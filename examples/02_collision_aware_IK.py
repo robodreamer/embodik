@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Interactive embodiK vs. Placo comparison using Viser."""
+"""Interactive collision-aware IK using embodiK and Viser."""
 
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import re
 import time
@@ -21,15 +20,6 @@ import embodik
 from robot_descriptions.loaders.yourdfpy import load_robot_description
 from embodik.utils import compute_pose_error, limit_task_velocity
 from embodik import r2q, q2r, Rt
-
-try:
-    import placo  # type: ignore
-
-    HAVE_PLACO = True
-except ImportError:  # pragma: no cover - optional dependency
-    placo = None
-
-    HAVE_PLACO = False
 
 # -----------------------------------------------------------------------------
 # Default numeric constants
@@ -381,156 +371,6 @@ class embodiKBackend:
 
 
 # -----------------------------------------------------------------------------
-# Placo backend
-# -----------------------------------------------------------------------------
-
-
-@dataclass
-class PlacoResult:
-    joints: np.ndarray
-    status: str
-    position_error: float
-    rotation_error: float
-    elapsed_ms: float
-
-
-def _rotation_error(target_R: np.ndarray, actual_R: np.ndarray) -> float:
-    r_delta = target_R @ actual_R.T
-    trace_val = np.clip((np.trace(r_delta) - 1.0) / 2.0, -1.0, 1.0)
-    return float(np.arccos(trace_val))
-
-
-class PlacoBackend:
-    def __init__(self, cfg: RobotConfig):
-        if not HAVE_PLACO:
-            raise RuntimeError("Placo is not installed. Install 'placo' to use this backend.")
-
-        self.cfg = cfg
-        ensure_ros_package_path(cfg.urdf_path)
-        dest = cfg.urdf_path.with_name("collisions.json")
-        if cfg.collision_exclusions:
-            try:
-                tmp_robot = placo.RobotWrapper(str(cfg.urdf_path), placo.Flags.ignore_collisions)
-                allowed_pairs = []
-                exclusions = {frozenset(pair) for pair in cfg.collision_exclusions}
-                for pair in tmp_robot.collision_model.collisionPairs:
-                    name_a = tmp_robot.collision_model.geometryObjects[pair.first].name
-                    name_b = tmp_robot.collision_model.geometryObjects[pair.second].name
-                    if frozenset((name_a, name_b)) not in exclusions:
-                        allowed_pairs.append([name_a, name_b])
-                dest.write_text(json.dumps(allowed_pairs, indent=2))
-            except Exception as exc:  # pragma: no cover
-                print(f"[Placo] Warning: failed to generate collisions.json for {cfg.display_name}: {exc}")
-        else:
-            if dest.exists():
-                dest.unlink(missing_ok=True)  # type: ignore[arg-type]
-
-        self.robot = placo.RobotWrapper(str(cfg.urdf_path))
-        self.solver = placo.KinematicsSolver(self.robot)
-        self.solver.mask_fbase(True)
-        self.solver.enable_joint_limits(True)
-        self.solver.enable_velocity_limits(True)
-        self.solver.dt = DEFAULT_SOLVER_DT
-
-        self.joint_names = cfg.joint_names
-        self.default_arm = cfg.default_configuration.copy()
-        self.set_q(self.default_arm)
-        self.initial_pose = self.get_pose()
-        self.self_collision_constraint = None
-
-    def get_joint_limits(self) -> tuple[np.ndarray, np.ndarray]:
-        lower = []
-        upper = []
-        for name in self.joint_names:
-            l, u = self.robot.get_joint_limits(name)
-            lower.append(float(l))
-            upper.append(float(u))
-        return np.array(lower, dtype=float), np.array(upper, dtype=float)
-
-    def get_q(self) -> np.ndarray:
-        return np.array([self.robot.get_joint(name) for name in self.joint_names], dtype=float)
-
-    def set_q(self, q_arm: np.ndarray) -> None:
-        for value, name in zip(q_arm, self.joint_names):
-            self.robot.set_joint(name, float(value))
-        self.robot.update_kinematics()
-
-    def get_pose(self) -> pin.SE3:
-        T = self.robot.get_T_world_frame(self.cfg.target_link)
-        return Rt(R=T[:3, :3], t=T[:3, 3])
-
-    def solve_step(
-        self,
-        target: pin.SE3,
-        pos_gain: float,
-        rot_gain: float,
-        active_indices: List[int],
-        nullspace_bias: np.ndarray,
-        nullspace_gain: float,
-        nullspace_enabled: bool,
-    ) -> PlacoResult:
-        target_transform = target.homogeneous()
-
-        self.solver.clear()
-        frame_task = self.solver.add_frame_task(self.cfg.target_link, target_transform)
-        frame_task.configure("ee_pose", "soft", max(pos_gain, 1.0), max(rot_gain, 1e-3))
-
-        if nullspace_enabled and active_indices and nullspace_gain > 0.0:
-            joints_task = self.solver.add_joints_task()
-            bias_dict = {
-                self.joint_names[idx]: float(nullspace_bias[idx])
-                for idx in active_indices
-            }
-            joints_task.set_joints(bias_dict)
-            joints_task.configure("posture", "soft", max(nullspace_gain, 1e-3))
-
-        status = "SUCCESS"
-        solve_start = time.perf_counter()
-        try:
-            self.solver.solve(True)
-            self.robot.update_kinematics()
-        except Exception as exc:  # pragma: no cover
-            status = f"ERROR: {exc}"
-        elapsed_ms = (time.perf_counter() - solve_start) * 1000.0
-
-        current = self.get_pose()
-        pos_err = float(np.linalg.norm(target.translation - current.translation))
-        rot_err = _rotation_error(target.rotation, current.rotation)
-
-        return PlacoResult(
-            joints=self.get_q(),
-            status=status,
-            position_error=pos_err,
-            rotation_error=rot_err,
-            elapsed_ms=elapsed_ms,
-        )
-
-    def reset(self) -> pin.SE3:
-        self.set_q(self.default_arm)
-        return self.get_pose()
-
-    def enable_self_collision(self, enable: bool) -> None:
-        if enable:
-            if self.self_collision_constraint is None:
-                try:
-                    self.self_collision_constraint = self.solver.add_avoid_self_collisions_constraint()
-                except Exception as exc:  # pragma: no cover - optional feature
-                    print(f"[Placo] Warning: failed to add self-collision constraint: {exc}")
-                    self.self_collision_constraint = None
-            if self.self_collision_constraint is not None:
-                try:
-                    self.self_collision_constraint.configure("self_collision", "soft", DEFAULT_COLLISION_GAIN)
-                except AttributeError:  # pragma: no cover
-                    pass
-        else:
-            if self.self_collision_constraint is not None:
-                try:
-                    self.self_collision_constraint.configure("self_collision", "soft", 0.0)
-                except AttributeError:  # pragma: no cover
-                    pass
-
-
-# -----------------------------------------------------------------------------
 # Utility functions
 # -----------------------------------------------------------------------------
 
@@ -540,21 +380,8 @@ class PlacoBackend:
 # -----------------------------------------------------------------------------
 
 
-def run_gui(cfg: RobotConfig, solver_name: str) -> None:
-    backends: Dict[str, object] = {"swift": embodiKBackend(cfg)}
-    if HAVE_PLACO:
-        backends["placo"] = PlacoBackend(cfg)
-
-    if solver_name not in backends:
-        solver_name = "swift"
-
-    backend_key = solver_name
-    backend = backends[backend_key]
-
-    solver_labels = {"swift": "embodiK"}
-    if "placo" in backends:
-        solver_labels["placo"] = "Placo"
-    label_to_key = {label: key for key, label in solver_labels.items()}
+def run_gui(cfg: RobotConfig) -> None:
+    backend = embodiKBackend(cfg)
 
     if hasattr(backend, "robot"):
         try:
@@ -608,11 +435,6 @@ def run_gui(cfg: RobotConfig, solver_name: str) -> None:
 
     with server.gui.add_folder("IK Controls"):
         timing_handle = server.gui.add_number("Elapsed (ms)", 0.001, disabled=True)
-        solver_dropdown = server.gui.add_dropdown(
-            "Solver Backend",
-            [solver_labels[key] for key in backends.keys()],
-            initial_value=solver_labels[backend_key],
-        )
         pos_gain = server.gui.add_slider("Position Gain", min=5.0, max=1e3, initial_value=DEFAULT_POS_GAIN, step=10.0)
         rot_gain = server.gui.add_slider("Rotation Gain", min=5.0, max=1e3, initial_value=DEFAULT_ROT_GAIN, step=10.0)
         nullspace_enabled_checkbox = server.gui.add_checkbox("Enable Nullspace Bias", initial_value=True)
@@ -824,25 +646,6 @@ def run_gui(cfg: RobotConfig, solver_name: str) -> None:
 
     prev_manual_state = False
 
-    @solver_dropdown.on_update
-    def _(_evt) -> None:
-        nonlocal backend, backend_key, prev_manual_state
-        new_key = label_to_key.get(solver_dropdown.value, backend_key)
-        if new_key == backend_key:
-            return
-        backend_key = new_key
-        backend = backends[backend_key]
-        manual_control.value = False
-        prev_manual_state = False
-        self_collision_checkbox.disabled = not hasattr(backend, "enable_self_collision")
-        collision_debug_checkbox.disabled = not (
-            hasattr(backend, "solver") and hasattr(backend.solver, "get_last_collision_debug")
-        )
-        if collision_debug_checkbox.disabled:
-            collision_debug_checkbox.value = False
-        sync_from_backend(update_target=True)
-        status_handle.value = f"Status: Switched to {solver_labels[backend_key]}"
-
     @bias_to_initial.on_click
     def _(_evt) -> None:
         nonlocal nullspace_bias
@@ -928,7 +731,7 @@ def run_gui(cfg: RobotConfig, solver_name: str) -> None:
             q_current = result.joints
             solver_elapsed_ms = result.elapsed_ms
             status_handle.value = (
-                f"Status: {solver_labels[backend_key]} {result.status} | "
+                f"Status: embodiK {result.status} | "
                 f"pos={result.position_error*1e3:.2f} mm, rot={result.rotation_error:.4f} rad"
             )
 
@@ -951,18 +754,12 @@ def run_gui(cfg: RobotConfig, solver_name: str) -> None:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Interactive embodiK vs. Placo comparison.")
+    parser = argparse.ArgumentParser(description="Interactive collision-aware IK using embodiK.")
     parser.add_argument(
         "--robot",
         choices=sorted(ROBOT_PRESETS.keys()),
         default="panda",
         help="Robot model to load (default: panda).",
-    )
-    parser.add_argument(
-        "--solver",
-        choices=["swift", "placo"],
-        default="swift",
-        help="Solver backend to use for the interactive demo.",
     )
     return parser.parse_args()
 
@@ -970,13 +767,11 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     cfg = resolve_robot_configuration(args.robot)
-    print(f"Interactive IK demo using {args.solver.title()} ({cfg.display_name})")
+    print(f"Interactive collision-aware IK demo ({cfg.display_name})")
     print(f"  - URDF path: {cfg.urdf_path}")
     print(f"  - Target link: {cfg.target_link}")
-    if args.solver == "placo" and not HAVE_PLACO:
-        raise RuntimeError("Requested Placo backend but the 'placo' package is not installed.")
 
-    run_gui(cfg, args.solver)
+    run_gui(cfg)
 
 
 if __name__ == "__main__":  # pragma: no cover

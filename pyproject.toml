@@ -87,3 +87,4 @@ addopts = "-v --tb=short"
 markers = [
     "benchmark: marks tests as benchmarks (deselect with '-m \"not benchmark\"')",
 ]
+filterwarnings = ["ignore::DeprecationWarning:hppfcl"]
