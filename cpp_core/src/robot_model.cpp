@@ -104,7 +104,7 @@ std::unique_ptr<RobotModel> RobotModel::from_xacro(const std::string& xacro_path
     file.close();
 
     // Process xacro to URDF using xacro command
-    std::string temp_urdf = "/tmp/swift_ik_temp_" + std::to_string(std::rand()) + ".urdf";
+    std::string temp_urdf = "/tmp/embodik_temp_" + std::to_string(std::rand()) + ".urdf";
     std::string command = "xacro " + xacro_path + " > " + temp_urdf + " 2>/dev/null";
 
     int result = std::system(command.c_str());

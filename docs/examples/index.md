@@ -43,5 +43,4 @@ python examples/01_basic_ik_simple.py
 The `examples/example_helpers/` directory contains reusable utilities:
 
 - `dual_arm_ik_helper.py` - Dual-arm IK utilities
-- `reachability_*.py` - Reachability analysis tools
-- `hmnd_alpha_common.py` - Humanoid robot utilities
+- `limit_profiles/` - Joint limit profile configurations

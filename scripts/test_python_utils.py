@@ -4,8 +4,8 @@
 import sys
 import os
 
-# Add python directory to path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'python'))
+# Add python directory to path (scripts/ is now in root, so go up one level)
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'python'))
 
 import numpy as np
 
@@ -30,7 +30,7 @@ try:
     assert q.shape == (4,), f"Expected shape (4,), got {q.shape}"
     assert np.allclose(q, [1, 0, 0, 0]), f"Expected [1,0,0,0], got {q}"
     print(f"   ✓ r2q works: {q}")
-    
+
     # Test with order parameter
     q_xyzs = r2q(R, order='xyzs')
     assert np.allclose(q_xyzs, [0, 0, 0, 1]), f"Expected [0,0,0,1] for xyzs, got {q_xyzs}"
@@ -49,13 +49,13 @@ try:
     assert R.shape == (3, 3), f"Expected shape (3,3), got {R.shape}"
     assert np.allclose(R, np.eye(3)), f"Expected identity matrix, got {R}"
     print(f"   ✓ q2r works: R is identity matrix")
-    
+
     # Test with xyzs order
     q_xyzs = np.array([0, 0, 0, 1])  # Identity quaternion (xyzw)
     R2 = q2r(q_xyzs, order='xyzs')
     assert np.allclose(R2, np.eye(3)), f"Expected identity matrix for xyzs, got {R2}"
     print(f"   ✓ q2r with order='xyzs' works")
-    
+
     # Test round-trip
     R_test = np.array([[0, -1, 0], [1, 0, 0], [0, 0, 1]])  # 90 deg rotation around z
     q_test = r2q(R_test)
@@ -79,7 +79,7 @@ try:
     assert np.allclose(T.translation, t), f"Expected translation {t}, got {T.translation}"
     assert np.allclose(T.rotation, R), f"Expected rotation {R}, got {T.rotation}"
     print(f"   ✓ Rt works: translation={T.translation}, rotation is identity")
-    
+
     # Test defaults
     T_default = Rt()
     assert np.allclose(T_default.translation, [0, 0, 0])

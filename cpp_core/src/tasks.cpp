@@ -1,6 +1,6 @@
 /**
  * @file tasks.cpp
- * @brief Implementation of task classes for SwiftIK solver
+ * @brief Implementation of task classes for EmbodiK solver
  */
 
 #include <embodik/tasks.hpp>

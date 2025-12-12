@@ -7,7 +7,7 @@ Guide for contributing to embodiK and developing with the source code.
 ### Clone Repository
 
 ```bash
-git clone https://github.com/swiftik/embodik.git
+git clone https://github.com/embodik/embodik.git
 cd embodik
 ```
 

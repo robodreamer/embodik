@@ -35,7 +35,7 @@ This guide explains when to use **Pixi** vs **pip install** for embodiK.
 curl -fsSL https://pixi.sh/install.sh | bash
 
 # Clone repository
-git clone https://github.com/swiftik/embodik.git
+git clone https://github.com/embodik/embodik.git
 cd embodik
 
 # Install in development mode
@@ -88,7 +88,7 @@ sudo apt-get install robotpkg-pinocchio
 pip install embodik
 
 # Or from source
-git clone https://github.com/swiftik/embodik.git
+git clone https://github.com/embodik/embodik.git
 cd embodik
 pip install -e .
 ```
