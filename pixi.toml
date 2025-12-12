@@ -1,0 +1,63 @@
+[workspace]
+channels = ["conda-forge"]
+platforms = ["linux-64", "linux-aarch64"]
+name = "embodik"
+version = "0.1.0"
+authors = ["Andy Park <andypark.purdue@gmail.com>"]
+
+[activation.env]
+CMAKE_PREFIX_PATH = "$CONDA_PREFIX"
+LD_LIBRARY_PATH = "$CONDA_PREFIX/lib"
+PKG_CONFIG_PATH = "$CONDA_PREFIX/lib/pkgconfig"
+
+[dependencies]
+# Build tools (explicitly listed for faster builds, though scikit-build-core can auto-detect)
+cmake = ">=3.16,<4"
+ninja = ">=1.12,<2"
+# C++ dependencies
+eigen = ">=3.4.0,<4"
+pinocchio = ">=3.8.0,<4" # Required for built-in ViserVisualizer
+# Python build dependencies
+python = ">=3.8,<3.12"
+nanobind = ">=2.8.0,<3"
+scikit-build-core = ">=0.11.5,<0.12"
+pip = ">=25.1,<26"
+
+[pypi-dependencies]
+numpy = ">=1.20.0"
+# Visualization dependencies (needed for examples)
+viser = ">=0.1.0"
+trimesh = ">=3.0.0"
+robot_descriptions = ">=1.0.0"
+scipy = ">=1.7.0"
+# YAML parsing for robot presets
+pyyaml = ">=6.0"
+# Testing and development tools (available in default environment)
+pytest = ">=6.0"
+black = ">=22.0"
+isort = ">=5.0"
+mkdocs-material = "*"
+mkdocstrings = { extras = ["python"], version = "*" }
+
+[tasks]
+# Development install with automatic rebuild on import (2025 best practice)
+install = "pip install -e . --no-build-isolation"
+install-rebuild = "pip install -C editable.rebuild=true -e . --no-build-isolation"
+build = "pip install --no-build-isolation ."
+test = "pytest test/"
+test-verbose = "pytest test/ -v"
+lint = "black --check python/ test/ && isort --check python/ test/"
+format = "black python/ test/ && isort python/ test/"
+docs-build = "mkdocs build"
+docs-serve = "mkdocs serve"
+
+[feature.dev.dependencies]
+# Additional dev-only dependencies
+pytest-cov = ">=2.0"
+
+[feature.dev.tasks]
+test-cov = "pytest test/ --cov=embodik --cov-report=term-missing"
+
+[environments]
+# Default environment includes dev features for development
+default = { features = ["dev"] }

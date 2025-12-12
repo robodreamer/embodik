@@ -1,0 +1,83 @@
+site_name: embodiK Documentation
+site_description: High-performance inverse kinematics solver with hierarchical task resolution
+site_url: https://embodik.github.io/embodik/
+repo_url: https://github.com/embodik/embodik
+repo_name: embodik/embodik
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  palette:
+    - scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.expand
+    - navigation.top
+    - search.suggest
+    - search.highlight
+    - content.code.annotate
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [python]
+          options:
+            show_source: true
+            show_root_heading: true
+            show_root_toc_entry: true
+            show_root_full_path: false
+            show_object_full_path: false
+            show_category_heading: true
+            show_if_no_docstring: false
+            separate_signature: true
+            line_length: 100
+
+markdown_extensions:
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - admonition
+  - pymdownx.details
+  - pymdownx.tabbed:
+      alternate_style: true
+  - attr_list
+  - md_in_html
+
+nav:
+  - Home: index.md
+  - Installation: installation.md
+  - Installation Guide (Pixi vs pip): INSTALLATION_GUIDE.md
+  - Quickstart: quickstart.md
+  - Working with Transforms: transforms.md
+  - API Reference:
+    - Overview: api/index.md
+    - RobotModel: api/robot_model.md
+    - KinematicsSolver: api/kinematics_solver.md
+    - Tasks: api/tasks.md
+    - Utilities: api/utils.md
+    - Visualization: api/visualization.md
+  - Examples:
+    - Overview: examples/index.md
+    - Basic IK: examples/basic_ik.md
+    - Multi-task IK: examples/multi_task_ik.md
+  - Development: development.md

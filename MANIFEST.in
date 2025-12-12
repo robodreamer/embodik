@@ -1,0 +1,18 @@
+# Include README and LICENSE files
+include README.md
+include LICENSE
+
+# Include CMakeLists.txt and CMake configuration files
+include CMakeLists.txt
+recursive-include cpp_core *.hpp *.cpp
+recursive-include python_bindings *.cpp *.cmake CMakeLists.txt
+
+# Include Python package source
+recursive-include python/embodik *.py
+
+# Exclude build artifacts
+global-exclude *.pyc
+global-exclude __pycache__
+global-exclude *.so
+global-exclude build/
+global-exclude *.egg-info/

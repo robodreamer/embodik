@@ -1,0 +1,39 @@
+name: beta_uniform_plus21
+metadata:
+  description: >
+    Approximate Beta Puppet joint limits based on the measured range-of-motion
+    deltas (≈21% increase for proximal joints, ≈51% for wrist pitch, ≈76% for wrist roll).
+    Use this profile to explore the Beta-like workspace while keeping the Alpha
+    baseline as the starting point.
+overrides:
+  # Left arm joints
+  left_shoulder_pitch_joint:
+    scale: 1.21
+  left_shoulder_roll_joint:
+    scale: 1.21
+  left_shoulder_yaw_joint:
+    scale: 1.21
+  left_elbow_pitch_joint:
+    scale: 1.21
+  left_elbow_yaw_joint:
+    scale: 1.21
+  left_wrist_pitch_joint:
+    scale: 1.513
+  left_wrist_roll_joint:
+    scale: 1.765
+
+  # Right arm joints
+  right_shoulder_pitch_joint:
+    scale: 1.21
+  right_shoulder_roll_joint:
+    scale: 1.21
+  right_shoulder_yaw_joint:
+    scale: 1.21
+  right_elbow_pitch_joint:
+    scale: 1.21
+  right_elbow_yaw_joint:
+    scale: 1.21
+  right_wrist_pitch_joint:
+    scale: 1.513
+  right_wrist_roll_joint:
+    scale: 1.765

@@ -1,0 +1,46 @@
+name: alpha_extended_all
+metadata:
+  description: "Example profile extending all arm joint limits by 50%."
+# Available override keys per joint (keep for quick reference):
+#   min / minimum: absolute lower limit
+#       e.g. min: -2.094  # clamp to -120°
+#   max / maximum: absolute upper limit
+#       e.g. max: 2.094   # clamp to +120°
+#   scale: scales entire range around midpoint
+#       e.g. scale: 1.5   # widen baseline span by 50%
+#   scale_min: scales only the lower limit
+#       e.g. scale_min: 1.2  # push negative side outward by 20%
+#   scale_max: scales only the upper limit
+#       e.g. scale_max: 0.8  # shrink positive side to 80%
+overrides:
+  # Left arm joints
+  left_shoulder_pitch_joint:
+    scale: 1.5
+  left_shoulder_roll_joint:
+    scale: 1.5
+  left_shoulder_yaw_joint:
+    scale: 1.5
+  left_elbow_pitch_joint:
+    scale: 1.5
+  left_elbow_yaw_joint:
+    scale: 1.5
+  left_wrist_pitch_joint:
+    scale: 2.5
+  left_wrist_roll_joint:
+    scale: 2.5
+
+  # Right arm joints
+  right_shoulder_pitch_joint:
+    scale: 1.5
+  right_shoulder_roll_joint:
+    scale: 1.5
+  right_shoulder_yaw_joint:
+    scale: 1.5
+  right_elbow_pitch_joint:
+    scale: 1.5
+  right_elbow_yaw_joint:
+    scale: 1.5
+  right_wrist_pitch_joint:
+    scale: 1.5
+  right_wrist_roll_joint:
+    scale: 1.5
