@@ -307,7 +307,7 @@ private:
    * @brief Calculate velocity box constraints based on position, velocity, and
    * acceleration limits
    *
-   * This implements the flex_ik approach where velocity limits are computed as:
+   * Velocity limits are computed as:
    * min(position_margin/dt, velocity_limit, sqrt(2*accel*margin))
    *
    * @param position_margin_lower Distance from current position to lower limit

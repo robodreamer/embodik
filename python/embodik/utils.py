@@ -46,7 +46,7 @@ class PoseData:
 
 
 def get_pose_error_vector(pose_current, pose_goal):
-    """Legacy pose-error helper matching the flex_ik convention.
+    """Pose-error helper function.
 
     Uses Pinocchio's log3 for rotation error computation.
 

@@ -116,7 +116,7 @@ def main(args: argparse.Namespace):
         rot_gain = server.gui.add_slider("Rotation Gain", min=10, max=100, initial_value=60, step=5)
         damping_slider = server.gui.add_slider("Solver Damping", min=0.01, max=1.0, initial_value=0.1, step=0.01)
 
-        # Step size limits (based on kuka-sns)
+        # Step size limits
         max_linear_step = server.gui.add_slider("Max Linear Step (m/s)", min=0.1, max=1.0, initial_value=0.5, step=0.01)
         max_angular_step = server.gui.add_slider("Max Angular Step (rad/s)", min=0.1, max=1.0, initial_value=0.5, step=0.01)
 
@@ -282,8 +282,7 @@ def main(args: argparse.Namespace):
         current_ee_pose = robot.get_frame_pose(target_link_name)
         current_pose = current_ee_pose  # Already SE3, no need to wrap
 
-        # Compute pose error using flex_ik convention
-        # This uses the same implementation as flex_ik:
+        # Compute pose error
         # position error = goal - current, rotation error = log(R_goal @ R_current^T)
         pose_error = compute_pose_error(current_pose, target_pose)
         frame_task.weight = 0.0
@@ -313,13 +312,13 @@ def main(args: argparse.Namespace):
         frame_task.weight = 0.0
 
         # Set target velocity as scaled error (velocity IK)
-        # Apply gains directly to the pose error (following flex_ik convention)
+        # Apply gains directly to the pose error
         target_velocity = np.concatenate([
             pos_gain.value * pose_error[:3],  # Position error with gain
             rot_gain.value * pose_error[3:]   # Rotation error with gain
         ])
 
-        # Limit the velocity to prevent large jumps (based on kuka-sns)
+        # Limit the velocity to prevent large jumps
         target_velocity = limit_task_velocity(
             target_velocity,
             max_linear_step=max_linear_step.value,

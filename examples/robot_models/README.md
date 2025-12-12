@@ -135,7 +135,7 @@ python examples/01_basic_ik_simple.py --robot my_robot
 The following robot models are currently available:
 
 - **Franka Panda** (`panda_description/`): `panda.urdf`
-- **KUKA LBR iiwa14** (`iiwa14_description/`): `iiwa14_no_collision.urdf`
+- **LBR iiwa14** (`iiwa14_description/`): `iiwa14_no_collision.urdf`
 
 ## Package:// URI Resolution
 
