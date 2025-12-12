@@ -34,6 +34,7 @@ scipy = ">=1.7.0"
 pyyaml = ">=6.0"
 # Testing and development tools (available in default environment)
 pytest = ">=6.0"
+pytest-benchmark = ">=4.0"
 black = ">=22.0"
 isort = ">=5.0"
 mkdocs-material = "*"
