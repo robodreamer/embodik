@@ -22,6 +22,8 @@ python = ">=3.8,<3.12"
 nanobind = ">=2.8.0,<3"
 scikit-build-core = ">=0.11.5,<0.12"
 pip = ">=25.1,<26"
+qhull = ">=2020.2,<2021"
+qhull-static = ">=2020.2,<2021"
 
 [pypi-dependencies]
 numpy = ">=1.20.0"
@@ -41,10 +43,18 @@ mkdocs-material = "*"
 mkdocstrings = { extras = ["python"], version = "*" }
 
 [tasks]
+# Patch Qhull CMake config before building (workaround for conda-forge qhull package)
+patch-qhull = "python scripts/patch_qhull_cmake.py"
 # Development install with automatic rebuild on import (2025 best practice)
-install = "pip install -e . --no-build-isolation"
-install-rebuild = "pip install -C editable.rebuild=true -e . --no-build-isolation"
-build = "pip install --no-build-isolation ."
+install = { cmd = "pip install -e . --no-build-isolation", depends-on = [
+    "patch-qhull",
+] }
+install-rebuild = { cmd = "pip install -C editable.rebuild=true -e . --no-build-isolation", depends-on = [
+    "patch-qhull",
+] }
+build = { cmd = "pip install --no-build-isolation .", depends-on = [
+    "patch-qhull",
+] }
 test = "pytest test/"
 test-verbose = "pytest test/ -v"
 lint = "black --check python/ test/ && isort --check python/ test/"

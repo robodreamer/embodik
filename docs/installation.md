@@ -66,7 +66,7 @@ pixi run install
 pixi run install-rebuild
 ```
 
-All system dependencies (CMake, Eigen, Pinocchio, etc.) are automatically managed by pixi. Activate the environment with `pixi shell`.
+All system dependencies (CMake, Eigen, Pinocchio, etc.) are automatically managed by pixi. The installation process automatically applies a workaround patch for Qhull CMake configuration (see Troubleshooting section). Activate the environment with `pixi shell`.
 
 ### Option 2: From PyPI
 
@@ -163,6 +163,21 @@ If you see an import warning about the C++ extension:
 2. Rebuild the package: `pip install --force-reinstall --no-cache-dir embodik`
 3. Check that CMake found Pinocchio during build
 
+### Qhull CMake Configuration Error
+
+If you encounter an error like:
+```
+CMake Error: The imported target "Qhull::qhull" references the file ".../bin/qhull" but this file does not exist.
+```
+
+This is a known issue with conda-forge's qhull package which doesn't include executable binaries. The installation process automatically applies a patch to work around this. If you're installing manually without pixi, run:
+
+```bash
+python scripts/patch_qhull_cmake.py
+```
+
+before building. This patch is automatically applied when using `pixi run install` or `pixi run build`.
+
 ### Build Errors
 
 If you encounter build errors:
@@ -170,6 +185,7 @@ If you encounter build errors:
 1. Ensure you have a C++17 compatible compiler (GCC 7+, Clang 5+)
 2. Check that CMake version is 3.16 or higher: `cmake --version`
 3. Verify Eigen3 is installed: `pkg-config --modversion eigen3`
+4. If using pixi, ensure the Qhull patch was applied: `pixi run patch-qhull`
 
 ## Next Steps
 
