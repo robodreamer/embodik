@@ -34,12 +34,13 @@ except ImportError:
     viser = None
 
 
-def _build_geometry_models(robot_model, urdf_path: str):
-    """Build visual and collision geometry models from URDF if not already loaded.
+def _build_geometry_models(robot_model, urdf_path: str, pin_model=None):
+    """Build visual and collision geometry models from URDF.
 
     Args:
-        robot_model: embodik RobotModel instance
+        robot_model: embodik RobotModel instance (unused, kept for compatibility)
         urdf_path: Path to URDF file
+        pin_model: Pinocchio model (required)
 
     Returns:
         Tuple of (visual_model, collision_model) - may be None if building fails
@@ -47,37 +48,32 @@ def _build_geometry_models(robot_model, urdf_path: str):
     if not _PINOCCHIO_VISER_AVAILABLE:
         return None, None
 
+    if pin_model is None:
+        raise ValueError("pin_model is required")
+
     try:
-        # Check if models are already loaded
-        visual_model = robot_model.visual_model
-        collision_model = robot_model.collision_model
+        # Build geometry models from URDF
+        # Note: buildGeomFromUrdf requires package directories, but we can try without
+        visual_model = None
+        collision_model = None
 
-        # If not loaded, try to build them from URDF
-        if visual_model is None or collision_model is None:
-            # Get the Pinocchio model
-            pin_model = robot_model._pinocchio_model
+        try:
+            visual_model = pin.buildGeomFromUrdf(
+                pin_model, urdf_path, pin.GeometryType.VISUAL,
+                package_dirs=[]
+            )
+        except Exception as e:
+            warnings.warn(f"Could not build visual model: {e}")
+            visual_model = None
 
-            # Build geometry models from URDF
-            # Note: buildGeomFromUrdf requires package directories, but we can try without
-            if visual_model is None:
-                try:
-                    visual_model = pin.buildGeomFromUrdf(
-                        pin_model, urdf_path, pin.GeometryType.VISUAL,
-                        package_dirs=[]
-                    )
-                except Exception as e:
-                    warnings.warn(f"Could not build visual model: {e}")
-                    visual_model = None
-
-            if collision_model is None:
-                try:
-                    collision_model = pin.buildGeomFromUrdf(
-                        pin_model, urdf_path, pin.GeometryType.COLLISION,
-                        package_dirs=[]
-                    )
-                except Exception as e:
-                    warnings.warn(f"Could not build collision model: {e}")
-                    collision_model = None
+        try:
+            collision_model = pin.buildGeomFromUrdf(
+                pin_model, urdf_path, pin.GeometryType.COLLISION,
+                package_dirs=[]
+            )
+        except Exception as e:
+            warnings.warn(f"Could not build collision model: {e}")
+            collision_model = None
 
         return visual_model, collision_model
     except Exception as e:
@@ -147,33 +143,41 @@ class EmbodikVisualizer:
 
     def _init_pinocchio_visualizer(self, open_browser: bool):
         """Initialize Pinocchio's ViserVisualizer."""
-        # Get Pinocchio model and data
-        pin_model = self.robot_model._pinocchio_model
-        pin_data = self.robot_model._pinocchio_data
-
-        # Get or build geometry models
+        # Rebuild Pinocchio model from URDF (since nanobind can't convert C++ Model type)
         urdf_path = self.robot_model.urdf_path
-        visual_model = self.robot_model.visual_model
-        collision_model = self.robot_model.collision_model
 
-        # Build geometry models if not already loaded
-        if visual_model is None or collision_model is None:
-            visual_model, collision_model = _build_geometry_models(
-                self.robot_model, urdf_path
-            )
+        # Build Pinocchio model from URDF
+        self._pin_model = pin.buildModelFromUrdf(urdf_path)
+        self._pin_data = self._pin_model.createData()
 
-        # Get collision and visual data (may be None if geometry models weren't loaded)
-        collision_data = self.robot_model.collision_data
-        visual_data = self.robot_model.visual_data
+        # Build geometry models from URDF (can't access C++ geometry models via nanobind)
+        visual_model, collision_model = _build_geometry_models(
+            self.robot_model, urdf_path, self._pin_model
+        )
+
+        # Build geometry data if models exist
+        collision_data = None
+        visual_data = None
+        if collision_model is not None:
+            collision_data = collision_model.createData()
+        if visual_model is not None:
+            visual_data = visual_model.createData()
 
         # Create visualizer
-        # Note: Pinocchio's ViserVisualizer can work with None geometry models/data
-        # It will just not display visual/collision geometry
+        # Pinocchio's ViserVisualizer requires at least visual or collision model
+        # If both are None, create empty geometry models
+        if visual_model is None and collision_model is None:
+            # Create empty geometry models to avoid None errors
+            visual_model = pin.GeometryModel()
+            collision_model = pin.GeometryModel()
+            visual_data = visual_model.createData()
+            collision_data = collision_model.createData()
+
         self.viz = ViserVisualizer(
-            model=pin_model,
+            model=self._pin_model,
             collision_model=collision_model,
             visual_model=visual_model,
-            data=pin_data,
+            data=self._pin_data,
             collision_data=collision_data,
             visual_data=visual_data
         )
@@ -196,7 +200,9 @@ class EmbodikVisualizer:
         if self._use_pinocchio:
             # Update robot model configuration
             self.robot_model.update_configuration(q)
-
+            # Update Pinocchio data to match
+            pin.forwardKinematics(self._pin_model, self._pin_data, q)
+            pin.updateFramePlacements(self._pin_model, self._pin_data)
             # Display using Pinocchio's visualizer
             self.viz.display(q)
         else:

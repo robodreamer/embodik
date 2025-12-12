@@ -6,6 +6,8 @@ python_bindings/*.a
 python_bindings/swift_ik_py/
 python_bindings/embodik_py/
 test/__pycache__/
+examples/__pycache__/
+examples/**/__pycache__/
 python_bindings/Makefile
 python_bindings/CMakeCache.txt
 python/embodik/__pycache__/
@@ -72,11 +74,14 @@ site/
 *.swp
 *~
 
-# Ignore all Markdown files except README.md and docs
+# Ignore all Markdown files except README.md, docs, and important project files
 *.md
 !README.md
 !docs/**/*.md
 !plan_docs/**/*.md
+!CHANGELOG.md
+!CONTRIBUTING.md
+!LICENSE
 
-# Robot models (commented out - we want to include robot_models in the repo)
-# examples/robot_models*/**
+# Robot models
+examples/robot_models*/**
