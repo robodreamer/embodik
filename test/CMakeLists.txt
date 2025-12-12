@@ -1,4 +1,4 @@
-# Unit tests for swift_ik
+# Unit tests for embodik
 enable_testing()
 
 # Find GTest
@@ -10,7 +10,7 @@ add_executable(test_robot_model
 )
 
 target_link_libraries(test_robot_model
-    swift_ik_core
+    embodik_core
     GTest::gtest_main
     GTest::gtest
 )

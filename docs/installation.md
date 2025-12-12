@@ -57,7 +57,7 @@ curl -fsSL https://pixi.sh/install.sh | bash
 
 **Clone and install:**
 ```bash
-git clone https://github.com/swiftik/embodik.git
+git clone https://github.com/embodik/embodik.git
 cd embodik
 pixi run install
 ```
@@ -78,7 +78,7 @@ pip install embodik
 ### Option 3: From Source (Manual)
 
 ```bash
-git clone https://github.com/swiftik/embodik.git
+git clone https://github.com/embodik/embodik.git
 cd embodik
 pip install -e .
 ```
@@ -94,7 +94,7 @@ pixi run install-rebuild
 
 **Without Pixi:**
 ```bash
-git clone https://github.com/swiftik/embodik.git
+git clone https://github.com/embodik/embodik.git
 cd embodik
 pip install -e ".[dev]"
 ```

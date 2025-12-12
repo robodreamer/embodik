@@ -1,6 +1,6 @@
 /**
  * @file tasks.hpp
- * @brief Task definitions for SwiftIK solver
+ * @brief Task definitions for EmbodiK solver
  *
  * This file defines various task types used in the IK solver:
  * - FrameTask: Track position/orientation of robot frames

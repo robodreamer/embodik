@@ -9,7 +9,7 @@ import os
 import logging
 import textwrap
 
-import embodik as sik
+import embodik as eik
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -40,19 +40,19 @@ DEFAULT_SR_DAMPING = 1e-6        # Singularity-robust damping (matches v1 beta_m
 def test_import_and_metadata():
     """Test basic imports and module metadata."""
     # Basic imports
-    assert hasattr(sik, "__version__")
-    assert hasattr(sik, "SolverStatus")
-    assert hasattr(sik, "computeMultiObjectiveVelocitySolutionEigen")
-    assert hasattr(sik, "pose_error_norm")
+    assert hasattr(eik, "__version__")
+    assert hasattr(eik, "SolverStatus")
+    assert hasattr(eik, "computeMultiObjectiveVelocitySolutionEigen")
+    assert hasattr(eik, "pose_error_norm")
     # Enums
-    assert sik.SolverStatus.SUCCESS.value == 0
-    assert sik.SolverStatus.INVALID_INPUT.value == 1
-    assert sik.SolverStatus.NUMERICAL_ERROR.value == 2
+    assert eik.SolverStatus.SUCCESS.value == 0
+    assert eik.SolverStatus.INVALID_INPUT.value == 1
+    assert eik.SolverStatus.NUMERICAL_ERROR.value == 2
 
 
 def test_pose_error_norm():
     """Test pose error norm calculation."""
-    assert abs(sik.pose_error_norm([0, 0, 0], [1, 2, 2]) - 3.0) < NUMERICAL_EPSILON
+    assert abs(eik.pose_error_norm([0, 0, 0], [1, 2, 2]) - 3.0) < NUMERICAL_EPSILON
 
 
 # =============================================================================
@@ -68,8 +68,8 @@ def test_multi_task_api():
     lower = np.array([-10.0, -10.0])
     upper = np.array([10.0, 10.0])
 
-    result = sik.computeMultiObjectiveVelocitySolutionEigen(goals, jacobians, C, lower, upper)
-    assert result.status == sik.SolverStatus.SUCCESS
+    result = eik.computeMultiObjectiveVelocitySolutionEigen(goals, jacobians, C, lower, upper)
+    assert result.status == eik.SolverStatus.SUCCESS
     assert len(result.solution) == 2
     assert len(result.task_scales) == 1
     assert result.task_scales[0] == 1.0
@@ -102,18 +102,18 @@ def test_eigen_first_multi_task():
         "regularization_factor": DEFAULT_SR_DAMPING,
     }
 
-    res_eigen = sik.computeMultiObjectiveVelocitySolutionEigen(
+    res_eigen = eik.computeMultiObjectiveVelocitySolutionEigen(
         goals, jacobians, C, lower_limits, upper_limits
     )
 
     # Test numpy API for comparison
-    res_np = sik.computeMultiObjectiveVelocitySolutionEigen(
+    res_np = eik.computeMultiObjectiveVelocitySolutionEigen(
         goals, jacobians, C, lower_limits, upper_limits
     )
 
     # Both should succeed
-    assert res_eigen.status == sik.SolverStatus.SUCCESS
-    assert res_np.status == sik.SolverStatus.SUCCESS
+    assert res_eigen.status == eik.SolverStatus.SUCCESS
+    assert res_np.status == eik.SolverStatus.SUCCESS
 
     # Results should match
     assert np.allclose(res_eigen.solution, res_np.solution)
@@ -130,8 +130,8 @@ def test_numpy_array_types():
     upper = np.array([1, 1], dtype=np.float64)
 
     # These should work without errors
-    res = sik.computeMultiObjectiveVelocitySolutionEigen(goals, jacobians, C, lower, upper)
-    assert res.status == sik.SolverStatus.SUCCESS
+    res = eik.computeMultiObjectiveVelocitySolutionEigen(goals, jacobians, C, lower, upper)
+    assert res.status == eik.SolverStatus.SUCCESS
 
 
 # =============================================================================
@@ -141,8 +141,8 @@ def test_numpy_array_types():
 def test_invalid_inputs():
     """Test invalid input handling for multi-task solver."""
     # Empty inputs
-    result = sik.computeMultiObjectiveVelocitySolutionEigen([], [], np.eye(1, dtype=np.float64, order='F'), np.array([0], dtype=np.float64), np.array([1], dtype=np.float64))
-    assert result.status == sik.SolverStatus.INVALID_INPUT
+    result = eik.computeMultiObjectiveVelocitySolutionEigen([], [], np.eye(1, dtype=np.float64, order='F'), np.array([0], dtype=np.float64), np.array([1], dtype=np.float64))
+    assert result.status == eik.SolverStatus.INVALID_INPUT
 
     # Mismatched dimensions - goal dimension doesn't match Jacobian rows
     goals = [np.array([1.0, 2.0])]  # 2D goal
@@ -151,9 +151,9 @@ def test_invalid_inputs():
     lower = np.array([-1, -1])
     upper = np.array([1, 1])
 
-    result = sik.computeMultiObjectiveVelocitySolutionEigen(goals, jacobians, C, lower, upper)
+    result = eik.computeMultiObjectiveVelocitySolutionEigen(goals, jacobians, C, lower, upper)
     # This should be caught by dimension validation
-    assert result.status == sik.SolverStatus.INVALID_INPUT
+    assert result.status == eik.SolverStatus.INVALID_INPUT
 
 
 # =============================================================================
@@ -177,8 +177,8 @@ def test_multi_task_with_constraints():
     lower = np.array([-0.4, -0.4, -0.4])
     upper = np.array([0.4, 0.4, 0.4])
 
-    result = sik.computeMultiObjectiveVelocitySolutionEigen(goals, jacobians, C, lower, upper)
-    assert result.status == sik.SolverStatus.SUCCESS
+    result = eik.computeMultiObjectiveVelocitySolutionEigen(goals, jacobians, C, lower, upper)
+    assert result.status == eik.SolverStatus.SUCCESS
 
     # Check that constraints are satisfied
     solution = np.array(result.solution)
@@ -208,8 +208,8 @@ def test_multi_task_prioritization():
     lower = np.array([-0.5, -0.5])
     upper = np.array([0.5, 0.5])
 
-    result = sik.computeMultiObjectiveVelocitySolutionEigen(goals, jacobians, C, lower, upper)
-    assert result.status == sik.SolverStatus.SUCCESS
+    result = eik.computeMultiObjectiveVelocitySolutionEigen(goals, jacobians, C, lower, upper)
+    assert result.status == eik.SolverStatus.SUCCESS
 
     # The key is that the solution respects the priority - Task 0's direction
     solution = np.array(result.solution)
@@ -247,9 +247,9 @@ def test_random_multi_task_problems():
         lower = np.full(n_joints, -1.0)
         upper = np.full(n_joints, 1.0)
 
-        result = sik.computeMultiObjectiveVelocitySolutionEigen(goals, jacobians, C, lower, upper)
+        result = eik.computeMultiObjectiveVelocitySolutionEigen(goals, jacobians, C, lower, upper)
 
-        if result.status == sik.SolverStatus.SUCCESS:
+        if result.status == eik.SolverStatus.SUCCESS:
             num_success += 1
 
             # Verify primary task (v1 requirement: primary task must be achieved if scale > 0)
@@ -331,14 +331,14 @@ def test_multi_task_numpy_benchmark(benchmark):  # type: ignore[no-untyped-def]
 
     def run_and_validate(goals, jacobians, C, lower_limits, upper_limits, params=None):
         """Run solver and validate output."""
-        result = sik.computeMultiObjectiveVelocitySolutionEigen(
+        result = eik.computeMultiObjectiveVelocitySolutionEigen(
             goals, jacobians, C, lower_limits, upper_limits
         )
 
         # Validate result
-        assert result.status in [sik.SolverStatus.SUCCESS, sik.SolverStatus.NUMERICAL_ERROR]
+        assert result.status in [eik.SolverStatus.SUCCESS, eik.SolverStatus.NUMERICAL_ERROR]
 
-        if result.status == sik.SolverStatus.SUCCESS:
+        if result.status == eik.SolverStatus.SUCCESS:
             n_joints = jacobians[0].shape[1]
             n_tasks = len(goals)
 
@@ -421,10 +421,10 @@ def test_multi_task_solver_large_scale():
 
     def validate_solution(result, goals, jacobians, C, lower_limits, upper_limits):
         """Validate solver result."""
-        if result.status not in [sik.SolverStatus.SUCCESS, sik.SolverStatus.NUMERICAL_ERROR]:
+        if result.status not in [eik.SolverStatus.SUCCESS, eik.SolverStatus.NUMERICAL_ERROR]:
             return False, None, False
 
-        if result.status == sik.SolverStatus.NUMERICAL_ERROR:
+        if result.status == eik.SolverStatus.NUMERICAL_ERROR:
             # Numerical errors are acceptable for ill-conditioned problems
             return True, None, True
 
@@ -478,13 +478,13 @@ def test_multi_task_solver_large_scale():
             "damping_regularization_factor": DEFAULT_SR_DAMPING,
         }
 
-        result = sik.computeMultiObjectiveVelocitySolutionEigen(
+        result = eik.computeMultiObjectiveVelocitySolutionEigen(
             goals, jacobians, C, lower_limits, upper_limits
         )
 
-        if result.status == sik.SolverStatus.SUCCESS:
+        if result.status == eik.SolverStatus.SUCCESS:
             n_success += 1
-        elif result.status == sik.SolverStatus.INVALID_INPUT:
+        elif result.status == eik.SolverStatus.INVALID_INPUT:
             n_invalid_input += 1
 
         is_valid, primary_error, has_warning = validate_solution(
@@ -583,8 +583,8 @@ def _create_minimal_collision_urdf(tmp_path):
 def test_configure_collision_constraint(tmp_path):
     """Ensure collision constraint configuration integrates with solver."""
     urdf_path = _create_minimal_collision_urdf(tmp_path)
-    robot = sik.RobotModel(str(urdf_path), floating_base=False)
-    solver = sik.KinematicsSolver(robot)
+    robot = eik.RobotModel(str(urdf_path), floating_base=False)
+    solver = eik.KinematicsSolver(robot)
 
     if not hasattr(solver, "configure_collision_constraint"):
         pytest.skip("Collision constraint API not available in current extension build.")
@@ -604,7 +604,7 @@ def test_configure_collision_constraint(tmp_path):
         pytest.skip(f"Collision support unavailable: {exc}")
     result = solver.solve_velocity(initial_q, apply_limits=False)
 
-    assert result.status == sik.SolverStatus.SUCCESS
+    assert result.status == eik.SolverStatus.SUCCESS
     assert np.all(np.isfinite(result.solution))
 
 

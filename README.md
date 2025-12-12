@@ -1,6 +1,6 @@
-# SwiftIK: Fast Inverse Kinematics with Nanobind
+# EmbodiK: Fast Inverse Kinematics with Nanobind
 
-SwiftIK is a high-performance inverse kinematics library built with C++ and Python bindings via Nanobind. It provides both single-task and multi-task velocity IK solvers with singularity-robust inverse methods.
+EmbodiK is a high-performance inverse kinematics library built with C++ and Python bindings via Nanobind. It provides both single-task and multi-task velocity IK solvers with singularity-robust inverse methods.
 
 **Author:** Andy Park <andypark.purdue@gmail.com>
 
@@ -27,7 +27,7 @@ pip install embodik
 curl -fsSL https://pixi.sh/install.sh | bash
 
 # Clone and install
-git clone https://github.com/swiftik/embodik.git
+git clone https://github.com/embodik/embodik.git
 cd embodik
 pixi run install
 ```
@@ -56,19 +56,19 @@ See [Installation Documentation](docs/installation.md) for detailed instructions
 ### Core Types
 
 ```python
-import swift_ik_py as sik
+import embodik as eik
 
 # Basic solver configuration
-config = sik.BasicSolverConfig(
+config = eik.BasicSolverConfig(
     epsilon=1e-6,           # Numerical tolerance
     iteration_limit=20,     # Maximum iterations allowed
     regularization=1e-1     # Tikhonov regularization parameter
 )
 
 # Solver result
-result = sik.SolverResult(
+result = eik.SolverResult(
     solution=[...],           # Joint velocities dq
-    status=sik.SolverStatus.SUCCESS,
+    status=eik.SolverStatus.SUCCESS,
     computation_time_ms=0.1,
     iterations=1,
     final_error=1e-6,
@@ -78,7 +78,7 @@ result = sik.SolverResult(
 
 ### Multi-Task Velocity IK
 
-SwiftIK provides a powerful multi-task velocity IK solver that handles task prioritization and constraint satisfaction.
+embodiK provides a powerful multi-task velocity IK solver that handles task prioritization and constraint satisfaction.
 
 #### Eigen-First API (Recommended)
 
@@ -109,7 +109,7 @@ params = {
     "regularization_factor": 1e-1,          # Regularization coefficient
 }
 
-result = sik.solve_velocity_ik_multi_task_eigen(
+result = eik.solve_velocity_ik_multi_task_eigen(
     goals, jacobians, C, lower, upper, params
 )
 ```
@@ -118,7 +118,7 @@ result = sik.solve_velocity_ik_multi_task_eigen(
 
 ```python
 # Similar to Eigen-first but with automatic array conversion
-result = sik.solve_velocity_ik_multi_task_np(
+result = eik.solve_velocity_ik_multi_task_np(
     goals, jacobians, C, lower, upper, params
 )
 ```
@@ -149,28 +149,27 @@ result = sik.solve_velocity_ik_multi_task_np(
 
 ```bash
 # Run all tests
-bash build.sh
+pixi run test
 
-# Run specific test
-cd test
-PYTHONPATH=../python_bindings/build python3 test_eigen_first_apis.py
+# Run tests with verbose output
+pixi run test-verbose
 
 # Tests should pass successfully
 ```
 
 ## Usage
 
-SwiftIK provides a clean, modern API for multi-task inverse kinematics:
+embodiK provides a clean, modern API for multi-task inverse kinematics:
 
 ```python
 # Multi-task velocity IK with hierarchical objectives
-result = sik.solve_velocity_ik_multi_task_np(
+result = eik.solve_velocity_ik_multi_task_np(
     goals, jacobians, C, lower, upper,
     params={"epsilon": 1e-6, "regularization_factor": 1e-1}
 )
 
 # Check if solution was successful
-if result.status == sik.SolverStatus.SUCCESS:
+if result.status == eik.SolverStatus.SUCCESS:
     print(f"Solution: {result.solution}")
     print(f"Task scales: {result.task_scales}")
 ```
@@ -178,13 +177,13 @@ if result.status == sik.SolverStatus.SUCCESS:
 ## Architecture
 
 ```
-swift_ik/
+embodik/
 ├── cpp_core/           # C++ implementation
 │   ├── include/        # Header files
 │   └── types.hpp       # Core data structures
 ├── python_bindings/    # Nanobind bindings
 │   ├── src/           # C++ binding code
-│   └── swift_ik_py/   # Python package
+│   └── python/        # Python package
 └── test/              # Test suite
 ```
 
