@@ -53,4 +53,4 @@ pip install embodik
 
 MIT License - see [LICENSE](../LICENSE) file for details.
 
-**Copyright (c) 2025 Andy Park**
+**Copyright (c) 2025 Andy Park <andypark.purdue@gmail.com>**
