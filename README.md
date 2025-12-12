@@ -1,6 +1,13 @@
-# EmbodiK: Fast Inverse Kinematics with Nanobind
+# EmbodiK: Cross-Embodiment Inverse Kinematics with Nanobind
 
-EmbodiK is a high-performance inverse kinematics library built with C++ and Python bindings via Nanobind. It provides both single-task and multi-task velocity IK solvers with singularity-robust inverse methods, collision avoidance, and interactive visualization.
+EmbodiK is a high-performance inverse kinematics (IK) library for cross-embodiment VLA/AI applications.
+
+- The core is implemented in C++, with Python bindings created using Nanobind.
+- EmbodiK delivers robust and high-performance IK behaviors, particularly optimized for humanoid robots and AI/VLA integrations.
+- The name "EmbodiK" highlights its focus on supporting various kinematic structures across different embodiment types.
+- The library handles diverse constraint types, supporting both single-task and multi-task velocity IK solvers.
+- Advanced inverse methods provide singularity-robustness.
+- Features include self-collision avoidance and interactive 3D visualization tools.
 
 **Author:** Andy Park <andypark.purdue@gmail.com>
 
@@ -38,8 +45,6 @@ pixi run install
 > **💡 When to use which?**
 > - **Pixi**: Development, automatic dependency management, reproducible builds
 > - **pip**: End users, standard Python installation, requires manual system dependencies
->
-> See [Installation Guide](docs/INSTALLATION_GUIDE.md) for detailed comparison.
 
 ### Prerequisites
 
@@ -87,7 +92,7 @@ if result.status == embodik.SolverStatus.SUCCESS:
 
 ### High-Level API (Recommended)
 
-embodiK provides a high-level API built on top of Pinocchio for easy robot modeling and IK solving:
+EmbodiK provides a high-level API built on top of Pinocchio for easy robot modeling and IK solving:
 
 ```python
 import embodik
@@ -116,7 +121,7 @@ result = solver.solve_velocity(q, apply_limits=True)
 
 ### Low-Level API
 
-For advanced users, embodiK also provides low-level multi-task velocity IK functions:
+For advanced users, EmbodiK also provides low-level multi-task velocity IK functions:
 
 ```python
 import embodik as eik

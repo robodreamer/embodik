@@ -1,6 +1,6 @@
 # Utilities
 
-Utility functions for working with embodiK.
+Utility functions for working with EmbodiK.
 
 ## Functions
 

@@ -1,8 +1,8 @@
-# embodiK
+# EmbodiK
 
-**High-performance inverse kinematics solver with hierarchical task resolution**
+**High-performance inverse kinematics solver optimized for cross-embodiment VLA/AI applications**
 
-embodiK is a modern C++ library with Python bindings that provides efficient inverse kinematics solvers for robotics applications. Built on top of [Pinocchio](https://github.com/stack-of-tasks/pinocchio) and using [Nanobind](https://github.com/wjakob/nanobind) for seamless Python integration.
+EmbodiK is a modern C++ library with Python bindings designed for robust, high-performance IK behaviors in cross-embodiment scenarios. The name reflects its focus on **embodied** dynamics and constraint handling, making it ideal for humanoid robots and AI/VLA integrations. Built on top of [Pinocchio](https://github.com/stack-of-tasks/pinocchio) and using [Nanobind](https://github.com/wjakob/nanobind) for seamless Python integration.
 
 ## Features
 
@@ -43,7 +43,7 @@ pip install embodik
 
 ## Documentation
 
-- [Installation Guide](installation.md) - How to install embodiK
+- [Installation Guide](installation.md) - How to install EmbodiK
 - [Quickstart](quickstart.md) - Get started in 5 minutes
 - [API Reference](api/index.md) - Complete API documentation
 - [Examples](examples/index.md) - Example code and tutorials
@@ -51,6 +51,6 @@ pip install embodik
 
 ## License
 
-MIT License - see [LICENSE](../LICENSE) file for details.
+MIT License - see the [LICENSE](https://github.com/robodreamer/embodik/blob/main/LICENSE) file for details.
 
 **Copyright (c) 2025 Andy Park <andypark.purdue@gmail.com>**

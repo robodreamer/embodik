@@ -1,8 +1,7 @@
 # Installation
 
-embodiK requires Python 3.8+ and several system dependencies.
+EmbodiK requires Python 3.8+ and several system dependencies.
 
-> **💡 Not sure which installation method to use?** See [Installation Guide: Pixi vs pip](INSTALLATION_GUIDE.md) for a detailed comparison.
 
 ## Prerequisites
 
@@ -26,7 +25,7 @@ brew install cmake eigen python3
 
 ### Pinocchio
 
-embodiK depends on the [Pinocchio](https://github.com/stack-of-tasks/pinocchio) library for robot kinematics.
+EmbodiK depends on the [Pinocchio](https://github.com/stack-of-tasks/pinocchio) library for robot kinematics.
 
 **Option 1: Install via robotpkg (Ubuntu/Debian)**
 ```bash
@@ -135,11 +134,11 @@ This includes:
 
 ## Verify Installation
 
-Test that embodiK is installed correctly:
+Test that EmbodiK is installed correctly:
 
 ```python
 import embodik
-print(f"embodiK version: {embodik.__version__}")
+print(f"EmbodiK version: {embodik.__version__}")
 
 # Test basic functionality
 model = embodik.RobotModel.from_urdf("path/to/robot.urdf")
@@ -174,6 +173,6 @@ If you encounter build errors:
 
 ## Next Steps
 
-- [Quickstart Guide](quickstart.md) - Get started with embodiK
+- [Quickstart Guide](quickstart.md) - Get started with EmbodiK
 - [API Reference](api/index.md) - Explore the API
 - [Examples](examples/index.md) - See example code

@@ -1,6 +1,6 @@
 # Development Guide
 
-Guide for contributing to embodiK and developing with the source code.
+Guide for contributing to EmbodiK and developing with the source code.
 
 ## Development Setup
 
@@ -18,7 +18,7 @@ pip install -e ".[dev]"
 ```
 
 This installs:
-- embodiK in editable mode
+- EmbodiK in editable mode
 - Development dependencies (pytest, black, isort, etc.)
 
 ### Build from Source
@@ -78,7 +78,7 @@ pytest --cov=embodik --cov-report=html
 
 ## Code Style
 
-embodiK follows PEP 8 for Python code:
+EmbodiK follows PEP 8 for Python code:
 
 ```bash
 # Format code

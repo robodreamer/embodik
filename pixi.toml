@@ -49,7 +49,7 @@ test = "pytest test/"
 test-verbose = "pytest test/ -v"
 lint = "black --check python/ test/ && isort --check python/ test/"
 format = "black python/ test/ && isort python/ test/"
-docs-build = "mkdocs build"
+docs-build = "python -W ignore::DeprecationWarning:hppfcl -m mkdocs build"
 docs-serve = "mkdocs serve"
 
 [feature.dev.dependencies]

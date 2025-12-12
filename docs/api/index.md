@@ -1,6 +1,6 @@
 # API Reference
 
-Complete API documentation for embodiK.
+Complete API documentation for EmbodiK.
 
 ## Core Classes
 
@@ -24,7 +24,7 @@ The `KinematicsSolver` provides inverse kinematics solving capabilities.
 
 ## Task Types
 
-embodiK supports various task types for multi-task IK:
+EmbodiK supports various task types for multi-task IK:
 
 - **FrameTask**: Control end-effector pose (position + orientation)
 - **PostureTask**: Maintain desired joint configuration
@@ -43,12 +43,7 @@ See the [Tasks](tasks.md) page for detailed documentation.
 
 ## Visualization
 
-Optional visualization tools:
-
-::: embodik.visualization
-    options:
-      show_root_heading: true
-      show_root_toc_entry: true
+Optional visualization tools are documented on the [Visualization](visualization.md) page.
 
 ## Enumerations
 

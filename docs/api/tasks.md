@@ -1,6 +1,6 @@
 # Tasks
 
-embodiK supports various task types for multi-task inverse kinematics.
+EmbodiK supports various task types for multi-task inverse kinematics.
 
 ## Task Types
 

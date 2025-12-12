@@ -1,6 +1,6 @@
 # Working with Transforms
 
-embodiK uses Pinocchio's `SE3` class for representing 3D rigid body transformations (combining rotation and translation). This guide covers basic transform operations you'll need when working with embodiK.
+EmbodiK uses Pinocchio's `SE3` class for representing 3D rigid body transformations (combining rotation and translation). This guide covers basic transform operations you'll need when working with EmbodiK.
 
 ## Quick Reference
 
@@ -30,7 +30,7 @@ R = embodik.q2r(q)  # 3x3 identity matrix
 
 ## Overview
 
-In embodiK, transforms are represented using Pinocchio's `SE3` class, which combines:
+In EmbodiK, transforms are represented using Pinocchio's `SE3` class, which combines:
 - **Rotation**: A 3×3 rotation matrix (or quaternion)
 - **Translation**: A 3D vector
 
@@ -207,7 +207,7 @@ R_from_q = q2.matrix()
 
 **Critical**: Different libraries use different quaternion orders. Always specify the `order` parameter to prevent errors:
 
-- **`'sxyz'` or `'wxyz'`** (default): `[w, x, y, z]` - Used by viser, Pinocchio, embodiK, most robotics libraries
+- **`'sxyz'` or `'wxyz'`** (default): `[w, x, y, z]` - Used by viser, Pinocchio, EmbodiK, most robotics libraries
 - **`'xyzs'` or `'xyzw'`**: `[x, y, z, w]` - Used by some libraries (e.g., SciPy in some contexts)
 
 **Best Practice**: Always explicitly specify the `order` parameter when converting quaternions:
@@ -300,7 +300,7 @@ t = np.array([1.0, 0.0, 0.0])
 T = pin.SE3(R_rot, t)
 ```
 
-## Using Transforms with embodiK
+## Using Transforms with EmbodiK
 
 ### Setting Target Poses
 
@@ -315,7 +315,7 @@ model = embodik.RobotModel.from_urdf("robot.urdf")
 # Create target pose using SE3
 target_pose_se3 = pin.SE3(np.eye(3), np.array([0.5, 0.2, 0.3]))
 
-# Convert to 4x4 matrix for embodiK
+# Convert to 4x4 matrix for EmbodiK
 target_pose_matrix = target_pose_se3.homogeneous()
 
 # Use in frame task
@@ -381,7 +381,7 @@ error = compute_pose_error(pose_current, pose_goal)
 
 ## Utility Functions
 
-embodiK provides utility functions for common transform operations, including spatialmath-python compatible functions:
+EmbodiK provides utility functions for common transform operations, including spatialmath-python compatible functions:
 
 ### Creating SE3 Transforms
 
@@ -485,7 +485,7 @@ For more advanced transform operations, see:
 
 If you're familiar with spatialmath-python, here's a quick comparison:
 
-| spatialmath-python | Pinocchio (embodiK) |
+| spatialmath-python | Pinocchio (EmbodiK) |
 |-------------------|---------------------|
 | `SE3(R, t)` | `pin.SE3(R, t)` or `embodik.Rt(R=R, t=t)` |
 | `SE3.Rt(R, t)` | `embodik.Rt(R=R, t=t)` |
@@ -499,7 +499,7 @@ If you're familiar with spatialmath-python, here's a quick comparison:
 
 ### Most Common Functions
 
-The most frequently used functions from spatialmath-python are available in embodiK:
+The most frequently used functions from spatialmath-python are available in EmbodiK:
 
 ```python
 import embodik
@@ -527,4 +527,4 @@ q = np.array([1, 0, 0, 0])  # wxyz format
 R = embodik.q2r(q, order='sxyz')  # Explicit order specification
 ```
 
-The main difference is that Pinocchio's `SE3` is optimized for robotics applications and integrates seamlessly with embodiK's kinematics computations.
+The main difference is that Pinocchio's `SE3` is optimized for robotics applications and integrates seamlessly with EmbodiK's kinematics computations.
