@@ -306,7 +306,10 @@ def _patch_loadViewerGeometryObject_for_colors(visualizer: ViserVisualizer) -> N
         """
         try:
             import trimesh
-            import hppfcl
+            try:
+                import coal  # New name for hppfcl
+            except ImportError:
+                import hppfcl as coal  # Fallback to old name
         except ImportError:
             # Fallback to original if dependencies not available
             return original_loadViewerGeometryObject(geometry_object, prefix, color)
@@ -317,7 +320,7 @@ def _patch_loadViewerGeometryObject_for_colors(visualizer: ViserVisualizer) -> N
         geom = geometry_object.geometry
 
         # For meshes, use add_mesh_trimesh when color is None to preserve mesh colors
-        MESH_TYPES = (hppfcl.BVHModelBase, hppfcl.HeightFieldOBBRSS, hppfcl.HeightFieldAABB)
+        MESH_TYPES = (coal.BVHModelBase, coal.HeightFieldOBBRSS, coal.HeightFieldAABB)
 
         if isinstance(geom, MESH_TYPES):
             mesh = trimesh.load(geometry_object.meshPath)
