@@ -1,6 +1,6 @@
 # EmbodiK: Fast Inverse Kinematics with Nanobind
 
-EmbodiK is a high-performance inverse kinematics library built with C++ and Python bindings via Nanobind. It provides both single-task and multi-task velocity IK solvers with singularity-robust inverse methods.
+EmbodiK is a high-performance inverse kinematics library built with C++ and Python bindings via Nanobind. It provides both single-task and multi-task velocity IK solvers with singularity-robust inverse methods, collision avoidance, and interactive visualization.
 
 **Author:** Andy Park <andypark.purdue@gmail.com>
 
@@ -11,6 +11,9 @@ EmbodiK is a high-performance inverse kinematics library built with C++ and Pyth
 - **Multiple Solvers**: Single-step and full multi-task velocity IK
 - **Singularity Robust**: Advanced inverse methods for stable solutions
 - **Constraint Support**: Joint limits and operational space constraints
+- **Collision Avoidance**: Self-collision detection and avoidance
+- **Visualization**: Interactive 3D visualization with Viser
+- **Robot Models**: Built-in support for common robots (Panda, IIWA)
 
 ## Installation
 
@@ -51,99 +54,119 @@ pixi run install
 
 See [Installation Documentation](docs/installation.md) for detailed instructions.
 
+## Quick Start
+
+```python
+import embodik
+import numpy as np
+
+# Load robot model from URDF
+robot = embodik.RobotModel("path/to/robot.urdf", floating_base=False)
+
+# Create kinematics solver
+solver = embodik.KinematicsSolver(robot)
+
+# Add a frame task for end-effector control
+frame_task = solver.add_frame_task("ee_task", "end_effector")
+frame_task.priority = 0
+frame_task.weight = 1.0
+
+# Set target velocity (6D: 3 linear + 3 angular)
+target_velocity = np.array([0.1, 0.0, 0.0, 0.0, 0.0, 0.0])
+frame_task.set_target_velocity(target_velocity)
+
+# Solve velocity IK
+q = np.zeros(robot.nq)
+result = solver.solve_velocity(q, apply_limits=True)
+
+if result.status == embodik.SolverStatus.SUCCESS:
+    print(f"Joint velocities: {result.joint_velocities}")
+```
+
 ## API Overview
 
-### Core Types
+### High-Level API (Recommended)
+
+embodiK provides a high-level API built on top of Pinocchio for easy robot modeling and IK solving:
+
+```python
+import embodik
+import numpy as np
+
+# Create robot model
+robot = embodik.RobotModel("robot.urdf", floating_base=False)
+
+# Create solver
+solver = embodik.KinematicsSolver(robot)
+
+# Add tasks
+frame_task = solver.add_frame_task("task1", "end_effector")
+posture_task = solver.add_posture_task("posture")
+
+# Configure tasks
+frame_task.priority = 0
+frame_task.weight = 1.0
+posture_task.priority = 1
+posture_task.weight = 0.1
+
+# Solve
+q = np.zeros(robot.nq)
+result = solver.solve_velocity(q, apply_limits=True)
+```
+
+### Low-Level API
+
+For advanced users, embodiK also provides low-level multi-task velocity IK functions:
 
 ```python
 import embodik as eik
+import numpy as np
 
-# Basic solver configuration
-config = eik.BasicSolverConfig(
-    epsilon=1e-6,           # Numerical tolerance
-    iteration_limit=20,     # Maximum iterations allowed
-    regularization=1e-1     # Tikhonov regularization parameter
-)
-
-# Solver result
-result = eik.SolverResult(
-    solution=[...],           # Joint velocities dq
-    status=eik.SolverStatus.SUCCESS,
-    computation_time_ms=0.1,
-    iterations=1,
-    final_error=1e-6,
-    task_scales=[...]         # Task scaling factors
-)
-```
-
-### Multi-Task Velocity IK
-
-embodiK provides a powerful multi-task velocity IK solver that handles task prioritization and constraint satisfaction.
-
-#### Eigen-First API (Recommended)
-
-```python
 # Multiple tasks with constraints
-goals = [
-    np.array([0.1, -0.2]),  # Primary task
-    np.array([0.3])          # Secondary task
-]
-
+goals = [np.array([0.1, -0.2]), np.array([0.3])]
 jacobians = [
-    np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]),  # 2x3
-    np.array([[0.0, 0.0, 1.0]])                      # 1x3
+    np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]),
+    np.array([[0.0, 0.0, 1.0]])
 ]
 
 # Constraint matrix and limits
-C = np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]])
-lower = np.array([-1e6, -1e6, -1e6])  # Joint limits
+C = np.eye(3)
+lower = np.array([-1e6, -1e6, -1e6])
 upper = np.array([1e6, 1e6, 1e6])
 
 params = {
     "epsilon": 1e-6,
-    "precision_threshold": 1e-10,
-    "iteration_limit": 20,
-    "magnitude_limit": 1e10,
-    "stall_detection_count": 2,
-    "regularization_epsilon": 1e-6,         # Regularization tolerance
-    "regularization_factor": 1e-1,          # Regularization coefficient
+    "regularization_factor": 1e-1,
 }
 
-result = eik.solve_velocity_ik_multi_task_eigen(
-    goals, jacobians, C, lower, upper, params
-)
-```
-
-#### Numpy-First API
-
-```python
-# Similar to Eigen-first but with automatic array conversion
 result = eik.solve_velocity_ik_multi_task_np(
     goals, jacobians, C, lower, upper, params
 )
 ```
 
-## Parameter Tuning
+## Examples
 
-### Tolerance Settings
+The repository includes several example scripts:
 
-- **Epsilon**: `1e-6` - Overall numerical tolerance
-- **Precision threshold**: `1e-10` - High-precision constraint satisfaction
-- **Regularization epsilon**: `1e-6` - Tolerance for regularized inverse computation
-- **Regularization factor**: `1e-1` - Regularization coefficient for stability
+- **`01_basic_ik_simple.py`** - Basic IK solving with interactive visualization
+- **`02_collision_aware_IK.py`** - Collision-aware IK with self-collision avoidance
+- **`robot_model_example.py`** - Robot model usage and configuration
+- **`visualization_example.py`** - Interactive 3D visualization examples
 
-### Performance Tuning
+### Running Examples
 
-- **Iteration limit**: `20` - Maximum solver iterations allowed
-- **Magnitude limit**: `1e10` - Maximum allowable solution magnitude
-- **Stall detection count**: `2` - Iterations before detecting solver stall
+```bash
+# Install example dependencies
+pixi run install
 
-## Performance Characteristics
+# Run basic IK example
+pixi run python examples/01_basic_ik_simple.py
 
-- **Single-step**: ~0.1ms for 6x7 Jacobian
-- **Multi-task**: ~1-5ms for typical 2-3 task problems
-- **Memory**: Minimal overhead with Eigen types
-- **Scalability**: Linear with problem size
+# Run collision-aware IK example
+pixi run python examples/02_collision_aware_IK.py --robot panda
+```
+
+See the [Examples Documentation](docs/examples/index.md) for detailed guides.
 
 ## Testing
 
@@ -154,41 +177,45 @@ pixi run test
 # Run tests with verbose output
 pixi run test-verbose
 
-# Tests should pass successfully
-```
-
-## Usage
-
-embodiK provides a clean, modern API for multi-task inverse kinematics:
-
-```python
-# Multi-task velocity IK with hierarchical objectives
-result = eik.solve_velocity_ik_multi_task_np(
-    goals, jacobians, C, lower, upper,
-    params={"epsilon": 1e-6, "regularization_factor": 1e-1}
-)
-
-# Check if solution was successful
-if result.status == eik.SolverStatus.SUCCESS:
-    print(f"Solution: {result.solution}")
-    print(f"Task scales: {result.task_scales}")
+# Run tests with coverage
+pixi run test-cov
 ```
 
 ## Architecture
 
 ```
 embodik/
-├── cpp_core/           # C++ implementation
-│   ├── include/        # Header files
-│   └── types.hpp       # Core data structures
-├── python_bindings/    # Nanobind bindings
-│   ├── src/           # C++ binding code
-│   └── python/        # Python package
-└── test/              # Test suite
+├── cpp_core/              # C++ core implementation
+│   ├── include/embodik/  # Header files
+│   └── src/              # Implementation files
+├── python_bindings/       # Nanobind C++ bindings
+│   └── src/              # Binding code
+├── python/embodik/        # Python package
+│   ├── utils.py          # Utility functions
+│   └── visualization.py  # Visualization support
+├── examples/              # Example scripts
+│   ├── 01_basic_ik_simple.py
+│   ├── 02_collision_aware_IK.py
+│   └── robot_models/     # Robot URDF files
+├── docs/                  # Documentation (MkDocs)
+└── test/                  # Test suite
 ```
+
+## Documentation
+
+Full documentation is available at: **https://embodik.github.io/embodik/**
+
+- [Installation Guide](docs/installation.md) - Detailed installation instructions
+- [Quickstart](docs/quickstart.md) - Get started in 5 minutes
+- [API Reference](docs/api/index.md) - Complete API documentation
+- [Examples](docs/examples/index.md) - Example code and tutorials
+- [Development Guide](docs/development.md) - Contributing and development
 
 ## Contributing
 
+We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+
+Key principles:
 1. Follow the existing code style
 2. Add tests for new functionality
 3. Ensure numerical accuracy and stability
