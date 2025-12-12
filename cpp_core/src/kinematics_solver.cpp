@@ -3,13 +3,13 @@
  * @brief Implementation of high-level kinematics solver
  */
 
-#include <algorithm>
-#include <iostream>
-#include <cmath>
-#include <stdexcept>
-#include <limits>
 #include <Eigen/Geometry>
+#include <algorithm>
+#include <cmath>
+#include <iostream>
+#include <limits>
 #include <pinocchio/algorithm/geometry.hpp>
+#include <stdexcept>
 #ifdef PINOCCHIO_WITH_HPP_FCL
 #include <pinocchio/collision/distance.hpp>
 #endif
@@ -22,7 +22,7 @@ namespace {
 constexpr double kCollisionTolerance = 1e-4;
 constexpr double kCollisionUpperDistance = 1e1;
 constexpr double kDistanceEpsilon = 1e-9;
-}
+} // namespace
 
 KinematicsSolver::KinematicsSolver(std::shared_ptr<RobotModel> robot)
     : robot_(robot) {
@@ -177,19 +177,25 @@ void KinematicsSolver::configure_collision_constraint(
   }
 
   if (collision_data != nullptr && collision_model_ptr != nullptr) {
-    if (collision_data->distanceRequests.size() != collision_model_ptr->collisionPairs.size()) {
-      collision_data->distanceRequests.resize(collision_model_ptr->collisionPairs.size());
-      collision_data->distanceResults.resize(collision_model_ptr->collisionPairs.size());
+    if (collision_data->distanceRequests.size() !=
+        collision_model_ptr->collisionPairs.size()) {
+      collision_data->distanceRequests.resize(
+          collision_model_ptr->collisionPairs.size());
+      collision_data->distanceResults.resize(
+          collision_model_ptr->collisionPairs.size());
     }
     for (auto &request : collision_data->distanceRequests) {
       request.enable_nearest_points = true;
       request.enable_signed_distance = true;
     }
     collision_data->activateAllCollisionPairs();
-    for (std::size_t idx = 0; idx < collision_model_ptr->collisionPairs.size(); ++idx) {
+    for (std::size_t idx = 0; idx < collision_model_ptr->collisionPairs.size();
+         ++idx) {
       const auto &pair = collision_model_ptr->collisionPairs[idx];
-      const auto &name_a = collision_model_ptr->geometryObjects[pair.first].name;
-      const auto &name_b = collision_model_ptr->geometryObjects[pair.second].name;
+      const auto &name_a =
+          collision_model_ptr->geometryObjects[pair.first].name;
+      const auto &name_b =
+          collision_model_ptr->geometryObjects[pair.second].name;
       if (!collision_pair_allowed(name_a, name_b)) {
         collision_data->activeCollisionPairs[idx] = false;
       }
@@ -199,8 +205,8 @@ void KinematicsSolver::configure_collision_constraint(
   (void)min_distance;
   (void)include_pairs;
   (void)exclude_pairs;
-  throw std::runtime_error(
-      "Collision avoidance requires Pinocchio to be built with hpp-fcl support.");
+  throw std::runtime_error("Collision avoidance requires Pinocchio to be built "
+                           "with hpp-fcl support.");
 #endif
 }
 
@@ -212,8 +218,8 @@ void KinematicsSolver::add_collision_constraint(
 #else
   (void)link_pairs;
   (void)min_distance;
-  throw std::runtime_error(
-      "Collision avoidance requires Pinocchio to be built with hpp-fcl support.");
+  throw std::runtime_error("Collision avoidance requires Pinocchio to be built "
+                           "with hpp-fcl support.");
 #endif
 }
 
@@ -233,8 +239,7 @@ std::string KinematicsSolver::canonical_pair_key(const std::string &a,
 
 bool KinematicsSolver::collision_pair_allowed(const std::string &a,
                                               const std::string &b) const {
-  if (!collision_constraint_.has_value() ||
-      !collision_constraint_->enabled) {
+  if (!collision_constraint_.has_value() || !collision_constraint_->enabled) {
     return false;
   }
 
@@ -295,8 +300,8 @@ KinematicsSolver::compute_collision_constraint() {
     return std::nullopt;
   }
 
-  bool constraint_active = collision_constraint_.has_value() &&
-                           collision_constraint_->enabled;
+  bool constraint_active =
+      collision_constraint_.has_value() && collision_constraint_->enabled;
 
   // Update collision placements and compute distances for all pairs
   pinocchio::updateGeometryPlacements(robot_->model(), robot_->data(),
@@ -322,7 +327,8 @@ KinematicsSolver::compute_collision_constraint() {
       continue;
     }
 
-    if (!collision_data->activeCollisionPairs.empty() && !collision_data->activeCollisionPairs[idx]) {
+    if (!collision_data->activeCollisionPairs.empty() &&
+        !collision_data->activeCollisionPairs[idx]) {
       continue;
     }
 
@@ -365,7 +371,8 @@ KinematicsSolver::compute_collision_constraint() {
   const auto &pair = pairs[*best_index_allowed];
   const auto &object_a = collision_model->geometryObjects[pair.first];
   const auto &object_b = collision_model->geometryObjects[pair.second];
-  const auto &distance_result = collision_data->distanceResults[*best_index_allowed];
+  const auto &distance_result =
+      collision_data->distanceResults[*best_index_allowed];
 
   Eigen::Vector3d p1_world = distance_result.nearest_points[0].cast<double>();
   Eigen::Vector3d p2_world = distance_result.nearest_points[1].cast<double>();
@@ -385,10 +392,10 @@ KinematicsSolver::compute_collision_constraint() {
   const auto &transform_a = robot_->data().oMf[frame_a_id];
   const auto &transform_b = robot_->data().oMf[frame_b_id];
 
-  Eigen::Vector3d p1_local =
-      transform_a.rotation().transpose() * (p1_world - transform_a.translation());
-  Eigen::Vector3d p2_local =
-      transform_b.rotation().transpose() * (p2_world - transform_b.translation());
+  Eigen::Vector3d p1_local = transform_a.rotation().transpose() *
+                             (p1_world - transform_a.translation());
+  Eigen::Vector3d p2_local = transform_b.rotation().transpose() *
+                             (p2_world - transform_b.translation());
 
   Eigen::Matrix<double, 3, Eigen::Dynamic> jacobian_a =
       robot_->get_point_jacobian(frame_a.name, p1_local);
@@ -398,18 +405,16 @@ KinematicsSolver::compute_collision_constraint() {
   Eigen::Matrix3d rotation_to_x = Eigen::Matrix3d::Identity();
   Eigen::Matrix3d rotation_from_negative = Eigen::Matrix3d::Identity();
   if (distance_norm > kDistanceEpsilon) {
-    rotation_to_x = Eigen::Quaterniond::FromTwoVectors(normal,
-                                                       Eigen::Vector3d::UnitX())
-                        .toRotationMatrix();
+    rotation_to_x =
+        Eigen::Quaterniond::FromTwoVectors(normal, Eigen::Vector3d::UnitX())
+            .toRotationMatrix();
     rotation_from_negative =
         Eigen::Quaterniond::FromTwoVectors(-normal, Eigen::Vector3d::UnitX())
             .toRotationMatrix();
   }
 
-  Eigen::RowVectorXd row_a =
-      (rotation_to_x * jacobian_a).row(0);
-  Eigen::RowVectorXd row_b =
-      (rotation_from_negative * jacobian_b).row(0);
+  Eigen::RowVectorXd row_a = (rotation_to_x * jacobian_a).row(0);
+  Eigen::RowVectorXd row_b = (rotation_from_negative * jacobian_b).row(0);
 
   CollisionConstraintResult result;
   result.jacobian.resize(2, robot_->nv());
@@ -449,8 +454,7 @@ std::pair<double, double> KinematicsSolver::calculate_velocity_box_constraint(
   position_margin_upper = std::max(0.0, position_margin_upper);
 
   // Calculate velocity limits based on position margins
-  // Following flex_ik approach: min of position/dt, vel_max, and
-  // sqrt(2*accel*margin)
+  // Computed as: min of position/dt, vel_max, and sqrt(2*accel*margin)
   double vel_from_pos_lower = -position_margin_lower / dt;
   double vel_from_pos_upper = position_margin_upper / dt;
 
@@ -540,7 +544,8 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
   }
 
   if (collision_constraint_result.has_value()) {
-    num_constraints += static_cast<int>(collision_constraint_result->jacobian.rows());
+    num_constraints +=
+        static_cast<int>(collision_constraint_result->jacobian.rows());
   }
 
   C = Eigen::MatrixXd::Zero(num_constraints, robot_->nv());
@@ -576,7 +581,7 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
     C.block(constraint_idx, 0, robot_->nv(), robot_->nv()) =
         Eigen::MatrixXd::Identity(robot_->nv(), robot_->nv());
 
-    // Use approach similar to flex_ik: consider position, velocity, and
+    // Consider position, velocity, and
     // acceleration constraints
     double margin_limit = 1e-4; // Small margin from exact limits
 
@@ -795,8 +800,8 @@ PositionIKResult KinematicsSolver::solve_position(
 
     if (position_ik_debug_) {
       std::cout << "[embodiK][IKDebug] iter " << iter
-                << " pos_err=" << pos_error
-                << " ori_err=" << ori_error << std::endl;
+                << " pos_err=" << pos_error << " ori_err=" << ori_error
+                << std::endl;
     }
 
     // Check convergence
@@ -945,8 +950,7 @@ PositionIKResult KinematicsSolver::solve_position(
 
   if (position_ik_debug_) {
     std::cout << "[embodiK][IKDebug] solve_position finished with status="
-              << static_cast<int>(result.status)
-              << " iterations=" << iter
+              << static_cast<int>(result.status) << " iterations=" << iter
               << " final_pos_err=" << result.position_error
               << " final_ori_err=" << result.orientation_error << std::endl;
   }
