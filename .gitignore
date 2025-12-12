@@ -1,0 +1,82 @@
+# Python build artifacts
+python_bindings/*.cmake
+python_bindings/CMakeFiles/
+python_bindings/build/
+python_bindings/*.a
+python_bindings/swift_ik_py/
+python_bindings/embodik_py/
+test/__pycache__/
+python_bindings/Makefile
+python_bindings/CMakeCache.txt
+python/embodik/__pycache__/
+*.pyc
+__pycache__/
+
+# Ignore generated type stubs and py.typed in build directories
+python_bindings/**/*.pyi
+python_bindings/**/py.typed
+build/**/*.pyi
+build/**/py.typed
+
+# CMake build artifacts (root directory)
+CMakeCache.txt
+CMakeFiles/
+CMakeInit.txt
+cmake_install.cmake
+build.ninja
+.cmake/
+cmake/
+
+# Ninja build system files
+.ninja_deps
+.ninja_log
+*.ninja
+
+# scikit-build-core artifacts
+.skbuild/
+.skbuild-info.json
+dist/
+*.egg-info/
+
+# Build directories
+build/
+install/
+
+# Compiled libraries and binaries
+*.so
+*.a
+*.dylib
+*.dll
+*.exe
+
+# Pixi lock file (optional - some projects commit this for reproducibility)
+# Uncomment the next line if you want to ignore pixi.lock
+# pixi.lock
+
+# Data files
+*.h5
+*.npz
+*.pkl
+reachability_maps/
+robot_models_urdf/
+tmp_reach_test/
+
+# Documentation build artifacts
+docs/_build/
+docs/.doctrees/
+site/
+
+# Temporary files
+*.diff
+*.tmp
+*.swp
+*~
+
+# Ignore all Markdown files except README.md and docs
+*.md
+!README.md
+!docs/**/*.md
+!plan_docs/**/*.md
+
+# Robot models (commented out - we want to include robot_models in the repo)
+# examples/robot_models*/**
