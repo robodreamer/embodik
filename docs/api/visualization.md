@@ -2,7 +2,7 @@
 
 Optional visualization tools for embodiK (requires `embodik[visualization]`).
 
-## embodiKVisualizer
+## EmbodikVisualizer
 
 Interactive 3D visualization using Viser.
 
@@ -11,7 +11,7 @@ import embodik
 import numpy as np
 
 model = embodik.RobotModel.from_urdf("robot.urdf")
-visualizer = embodik.embodiKVisualizer(model)
+visualizer = embodik.EmbodikVisualizer(model)
 
 # Update robot configuration
 q = np.zeros(model.nq)
@@ -33,7 +33,7 @@ visualizer.run()  # Opens interactive window
 
 ## API Reference
 
-::: embodik.visualization.embodiKVisualizer
+::: embodik.visualization.EmbodikVisualizer
     options:
       show_root_heading: true
       show_root_toc_entry: true
@@ -52,6 +52,8 @@ pip install embodik[visualization]
 ```
 
 This installs:
-- `viser` - 3D visualization library
-- `yourdfpy` - URDF parsing
-- `spatialmath-python` - Spatial math utilities
+- `pin>=3.8.0` - Pinocchio (includes native Viser visualization support)
+- `viser>=0.1.0` - 3D visualization library
+- `trimesh>=3.0.0` - Mesh loading for visualization
+
+**Note:** Pinocchio 3.8.0+ includes native Viser visualization support. For legacy systems, the package falls back to custom visualization using `yourdfpy` if Pinocchio's visualizer is not available.

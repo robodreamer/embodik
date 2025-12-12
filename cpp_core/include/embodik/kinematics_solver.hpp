@@ -2,7 +2,7 @@
  * @file kinematics_solver.hpp
  * @brief High-level kinematics solver for EmbodiK
  *
- * Provides a simple API similar to placo for solving IK problems.
+ * Provides a simple, high-level API for solving IK problems.
  * Handles velocity integration, limits, and solver details internally.
  */
 

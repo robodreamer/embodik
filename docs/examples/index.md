@@ -21,8 +21,7 @@ Hierarchical multi-task inverse kinematics:
 The embodiK repository includes several example scripts:
 
 - `01_basic_ik_simple.py` - Basic IK solving
-- `02_comparison_with_placo.py` - Comparison with PlaCo solver
-- `03_reachability_analysis.py` - Workspace reachability analysis
+- `02_collision_aware_IK.py` - Collision-aware IK with self-collision avoidance
 - `robot_model_example.py` - Robot model usage
 - `visualization_example.py` - Visualization examples
 
