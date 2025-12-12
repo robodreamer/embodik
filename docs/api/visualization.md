@@ -1,6 +1,6 @@
 # Visualization
 
-Optional visualization tools for embodiK (requires `embodik[visualization]`).
+Optional visualization tools for EmbodiK (requires `embodik[visualization]`).
 
 ## EmbodikVisualizer
 

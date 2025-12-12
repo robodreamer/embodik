@@ -1,5 +1,5 @@
-site_name: embodiK Documentation
-site_description: High-performance inverse kinematics solver with hierarchical task resolution
+site_name: EmbodiK Documentation
+site_description: High-performance inverse kinematics solver optimized for cross-embodiment VLA/AI applications
 site_url: https://embodik.github.io/embodik/
 repo_url: https://github.com/embodik/embodik
 repo_name: embodik/embodik

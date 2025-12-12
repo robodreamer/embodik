@@ -1,6 +1,6 @@
 # Quickstart Guide
 
-Get started with embodiK in 5 minutes.
+Get started with EmbodiK in 5 minutes.
 
 ## Basic Usage
 
@@ -62,7 +62,7 @@ else:
 
 ## Multi-Task IK
 
-embodiK supports hierarchical multi-task inverse kinematics:
+EmbodiK supports hierarchical multi-task inverse kinematics:
 
 ```python
 # Create multiple tasks with priorities
@@ -144,4 +144,4 @@ else:
 - [Working with Transforms](transforms.md) - Learn how to create and manipulate 3D transforms
 - [API Reference](api/index.md) - Detailed API documentation
 - [Examples](examples/index.md) - More complex examples
-- [Development Guide](development.md) - Contributing to embodiK
+- [Development Guide](development.md) - Contributing to EmbodiK

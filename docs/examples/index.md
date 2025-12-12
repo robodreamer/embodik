@@ -1,6 +1,6 @@
 # Examples
 
-Example code and tutorials for embodiK.
+Example code and tutorials for EmbodiK.
 
 ## Basic Examples
 
@@ -18,7 +18,7 @@ Hierarchical multi-task inverse kinematics:
 
 ## Available Examples
 
-The embodiK repository includes several example scripts:
+The EmbodiK repository includes several example scripts:
 
 - `01_basic_ik_simple.py` - Basic IK solving
 - `02_collision_aware_IK.py` - Collision-aware IK with self-collision avoidance

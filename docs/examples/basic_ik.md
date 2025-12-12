@@ -1,6 +1,6 @@
 # Basic IK Example
 
-Simple example demonstrating basic inverse kinematics with embodiK.
+Simple example demonstrating basic inverse kinematics with EmbodiK.
 
 ## Code
 

@@ -51,7 +51,7 @@ def quaternion_wxyz_to_matrix(wxyz):
 class EmbodikVisualizer:
     """embodiK visualization using Viser directly (no Pinocchio visualization dependencies)."""
 
-    def __init__(self, robot_model, port: int = 8080, open_browser: bool = True):
+    def __init__(self, robot_model: Any, port: int = 8080, open_browser: bool = True):
         """
         Initialize visualizer using Viser directly.
 
@@ -352,7 +352,7 @@ class EmbodikVisualizer:
             self.display(q)
             time.sleep(dt)
 
-    def start_animation_loop(self, update_callback, dt: float = 0.01):
+    def start_animation_loop(self, update_callback: Callable[[], np.ndarray], dt: float = 0.01):
         """
         Start an animation loop that calls update_callback repeatedly.
 
@@ -392,7 +392,7 @@ class InteractiveVisualizer(EmbodikVisualizer):
         self._target_update_callbacks = {}
 
     def add_interactive_target(self, name: str, initial_pose: np.ndarray,
-                              callback=None, color: Tuple[float, float, float] = (0, 1, 0)):
+                              callback: Optional[Callable[[np.ndarray], None]] = None, color: Tuple[float, float, float] = (0, 1, 0)):
         """
         Add an interactive target that can be manipulated.
 

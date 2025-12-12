@@ -51,9 +51,10 @@ install/
 *.dll
 *.exe
 
-# Pixi lock file (optional - some projects commit this for reproducibility)
-# Uncomment the next line if you want to ignore pixi.lock
-# pixi.lock
+# Pixi lock file - COMMIT THIS for reproducibility (ensures consistent environments)
+# Both pixi.toml and pixi.lock should be version-controlled per Pixi documentation
+# Only ignore the .pixi/ directory (environment cache), not the lock file
+.pixi/
 
 # Data files
 *.h5
