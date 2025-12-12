@@ -5,6 +5,9 @@ repo_url: https://github.com/embodik/embodik
 repo_name: embodik/embodik
 edit_uri: edit/main/docs/
 
+# Ensure proper URL handling - use directory URLs (transforms/ instead of transforms.html)
+use_directory_urls: true
+
 theme:
   name: material
   palette:
@@ -66,7 +69,6 @@ markdown_extensions:
 nav:
   - Home: index.md
   - Installation: installation.md
-  - Installation Guide (Pixi vs pip): INSTALLATION_GUIDE.md
   - Quickstart: quickstart.md
   - Working with Transforms: transforms.md
   - API Reference:
