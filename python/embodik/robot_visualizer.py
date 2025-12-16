@@ -57,6 +57,7 @@ class RobotVisualizer:
         self._pinocchio_visualizer = None
         self._urdf_vis = None
         self._make_visual_config = None
+        self._cfg_vec_cache = None  # Cache for ViserUrdf config array
 
         if backend == "pinocchio":
             self._init_pinocchio_backend(open_browser, package_root)
@@ -112,23 +113,42 @@ class RobotVisualizer:
             urdf = load_robot_description(description_name)
             self._urdf_vis = ViserUrdf(self.server, urdf, root_node_name="/robot")
 
-            # Set up joint configuration mapping
+            # Set up joint configuration mapping (optimized for performance)
             actuated_names = list(getattr(self._urdf_vis._urdf, "actuated_joint_names", []))
             robot_joint_names = self.robot_model.get_joint_names()
             name_to_index = {name: idx for idx, name in enumerate(robot_joint_names)}
 
+            # Pre-compute index mapping for faster lookups
+            # Map from actuated_names index to robot_joint_names index
+            actuated_to_robot_indices = []
+            for joint_name in actuated_names:
+                idx = name_to_index.get(joint_name)
+                actuated_to_robot_indices.append(idx if idx is not None else -1)
+
+            # Pre-allocate array for reuse (will resize if needed)
+            self._cfg_vec_cache = np.zeros(len(actuated_names), dtype=float)
+
             def make_visual_config(q: np.ndarray) -> np.ndarray:
-                """Convert embodik joint configuration to URDF visual configuration."""
+                """Convert embodik joint configuration to URDF visual configuration.
+
+                Optimized version that reuses pre-allocated array and uses direct indexing.
+                """
                 if not actuated_names:
-                    return q
-                cfg_vec = np.zeros(len(actuated_names), dtype=float)
-                for i, joint_name in enumerate(actuated_names):
-                    idx = name_to_index.get(joint_name)
-                    if idx is not None and idx < q.size:
-                        cfg_vec[i] = q[idx]
+                    return q.copy() if q is not None else q
+
+                # Reuse cached array if size matches, otherwise create new one
+                if self._cfg_vec_cache is None or len(self._cfg_vec_cache) != len(actuated_names):
+                    self._cfg_vec_cache = np.zeros(len(actuated_names), dtype=float)
+
+                # Direct indexing instead of dictionary lookups (much faster)
+                for i, robot_idx in enumerate(actuated_to_robot_indices):
+                    if robot_idx >= 0 and robot_idx < q.size:
+                        self._cfg_vec_cache[i] = q[robot_idx]
                     else:
-                        cfg_vec[i] = 0.0
-                return cfg_vec
+                        self._cfg_vec_cache[i] = 0.0
+
+                # Return view to avoid copy overhead (ViserUrdf.update_cfg copies internally)
+                return self._cfg_vec_cache[:]
 
             self._make_visual_config = make_visual_config
 
