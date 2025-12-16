@@ -53,7 +53,7 @@ pixi run install
 **Without Pixi (manual setup):**
 - C++17 compatible compiler
 - CMake 3.16+
-- Python 3.8+
+- Python 3.10+
 - Eigen3 development headers (`libeigen3-dev` on Ubuntu)
 - Pinocchio library
 
