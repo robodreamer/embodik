@@ -233,11 +233,15 @@ def _load_geometry_models(
     """
     # Try to use geometry models already loaded in the robot model first
     if robot_model is not None:
-        visual_model = robot_model.visual_model
-        collision_model = robot_model.collision_model
-        if visual_model is not None and collision_model is not None:
-            logger.info(f"Using robot's pre-loaded geometry: {len(visual_model.geometryObjects)} visual objects and {len(collision_model.geometryObjects)} collision objects")
-            return visual_model, collision_model, robot_model.visual_data, robot_model.collision_data
+        try:
+            visual_model = robot_model.visual_model
+            collision_model = robot_model.collision_model
+            if visual_model is not None and collision_model is not None:
+                logger.info(f"Using robot's pre-loaded geometry: {len(visual_model.geometryObjects)} visual objects and {len(collision_model.geometryObjects)} collision objects")
+                return visual_model, collision_model, robot_model.visual_data, robot_model.collision_data
+        except (TypeError, AttributeError):
+            # If there's a binding issue or attribute doesn't exist, fall through to loading from URDF
+            pass
 
     # Geometry models not loaded, try to load them
     logger.info("Geometry models not pre-loaded, attempting to load from URDF...")

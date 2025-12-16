@@ -50,6 +50,15 @@ except ImportError:
     except ImportError:
         _visualization_available = False
 
+# Export robot visualizer (always available if dependencies are installed)
+try:
+    from .robot_visualizer import RobotVisualizer, create_robot_visualizer
+    _robot_visualizer_available = True
+except ImportError:
+    RobotVisualizer = None
+    create_robot_visualizer = None
+    _robot_visualizer_available = False
+
 __all__ = [
     # C++ classes (when available)
     "RobotModel",
@@ -72,6 +81,9 @@ __all__ = [
     # Visualization (optional)
     "EmbodikVisualizer",
     "InteractiveVisualizer",
+    # Robot visualizer
+    "RobotVisualizer",
+    "create_robot_visualizer",
 ]
 
 # Filter out None values from __all__

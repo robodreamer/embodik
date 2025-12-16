@@ -193,11 +193,42 @@ def resolve_robot_configuration(robot_key: str) -> RobotConfig:
         ensure_ros_package_path(urdf_path)
         temp_robot = embodik.RobotModel(str(urdf_path), floating_base=False)
         if not joint_names:
-            joint_names = temp_robot.get_joint_names()
+            # Get all joint names, but for robots with grippers, we only want arm joints
+            all_joint_names = temp_robot.get_joint_names()
+            # For panda, default_configuration has 7 values (arm only), so use first 7 joints
+            default_config = preset.get("default_configuration", [])
+            if robot_key == "panda" and len(default_config) == 7 and len(all_joint_names) > 7:
+                # Use only arm joints (first 7), exclude gripper joints
+                joint_names = all_joint_names[:7]
+            else:
+                joint_names = all_joint_names
         if not joint_labels:
             # Auto-generate labels from joint names
             from utils.robot_models import generate_joint_labels_from_names
             joint_labels = generate_joint_labels_from_names(joint_names, robot_key)
+
+    # Handle default configuration - ensure it matches the number of arm joints
+    default_config = np.array(preset.get("default_configuration", []), dtype=float)
+
+    # For panda with gripper, default_configuration should only have arm joints (7)
+    # Handle gripper joints separately if robot has more DOF than default_configuration
+    if robot_key == "panda" and len(default_config) == 7:
+        # Ensure we have exactly 7 values for arm joints
+        if len(joint_names) > len(default_config):
+            # Robot has more joints than default_configuration - this is expected for panda with gripper
+            # default_configuration should only contain arm joints
+            pass
+        elif len(joint_names) != len(default_config):
+            # Mismatch - pad or truncate to match joint_names length
+            if len(joint_names) > len(default_config):
+                # Pad with zeros (for gripper joints)
+                extra_gripper = preset.get("extra_gripper_default", np.array([0.05, 0.05]))
+                if isinstance(extra_gripper, list):
+                    extra_gripper = np.array(extra_gripper)
+                default_config = np.concatenate([default_config, extra_gripper])
+            else:
+                # Truncate to match
+                default_config = default_config[:len(joint_names)]
 
     return RobotConfig(
         key=robot_key,
@@ -207,7 +238,7 @@ def resolve_robot_configuration(robot_key: str) -> RobotConfig:
         target_link=preset.get("target_link", "end_effector"),  # type: ignore[arg-type]
         joint_labels=list(joint_labels) if isinstance(joint_labels, (list, tuple)) else [],  # type: ignore[arg-type]
         joint_names=list(joint_names) if isinstance(joint_names, (list, tuple)) else [],  # type: ignore[arg-type]
-        default_configuration=np.array(preset.get("default_configuration", []), dtype=float),
+        default_configuration=default_config,
         default_offset=np.array(preset.get("default_offset", [0.05, 0.0, 0.0]), dtype=float),
         collision_exclusions=collision_exclusions,
     )
@@ -270,6 +301,16 @@ class embodiKBackend:
                 print(f"[embodiK] Warning: failed to apply collision exclusions: {exc}")
 
         self.default_arm = cfg.default_configuration.copy()
+        # Ensure default_arm matches arm_dofs
+        if len(self.default_arm) != self.arm_dofs:
+            if len(self.default_arm) < self.arm_dofs:
+                # Pad with zeros if needed
+                padding = np.zeros(self.arm_dofs - len(self.default_arm), dtype=float)
+                self.default_arm = np.concatenate([self.default_arm, padding])
+            else:
+                # Truncate if needed
+                self.default_arm = self.default_arm[:self.arm_dofs]
+
         self.default_full = np.zeros(self.full_dofs, dtype=float)
         self.default_full[: self.arm_dofs] = self.default_arm
         self.q = self.default_full.copy()

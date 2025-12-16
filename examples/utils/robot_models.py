@@ -9,6 +9,7 @@ from typing import Dict, Any
 import yaml
 import numpy as np
 import logging
+import os
 
 # Get the robot_models directory
 # Use resolve() to ensure we get absolute paths and handle symlinks correctly
@@ -85,6 +86,35 @@ def get_robot_preset(robot_key: str) -> Dict[str, Any]:
         )
 
     return presets[robot_key]
+
+
+def ensure_ros_package_path(urdf_path: Path) -> None:
+    """Ensure ROS_PACKAGE_PATH includes ancestors that contain meshes.
+
+    This function sets up the ROS_PACKAGE_PATH environment variable to help
+    resolve package:// URIs in URDF files. It looks for common package root
+    directories in the URDF path's ancestors.
+
+    Args:
+        urdf_path: Path to the URDF file
+    """
+    resolved = urdf_path.resolve()
+    candidate_roots: list[Path] = []
+    for depth in range(1, 5):
+        if len(resolved.parents) > depth:
+            candidate_roots.append(resolved.parents[depth])
+
+    current = os.environ.get("ROS_PACKAGE_PATH", "")
+    paths = [Path(p) for p in current.split(":") if p]
+    updated = False
+
+    for candidate in candidate_roots:
+        if candidate.exists() and candidate not in paths:
+            paths.append(candidate)
+            updated = True
+
+    if updated:
+        os.environ["ROS_PACKAGE_PATH"] = ":".join(str(p) for p in paths)
 
 
 def generate_joint_labels_from_names(joint_names: list[str], robot_key: str = "") -> list[str]:
@@ -225,8 +255,11 @@ def resolve_robot_configuration(robot_key: str) -> Dict[str, Any]:
 
         logger.info(f"Loading robot model from robot_descriptions: {urdf_path}")
 
-    # Load robot model
-    robot = embodik.RobotModel(str(urdf_path))
+    # Ensure ROS_PACKAGE_PATH is set up for package:// URI resolution
+    ensure_ros_package_path(urdf_path)
+
+    # Load robot model (use floating_base=False to match example 02 behavior)
+    robot = embodik.RobotModel(str(urdf_path), floating_base=False)
 
     # Handle default configuration
     q_default = preset.get("default_configuration", np.zeros(robot.nq))
