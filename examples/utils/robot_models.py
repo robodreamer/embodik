@@ -50,12 +50,14 @@ def load_robot_presets() -> Dict[str, Dict[str, Any]]:
     if presets is None:
         return {}
 
-    # Convert default_configuration lists to numpy arrays
+    # Convert numeric lists to numpy arrays
     for robot_key, config in presets.items():
         if 'default_configuration' in config:
             config['default_configuration'] = np.array(config['default_configuration'])
         if 'extra_gripper_default' in config:
             config['extra_gripper_default'] = np.array(config['extra_gripper_default'])
+        if 'default_offset' in config:
+            config['default_offset'] = np.array(config['default_offset'])
 
     return presets
 
@@ -85,11 +87,31 @@ def get_robot_preset(robot_key: str) -> Dict[str, Any]:
     return presets[robot_key]
 
 
+def generate_joint_labels_from_names(joint_names: list[str], robot_key: str = "") -> list[str]:
+    """Generate joint labels automatically from joint names.
+
+    Simply uses the original joint names from the URDF as labels.
+    This preserves the original naming convention from the robot description.
+
+    Args:
+        joint_names: List of joint names from the robot model
+        robot_key: Optional robot key (unused, kept for API compatibility)
+
+    Returns:
+        List of joint labels (same as joint names)
+    """
+    # Use joint names directly as labels
+    return list(joint_names)
+
+
 def resolve_robot_configuration(robot_key: str) -> Dict[str, Any]:
     """Resolve robot configuration from presets and load the robot model.
 
-    This function loads the robot model from the URDF file specified in the preset,
-    handles default configurations, and returns a complete configuration dictionary
+    This function loads the robot model from either:
+    1. Local URDF file (if urdf_path is specified)
+    2. robot_descriptions package (if urdf_import and urdf_attr are specified)
+
+    It handles default configurations and returns a complete configuration dictionary
     ready for use in examples.
 
     Args:
@@ -107,8 +129,9 @@ def resolve_robot_configuration(robot_key: str) -> Dict[str, Any]:
     robot.get_joint_names(), so they don't need to be specified in the preset.
 
     Raises:
-        ValueError: If robot_key is not found in presets
-        FileNotFoundError: If URDF file is not found
+        ValueError: If robot_key is not found in presets or configuration is invalid
+        FileNotFoundError: If local URDF file is not found
+        ImportError: If robot_descriptions package is not available
     """
     try:
         import embodik
@@ -150,23 +173,59 @@ def resolve_robot_configuration(robot_key: str) -> Dict[str, Any]:
 
     preset = presets[robot_key]
 
-    # Resolve URDF path (relative to examples/ directory)
+    # Resolve URDF path - support both local files and robot_descriptions
+    urdf_path = None
+
+    # Priority 1: Check for local urdf_path (for backward compatibility and custom models)
     urdf_path_str = preset.get("urdf_path")
-    if not urdf_path_str:
-        raise ValueError(f"Robot preset '{robot_key}' missing 'urdf_path' in robot_presets.yaml")
+    if urdf_path_str:
+        examples_dir = _ROBOT_MODELS_DIR.parent
+        urdf_path = examples_dir / urdf_path_str
+        if not urdf_path.exists():
+            raise FileNotFoundError(
+                f"URDF file not found: {urdf_path}\n"
+                f"Expected at: {urdf_path_str} (relative to examples/ directory)\n"
+                f"See examples/robot_models/README.md for instructions on adding robot models."
+            )
+        logger.info(f"Loading robot model from local file: {urdf_path}")
 
-    # Get examples directory (parent of robot_models/)
-    examples_dir = _ROBOT_MODELS_DIR.parent
-    urdf_path = examples_dir / urdf_path_str
+    # Priority 2: Use robot_descriptions package
+    if urdf_path is None:
+        urdf_import = preset.get("urdf_import")
+        urdf_attr = preset.get("urdf_attr", "URDF_PATH")
 
-    if not urdf_path.exists():
-        raise FileNotFoundError(
-            f"URDF file not found: {urdf_path}\n"
-            f"Expected at: {urdf_path_str} (relative to examples/ directory)\n"
-            f"See examples/robot_models/README.md for instructions on adding robot models."
-        )
+        if not urdf_import:
+            raise ValueError(
+                f"Robot preset '{robot_key}' must specify either 'urdf_path' (local file) "
+                f"or 'urdf_import' (robot_descriptions package) in robot_presets.yaml"
+            )
 
-    logger.info(f"Loading robot model from: {urdf_path}")
+        try:
+            module = __import__(urdf_import, fromlist=[urdf_attr])
+            urdf_path = Path(getattr(module, urdf_attr))
+        except ImportError as exc:
+            raise ImportError(
+                f"Robot description package '{urdf_import}' is required for the '{robot_key}' model.\n"
+                "Install the 'robot_descriptions' package to use this example:\n"
+                "  pip install robot_descriptions\n"
+                "Or install with examples dependencies:\n"
+                "  pip install embodik[examples]"
+            ) from exc
+        except AttributeError as exc:
+            raise ValueError(
+                f"Robot description module '{urdf_import}' does not have attribute '{urdf_attr}'.\n"
+                f"Available attributes: {dir(module)}"
+            ) from exc
+
+        if not urdf_path.exists():
+            raise FileNotFoundError(
+                f"URDF file from robot_descriptions not found: {urdf_path}\n"
+                f"This may indicate a caching issue. Try clearing ~/.cache/robot_descriptions/"
+            )
+
+        logger.info(f"Loading robot model from robot_descriptions: {urdf_path}")
+
+    # Load robot model
     robot = embodik.RobotModel(str(urdf_path))
 
     # Handle default configuration
@@ -188,4 +247,28 @@ def resolve_robot_configuration(robot_key: str) -> Dict[str, Any]:
         "default_configuration": q_default,
         "key": robot_key,
     }
+
+
+def resolve_robot_configuration_with_labels(robot_key: str) -> Dict[str, Any]:
+    """Resolve robot configuration including auto-generated joint labels.
+
+    This is a convenience wrapper around resolve_robot_configuration that
+    automatically generates joint_labels from joint names if not specified.
+
+    Args:
+        robot_key: Robot key from presets (e.g., "panda", "iiwa")
+
+    Returns:
+        Dictionary with robot configuration including joint_labels
+    """
+    config = resolve_robot_configuration(robot_key)
+
+    # Auto-generate joint labels if not in preset
+    preset = get_robot_preset(robot_key)
+    if "joint_labels" not in preset or not preset.get("joint_labels"):
+        robot = config["robot"]
+        joint_names = robot.get_joint_names()
+        config["joint_labels"] = generate_joint_labels_from_names(joint_names, robot_key)
+
+    return config
 

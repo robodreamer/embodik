@@ -1,141 +1,211 @@
 # Robot Models
 
-This directory contains robot model files (URDF + meshes) that can be used with the embodiK examples.
+This directory contains robot model configurations that can be used with the embodiK examples.
 
 Robot configurations are defined in `robot_presets.yaml`, which can be shared across multiple scripts.
 
 ## Quick Start
 
-1. **Place your robot model** in a subdirectory under `robot_models/`:
-   ```
-   robot_models/
-   └── my_robot/
-       ├── my_robot.urdf
-       └── meshes/
-           └── ...
+Robot models can be loaded from two sources:
+
+1. **robot_descriptions package** (recommended): Automatically downloads and caches models
+2. **Local files**: Place URDF files in `robot_models/` subdirectories
+
+### Using robot_descriptions (Recommended)
+
+The `robot_descriptions` package automatically downloads and caches robot models on first use. This is the default method used by the examples.
+
+**Example configuration in `robot_presets.yaml`:**
+```yaml
+panda:
+  description_name: panda_description
+  urdf_import: robot_descriptions.panda_description
+  urdf_attr: URDF_PATH
+  target_link: panda_hand
+  display_name: Franka Emika Panda
+  default_configuration: [0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785]
+```
+
+**Benefits:**
+- No need to download or manage robot model files manually
+- Models are automatically cached in `~/.cache/robot_descriptions/` after first download
+- Keeps repository size small
+- Models are versioned and maintained by the robot_descriptions community
+
+**Installation:**
+```bash
+pip install robot_descriptions
+# Or install with examples dependencies:
+pip install embodik[examples]
+```
+
+### Using Local Files
+
+For custom robot models or when you need to override robot_descriptions, you can use local files:
+
+**Step 1: Place your robot model** in a subdirectory under `robot_models/`:
+```
+robot_models/
+└── my_robot/
+    ├── my_robot.urdf
+    └── meshes/
+        └── ...
+```
+
+**Step 2: Add an entry** to `robot_presets.yaml`:
+```yaml
+my_robot:
+  description_name: my_robot_description
+  urdf_path: robot_models/my_robot/my_robot.urdf  # Local file path
+  target_link: "end_effector_link"
+  display_name: "My Robot"
+  default_configuration: [0.0, 0.0, 0.0, ...]
+```
+
+**Note:** If both `urdf_path` and `urdf_import` are specified, `urdf_path` (local file) takes priority.
+
+## Using Robot Models in Examples
+
+### Example 01 (Basic IK)
+
+```python
+from utils.robot_models import resolve_robot_configuration
+
+config = resolve_robot_configuration("panda")
+robot = config["robot"]
+target_link = config["target_link"]
+```
+
+Or from command line:
+```bash
+python examples/01_basic_ik_simple.py --robot panda
+```
+
+### Example 02 (Collision-Aware IK)
+
+```python
+from utils.robot_models import load_robot_presets
+from examples.example_helpers.reachability_robot_configs import resolve_robot_configuration
+
+config = resolve_robot_configuration("panda")
+robot = config.robot
+target_link = config.target_link
+```
+
+## robot_presets.yaml Structure
+
+Each robot entry in `robot_presets.yaml` can include:
+
+### Required Fields
+
+- **description_name**: Robot description name (e.g., "panda_description")
+- **target_link**: Target link name for inverse kinematics
+- **display_name**: Display name for the robot
+- **default_configuration**: Default joint configuration (list of joint angles in radians)
+
+### URDF Source (choose one)
+
+- **urdf_import** + **urdf_attr**: Use robot_descriptions package
+  ```yaml
+  urdf_import: robot_descriptions.panda_description
+  urdf_attr: URDF_PATH
+  ```
+- **urdf_path**: Use local file (relative to examples/ directory)
+  ```yaml
+  urdf_path: robot_models/my_robot/my_robot.urdf
+  ```
+
+### Optional Fields
+
+- **joint_names**: List of joint names (auto-extracted from URDF if not specified)
+- **joint_labels**: List of joint labels for display (auto-generated from joint names if not specified)
+  - Labels default to the original joint names from the URDF (e.g., "panda_joint1", "iiwa_joint_1")
+  - If not specified, joint names are used directly as labels
+- **default_offset**: Default end-effector offset [x, y, z] (default: [0.05, 0.0, 0.0])
+- **extra_gripper_default**: Extra gripper joint defaults (for robots with grippers, e.g., Panda)
+- **collision_exclusions**: Collision exclusion pairs (use "auto" for automatic detection)
+- **collision_exclusion_overrides**: Additional collision exclusions to add to auto-detected ones
+
+## Adding a New Robot Model
+
+### Method 1: Using robot_descriptions
+
+1. **Check if robot is available** in robot_descriptions:
+   ```python
+   import robot_descriptions
+   # Check available robots
    ```
 
-2. **Add an entry** to `robot_presets.yaml`:
+2. **Add entry to `robot_presets.yaml`**:
    ```yaml
    my_robot:
-     urdf_path: "robot_models/my_robot/my_robot.urdf"
-     target_link: "end_effector_link"
-     display_name: "My Robot"
+     description_name: my_robot_description
+     urdf_import: robot_descriptions.my_robot_description
+     urdf_attr: URDF_PATH
+     target_link: end_effector_link
+     display_name: My Robot
      default_configuration: [0.0, 0.0, 0.0, ...]
    ```
 
-3. **Use it in examples**:
-   ```python
-   from utils.robot_models import resolve_robot_configuration
-
-   config = resolve_robot_configuration("my_robot")
-   robot = config["robot"]
-   target_link = config["target_link"]
-   ```
-
-   Or from command line:
+3. **Test it**:
    ```bash
    python examples/01_basic_ik_simple.py --robot my_robot
    ```
 
-## Directory Structure
+### Method 2: Using Local Files
 
-Each robot model should be placed in its own subdirectory:
+1. **Create directory structure**:
+   ```bash
+   mkdir -p examples/robot_models/my_robot/meshes
+   ```
 
-```
-robot_models/
-├── franka_panda/
-│   ├── frankaEmikaPanda.urdf    # URDF file
-│   └── meshes/                  # Mesh files referenced by URDF
-│       ├── visual/              # Optional: separate visual meshes
-│       │   ├── link0.dae
-│       │   └── ...
-│       └── collision/           # Optional: separate collision meshes
-│           ├── link0.stl
-│           └── ...
-├── LBR_iiwa_14/
-│   ├── lbr_iiwa_14_r820.urdf    # URDF file
-│   └── meshes/                  # Mesh files referenced by URDF
-│       └── ...
-├── robot_presets.yaml           # Robot configuration presets (shared across scripts)
-├── __init__.py                  # Helper functions for loading presets
-└── README.md                    # This file
-```
+2. **Copy URDF and meshes**:
+   ```bash
+   # Copy URDF file
+   cp my_robot.urdf examples/robot_models/my_robot/
 
-## Adding a New Robot Model
+   # Copy mesh files
+   cp -r path/to/meshes/* examples/robot_models/my_robot/meshes/
+   ```
 
-### Step 1: Create Directory Structure
+3. **Configure URDF paths**:
 
-```bash
-mkdir -p examples/robot_models/my_robot/meshes
-```
+   Your URDF can reference meshes in two ways:
 
-### Step 2: Copy URDF and Meshes
+   **Option A (Recommended): Relative paths**
+   ```xml
+   <mesh filename="meshes/link0.dae"/>
+   ```
 
-```bash
-# Copy URDF file
-cp my_robot.urdf examples/robot_models/my_robot/
+   **Option B: Package:// URIs**
+   ```xml
+   <mesh filename="package://my_robot/meshes/link0.dae"/>
+   ```
+   The package name (`my_robot`) should match your directory name.
 
-# Copy mesh files
-cp -r path/to/meshes/* examples/robot_models/my_robot/meshes/
-```
+4. **Add to robot_presets.yaml**:
+   ```yaml
+   my_robot:
+     description_name: my_robot_description
+     urdf_path: robot_models/my_robot/my_robot.urdf
+     target_link: end_effector_link
+     display_name: My Robot
+     default_configuration: [0.0, 0.0, 0.0, ...]
+   ```
 
-### Step 3: Configure URDF Paths
-
-Your URDF can reference meshes in two ways:
-
-**Option A (Recommended): Relative paths**
-```xml
-<mesh filename="meshes/link0.dae"/>
-```
-
-**Option B: Package:// URIs**
-```xml
-<mesh filename="package://my_robot/meshes/link0.dae"/>
-```
-The package name (`my_robot`) should match your directory name.
-
-### Step 4: Add to robot_presets.yaml
-
-Add an entry to `robot_presets.yaml`:
-
-```yaml
-my_robot:
-  # Required: Path to URDF file (relative to examples/ directory)
-  urdf_path: "robot_models/my_robot/my_robot.urdf"
-
-  # Required: Target link name for inverse kinematics
-  target_link: "end_effector_link"
-
-  # Required: Display name for the robot
-  display_name: "My Robot"
-
-  # Required: Default joint configuration (list of joint angles in radians)
-  default_configuration: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-
-  # Optional: Extra gripper joints (only for robots with grippers, e.g., Panda)
-  extra_gripper_default: [0.05, 0.05]
-```
-
-**Notes:**
-- `urdf_path` is relative to the `examples/` directory
-- `default_configuration` should be a YAML list (automatically converted to numpy array)
-- Joint labels are automatically extracted from the URDF model (no need to specify them)
-- `extra_gripper_default` is only needed for robots with gripper joints (like Panda with 9 DOF)
-
-### Step 5: Test Your Robot
-
-```bash
-# Test loading
-python examples/01_basic_ik_simple.py --robot my_robot
-```
+5. **Test your robot**:
+   ```bash
+   python examples/01_basic_ik_simple.py --robot my_robot
+   ```
 
 ## Current Robot Models
 
-The following robot models are currently available:
+The following robot models are currently configured:
 
-- **Franka Panda** (`panda_description/`): `panda.urdf`
-- **LBR iiwa14** (`iiwa14_description/`): `iiwa14_no_collision.urdf`
+- **Franka Panda** (`panda`): Uses `robot_descriptions.panda_description`
+- **KUKA LBR iiwa14** (`iiwa`): Uses `robot_descriptions.iiwa14_description`
+
+Models are automatically downloaded and cached in `~/.cache/robot_descriptions/` on first use.
 
 ## Package:// URI Resolution
 
@@ -178,4 +248,5 @@ Both structures are supported. The URDF should reference the correct paths.
 - The URDF file can reference meshes using either relative paths or `package://` URIs
 - All paths are resolved relative to the URDF file's directory or the `robot_models/` root
 - Colors from mesh files are automatically preserved (see `viser_helpers.py` for details)
-
+- robot_descriptions models are cached automatically - no manual download needed
+- To clear robot_descriptions cache: `rm -rf ~/.cache/robot_descriptions/`
