@@ -18,7 +18,7 @@ from embodik.utils import (
     apply_joint_limit_barrier_to_velocities,
 )
 from embodik import r2q, q2r, Rt
-from embodik.viser_helpers import create_viser_visualizer
+from embodik import RobotVisualizer, create_robot_visualizer
 
 # Import robot model utilities
 from utils.robot_models import load_robot_presets, resolve_robot_configuration
@@ -48,6 +48,13 @@ def parse_args() -> argparse.Namespace:
         default="panda" if "panda" in presets else sorted(presets.keys())[0] if presets else None,
         help="Select which robot model to load.",
     )
+    parser.add_argument(
+        "--visualizer",
+        choices=["pinocchio", "viserurdf"],
+        default="pinocchio",
+        help="Visualization backend to use. 'pinocchio' (default) uses Pinocchio ViserVisualizer, "
+             "'viserurdf' uses ViserUrdf for color-preserving visualization.",
+    )
     return parser.parse_args()
 
 
@@ -75,17 +82,31 @@ def main(args: argparse.Namespace):
     # Get initial end-effector pose
     initial_pose = robot.get_frame_pose(target_link_name)
 
-    # Set up Pinocchio ViserVisualizer using helper function
-    # This handles geometry loading, package:// URI resolution, and color preservation
-    visualizer, server, scene, gui = create_viser_visualizer(
+    # Set up robot visualizer with selected backend
+    preset = load_robot_presets()[args.robot.lower()]
+    description_name = preset.get("description_name", "")
+
+    viz = create_robot_visualizer(
         robot_model=robot,
+        backend=args.visualizer,
+        description_name=description_name,
         port=8080,
         open_browser=True,
     )
 
     # Add grid and display initial configuration
-    scene.add_grid("/ground", width=2, height=2)
-    visualizer.display(q_current)
+    viz.add_grid("/ground", width=2, height=2)
+    viz.display(q_current)
+
+    # Get server, scene, and gui from visualizer
+    server = viz.server
+    scene = viz.scene
+    gui = viz.gui
+
+    # Helper function to update visualization (uses unified API)
+    def update_visualization(q: np.ndarray):
+        """Update robot visualization using robot visualizer."""
+        viz.display(q)
 
     # Convert initial rotation matrix to quaternion for target
     initial_wxyz = tuple(r2q(initial_pose.rotation))
@@ -219,7 +240,7 @@ def main(args: argparse.Namespace):
         robot.update_configuration(q_current)
 
         # Update visualization
-        visualizer.display(q_current)
+        update_visualization(q_current)
 
         # Update joint sliders
         for i, slider in joint_sliders.items():
@@ -257,7 +278,7 @@ def main(args: argparse.Namespace):
             robot.update_configuration(q_current)
 
             # Update visualization
-            visualizer.display(q_current)
+            update_visualization(q_current)
 
             frame_task.weight = 0.0
             nullspace_task.weight = 0.0
@@ -427,7 +448,7 @@ def main(args: argparse.Namespace):
             robot.update_configuration(q_current)
 
             # Update visualization
-            visualizer.display(q_current)
+            update_visualization(q_current)
 
             # Update joint sliders
             for i, slider in joint_sliders.items():
