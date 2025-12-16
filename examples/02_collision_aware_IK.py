@@ -20,6 +20,7 @@ import embodik
 from robot_descriptions.loaders.yourdfpy import load_robot_description
 from embodik.utils import compute_pose_error, limit_task_velocity
 from embodik import r2q, q2r, Rt
+from utils.robot_models import load_robot_presets
 
 # -----------------------------------------------------------------------------
 # Default numeric constants
@@ -90,52 +91,11 @@ def generate_auto_collision_exclusions(robot: embodik.RobotModel, robot_key: str
 
 # -----------------------------------------------------------------------------
 # Robot presets shared with the other demos.
+# Loaded from robot_presets.yaml to keep configurations in sync.
 # -----------------------------------------------------------------------------
 
-ROBOT_PRESETS: Dict[str, Dict[str, object]] = {
-    "panda": {
-        "description_name": "panda_description",
-        "urdf_import": "robot_descriptions.panda_description",
-        "urdf_attr": "URDF_PATH",
-        "target_link": "panda_hand",
-        "joint_labels": ["J1", "J2", "J3", "J4", "J5", "J6", "J7"],
-        "joint_names": [
-            "panda_joint1",
-            "panda_joint2",
-            "panda_joint3",
-            "panda_joint4",
-            "panda_joint5",
-            "panda_joint6",
-            "panda_joint7",
-        ],
-        "display_name": "Franka Emika Panda",
-        "default_configuration": np.array([0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785]),
-        "default_offset": np.array([0.05, 0.0, 0.0]),
-        "collision_exclusions": "auto",
-        "collision_exclusion_overrides": [],
-    },
-    "iiwa": {
-        "description_name": "iiwa14_description",
-        "urdf_import": "robot_descriptions.iiwa14_description",
-        "urdf_attr": "URDF_PATH",
-        "target_link": "iiwa_link_7",
-        "joint_labels": ["A1", "A2", "A3", "A4", "A5", "A6", "A7"],
-        "joint_names": [
-            "iiwa_joint_1",
-            "iiwa_joint_2",
-            "iiwa_joint_3",
-            "iiwa_joint_4",
-            "iiwa_joint_5",
-            "iiwa_joint_6",
-            "iiwa_joint_7",
-        ],
-        "display_name": "KUKA LBR iiwa14",
-        "default_configuration": np.array([0.0, 0.7854, 0.0, -1.5708, 0.0, 0.7854, 0.0]),
-        "default_offset": np.array([0.05, 0.0, 0.0]),
-        "collision_exclusions": "auto",
-        "collision_exclusion_overrides": [],
-    },
-}
+# Load presets from YAML file (shared with example 01)
+ROBOT_PRESETS: Dict[str, Dict[str, object]] = load_robot_presets()
 
 
 @dataclass
@@ -153,21 +113,64 @@ class RobotConfig:
 
 
 def resolve_robot_configuration(robot_key: str) -> RobotConfig:
+    """Resolve robot configuration from presets and return RobotConfig dataclass.
+
+    Supports both local URDF files (urdf_path) and robot_descriptions package (urdf_import + urdf_attr).
+    """
     robot_key = robot_key.lower()
     if robot_key not in ROBOT_PRESETS:
         raise ValueError(f"Unsupported robot '{robot_key}'. Available options: {sorted(ROBOT_PRESETS)}")
 
     preset = ROBOT_PRESETS[robot_key]
 
-    try:
-        module = __import__(preset["urdf_import"], fromlist=[preset["urdf_attr"]])
-        urdf_path = Path(getattr(module, preset["urdf_attr"]))  # type: ignore[arg-type]
-    except ImportError as exc:  # pragma: no cover
-        raise RuntimeError(
-            f"Robot description package '{preset['urdf_import']}' is required for the '{robot_key}' model. "
-            "Install the 'robot_descriptions' package to use this example."
-        ) from exc
+    # Resolve URDF path - support both local files and robot_descriptions
+    urdf_path = None
 
+    # Priority 1: Check for local urdf_path (for backward compatibility and custom models)
+    urdf_path_str = preset.get("urdf_path")
+    if urdf_path_str:
+        examples_dir = Path(__file__).parent
+        urdf_path = examples_dir / urdf_path_str
+        if not urdf_path.exists():
+            raise FileNotFoundError(
+                f"URDF file not found: {urdf_path}\n"
+                f"Expected at: {urdf_path_str} (relative to examples/ directory)"
+            )
+
+    # Priority 2: Use robot_descriptions package
+    if urdf_path is None:
+        urdf_import = preset.get("urdf_import")
+        urdf_attr = preset.get("urdf_attr", "URDF_PATH")
+
+        if not urdf_import:
+            raise ValueError(
+                f"Robot preset '{robot_key}' must specify either 'urdf_path' (local file) "
+                f"or 'urdf_import' (robot_descriptions package) in robot_presets.yaml"
+            )
+
+        try:
+            module = __import__(urdf_import, fromlist=[urdf_attr])
+            urdf_path = Path(getattr(module, urdf_attr))  # type: ignore[arg-type]
+        except ImportError as exc:  # pragma: no cover
+            raise RuntimeError(
+                f"Robot description package '{urdf_import}' is required for the '{robot_key}' model. "
+                "Install the 'robot_descriptions' package to use this example:\n"
+                "  pip install robot_descriptions\n"
+                "Or install with examples dependencies:\n"
+                "  pip install embodik[examples]"
+            ) from exc
+        except AttributeError as exc:
+            raise ValueError(
+                f"Robot description module '{urdf_import}' does not have attribute '{urdf_attr}'."
+            ) from exc
+
+        if not urdf_path.exists():
+            raise FileNotFoundError(
+                f"URDF file from robot_descriptions not found: {urdf_path}\n"
+                f"This may indicate a caching issue. Try clearing ~/.cache/robot_descriptions/"
+            )
+
+    # Handle collision exclusions
     raw_exclusions = preset.get("collision_exclusions", [])
     auto_collision = False
     if raw_exclusions == "auto":
@@ -181,16 +184,31 @@ def resolve_robot_configuration(robot_key: str) -> RobotConfig:
         collision_exclusions = [tuple(pair) for pair in raw_exclusions]  # type: ignore[arg-type]
         ensure_ros_package_path(urdf_path)
 
+    # Get joint names and labels (with fallback to auto-generation)
+    joint_names = preset.get("joint_names", [])
+    joint_labels = preset.get("joint_labels", [])
+
+    # If not specified, try to extract from robot model
+    if not joint_names or not joint_labels:
+        ensure_ros_package_path(urdf_path)
+        temp_robot = embodik.RobotModel(str(urdf_path), floating_base=False)
+        if not joint_names:
+            joint_names = temp_robot.get_joint_names()
+        if not joint_labels:
+            # Auto-generate labels from joint names
+            from utils.robot_models import generate_joint_labels_from_names
+            joint_labels = generate_joint_labels_from_names(joint_names, robot_key)
+
     return RobotConfig(
         key=robot_key,
-        display_name=preset["display_name"],  # type: ignore[arg-type]
+        display_name=preset.get("display_name", robot_key),  # type: ignore[arg-type]
         urdf_path=urdf_path,
-        description_name=preset["description_name"],  # type: ignore[arg-type]
-        target_link=preset["target_link"],  # type: ignore[arg-type]
-        joint_labels=list(preset["joint_labels"]),  # type: ignore[arg-type]
-        joint_names=list(preset["joint_names"]),  # type: ignore[arg-type]
-        default_configuration=np.array(preset["default_configuration"], dtype=float),
-        default_offset=np.array(preset["default_offset"], dtype=float),
+        description_name=preset.get("description_name", ""),  # type: ignore[arg-type]
+        target_link=preset.get("target_link", "end_effector"),  # type: ignore[arg-type]
+        joint_labels=list(joint_labels) if isinstance(joint_labels, (list, tuple)) else [],  # type: ignore[arg-type]
+        joint_names=list(joint_names) if isinstance(joint_names, (list, tuple)) else [],  # type: ignore[arg-type]
+        default_configuration=np.array(preset.get("default_configuration", []), dtype=float),
+        default_offset=np.array(preset.get("default_offset", [0.05, 0.0, 0.0]), dtype=float),
         collision_exclusions=collision_exclusions,
     )
 
