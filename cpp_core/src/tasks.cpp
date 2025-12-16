@@ -128,18 +128,23 @@ void FrameTask::update(const RobotModel &model) {
   current_orientation_ = frame_pose.rotation();
 
   // Update Jacobians based on task type
-  if (task_type_ == TaskType::FRAME_POSITION ||
-      task_type_ == TaskType::FRAME_POSE) {
-    // Get 6D Jacobian and extract position part (top 3 rows)
+  // Optimize: For FRAME_POSE, compute Jacobian once and extract both parts
+  if (task_type_ == TaskType::FRAME_POSE) {
+    // Get 6D Jacobian once and extract both position and orientation parts
     Matrix6Xd J = model.get_frame_jacobian(frame_name_);
     position_jacobian_ = J.topRows<3>();
-  }
-
-  if (task_type_ == TaskType::FRAME_ORIENTATION ||
-      task_type_ == TaskType::FRAME_POSE) {
-    // Get 6D Jacobian and extract orientation part (bottom 3 rows)
-    Matrix6Xd J = model.get_frame_jacobian(frame_name_);
     orientation_jacobian_ = J.bottomRows<3>();
+  } else {
+    // For single-type tasks, only compute what's needed
+    if (task_type_ == TaskType::FRAME_POSITION) {
+      Matrix6Xd J = model.get_frame_jacobian(frame_name_);
+      position_jacobian_ = J.topRows<3>();
+    }
+
+    if (task_type_ == TaskType::FRAME_ORIENTATION) {
+      Matrix6Xd J = model.get_frame_jacobian(frame_name_);
+      orientation_jacobian_ = J.bottomRows<3>();
+    }
   }
 
   invalidateCache();
