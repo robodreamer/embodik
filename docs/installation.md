@@ -1,38 +1,80 @@
 # Installation
 
-EmbodiK requires Python 3.8+ and several system dependencies.
+EmbodiK requires Python 3.10+ and several system dependencies.
 
+## Quick Installation
 
-## Prerequisites
+### For End Users (Pre-built Package)
 
-### System Dependencies
+If you just want to use embodiK without building from source:
 
-**Ubuntu/Debian:**
 ```bash
-sudo apt-get update
-sudo apt-get install -y \
-    build-essential \
-    cmake \
-    libeigen3-dev \
-    python3-dev \
-    python3-pip
+pip install embodik
 ```
 
-**macOS (Homebrew):**
+This installs pre-built wheels from PyPI. The `pin` package (Pinocchio Python bindings with C++ libraries) is automatically installed as a dependency - **no separate Pinocchio installation needed**. No build tools or system dependencies required.
+
+### For Developers (Building from Source)
+
+We **strongly recommend using Pixi** - it automatically manages all dependencies (CMake, Eigen, Pinocchio, nanobind, etc.) with a single command.
+
+**Step 1: Install Pixi**
+```bash
+curl -fsSL https://pixi.sh/install.sh | bash
+```
+
+**Step 2: Clone and Install**
+```bash
+git clone https://github.com/embodik/embodik.git
+cd embodik
+pixi run install
+```
+
+That's it! Pixi automatically:
+- ✅ Installs all system dependencies (CMake, Eigen, Pinocchio, nanobind, etc.)
+- ✅ Builds the C++ extension
+- ✅ Installs the Python package
+- ✅ Applies necessary patches (e.g., Qhull CMake workaround)
+
+**For development with auto-rebuild:**
+```bash
+pixi run install-rebuild
+```
+
+**Activate the environment:**
+```bash
+pixi shell
+```
+
+## Alternative: Manual Installation
+
+<details>
+<summary><strong>⚠️ Manual installation (only if Pixi is not available)</strong></summary>
+
+If you cannot use Pixi, you must manually install all system dependencies:
+
+**1. Install system dependencies:**
+
+Ubuntu/Debian:
+```bash
+sudo apt-get update
+sudo apt-get install -y build-essential cmake libeigen3-dev python3-dev python3-pip
+```
+
+macOS (Homebrew):
 ```bash
 brew install cmake eigen python3
 ```
 
-### Pinocchio
+**2. Install Pinocchio:**
 
-EmbodiK depends on the [Pinocchio](https://github.com/stack-of-tasks/pinocchio) library for robot kinematics.
-
-**Option 1: Install via robotpkg (Ubuntu/Debian)**
+Option A - via robotpkg (Ubuntu/Debian):
 ```bash
 sudo apt-get install robotpkg-pinocchio
+export CMAKE_PREFIX_PATH=/opt/openrobots:$CMAKE_PREFIX_PATH
 ```
 
-**Option 2: Build from source**
+Option B - build from source:
 ```bash
 git clone https://github.com/stack-of-tasks/pinocchio.git
 cd pinocchio
@@ -43,60 +85,16 @@ make install
 export CMAKE_PREFIX_PATH=$HOME/.local:$CMAKE_PREFIX_PATH
 ```
 
-## Python Package Installation
-
-### Option 1: Using Pixi (Recommended for Development)
-
-[Pixi](https://pixi.sh/) provides a reproducible development environment with all dependencies managed automatically.
-
-**Install Pixi:**
-```bash
-curl -fsSL https://pixi.sh/install.sh | bash
-```
-
-**Clone and install:**
+**3. Install embodiK:**
 ```bash
 git clone https://github.com/embodik/embodik.git
 cd embodik
-pixi run install
-```
-
-**For development with auto-rebuild:**
-```bash
-pixi run install-rebuild
-```
-
-All system dependencies (CMake, Eigen, Pinocchio, etc.) are automatically managed by pixi. The installation process automatically applies a workaround patch for Qhull CMake configuration (see Troubleshooting section). Activate the environment with `pixi shell`.
-
-### Option 2: From PyPI
-
-```bash
-pip install embodik
-```
-
-### Option 3: From Source (Manual)
-
-```bash
-git clone https://github.com/embodik/embodik.git
-cd embodik
+python scripts/patch_qhull_cmake.py  # Required for manual installs
 pip install -e .
 ```
 
-**Note:** This requires manual installation of system dependencies (CMake, Eigen, Pinocchio).
+</details>
 
-### Development Installation
-
-**With Pixi:**
-```bash
-pixi run install-rebuild
-```
-
-**Without Pixi:**
-```bash
-git clone https://github.com/embodik/embodik.git
-cd embodik
-pip install -e ".[dev]"
-```
 
 ## Optional Dependencies
 
@@ -147,21 +145,47 @@ print("Installation successful!")
 
 ## Troubleshooting
 
-### CMake cannot find Pinocchio
-
-If CMake cannot find Pinocchio, set the `CMAKE_PREFIX_PATH`:
-
-```bash
-export CMAKE_PREFIX_PATH=/path/to/pinocchio/install:$CMAKE_PREFIX_PATH
-```
-
 ### Import Error: C++ extension not available
 
-If you see an import warning about the C++ extension:
+If you see an error that `RobotModel` is not available:
 
-1. Ensure all system dependencies are installed
-2. Rebuild the package: `pip install --force-reinstall --no-cache-dir embodik`
+**Using Pixi (Recommended):**
+```bash
+# Rebuild and reinstall
+pixi run install
+
+# Or for development with auto-rebuild
+pixi run install-rebuild
+```
+
+**Using PyPI installation (`pip install embodik`):**
+If you installed from PyPI and see this error, it likely means:
+1. Only source distribution (sdist) was available (no pre-built wheel for your platform)
+2. The build failed because Pinocchio wasn't found
+
+Try installing Pinocchio Python package first, then rebuild:
+```bash
+pip install pin  # Installs Pinocchio with C++ libraries
+pip install --force-reinstall --no-cache-dir embodik
+```
+
+**Using manual installation from source:**
+1. Ensure all system dependencies are installed (CMake, Eigen, Pinocchio)
+2. Rebuild the package: `pip install --force-reinstall --no-cache-dir -e .`
 3. Check that CMake found Pinocchio during build
+
+### CMake cannot find Pinocchio
+
+**Using Pixi:** This should not happen - pixi manages Pinocchio automatically. If it does, try:
+```bash
+pixi run install
+```
+
+**Using manual installation:** Set the `CMAKE_PREFIX_PATH`:
+```bash
+export CMAKE_PREFIX_PATH=/path/to/pinocchio/install:$CMAKE_PREFIX_PATH
+pip install -e .
+```
 
 ### Qhull CMake Configuration Error
 

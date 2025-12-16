@@ -11,7 +11,8 @@ import numpy as np
 import logging
 
 # Get the robot_models directory
-_ROBOT_MODELS_DIR = Path(__file__).parent.parent / "robot_models"
+# Use resolve() to ensure we get absolute paths and handle symlinks correctly
+_ROBOT_MODELS_DIR = Path(__file__).resolve().parent.parent / "robot_models"
 _PRESETS_FILE = _ROBOT_MODELS_DIR / "robot_presets.yaml"
 
 logger = logging.getLogger(__name__)
@@ -115,6 +116,26 @@ def resolve_robot_configuration(robot_key: str) -> Dict[str, Any]:
         raise ImportError(
             "embodik package is required. Install it with: pip install -e ."
         )
+
+    # Check if C++ extension is available
+    if not hasattr(embodik, 'RobotModel'):
+        cpp_available = getattr(embodik, '_cpp_extension_available', False)
+        if not cpp_available:
+            raise ImportError(
+                "embodik C++ extension is not available. RobotModel cannot be used.\n\n"
+                "To build and install the package:\n"
+                "  Recommended: pixi run install\n"
+                "    (This automatically manages all dependencies including CMake, Eigen, Pinocchio, etc.)\n\n"
+                "  Alternative (manual):\n"
+                "    1. Install system dependencies (CMake, Eigen, Pinocchio)\n"
+                "    2. Run: pip install -e .\n\n"
+                "See docs/installation.md for detailed instructions."
+            )
+        else:
+            raise AttributeError(
+                "embodik.RobotModel is not available even though C++ extension is marked as available.\n"
+                "This may indicate a build or installation issue. Please rebuild the package."
+            )
 
     robot_key = robot_key.lower()
     presets = load_robot_presets()

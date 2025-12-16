@@ -18,7 +18,7 @@ ninja = ">=1.12,<2"
 eigen = ">=3.4.0,<4"
 pinocchio = ">=3.8.0,<4" # Required for built-in ViserVisualizer
 # Python build dependencies
-python = ">=3.8,<3.12"
+python = ">=3.10,<3.13"
 nanobind = ">=2.8.0,<3"
 scikit-build-core = ">=0.11.5,<0.12"
 pip = ">=25.1,<26"
@@ -26,19 +26,19 @@ qhull = ">=2020.2,<2021"
 qhull-static = ">=2020.2,<2021"
 
 [pypi-dependencies]
-numpy = ">=1.20.0"
+numpy = ">=1.26.0"
 # Visualization dependencies (needed for examples)
 viser = ">=0.1.0"
 trimesh = ">=3.0.0"
 robot_descriptions = ">=1.0.0"
-scipy = ">=1.7.0"
+scipy = ">=1.11.0"
 # YAML parsing for robot presets
 pyyaml = ">=6.0"
 # Testing and development tools (available in default environment)
-pytest = ">=6.0"
+pytest = ">=7.0"
 pytest-benchmark = ">=4.0"
-black = ">=22.0"
-isort = ">=5.0"
+black = ">=24.0"
+isort = ">=5.13.0"
 mkdocs-material = "*"
 mkdocstrings = { extras = ["python"], version = "*" }
 
