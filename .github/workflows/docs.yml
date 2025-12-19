@@ -23,8 +23,6 @@ jobs:
 
       - name: Install Pixi
         uses: prefix-dev/setup-pixi@v0
-        with:
-          pixi-version: v0.20.0
 
       - name: Build and install package
         run: |
