@@ -35,6 +35,9 @@ robot_descriptions = ">=1.0.0"
 scipy = ">=1.11.0"
 # YAML parsing for robot presets
 pyyaml = ">=6.0"
+# Publishing tools
+build = ">=1.0.0"
+twine = ">=5.0.0"
 # Testing and development tools (available in default environment)
 pytest = ">=7.0"
 pytest-benchmark = ">=4.0"
@@ -62,6 +65,18 @@ lint = "black --check python/ test/ && isort --check python/ test/"
 format = "black python/ test/ && isort python/ test/"
 docs-build = "python -W ignore::DeprecationWarning:hppfcl -m mkdocs build"
 docs-serve = "mkdocs serve"
+# Build distributions
+build-wheel = { cmd = "python -m build --wheel", depends-on = ["patch-qhull"] }
+build-sdist = { cmd = "python -m build --sdist", depends-on = ["patch-qhull"] }
+build-dist = { cmd = "python -m build", depends-on = ["patch-qhull"] }
+# Setup PyPI credentials (run once to create ~/.pypirc)
+setup-pypirc = "bash scripts/setup_pypirc.sh"
+# Upload to PyPI (requires credentials configured in ~/.pypirc)
+# Note: TestPyPI only accepts source distributions, not platform-specific wheels
+upload-testpypi = "bash scripts/upload_testpypi.sh"
+upload-pypi = "bash scripts/upload_pypi.sh"
+# Version management
+version = "python scripts/version.py"
 
 [feature.dev.dependencies]
 # Additional dev-only dependencies
