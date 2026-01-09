@@ -29,6 +29,7 @@ keywords = ["robotics", "inverse-kinematics", "optimization", "motion-planning"]
 
 [project.scripts]
 embodik-sanitize-env = "embodik.cli:sanitize_env"
+embodik-examples = "embodik.cli:examples_cmd"
 
 [project.optional-dependencies]
 visualization = [
