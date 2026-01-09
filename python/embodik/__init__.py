@@ -1,7 +1,16 @@
 """embodiK: High-performance inverse kinematics with Pinocchio and Viser visualization."""
 
-# Version information
-__version__ = "0.1.0"
+# Version information (prefer installed package metadata)
+try:
+    from importlib.metadata import PackageNotFoundError, version
+
+    __version__ = version("embodik")
+except Exception:
+    __version__ = "0.0.0"
+
+# NOTE: We intentionally do NOT auto-import Pinocchio at import-time.
+# In environments where LD_LIBRARY_PATH points to another Pinocchio install (e.g. a local build),
+# forcing mixed shared-library stacks into the same process can cause hard crashes (double-free).
 
 # Try to import the C++ extension (only once)
 _cpp_extension_available = False

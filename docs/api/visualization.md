@@ -52,7 +52,7 @@ pip install embodik[visualization]
 ```
 
 This installs:
-- `pin>=3.8.0` - Pinocchio (includes native Viser visualization support)
+- `pin>=3.8.0` - Pinocchio (PyPI package name is `pin`; import is `pinocchio`)
 - `viser>=0.1.0` - 3D visualization library
 - `trimesh>=3.0.0` - Mesh loading for visualization
 
