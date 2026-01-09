@@ -1,28 +1,52 @@
 # Installation
 
-EmbodiK requires Python 3.10+ and is distributed via PyPI.
+EmbodiK requires Python 3.10+ and is distributed via PyPI as a source distribution (sdist).
 
-## Quick Installation (Recommended)
+## Option A: Fresh Environment (No existing Pinocchio)
 
-Since embodik is distributed as a source distribution (sdist), it builds from source during installation.
-This requires setting up the build environment correctly.
+If you're starting fresh without any local Pinocchio or Boost installations:
 
 ```bash
-# Create a clean virtual environment
+# Create virtual environment
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -U pip
 
-# Clear any local Pinocchio paths to avoid conflicts
-unset LD_LIBRARY_PATH CMAKE_PREFIX_PATH pinocchio_DIR
-
-# Install Pinocchio and build dependencies
+# Install build dependencies and Pinocchio
 pip install pin scikit-build-core nanobind cmake ninja
 
 # Set CMAKE_PREFIX_PATH so the build can find Pinocchio
 export CMAKE_PREFIX_PATH=$(python -c "import pinocchio, pathlib; print(pathlib.Path(pinocchio.__file__).resolve().parents[4])")
 
-# Install embodik (builds from source)
+# Install embodik
+pip install --no-build-isolation embodik
+
+# Verify
+python -c "import embodik; import pinocchio as pin; print(embodik.__version__)"
+```
+
+## Option B: Robotics Environment (Existing Pinocchio/ROS/Boost)
+
+If you have Pinocchio, Boost, or ROS installed locally (e.g., from source builds, conda, or system packages),
+you **must** clear environment variables that point to those installations. Otherwise, embodik may link
+against mismatched library versions and fail at runtime with errors like `libboost_*.so.X.Y.Z not found`.
+
+```bash
+# Create virtual environment
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -U pip
+
+# CRITICAL: Clear local Pinocchio/Boost paths
+unset LD_LIBRARY_PATH CMAKE_PREFIX_PATH pinocchio_DIR
+
+# Install build dependencies and Pinocchio from PyPI
+pip install pin scikit-build-core nanobind cmake ninja
+
+# Set CMAKE_PREFIX_PATH to the PyPI pin package
+export CMAKE_PREFIX_PATH=$(python -c "import pinocchio, pathlib; print(pathlib.Path(pinocchio.__file__).resolve().parents[4])")
+
+# Install embodik
 pip install --no-build-isolation embodik
 
 # Verify
