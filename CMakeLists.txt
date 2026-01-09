@@ -1,5 +1,8 @@
 cmake_minimum_required(VERSION 3.16)
-project(embodik VERSION 0.1.0)
+project(embodik VERSION 0.1.21)
+
+# Python is used to auto-discover Pinocchio (PyPI `pin`) CMake config during sdist builds.
+find_package(Python REQUIRED COMPONENTS Interpreter)
 
 # C++ standard
 set(CMAKE_CXX_STANDARD 17)
@@ -12,6 +15,38 @@ option(BUILD_EXAMPLES "Build examples" ON)
 
 # Find dependencies
 find_package(Eigen3 3.3 REQUIRED NO_MODULE)
+
+# If the user doesn't have a system Pinocchio install, try to locate the CMake config
+# shipped with the PyPI `pin` wheel (import name: `pinocchio`).
+#
+# This helps `pip install` from sdist (when a wheel isn't available) in a plain venv.
+if(NOT DEFINED pinocchio_DIR AND NOT DEFINED ENV{pinocchio_DIR})
+    execute_process(
+        COMMAND "${Python_EXECUTABLE}" -c
+            "import pathlib, sys\n"
+            "try:\n"
+            "  import pinocchio\n"
+            "except Exception:\n"
+            "  sys.exit(1)\n"
+            "p = pathlib.Path(pinocchio.__file__).resolve()\n"
+            "# .../cmeel.prefix/lib/pythonX/site-packages/pinocchio/__init__.py\n"
+            "prefix = p.parents[4]\n"
+            "print(str(prefix))\n"
+        RESULT_VARIABLE _pin_prefix_rc
+        OUTPUT_VARIABLE _pin_prefix
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+    if(_pin_prefix_rc EQUAL 0 AND _pin_prefix)
+        message(STATUS "Detected PyPI `pin` prefix: ${_pin_prefix}")
+        # Prefer the `pin` wheel's CMake packages over any local Pinocchio installs.
+        list(PREPEND CMAKE_PREFIX_PATH "${_pin_prefix}")
+        # Force pinocchio_DIR to the wheel-provided config to avoid accidentally
+        # picking up a locally-built Pinocchio (which can bake in incompatible Boost SONAMEs).
+        set(pinocchio_DIR "${_pin_prefix}/lib/cmake/pinocchio" CACHE PATH "Pinocchio CMake package directory" FORCE)
+        message(STATUS "Forcing pinocchio_DIR=${pinocchio_DIR}")
+    endif()
+endif()
+
 find_package(pinocchio REQUIRED)
 
 # Add compile options
@@ -87,3 +122,14 @@ install(EXPORT embodik_targets
 # Note: scikit-build-core handles Python package installation via wheel.packages
 # The extension module is installed by python_bindings/CMakeLists.txt
 # Python source files are included via wheel.packages in pyproject.toml
+
+# Install examples directory for pip-installed users
+install(DIRECTORY examples/
+    DESTINATION share/embodik/examples
+    FILES_MATCHING
+        PATTERN "*.py"
+        PATTERN "*.yaml"
+        PATTERN "*.md"
+    PATTERN "__pycache__" EXCLUDE
+    PATTERN "*.pyc" EXCLUDE
+)

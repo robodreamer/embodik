@@ -153,22 +153,53 @@ def sanitize_env(argv: Optional[List[str]] = None) -> int:
 
 def _find_examples_dir() -> Optional[Path]:
     """Find the examples directory in the installed package."""
-    # Try to find examples relative to the package
+    # Examples are installed via CMake to share/embodik/examples
+    # With scikit-build-core, this is relative to the package directory
     try:
         import embodik
-        package_dir = Path(embodik.__file__).parent.parent.parent
-        examples_dir = package_dir / "examples"
-        if examples_dir.exists() and examples_dir.is_dir():
-            return examples_dir
+
+        # Get the package directory
+        embodik_pkg_dir = Path(embodik.__file__).parent
+
+        # Check multiple possible locations (in order of likelihood)
+        candidates = [
+            # CMake install location: share/embodik/examples relative to package dir
+            embodik_pkg_dir / "share" / "embodik" / "examples",
+            # At site-packages root (if installed via MANIFEST.in)
+            embodik_pkg_dir.parent / "examples",
+            # Relative to package parent (for editable installs from source)
+            embodik_pkg_dir.parent.parent / "examples",
+            # System share location (traditional CMake install)
+            embodik_pkg_dir.parent.parent.parent / "share" / "embodik" / "examples",
+        ]
+
+        for candidate in candidates:
+            if candidate.exists() and candidate.is_dir():
+                # Verify it has example files
+                if any(candidate.glob("*.py")):
+                    return candidate
     except Exception:
         pass
 
-    # Fallback: check common installation locations
+    # Fallback: check all sys.path entries
     for site_packages in sys.path:
         try:
-            candidate = Path(site_packages) / "embodik" / "examples"
-            if candidate.exists() and candidate.is_dir():
-                return candidate
+            site_path = Path(site_packages)
+            if not site_path.exists():
+                continue
+
+            # Check various locations
+            candidates = [
+                site_path / "embodik" / "share" / "embodik" / "examples",
+                site_path / "embodik" / "examples",
+                site_path / "examples",
+                site_path.parent.parent / "share" / "embodik" / "examples",
+            ]
+
+            for candidate in candidates:
+                if candidate.exists() and candidate.is_dir():
+                    if any(candidate.glob("*.py")):
+                        return candidate
         except Exception:
             continue
 
@@ -188,9 +219,15 @@ def examples_cmd(argv: Optional[List[str]] = None) -> int:
     )
     parser.add_argument(
         "--copy",
+        nargs="?",
+        const="embodik_examples",
         metavar="DEST",
         type=str,
-        help="Copy examples to the specified directory (default: ./embodik_examples)",
+        help=(
+            "Copy examples to DEST. "
+            "If DEST is omitted, copies to ./embodik_examples. "
+            "Example: `embodik-examples --copy` or `embodik-examples --copy ./examples`."
+        ),
     )
     parser.add_argument(
         "--list",
@@ -222,6 +259,41 @@ def examples_cmd(argv: Optional[List[str]] = None) -> int:
         dest = Path.cwd() / "embodik_examples"
 
     try:
+        # Ensure examples_dir is resolved to absolute path and verify it exists
+        # Use the original path if resolve() fails or if the resolved path doesn't exist
+        try:
+            examples_dir_resolved = examples_dir.resolve()
+        except (OSError, RuntimeError):
+            # If resolve() fails, try using the original path
+            examples_dir_resolved = examples_dir
+
+        # Check if the resolved path exists, if not try the original
+        if not examples_dir_resolved.exists():
+            if examples_dir.exists():
+                examples_dir_resolved = examples_dir
+            else:
+                print(f"ERROR: Examples directory does not exist: {examples_dir_resolved}", file=sys.stderr)
+                print(f"Original path: {examples_dir}", file=sys.stderr)
+                print(f"Original exists: {examples_dir.exists()}", file=sys.stderr)
+                # Try to find it again
+                alt_dir = _find_examples_dir()
+                if alt_dir:
+                    if alt_dir.exists():
+                        examples_dir_resolved = alt_dir
+                    else:
+                        alt_dir_resolved = alt_dir.resolve() if alt_dir.exists() else alt_dir
+                        if alt_dir_resolved.exists():
+                            examples_dir_resolved = alt_dir_resolved
+                        else:
+                            return 1
+                else:
+                    return 1
+
+        # Verify it's actually a directory
+        if not examples_dir_resolved.is_dir():
+            print(f"ERROR: Examples path exists but is not a directory: {examples_dir_resolved}", file=sys.stderr)
+            return 1
+
         if dest.exists():
             if not dest.is_dir():
                 print(f"ERROR: {dest} exists but is not a directory", file=sys.stderr)
@@ -232,11 +304,26 @@ def examples_cmd(argv: Optional[List[str]] = None) -> int:
                 return 0
             shutil.rmtree(dest)
 
-        shutil.copytree(examples_dir, dest)
+        # Convert Path objects to strings for shutil.copytree
+        src_str = str(examples_dir_resolved)
+        dst_str = str(dest)
+
+        # Final verification before copying
+        if not Path(src_str).exists():
+            print(f"ERROR: Source directory does not exist: {src_str}", file=sys.stderr)
+            return 1
+
+        shutil.copytree(src_str, dst_str)
         print(f"✓ Copied examples to {dest}")
         print(f"\nTo run an example:")
         print(f"  cd {dest}")
-        print(f"  python 01_basic_ik_simple.py")
+        # Use the exact Python executable that ran this command to avoid accidentally
+        # using system Python (common source of "C++ extension is not available").
+        print(f"  {shlex.quote(sys.executable)} 01_basic_ik_simple.py")
+        # If the user is in a Pixi project, also show the pixi-friendly form.
+        if os.environ.get("PIXI_PROJECT_ROOT") or os.environ.get("PIXI_ENVIRONMENT_NAME"):
+            print(f"  # or")
+            print(f"  pixi run python 01_basic_ik_simple.py")
         return 0
 
     except Exception as e:
@@ -246,7 +333,7 @@ def examples_cmd(argv: Optional[List[str]] = None) -> int:
     # Default: just show location
     print(f"Examples directory: {examples_dir}")
     print("\nTo run an example:")
-    print(f"  python {examples_dir}/01_basic_ik_simple.py")
+    print(f"  {shlex.quote(sys.executable)} {examples_dir}/01_basic_ik_simple.py")
     print("\nTo copy examples to a local directory:")
     print("  embodik-examples --copy")
     return 0

@@ -24,65 +24,48 @@ EmbodiK is a high-performance inverse kinematics (IK) library for cross-embodime
 
 ## Installation
 
-### Quick Start
-
-**For end users (installing from PyPI):**
-```bash
-pip install embodik
-```
-
-**Recommended for robotics environments (most reliable): Pixi + pip**
-
-If you already have robotics libraries installed (or you ever set `LD_LIBRARY_PATH` for another Pinocchio build),
-using a Pixi environment for the native stack is the most reliable way to avoid shared-library conflicts:
+### Quick Start (Recommended)
 
 ```bash
-# Install Pixi (one-time)
-curl -fsSL https://pixi.sh/install.sh | bash
+# Create a clean virtual environment
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -U pip
 
-# Create a new environment for usage
-mkdir embodik_env && cd embodik_env
-pixi init
-# conda/pixi package name is `pinocchio` (PyPI package name is `pin`)
-pixi add -c conda-forge python "pinocchio>=3.8,<4" numpy pip
+# Important: Clear any local Pinocchio paths to avoid conflicts
+unset LD_LIBRARY_PATH
 
-# Install embodik via pip but DON'T let pip install PyPI `pin` on top of conda `pinocchio`
-pixi run pip install --no-deps embodik
+# Install embodik with example dependencies
+pip install "embodik[examples]"
 
-# Verify
-pixi run python -c "import embodik; import pinocchio as pin; print(embodik.__version__)"
+# Verify installation
+python -c "import embodik; print(embodik.__version__)"
 ```
 
-**For developers (recommended):**
+### Running Examples
+
 ```bash
-# Install Pixi (one-time setup)
-curl -fsSL https://pixi.sh/install.sh | bash
+# Copy examples to a local directory
+embodik-examples --copy
 
-# Clone and install
-git clone https://github.com/embodik/embodik.git
-cd embodik
-pixi run install
+# Run an example
+cd embodik_examples
+python 01_basic_ik_simple.py --robot panda
 ```
 
-> **💡 When to use which?**
-> - **Pixi**: Development, automatic dependency management, reproducible builds
-> - **pip**: End users, standard Python installation; may require environment hygiene if you have other native stacks installed
+### Troubleshooting
 
-> **Tip:** If `import pinocchio` fails due to a shared library / Boost error, try:
-> `eval "$(embodik-sanitize-env --shell)"` (or `unset LD_LIBRARY_PATH`) before importing.
+If you see `ImportError: libboost_*.so...` errors, your shell has `LD_LIBRARY_PATH` pointing to a local Pinocchio build. Fix with:
 
-### Prerequisites
+```bash
+unset LD_LIBRARY_PATH
+```
 
-**With Pixi:** All dependencies managed automatically ✅
+### For Developers
 
-**Without Pixi (manual setup):**
-- C++17 compatible compiler
-- CMake 3.16+
-- Python 3.10+
-- Eigen3 development headers (`libeigen3-dev` on Ubuntu)
-- Pinocchio library
+See [docs/installation.md](docs/installation.md) for development setup with Pixi.
 
-See [Installation Documentation](docs/installation.md) for detailed instructions.
+See [PUBLISHING.md](PUBLISHING.md) for wheel building and PyPI publishing.
 
 ## Quick Start
 

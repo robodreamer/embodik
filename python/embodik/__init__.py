@@ -14,6 +14,7 @@ except Exception:
 
 # Try to import the C++ extension (only once)
 _cpp_extension_available = False
+_cpp_extension_error: str | None = None
 try:
     import sys
     module_key = f'{__name__}._embodik_impl'
@@ -31,6 +32,7 @@ try:
 
 except ImportError as e:
     import warnings
+    _cpp_extension_error = str(e)
     warnings.warn(f"C++ extension not available: {e}. Please build and install the package properly.", ImportWarning)
 
 # Export utility functions

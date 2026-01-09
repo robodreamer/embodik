@@ -1,57 +1,66 @@
 # Installation
 
-EmbodiK requires Python 3.10+ and several system dependencies.
+EmbodiK requires Python 3.10+ and is distributed via PyPI.
 
-## Quick Installation
-
-### For End Users (Pre-built Package)
-
-If you just want to use embodiK without building from source:
+## Quick Installation (Recommended)
 
 ```bash
+# Create a clean virtual environment
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -U pip
+
+# Important: Clear any local Pinocchio paths to avoid shared-library conflicts
+unset LD_LIBRARY_PATH
+
+# Install embodik (includes Pinocchio via the `pin` PyPI package)
 pip install embodik
+
+# Verify
+python -c "import embodik; import pinocchio as pin; print(embodik.__version__)"
 ```
 
-This installs wheels from PyPI. The `pin` package (Pinocchio Python bindings with C++ libraries) is installed as a dependency — **no separate Pinocchio installation needed**.
+**Note on package names:** The PyPI package is `pin`, but the Python import is `import pinocchio`.
 
-**Note on names:** the PyPI package is `pin`, but the import is `import pinocchio`.
-
-#### Recommended for robotics stacks: Pixi (runtime) + pip (embodik)
-
-If you are in a robotics environment (e.g. you already built Pinocchio from source, or you export `LD_LIBRARY_PATH`),
-**pip-only installs can break due to shared-library conflicts**. The most reliable pattern is:
-
-- Use **Pixi/conda-forge** for the native stack (Pinocchio + C++ deps)
-- Use **pip** for `embodik`
-
-Example:
+### With Example Dependencies
 
 ```bash
-curl -fsSL https://pixi.sh/install.sh | bash
-mkdir embodik_env && cd embodik_env
-pixi init
-# conda/pixi package name is `pinocchio` (PyPI package name is `pin`)
-pixi add -c conda-forge python "pinocchio>=3.8,<4" numpy pip
+pip install "embodik[examples]"
 
-# Install embodik via pip but DON'T let pip install PyPI `pin` on top of conda `pinocchio`
-pixi run pip install --no-deps embodik
-pixi run python -c "import embodik; import pinocchio as pin; print(embodik.__version__)"
+# Copy and run examples
+embodik-examples --copy
+cd embodik_examples
+python 01_basic_ik_simple.py --robot panda
 ```
 
-#### Troubleshooting pip-only installs
+## Troubleshooting
 
-If `import pinocchio` fails with missing Boost / shared libraries and you have `LD_LIBRARY_PATH` set (common in robotics),
-sanitize your shell environment:
+### `ImportError: libboost_*.so...`
+
+This error means `LD_LIBRARY_PATH` points to a locally-built Pinocchio/Boost that conflicts with the `pin` wheel. Fix:
 
 ```bash
-eval "$(embodik-sanitize-env --shell)"
-# or:
 unset LD_LIBRARY_PATH
 ```
 
+### Source Build Fails to Find Pinocchio
+
+If pip falls back to building from source (sdist) and CMake can't find Pinocchio:
+
+```bash
+# Clear any cached CMake paths
+unset LD_LIBRARY_PATH CMAKE_PREFIX_PATH pinocchio_DIR
+
+# Install pin first, then embodik
+pip install pin
+pip install --no-cache-dir embodik
+```
+
+The build system auto-detects the `pin` wheel's CMake config when these variables are clear
+
 ### For Developers (Building from Source)
 
-We **strongly recommend using Pixi** - it automatically manages all dependencies (CMake, Eigen, Pinocchio, nanobind, etc.) with a single command.
+We recommend Pixi for development/reproducible builds, but it is optional. If you prefer venv-only development, see the manual section below.
 
 **Step 1: Install Pixi**
 ```bash
@@ -163,7 +172,9 @@ pip install embodik[examples]
 
 This includes:
 - `robot_descriptions` - Robot model descriptions
-- `scipy` - Scientific computing utilities
+- `pyyaml` - YAML parsing for robot preset configs
+- `viser` - visualization server used by interactive examples
+- `yourdfpy` - URDF loader used by some examples (via `robot_descriptions.loaders.yourdfpy`)
 
 ## Verify Installation
 

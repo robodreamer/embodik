@@ -1,10 +1,12 @@
 #!/bin/bash
 # Wrapper script for uploading to TestPyPI with credentials from ~/.pypirc
-# Note: TestPyPI only accepts source distributions (sdist), not platform-specific wheels
+# NOTE:
+# TestPyPI (and PyPI) reject Linux wheels with the generic platform tag `linux_x86_64`.
+# You must upload `manylinux_*` (or `musllinux_*`) wheels, typically produced via
+# cibuildwheel + auditwheel. For TestPyPI, we upload the sdist by default.
 
 set -e
 
-# TestPyPI doesn't accept platform-specific wheels, so upload only source distribution
 if [ -f "$HOME/.pypirc" ]; then
     echo "Uploading source distribution to TestPyPI..."
     twine upload --repository testpypi --config-file "$HOME/.pypirc" --verbose dist/*.tar.gz 2>&1 || {

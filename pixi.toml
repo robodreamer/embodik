@@ -1,6 +1,6 @@
 [project]
 name = "embodik"
-version = "0.1.0"
+version = "0.1.21"
 description = "High-performance inverse kinematics solver optimized for cross-embodiment VLA/AI applications"
 authors = ["Andy Park <andypark.purdue@gmail.com>"]
 channels = ["conda-forge"]
@@ -72,7 +72,6 @@ build-dist = { cmd = "python -m build", depends-on = ["patch-qhull"] }
 # Setup PyPI credentials (run once to create ~/.pypirc)
 setup-pypirc = "bash scripts/setup_pypirc.sh"
 # Upload to PyPI (requires credentials configured in ~/.pypirc)
-# Note: TestPyPI only accepts source distributions, not platform-specific wheels
 upload-testpypi = "bash scripts/upload_testpypi.sh"
 upload-pypi = "bash scripts/upload_pypi.sh"
 # Version management

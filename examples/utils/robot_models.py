@@ -6,7 +6,6 @@ robot_presets.yaml, which can be shared across multiple examples.
 
 from pathlib import Path
 from typing import Dict, Any
-import yaml
 import numpy as np
 import logging
 import os
@@ -18,9 +17,40 @@ _PRESETS_FILE = _ROBOT_MODELS_DIR / "robot_presets.yaml"
 
 logger = logging.getLogger(__name__)
 
+# Built-in presets so pip-installed examples work even if `robot_models/robot_presets.yaml`
+# is not present (or you don't want to ship model assets). These use `robot_descriptions`,
+# which downloads/caches models on demand.
+#
+# Users can still override/extend these by providing `robot_models/robot_presets.yaml`.
+_BUILTIN_PRESETS: Dict[str, Dict[str, Any]] = {
+    "panda": {
+        "description_name": "panda_description",
+        "urdf_import": "robot_descriptions.panda_description",
+        "urdf_attr": "URDF_PATH",
+        "target_link": "panda_hand",
+        "display_name": "Franka Emika Panda",
+        "default_configuration": np.array([0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785]),
+        "extra_gripper_default": np.array([0.05, 0.05]),
+        "default_offset": np.array([0.05, 0.0, 0.0]),
+        "collision_exclusions": "auto",
+        "collision_exclusion_overrides": [],
+    },
+    "iiwa": {
+        "description_name": "iiwa14_description",
+        "urdf_import": "robot_descriptions.iiwa14_description",
+        "urdf_attr": "URDF_PATH",
+        "target_link": "iiwa_link_7",
+        "display_name": "KUKA LBR iiwa14",
+        "default_configuration": np.array([0.0, 0.7854, 0.0, -1.5708, 0.0, 0.7854, 0.0]),
+        "default_offset": np.array([0.05, 0.0, 0.0]),
+        "collision_exclusions": "auto",
+        "collision_exclusion_overrides": [],
+    },
+}
+
 
 def load_robot_presets() -> Dict[str, Dict[str, Any]]:
-    """Load robot presets from robot_presets.yaml.
+    """Load robot presets.
 
     Returns:
         Dictionary mapping robot keys to their configuration dictionaries.
@@ -35,21 +65,31 @@ def load_robot_presets() -> Dict[str, Dict[str, Any]]:
     Note: Joint labels are automatically extracted from the URDF model, so they don't
     need to be specified in the YAML file.
 
-    Raises:
-        FileNotFoundError: If robot_presets.yaml is not found
-        yaml.YAMLError: If the YAML file is invalid
+    Behavior:
+        - If `examples/robot_models/robot_presets.yaml` exists, it is loaded and used
+          to override/extend the built-in presets.
+        - If it does not exist, built-in presets are returned (robot_descriptions-based).
     """
-    if not _PRESETS_FILE.exists():
-        raise FileNotFoundError(
-            f"Robot presets file not found: {_PRESETS_FILE}\n"
-            f"Expected at: {_PRESETS_FILE.relative_to(_ROBOT_MODELS_DIR.parent.parent)}"
-        )
+    presets: Dict[str, Dict[str, Any]] = {k: dict(v) for k, v in _BUILTIN_PRESETS.items()}
 
-    with open(_PRESETS_FILE, 'r') as f:
-        presets = yaml.safe_load(f)
+    if _PRESETS_FILE.exists():
+        try:
+            import yaml  # optional dependency; only needed when using YAML presets
+        except ModuleNotFoundError as e:
+            raise ModuleNotFoundError(
+                "Missing dependency: PyYAML.\n"
+                "You have `robot_models/robot_presets.yaml`, so YAML parsing is required.\n"
+                "Install it via one of:\n"
+                "  - pip install pyyaml\n"
+                "  - pip install 'embodik[examples]'\n"
+            ) from e
 
-    if presets is None:
-        return {}
+        with open(_PRESETS_FILE, "r") as f:
+            loaded = yaml.safe_load(f)
+
+        if loaded:
+            # YAML overrides/extends built-ins
+            presets.update(loaded)
 
     # Convert numeric lists to numpy arrays
     for robot_key, config in presets.items():
@@ -174,14 +214,22 @@ def resolve_robot_configuration(robot_key: str) -> Dict[str, Any]:
     if not hasattr(embodik, 'RobotModel'):
         cpp_available = getattr(embodik, '_cpp_extension_available', False)
         if not cpp_available:
+            import sys
+            cpp_err = getattr(embodik, "_cpp_extension_error", None)
             raise ImportError(
                 "embodik C++ extension is not available. RobotModel cannot be used.\n\n"
-                "To build and install the package:\n"
-                "  Recommended: pixi run install\n"
-                "    (This automatically manages all dependencies including CMake, Eigen, Pinocchio, etc.)\n\n"
-                "  Alternative (manual):\n"
-                "    1. Install system dependencies (CMake, Eigen, Pinocchio)\n"
-                "    2. Run: pip install -e .\n\n"
+                f"Debug info:\n"
+                f"  - sys.executable: {sys.executable}\n"
+                f"  - embodik.__file__: {getattr(embodik, '__file__', '(unknown)')}\n"
+                f"  - C++ import error: {cpp_err or '(unknown)'}\n\n"
+                "How to fix:\n"
+                "  - If you installed from PyPI, you may be on a platform without a prebuilt wheel.\n"
+                "    Try upgrading pip and reinstalling:\n"
+                "      pip install -U pip\n"
+                "      pip install --force-reinstall --no-cache-dir embodik\n\n"
+                "  - If you are building from source:\n"
+                "      pip install -e .\n"
+                "    (You will need system deps like CMake/Eigen and a working Pinocchio install.)\n\n"
                 "See docs/installation.md for detailed instructions."
             )
         else:

@@ -47,11 +47,13 @@ class RobotVisualizer:
         open_browser: bool = True,
         host: str = "localhost",
         package_root: Optional[str] = None,
+        load_collisions: bool = False,
     ):
         self.robot_model = robot_model
         self.backend = backend
         self.port = port
         self.host = host
+        self.load_collisions = load_collisions
 
         # Initialize backend-specific components
         self._pinocchio_visualizer = None
@@ -76,6 +78,7 @@ class RobotVisualizer:
             open_browser=open_browser,
             host=self.host,
             package_root=package_root,
+            load_collisions=self.load_collisions,
         )
 
         logger.info("Initialized Pinocchio ViserVisualizer backend")
@@ -90,6 +93,20 @@ class RobotVisualizer:
             raise ImportError(
                 f"ViserUrdf backend requires 'viser' and 'robot_descriptions' packages. "
                 f"Install with: pip install viser robot_descriptions"
+            ) from e
+
+        # Some robot_descriptions assets require liblzfse (PyPI-only) for decompression.
+        # In Pixi envs there may not be a conda-forge package, so users must install via pip.
+        try:
+            import liblzfse  # noqa: F401
+        except Exception as e:
+            raise ImportError(
+                "ViserUrdf backend requires `liblzfse` for some robot assets.\n"
+                "Install it via:\n"
+                "  - pip install liblzfse\n"
+                "  - (Pixi) pixi run pip install liblzfse\n"
+                "Or install with examples dependencies:\n"
+                "  pip install 'embodik[examples]'\n"
             ) from e
 
         # Get description name if not provided
@@ -256,6 +273,7 @@ def create_robot_visualizer(
     open_browser: bool = True,
     host: str = "localhost",
     package_root: Optional[str] = None,
+    load_collisions: bool = False,
 ) -> RobotVisualizer:
     """Create a robot visualizer with the specified backend.
 
@@ -281,5 +299,6 @@ def create_robot_visualizer(
         open_browser=open_browser,
         host=host,
         package_root=package_root,
+        load_collisions=load_collisions,
     )
 

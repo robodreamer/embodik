@@ -1,10 +1,12 @@
 [build-system]
-requires = ["scikit-build-core", "nanobind", "numpy>=1.26.0"]
+# Build isolation only installs build-system requirements. We include `pin` here so that
+# source builds (sdists) can still locate Pinocchio's CMake package config via the PyPI wheel.
+requires = ["scikit-build-core", "nanobind", "numpy>=1.26.0", "pin>=3.8.0"]
 build-backend = "scikit_build_core.build"
 
 [project]
 name = "embodik"
-version = "0.1.9"
+version = "0.1.21"
 description = "High-performance inverse kinematics solver optimized for cross-embodiment VLA/AI applications"
 authors = [{ name = "Andy Park", email = "andypark.purdue@gmail.com" }]
 readme = "README.md"
@@ -41,7 +43,13 @@ visualization-legacy = [
     "yourdfpy>=0.0.52", # Only needed for legacy custom visualization
     # Note: spatialmath-python removed - now using Pinocchio's native transforms
 ]
-examples = ["robot_descriptions>=1.0.0", "scipy>=1.11.0"]
+# Example scripts copied via `embodik-examples` import these directly.
+examples = [
+    "pyyaml>=6.0",
+    "robot_descriptions>=1.0.0",
+    "viser>=0.1.0",
+    "yourdfpy>=0.0.52",
+]
 dev = ["pytest>=7.0", "pytest-cov>=4.0", "black>=24.0", "isort>=5.13.0"]
 
 [project.urls]
