@@ -185,6 +185,21 @@ The repository includes several example scripts:
 
 ### Running Examples
 
+**For pip-installed users:**
+```bash
+# Install with example dependencies
+pip install embodik[examples]
+
+# Copy examples to a local directory
+embodik-examples --copy
+
+# Run examples
+cd embodik_examples
+python 01_basic_ik_simple.py --robot panda
+python 02_collision_aware_IK.py --robot panda
+```
+
+**For developers (from repository):**
 ```bash
 # Install example dependencies
 pixi run install
