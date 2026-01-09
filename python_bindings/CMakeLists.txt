@@ -41,9 +41,9 @@ add_custom_command(TARGET _embodik_impl POST_BUILD
 
 # Set RPATH so Python can find libembodik_core.so
 # For editable installs (inplace mode), library is in same directory as extension
-# For regular installs, library is in ../lib relative to extension
+# For regular installs, library is in ./lib relative to extension (installed under the package dir)
 set_target_properties(_embodik_impl PROPERTIES
-    INSTALL_RPATH "$ORIGIN:$ORIGIN/../lib"
+    INSTALL_RPATH "$ORIGIN:$ORIGIN/lib"
     BUILD_RPATH "$ORIGIN:$<TARGET_FILE_DIR:embodik_core>"
 )
 
@@ -109,14 +109,4 @@ add_custom_command(
     COMMENT "Copying type stubs to source package directory (if generated)"
     VERBATIM
 )
-
-# Copy stubs into the source package dir for IDEs/type checkers (commented out to avoid build issues)
-# add_custom_command(TARGET _embodik_impl POST_BUILD
-#     COMMAND ${CMAKE_COMMAND} -E copy_if_different
-#         ${CMAKE_BINARY_DIR}/__init__.pyi
-#         ${CMAKE_SOURCE_DIR}/embodik_py/__init__.pyi
-#     COMMAND ${CMAKE_COMMAND} -E copy_if_different
-#         ${CMAKE_BINARY_DIR}/py.typed
-#         ${CMAKE_SOURCE_DIR}/embodik_py/py.typed)
-
 

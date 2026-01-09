@@ -27,45 +27,39 @@ The EmbodiK repository includes several example scripts:
 
 ## Running Examples
 
-### For pip-installed users
+### For pip-installed users (recommended)
 
-Examples are included in the pip package. To access them:
-
-**Option 1: Use the `embodik-examples` command (recommended)**
 ```bash
-# Install with example dependencies
-pip install embodik[examples]
+# Create venv and install
+python3 -m venv .venv
+source .venv/bin/activate
+unset LD_LIBRARY_PATH  # Important: avoid shared-library conflicts
 
-# List available examples
-embodik-examples --list
+pip install "embodik[examples]"
 
-# Copy examples to a local directory for editing
+# Copy examples to local directory
 embodik-examples --copy
 
-# Then run examples from the copied directory
+# Run an example
 cd embodik_examples
 python 01_basic_ik_simple.py --robot panda
 ```
 
-**Option 2: Find examples in the package**
-```bash
-# Find where examples are installed
-python -c "import embodik; from pathlib import Path; print(Path(embodik.__file__).parent.parent / 'examples')"
-
-# Run directly (path will vary by installation)
-python /path/to/site-packages/embodik/examples/01_basic_ik_simple.py
-```
+**Available CLI commands:**
+- `embodik-examples --list` - List available examples
+- `embodik-examples --copy` - Copy examples to `./embodik_examples`
+- `embodik-examples --copy /path/to/dir` - Copy to custom directory
 
 ### For developers (from repository)
 
-Examples can be run from the repository root:
-
 ```bash
-# Install example dependencies
-pip install embodik[examples]
+# Using Pixi (recommended for development)
+pixi run install
+pixi run python examples/01_basic_ik_simple.py --robot panda
 
-# Run an example
-python examples/01_basic_ik_simple.py
+# Or manually
+pip install -e ".[examples]"
+python examples/01_basic_ik_simple.py --robot panda
 ```
 
 ## Example Helpers

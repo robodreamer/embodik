@@ -92,7 +92,9 @@ def create_visualizer_with_viser_access(
     robot_model,
     port: int = 8080,
     open_browser: bool = True,
-    host: str = "localhost"
+    host: str = "localhost",
+    *,
+    load_collisions: bool = False,
 ) -> tuple[ViserVisualizer, "ViserServer", "ViserScene", "ViserGui"]:
     """Create Pinocchio ViserVisualizer and return viser access objects.
 
@@ -120,7 +122,7 @@ def create_visualizer_with_viser_access(
 
     # Get geometry models
     visual_model = robot_model.visual_model
-    collision_model = robot_model.collision_model
+    collision_model = robot_model.collision_model if load_collisions else None
 
     # Create visualizer
     visualizer = ViserVisualizer(
@@ -128,7 +130,7 @@ def create_visualizer_with_viser_access(
         collision_model=collision_model,
         visual_model=visual_model,
         data=pin_data,
-        collision_data=robot_model.collision_data,
+        collision_data=robot_model.collision_data if load_collisions else None,
         visual_data=robot_model.visual_data
     )
 
@@ -364,7 +366,9 @@ def create_viser_visualizer(
     open_browser: bool = True,
     host: str = "localhost",
     preserve_mesh_colors: bool = True,
-    package_root: Optional[str] = None
+    package_root: Optional[str] = None,
+    *,
+    load_collisions: bool = False,
 ) -> Tuple[ViserVisualizer, "ViserServer", "ViserScene", "ViserGui"]:
     """Create Pinocchio ViserVisualizer with proper geometry loading and color preservation.
 
@@ -401,6 +405,12 @@ def create_viser_visualizer(
         pin_model, urdf_path, robot_model, package_root
     )
 
+    # If not loading collisions, create empty models instead of None
+    # (ViserVisualizer doesn't handle None well)
+    if not load_collisions:
+        collision_model = pin.GeometryModel()
+        collision_data = pin.GeometryData(collision_model)
+
     # Create visualizer
     visualizer = ViserVisualizer(
         model=pin_model,
@@ -426,18 +436,24 @@ def create_viser_visualizer(
 
     # Load model with visual_color=None to ensure mesh colors are preserved
     # The monkey-patched loadViewerGeometryObject will use add_mesh_trimesh when color=None
+    model_loaded = False
     try:
         if hasattr(visualizer, 'loadViewerModel'):
             visualizer.loadViewerModel(visual_color=None, collision_color=None)
+            model_loaded = True
             if preserve_mesh_colors:
                 logger.info("Loaded model with visual_color=None to preserve mesh colors")
     except Exception as e:
         logger.warning(f"Could not load with visual_color=None: {e}. Falling back to default loading.")
-        # Fallback: load without explicit color parameter
+
+    # Fallback: load without explicit color parameter
+    if not model_loaded:
         try:
-            visualizer.loadViewerModel()
-        except Exception:
-            pass
+            if hasattr(visualizer, 'loadViewerModel'):
+                visualizer.loadViewerModel()
+                model_loaded = True
+        except Exception as e2:
+            logger.warning(f"Fallback loadViewerModel also failed: {e2}")
 
     # Get viser access objects
     server = visualizer.viewer

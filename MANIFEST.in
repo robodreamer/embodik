@@ -10,11 +10,8 @@ recursive-include python_bindings *.cpp *.cmake CMakeLists.txt
 # Include Python package source
 recursive-include python/embodik *.py
 
-# Include examples for pip-installed users
-recursive-include examples *.py *.yaml *.md
-recursive-include examples/example_helpers *.py *.yaml
-recursive-include examples/utils *.py
-recursive-include examples/robot_models *.py *.yaml *.md
+# Include examples directory (will be installed as package data)
+graft examples
 
 # Exclude build artifacts
 global-exclude *.pyc
