@@ -30,11 +30,18 @@ The EmbodiK repository includes several example scripts:
 ### For pip-installed users (recommended)
 
 ```bash
-# Create venv and install
+# Create venv and install (see README for full installation steps)
 python3 -m venv .venv
 source .venv/bin/activate
-unset LD_LIBRARY_PATH  # Important: avoid shared-library conflicts
+pip install -U pip
 
+# Clear environment and set up build
+unset LD_LIBRARY_PATH CMAKE_PREFIX_PATH pinocchio_DIR
+pip install pin scikit-build-core nanobind cmake ninja
+export CMAKE_PREFIX_PATH=$(python -c "import pinocchio, pathlib; print(pathlib.Path(pinocchio.__file__).resolve().parents[4])")
+
+# Install embodik with examples
+pip install --no-build-isolation embodik
 pip install "embodik[examples]"
 
 # Copy examples to local directory

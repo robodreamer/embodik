@@ -4,17 +4,26 @@ EmbodiK requires Python 3.10+ and is distributed via PyPI.
 
 ## Quick Installation (Recommended)
 
+Since embodik is distributed as a source distribution (sdist), it builds from source during installation.
+This requires setting up the build environment correctly.
+
 ```bash
 # Create a clean virtual environment
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -U pip
 
-# Important: Clear any local Pinocchio paths to avoid shared-library conflicts
-unset LD_LIBRARY_PATH
+# Clear any local Pinocchio paths to avoid conflicts
+unset LD_LIBRARY_PATH CMAKE_PREFIX_PATH pinocchio_DIR
 
-# Install embodik (includes Pinocchio via the `pin` PyPI package)
-pip install embodik
+# Install Pinocchio and build dependencies
+pip install pin scikit-build-core nanobind cmake ninja
+
+# Set CMAKE_PREFIX_PATH so the build can find Pinocchio
+export CMAKE_PREFIX_PATH=$(python -c "import pinocchio, pathlib; print(pathlib.Path(pinocchio.__file__).resolve().parents[4])")
+
+# Install embodik (builds from source)
+pip install --no-build-isolation embodik
 
 # Verify
 python -c "import embodik; import pinocchio as pin; print(embodik.__version__)"
@@ -43,20 +52,22 @@ This error means `LD_LIBRARY_PATH` points to a locally-built Pinocchio/Boost tha
 unset LD_LIBRARY_PATH
 ```
 
-### Source Build Fails to Find Pinocchio
+### `CMake cannot find pinocchio`
 
-If pip falls back to building from source (sdist) and CMake can't find Pinocchio:
+CMake needs to know where the `pin` wheel installed Pinocchio. Fix:
 
 ```bash
-# Clear any cached CMake paths
-unset LD_LIBRARY_PATH CMAKE_PREFIX_PATH pinocchio_DIR
-
-# Install pin first, then embodik
-pip install pin
-pip install --no-cache-dir embodik
+export CMAKE_PREFIX_PATH=$(python -c "import pinocchio, pathlib; print(pathlib.Path(pinocchio.__file__).resolve().parents[4])")
+pip install --no-build-isolation embodik
 ```
 
-The build system auto-detects the `pin` wheel's CMake config when these variables are clear
+### `Cannot import scikit_build_core.build`
+
+With `--no-build-isolation`, build dependencies must be installed manually:
+
+```bash
+pip install scikit-build-core nanobind cmake ninja
+```
 
 ### For Developers (Building from Source)
 

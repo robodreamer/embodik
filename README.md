@@ -32,14 +32,23 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -U pip
 
-# Important: Clear any local Pinocchio paths to avoid conflicts
-unset LD_LIBRARY_PATH
+# Clear any local Pinocchio paths to avoid conflicts
+unset LD_LIBRARY_PATH CMAKE_PREFIX_PATH pinocchio_DIR
 
-# Install embodik with example dependencies
+# Install Pinocchio and build dependencies first
+pip install pin scikit-build-core nanobind cmake ninja
+
+# Set CMAKE_PREFIX_PATH so the build can find Pinocchio
+export CMAKE_PREFIX_PATH=$(python -c "import pinocchio, pathlib; print(pathlib.Path(pinocchio.__file__).resolve().parents[4])")
+
+# Install embodik (builds from source)
+pip install --no-build-isolation embodik
+
+# Install example dependencies
 pip install "embodik[examples]"
 
 # Verify installation
-python -c "import embodik; print(embodik.__version__)"
+python -c "import embodik; print(embodik.__version__, embodik.RobotModel)"
 ```
 
 ### Running Examples
@@ -55,10 +64,16 @@ python 01_basic_ik_simple.py --robot panda
 
 ### Troubleshooting
 
-If you see `ImportError: libboost_*.so...` errors, your shell has `LD_LIBRARY_PATH` pointing to a local Pinocchio build. Fix with:
+**`ImportError: libboost_*.so...`**: Your shell has `LD_LIBRARY_PATH` pointing to a local Pinocchio build:
 
 ```bash
 unset LD_LIBRARY_PATH
+```
+
+**`CMake cannot find pinocchio`**: Set the CMake prefix path:
+
+```bash
+export CMAKE_PREFIX_PATH=$(python -c "import pinocchio, pathlib; print(pathlib.Path(pinocchio.__file__).resolve().parents[4])")
 ```
 
 ### For Developers
