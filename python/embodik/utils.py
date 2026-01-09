@@ -1,10 +1,11 @@
 """Utility functions for embodiK."""
 
 from __future__ import annotations
-from typing import Optional, Tuple
+from typing import Any, Optional, Tuple
 
 import numpy as np
-import pinocchio as pin
+
+from ._runtime_deps import import_pinocchio as _import_pinocchio
 
 __all__ = [
     "PoseData",
@@ -76,13 +77,32 @@ def get_pose_error_vector(pose_current, pose_goal):
     # Compute relative rotation: R_error = R_goal * R_current^T
     R_error = R_goal @ R_current.T
     # Pinocchio's log3 handles rotation matrices directly (no need for explicit normalization)
+    pin = _import_pinocchio()
     pose_error[3:] = pin.log3(R_error)
     return pose_error
 
 
 def compute_pose_error(pose_current: PoseData | object, pose_goal: PoseData | object) -> np.ndarray:
-    """Compute 6D pose error (goal - current) using Pinocchio's :func:`log3`."""
+    """Compute 6D pose error (goal - current) using Pinocchio's :func:`log3`.
 
+    Optimized to work directly with Pinocchio SE3 objects without wrapping when possible.
+    Extracts rotation/translation once to minimize Python binding overhead.
+    """
+    pin = _import_pinocchio()
+    # Fast path for Pinocchio SE3 objects (most common case)
+    if isinstance(pose_current, pin.SE3) and isinstance(pose_goal, pin.SE3):
+        # Extract rotation and translation once to avoid repeated attribute access overhead
+        t_current = pose_current.translation
+        t_goal = pose_goal.translation
+        R_current = pose_current.rotation
+        R_goal = pose_goal.rotation
+
+        error = np.empty(6, dtype=float)
+        error[:3] = t_goal - t_current
+        error[3:] = pin.log3(R_goal @ R_current.T)
+        return error
+
+    # Fallback to PoseData.wrap for other types
     current = PoseData.wrap(pose_current)
     goal = PoseData.wrap(pose_goal)
     error = np.empty(6, dtype=float)
@@ -228,7 +248,7 @@ def r2q(rotation: np.ndarray, order: str = "sxyz") -> np.ndarray:
     """
     Convert rotation matrix to quaternion (spatialmath-python compatible).
 
-    Uses Pinocchio's Quaternion for conversion.
+    Optimized implementation using scipy for better performance than Pinocchio Quaternion.
 
     Args:
         rotation: 3x3 rotation matrix
@@ -248,15 +268,17 @@ def r2q(rotation: np.ndarray, order: str = "sxyz") -> np.ndarray:
     if rotation.shape != (3, 3):
         raise ValueError(f"Expected 3x3 rotation matrix, got shape {rotation.shape}")
 
-    # Use Pinocchio's Quaternion
-    q = pin.Quaternion(rotation)
+    # Use scipy for conversion (faster than Pinocchio Quaternion object creation)
+    from scipy.spatial.transform import Rotation as R
+    r = R.from_matrix(rotation)
+    quat_xyzw = r.as_quat()  # Returns [x, y, z, w]
 
     if order == "sxyz" or order == "wxyz":
         # Scalar first: [w, x, y, z]
-        return np.array([q.w, q.x, q.y, q.z], dtype=float)
+        return np.array([quat_xyzw[3], quat_xyzw[0], quat_xyzw[1], quat_xyzw[2]], dtype=float)
     elif order == "xyzs" or order == "xyzw":
         # Scalar last: [x, y, z, w]
-        return np.array([q.x, q.y, q.z, q.w], dtype=float)
+        return quat_xyzw.copy()
     else:
         raise ValueError(f"Unknown quaternion order: {order}. Use 'sxyz' or 'xyzs'")
 
@@ -265,7 +287,7 @@ def q2r(quaternion: np.ndarray, order: str = "sxyz") -> np.ndarray:
     """
     Convert quaternion to rotation matrix (spatialmath-python compatible).
 
-    Uses Pinocchio's Quaternion for conversion.
+    Optimized implementation using direct matrix computation to avoid Pinocchio Quaternion overhead.
 
     Args:
         quaternion: Quaternion as array
@@ -293,12 +315,23 @@ def q2r(quaternion: np.ndarray, order: str = "sxyz") -> np.ndarray:
     else:
         raise ValueError(f"Unknown quaternion order: {order}. Use 'sxyz' or 'xyzs'")
 
-    # Create Pinocchio Quaternion (w, x, y, z)
-    q = pin.Quaternion(w, x, y, z)
-    return q.matrix()  # Returns 3x3 rotation matrix
+    # Normalize quaternion
+    norm = np.sqrt(w*w + x*x + y*y + z*z)
+    if norm < 1e-12:
+        return np.eye(3, dtype=float)
+    w, x, y, z = w/norm, x/norm, y/norm, z/norm
+
+    # Direct rotation matrix computation (faster than Pinocchio Quaternion object creation)
+    # Using standard quaternion to rotation matrix formula
+    R = np.array([
+        [1 - 2*(y*y + z*z), 2*(x*y - w*z), 2*(x*z + w*y)],
+        [2*(x*y + w*z), 1 - 2*(x*x + z*z), 2*(y*z - w*x)],
+        [2*(x*z - w*y), 2*(y*z + w*x), 1 - 2*(x*x + y*y)]
+    ], dtype=float)
+    return R
 
 
-def Rt(R: Optional[np.ndarray] = None, t: Optional[np.ndarray] = None) -> pin.SE3:
+def Rt(R: Optional[np.ndarray] = None, t: Optional[np.ndarray] = None) -> Any:
     """
     Create SE3 transform from rotation matrix and translation (spatialmath-python compatible).
 
@@ -332,4 +365,5 @@ def Rt(R: Optional[np.ndarray] = None, t: Optional[np.ndarray] = None) -> pin.SE
     if t.shape != (3,):
         raise ValueError(f"Expected 3D translation vector, got shape {t.shape}")
 
+    pin = _import_pinocchio()
     return pin.SE3(R, t)

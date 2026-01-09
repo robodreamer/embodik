@@ -14,7 +14,9 @@ from pathlib import Path
 import logging
 
 try:
-    import pinocchio as pin
+    from ._runtime_deps import import_pinocchio as _import_pinocchio
+
+    pin = _import_pinocchio()
     try:
         from pinocchio.visualize import ViserVisualizer
         _PINOCCHIO_VISER_AVAILABLE = True

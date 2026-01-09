@@ -31,6 +31,28 @@ EmbodiK is a high-performance inverse kinematics (IK) library for cross-embodime
 pip install embodik
 ```
 
+**Recommended for robotics environments (most reliable): Pixi + pip**
+
+If you already have robotics libraries installed (or you ever set `LD_LIBRARY_PATH` for another Pinocchio build),
+using a Pixi environment for the native stack is the most reliable way to avoid shared-library conflicts:
+
+```bash
+# Install Pixi (one-time)
+curl -fsSL https://pixi.sh/install.sh | bash
+
+# Create a new environment for usage
+mkdir embodik_env && cd embodik_env
+pixi init
+# conda/pixi package name is `pinocchio` (PyPI package name is `pin`)
+pixi add -c conda-forge python "pinocchio>=3.8,<4" numpy pip
+
+# Install embodik via pip but DON'T let pip install PyPI `pin` on top of conda `pinocchio`
+pixi run pip install --no-deps embodik
+
+# Verify
+pixi run python -c "import embodik; import pinocchio as pin; print(embodik.__version__)"
+```
+
 **For developers (recommended):**
 ```bash
 # Install Pixi (one-time setup)
@@ -44,7 +66,10 @@ pixi run install
 
 > **💡 When to use which?**
 > - **Pixi**: Development, automatic dependency management, reproducible builds
-> - **pip**: End users, standard Python installation, requires manual system dependencies
+> - **pip**: End users, standard Python installation; may require environment hygiene if you have other native stacks installed
+
+> **Tip:** If `import pinocchio` fails due to a shared library / Boost error, try:
+> `eval "$(embodik-sanitize-env --shell)"` (or `unset LD_LIBRARY_PATH`) before importing.
 
 ### Prerequisites
 

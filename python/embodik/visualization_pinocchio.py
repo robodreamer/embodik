@@ -10,7 +10,9 @@ import warnings
 
 # Try to import Pinocchio's ViserVisualizer
 try:
-    import pinocchio as pin
+    from ._runtime_deps import import_pinocchio as _import_pinocchio
+
+    pin = _import_pinocchio()
     try:
         from pinocchio.visualize import ViserVisualizer, BaseVisualizer
         _PINOCCHIO_VISER_AVAILABLE = True

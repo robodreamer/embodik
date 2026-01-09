@@ -15,7 +15,9 @@ import yourdfpy
 
 # For transforms and quaternions - use system pinocchio if available
 try:
-    import pinocchio as pin
+    from ._runtime_deps import import_pinocchio as _import_pinocchio
+
+    pin = _import_pinocchio()
 except ImportError:
     # If pinocchio not available, we can use numpy/scipy for transforms
     pin = None

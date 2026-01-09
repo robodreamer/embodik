@@ -4,16 +4,13 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "embodik"
-version = "0.1.0"
+version = "0.1.9"
 description = "High-performance inverse kinematics solver optimized for cross-embodiment VLA/AI applications"
 authors = [{ name = "Andy Park", email = "andypark.purdue@gmail.com" }]
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.10"
-dependencies = [
-    "numpy>=1.26.0",
-    "pin>=2.6.0",
-] # numpy constraint updated: no longer limited by spatialmath-python
+dependencies = ["numpy>=1.26.0", "pin>=3.8.0"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
@@ -30,9 +27,11 @@ classifiers = [
 ]
 keywords = ["robotics", "inverse-kinematics", "optimization", "motion-planning"]
 
+[project.scripts]
+embodik-sanitize-env = "embodik.cli:sanitize_env"
+
 [project.optional-dependencies]
 visualization = [
-    "pin>=3.8.0",     # Pinocchio 3.8+ includes ViserVisualizer
     "viser>=0.1.0",   # Required by Pinocchio's ViserVisualizer
     "trimesh>=3.0.0", # Required by Pinocchio's ViserVisualizer for mesh loading
 ]
@@ -52,17 +51,24 @@ Documentation = "https://embodik.readthedocs.io"
 
 [tool.scikit-build]
 # Specify the CMake source directory
-cmake.source-dir = "."
-# Build directory
 build-dir = "build"
+
+[tool.scikit-build.cmake]
+source-dir = "."
+
+[tool.scikit-build.wheel]
 # Install the Python package - CMake installs go here
-wheel.install-dir = "embodik"
+install-dir = "embodik"
 # Include Python packages from source
-wheel.packages = ["python/embodik"]
+packages = ["python/embodik"]
+
+[tool.scikit-build.ninja]
 # Explicitly use Ninja generator (required when ninja is available)
-ninja.make-fallback = false
+make-fallback = false
+
+[tool.scikit-build.editable]
 # Use inplace mode for editable installs (builds extension in source directory)
-editable.mode = "inplace"
+mode = "inplace"
 
 [tool.scikit-build.cmake.define]
 CMAKE_BUILD_TYPE = "Release"

@@ -12,7 +12,42 @@ If you just want to use embodiK without building from source:
 pip install embodik
 ```
 
-This installs pre-built wheels from PyPI. The `pin` package (Pinocchio Python bindings with C++ libraries) is automatically installed as a dependency - **no separate Pinocchio installation needed**. No build tools or system dependencies required.
+This installs wheels from PyPI. The `pin` package (Pinocchio Python bindings with C++ libraries) is installed as a dependency — **no separate Pinocchio installation needed**.
+
+**Note on names:** the PyPI package is `pin`, but the import is `import pinocchio`.
+
+#### Recommended for robotics stacks: Pixi (runtime) + pip (embodik)
+
+If you are in a robotics environment (e.g. you already built Pinocchio from source, or you export `LD_LIBRARY_PATH`),
+**pip-only installs can break due to shared-library conflicts**. The most reliable pattern is:
+
+- Use **Pixi/conda-forge** for the native stack (Pinocchio + C++ deps)
+- Use **pip** for `embodik`
+
+Example:
+
+```bash
+curl -fsSL https://pixi.sh/install.sh | bash
+mkdir embodik_env && cd embodik_env
+pixi init
+# conda/pixi package name is `pinocchio` (PyPI package name is `pin`)
+pixi add -c conda-forge python "pinocchio>=3.8,<4" numpy pip
+
+# Install embodik via pip but DON'T let pip install PyPI `pin` on top of conda `pinocchio`
+pixi run pip install --no-deps embodik
+pixi run python -c "import embodik; import pinocchio as pin; print(embodik.__version__)"
+```
+
+#### Troubleshooting pip-only installs
+
+If `import pinocchio` fails with missing Boost / shared libraries and you have `LD_LIBRARY_PATH` set (common in robotics),
+sanitize your shell environment:
+
+```bash
+eval "$(embodik-sanitize-env --shell)"
+# or:
+unset LD_LIBRARY_PATH
+```
 
 ### For Developers (Building from Source)
 
