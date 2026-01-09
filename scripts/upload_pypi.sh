@@ -1,6 +1,9 @@
 #!/bin/bash
 # Wrapper script for uploading to PyPI with credentials from ~/.pypirc
-# PyPI accepts both wheels and source distributions
+#
+# NOTE: PyPI rejects linux_x86_64 wheels (requires manylinux).
+# For now, we upload only source distributions. Users will build from source
+# or we'll add manylinux wheel builds via cibuildwheel in the future.
 
 set -e
 
@@ -12,8 +15,9 @@ if [ -f "$HOME/.pypirc" ]; then
         echo "Uploading source distribution to TestPyPI..."
         twine upload --repository testpypi --config-file "$HOME/.pypirc" dist/*.tar.gz
     else
-        echo "Uploading distributions to PyPI..."
-        twine upload --config-file "$HOME/.pypirc" dist/*
+        echo "Uploading source distribution to PyPI..."
+        echo "(Note: linux_x86_64 wheels are rejected; use cibuildwheel for manylinux wheels)"
+        twine upload --config-file "$HOME/.pypirc" dist/*.tar.gz
     fi
 else
     echo "Warning: ~/.pypirc not found. Using environment variables if set."
@@ -21,6 +25,6 @@ else
     if [ "$REPO" = "testpypi" ]; then
         twine upload --repository testpypi dist/*.tar.gz
     else
-        twine upload dist/*
+        twine upload dist/*.tar.gz
     fi
 fi
