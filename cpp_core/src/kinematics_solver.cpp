@@ -146,7 +146,8 @@ void KinematicsSolver::clear_base_bounds() {
 void KinematicsSolver::configure_collision_constraint(
     double min_distance,
     const std::vector<std::pair<std::string, std::string>> &include_pairs,
-    const std::vector<std::pair<std::string, std::string>> &exclude_pairs) {
+    const std::vector<std::pair<std::string, std::string>> &exclude_pairs,
+    bool nearest_points_all_pairs) {
 
 #ifdef PINOCCHIO_WITH_HPP_FCL
   if (!robot_->has_collision_geometry()) {
@@ -166,6 +167,7 @@ void KinematicsSolver::configure_collision_constraint(
   config.min_distance = std::max(0.0, min_distance);
   config.upper_distance = kCollisionUpperDistance;
   config.tolerance = kCollisionTolerance;
+  config.nearest_points_all_pairs = nearest_points_all_pairs;
   config.include_pairs.clear();
   config.exclude_pairs.clear();
 
@@ -186,8 +188,9 @@ void KinematicsSolver::configure_collision_constraint(
           collision_model_ptr->collisionPairs.size());
     }
     for (auto &request : collision_data->distanceRequests) {
-      // Nearest points are expensive; enable them only for the chosen pair.
-      request.enable_nearest_points = false;
+      // Nearest points are expensive; by default we enable them only for the
+      // chosen pair. Debug-heavy use cases can force enabling them for all.
+      request.enable_nearest_points = config.nearest_points_all_pairs;
       request.enable_signed_distance = true;
     }
     collision_data->activateAllCollisionPairs();
@@ -210,6 +213,33 @@ void KinematicsSolver::configure_collision_constraint(
   (void)exclude_pairs;
   throw std::runtime_error("Collision avoidance requires Pinocchio to be built "
                            "with hpp-fcl support.");
+#endif
+}
+
+std::optional<KinematicsSolver::CollisionDebugInfo>
+KinematicsSolver::evaluate_collision_debug(const Eigen::VectorXd &current_q) {
+#ifdef PINOCCHIO_WITH_HPP_FCL
+  // Snapshot internal state so this call is side-effect free with respect to
+  // solver hysteresis/debug.
+  const auto prev_last_collision_debug = last_collision_debug_;
+  const auto prev_last_pair_index = last_collision_constraint_pair_index_;
+
+  if (current_q.size() > 0) {
+    if (current_q.size() != robot_->nq()) {
+      return std::nullopt;
+    }
+    robot_->update_kinematics(current_q);
+  }
+
+  (void)compute_collision_constraint();
+  const auto debug = last_collision_debug_;
+
+  last_collision_debug_ = prev_last_collision_debug;
+  last_collision_constraint_pair_index_ = prev_last_pair_index;
+  return debug;
+#else
+  (void)current_q;
+  return std::nullopt;
 #endif
 }
 
@@ -321,6 +351,10 @@ KinematicsSolver::compute_collision_constraint() {
   std::optional<std::size_t> best_index_debug;
 
   auto ensure_nearest_points_for_pair = [&](std::size_t idx) {
+    if (collision_constraint_.has_value() &&
+        collision_constraint_->nearest_points_all_pairs) {
+      return;
+    }
     if (idx >= collision_data->distanceRequests.size()) {
       return;
     }

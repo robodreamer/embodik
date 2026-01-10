@@ -158,15 +158,18 @@ void bind_kinematics_solver(nb::module_ &m) {
              const std::vector<std::pair<std::string, std::string>>
                  &include_pairs,
              const std::vector<std::pair<std::string, std::string>>
-                 &exclude_pairs) {
+                 &exclude_pairs,
+             bool nearest_points_all_pairs) {
             self.configure_collision_constraint(min_distance, include_pairs,
-                                                exclude_pairs);
+                                                exclude_pairs,
+                                                nearest_points_all_pairs);
           },
           nb::arg("min_distance"),
           nb::arg("include_pairs") =
               std::vector<std::pair<std::string, std::string>>{},
           nb::arg("exclude_pairs") =
               std::vector<std::pair<std::string, std::string>>{},
+          nb::arg("nearest_points_all_pairs") = false,
           "Enable collision avoidance with optional include/exclude geometry "
           "pair filters.")
 
@@ -189,6 +192,12 @@ void bind_kinematics_solver(nb::module_ &m) {
            &KinematicsSolver::get_last_collision_debug,
            "Retrieve debug information for the last evaluated collision pair, "
            "if available.")
+
+      .def("evaluate_collision_debug",
+           &KinematicsSolver::evaluate_collision_debug,
+           nb::arg("current_q") = Eigen::VectorXd(),
+           "Evaluate collisions at the provided configuration and return debug "
+           "info (side-effect free).")
 
       .def("get_active_collision_pairs",
            &KinematicsSolver::get_active_collision_pairs,

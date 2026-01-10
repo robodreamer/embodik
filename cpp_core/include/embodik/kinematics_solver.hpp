@@ -214,13 +214,17 @@ public:
    * @param include_pairs Optional list of geometry/frame name pairs to consider
    * (empty = all pairs).
    * @param exclude_pairs Optional list of geometry/frame name pairs to ignore.
+   * @param nearest_points_all_pairs If false, nearest points will be computed only
+   *        for the selected closest pair (constraint/debug) instead of for every
+   *        evaluated pair.
    */
   void configure_collision_constraint(
       double min_distance,
       const std::vector<std::pair<std::string, std::string>> &include_pairs =
           {},
       const std::vector<std::pair<std::string, std::string>> &exclude_pairs =
-          {});
+          {},
+      bool nearest_points_all_pairs = false);
 
   /**
    * @brief Convenience helper for specifying a list of collision pairs to
@@ -251,6 +255,19 @@ public:
   std::optional<CollisionDebugInfo> get_last_collision_debug() const {
     return last_collision_debug_;
   }
+
+  /**
+   * @brief Evaluate collisions at the provided configuration and return debug info.
+   *
+   * This runs collision distance computation (respecting active pair masks /
+   * include-exclude filtering) and returns the closest-pair debug info. Intended
+   * for validating final solutions (e.g., reachability sweeps) where "SUCCESS"
+   * from IK should still be rejected if it ends inside the collision threshold.
+   *
+   * @param current_q Optional configuration to evaluate (empty => current robot configuration).
+   */
+  std::optional<CollisionDebugInfo>
+  evaluate_collision_debug(const Eigen::VectorXd &current_q = Eigen::VectorXd());
 
   /**
    * @brief Retrieve the list of currently active collision pairs (after
@@ -295,6 +312,7 @@ private:
     double min_distance = 0.05;
     double upper_distance = 10.0;
     double tolerance = 1e-4;
+    bool nearest_points_all_pairs = false;
     std::unordered_set<std::string> include_pairs;
     std::unordered_set<std::string> exclude_pairs;
   };
