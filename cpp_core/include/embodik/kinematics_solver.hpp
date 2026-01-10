@@ -114,6 +114,18 @@ public:
                  bool apply_limits = true);
 
   /**
+   * @brief Enable/disable detailed timing breakdown fields in
+   * VelocitySolverResult.
+   *
+   * When disabled (default), timing fields remain zero and we avoid extra
+   * high_resolution_clock calls in the hot path.
+   */
+  void enable_timing_breakdown(bool enable) {
+    timing_breakdown_enabled_ = enable;
+  }
+  bool timing_breakdown_enabled() const { return timing_breakdown_enabled_; }
+
+  /**
    * @brief Enable/disable joint velocity limits
    * @param enable True to enable velocity limit constraints
    */
@@ -265,6 +277,9 @@ private:
   // Constraint options
   bool use_velocity_limits_ = true;
   bool use_position_limits_ = true;
+
+  // Debug/perf instrumentation (off by default)
+  bool timing_breakdown_enabled_ = false;
 
   // Floating-base bounds (optional)
   std::optional<Eigen::Vector3d> base_position_lower_;

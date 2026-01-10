@@ -5,6 +5,7 @@
 
 #include <Eigen/Geometry>
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <iostream>
 #include <limits>
@@ -483,26 +484,57 @@ void KinematicsSolver::sort_tasks_by_priority() {
 VelocitySolverResult
 KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
                                  bool apply_limits) {
+  const bool timing = timing_breakdown_enabled_;
+  auto get_elapsed_ms = [](auto start) {
+    return std::chrono::duration_cast<std::chrono::microseconds>(
+               std::chrono::high_resolution_clock::now() - start)
+               .count() /
+           1000.0;
+  };
+
+  VelocitySolverResult result;
+  // Timing fields default to 0.0; only populate when timing is enabled.
 
   // Use provided configuration or robot's current
   if (current_q.size() > 0) {
     if (current_q.size() != robot_->nq()) {
-      VelocitySolverResult result;
       result.status = SolverStatus::kInvalidInput;
       return result;
     }
-    robot_->update_kinematics(current_q);
+    if (timing) {
+      auto t_kin_start = std::chrono::high_resolution_clock::now();
+      robot_->update_kinematics(current_q);
+      result.pinocchio_kinematics_time_ms = get_elapsed_ms(t_kin_start);
+    } else {
+      robot_->update_kinematics(current_q);
+    }
   } else {
-    robot_->update_kinematics(robot_->get_current_configuration());
+    if (timing) {
+      auto t_kin_start = std::chrono::high_resolution_clock::now();
+      robot_->update_kinematics(robot_->get_current_configuration());
+      result.pinocchio_kinematics_time_ms = get_elapsed_ms(t_kin_start);
+    } else {
+      robot_->update_kinematics(robot_->get_current_configuration());
+    }
   }
 
   // Sort tasks by priority
   sort_tasks_by_priority();
 
   // Update all tasks with current robot state
-  for (auto &task : tasks_) {
-    if (task->isActive()) {
-      task->update(*robot_);
+  if (timing) {
+    auto t_task_start = std::chrono::high_resolution_clock::now();
+    for (auto &task : tasks_) {
+      if (task->isActive()) {
+        task->update(*robot_);
+      }
+    }
+    result.task_update_time_ms = get_elapsed_ms(t_task_start);
+  } else {
+    for (auto &task : tasks_) {
+      if (task->isActive()) {
+        task->update(*robot_);
+      }
     }
   }
 
@@ -520,7 +552,6 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
 
   // If no active tasks, return early
   if (goals.empty()) {
-    VelocitySolverResult result;
     result.status = SolverStatus::kSuccess;
     result.solution.resize(robot_->nv(), 0.0);
     result.joint_velocities = Eigen::VectorXd::Zero(robot_->nv());
@@ -528,9 +559,26 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
     return result;
   }
 
-  auto collision_constraint_result = compute_collision_constraint();
+  // Collision constraints are expensive when collision geometry exists.
+  // Only evaluate distances when collision avoidance is actually enabled.
+  std::optional<CollisionConstraintResult> collision_constraint_result =
+      std::nullopt;
+  if (collision_constraint_.has_value() && collision_constraint_->enabled) {
+    if (timing) {
+      auto t_collision_start = std::chrono::high_resolution_clock::now();
+      collision_constraint_result = compute_collision_constraint();
+      result.collision_constraint_time_ms = get_elapsed_ms(t_collision_start);
+    } else {
+      collision_constraint_result = compute_collision_constraint();
+    }
+  }
 
   // Build constraint matrix
+  std::optional<std::chrono::high_resolution_clock::time_point>
+      t_constraint_start;
+  if (timing) {
+    t_constraint_start = std::chrono::high_resolution_clock::now();
+  }
   Eigen::MatrixXd C;
   Eigen::VectorXd c_lower, c_upper;
 
@@ -679,6 +727,10 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
     constraint_idx += rows;
   }
 
+  if (timing && t_constraint_start.has_value()) {
+    result.constraint_setup_time_ms = get_elapsed_ms(*t_constraint_start);
+  }
+
   // Configure solver
   VelocitySolverConfig config;
   config.epsilon = solver_tolerance_;
@@ -694,10 +746,10 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
       goals, jacobians, C, c_lower, c_upper, config);
 
   // Create velocity-specific result
-  VelocitySolverResult result;
   result.status = backend_result.status;
   result.solution = backend_result.solution;
   result.computation_time_ms = backend_result.computation_time_ms;
+  result.solver_computation_time_ms = backend_result.computation_time_ms;
   result.iterations = backend_result.iterations;
   result.final_error = backend_result.final_error;
   result.task_scales = backend_result.task_scales;

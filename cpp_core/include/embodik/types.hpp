@@ -62,6 +62,13 @@ struct VelocitySolverResult : public SolverResult {
   bool limits_applied = false;       // Whether limits were enforced
   Eigen::VectorXd
       joint_velocities; // Convenience access to solution as VectorXd
+
+  // Performance breakdown (for debugging)
+  double pinocchio_kinematics_time_ms = 0.0;  // Forward kinematics time
+  double collision_constraint_time_ms = 0.0;  // Collision distance/constraint time
+  double task_update_time_ms = 0.0;            // Task update (Jacobian) time
+  double solver_computation_time_ms = 0.0;     // Actual solver time (from backend)
+  double constraint_setup_time_ms = 0.0;       // Constraint matrix setup time
 };
 
 // Configuration for regularized matrix inversion
