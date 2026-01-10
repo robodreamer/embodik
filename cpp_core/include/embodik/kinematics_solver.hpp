@@ -312,6 +312,7 @@ private:
 
   std::optional<CollisionConstraintConfig> collision_constraint_;
   std::optional<CollisionDebugInfo> last_collision_debug_;
+  std::optional<std::size_t> last_collision_constraint_pair_index_;
 
   std::string canonical_pair_key(const std::string &a,
                                  const std::string &b) const;
