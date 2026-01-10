@@ -186,7 +186,8 @@ void KinematicsSolver::configure_collision_constraint(
           collision_model_ptr->collisionPairs.size());
     }
     for (auto &request : collision_data->distanceRequests) {
-      request.enable_nearest_points = true;
+      // Nearest points are expensive; enable them only for the chosen pair.
+      request.enable_nearest_points = false;
       request.enable_signed_distance = true;
     }
     collision_data->activateAllCollisionPairs();
@@ -201,6 +202,7 @@ void KinematicsSolver::configure_collision_constraint(
         collision_data->activeCollisionPairs[idx] = false;
       }
     }
+    last_collision_constraint_pair_index_.reset();
   }
 #else
   (void)min_distance;
@@ -290,6 +292,9 @@ KinematicsSolver::get_active_collision_pairs() const {
 std::optional<KinematicsSolver::CollisionConstraintResult>
 KinematicsSolver::compute_collision_constraint() {
 #ifdef PINOCCHIO_WITH_HPP_FCL
+  constexpr double kCollisionPairSwitchHysteresis = 2e-3; // m
+  constexpr double kCollisionRepulsionDeadband = 3e-3;    // m
+
   last_collision_debug_.reset();
   if (!robot_->has_collision_geometry()) {
     return std::nullopt;
@@ -315,7 +320,25 @@ KinematicsSolver::compute_collision_constraint() {
   double best_distance_debug = std::numeric_limits<double>::infinity();
   std::optional<std::size_t> best_index_debug;
 
+  auto ensure_nearest_points_for_pair = [&](std::size_t idx) {
+    if (idx >= collision_data->distanceRequests.size()) {
+      return;
+    }
+    auto &req = collision_data->distanceRequests[idx];
+    if (req.enable_nearest_points) {
+      return;
+    }
+    req.enable_nearest_points = true;
+    pinocchio::computeDistance(*collision_model, *collision_data, idx);
+    req.enable_nearest_points = false;
+  };
+
   for (std::size_t idx = 0; idx < pairs.size(); ++idx) {
+    // Honor Pinocchio's active-pair mask *before* distance computation.
+    if (!collision_data->activeCollisionPairs.empty() &&
+        !collision_data->activeCollisionPairs[idx]) {
+      continue;
+    }
     pinocchio::computeDistance(*collision_model, *collision_data, idx);
 
     const auto &pair = pairs[idx];
@@ -325,11 +348,6 @@ KinematicsSolver::compute_collision_constraint() {
 
     double distance = distance_result.min_distance;
     if (!std::isfinite(distance)) {
-      continue;
-    }
-
-    if (!collision_data->activeCollisionPairs.empty() &&
-        !collision_data->activeCollisionPairs[idx]) {
       continue;
     }
 
@@ -348,11 +366,43 @@ KinematicsSolver::compute_collision_constraint() {
     }
   }
 
-  if (best_index_debug.has_value()) {
-    const auto &pair_debug = pairs[*best_index_debug];
+  // Apply hysteresis to reduce rapid pair switching when multiple pairs have
+  // similar minimum distance.
+  if (constraint_active && best_index_allowed.has_value()) {
+    if (last_collision_constraint_pair_index_.has_value()) {
+      const std::size_t prev_idx = *last_collision_constraint_pair_index_;
+      if (prev_idx < pairs.size()) {
+        const bool prev_active = collision_data->activeCollisionPairs.empty() ||
+                                 collision_data->activeCollisionPairs[prev_idx];
+        const auto &res_prev = collision_data->distanceResults[prev_idx];
+        const double prev_dist = res_prev.min_distance;
+        if (prev_active && std::isfinite(prev_dist) &&
+            prev_dist <=
+                best_distance_allowed + kCollisionPairSwitchHysteresis) {
+          best_index_allowed = prev_idx;
+          best_distance_allowed = prev_dist;
+        }
+      }
+    }
+    last_collision_constraint_pair_index_ = best_index_allowed;
+  } else {
+    last_collision_constraint_pair_index_.reset();
+  }
+
+  // For debug visualization/logging, prefer the constrained pair when enabled;
+  // otherwise show the globally closest active pair.
+  std::optional<std::size_t> debug_index_to_use = best_index_debug;
+  if (constraint_active && best_index_allowed.has_value()) {
+    debug_index_to_use = best_index_allowed;
+  }
+
+  if (debug_index_to_use.has_value()) {
+    ensure_nearest_points_for_pair(*debug_index_to_use);
+    const auto &pair_debug = pairs[*debug_index_to_use];
     const auto &obj_da = collision_model->geometryObjects[pair_debug.first];
     const auto &obj_db = collision_model->geometryObjects[pair_debug.second];
-    const auto &res_debug = collision_data->distanceResults[*best_index_debug];
+    const auto &res_debug =
+        collision_data->distanceResults[*debug_index_to_use];
 
     CollisionDebugInfo debug_info;
     debug_info.object_a = obj_da.name;
@@ -369,6 +419,7 @@ KinematicsSolver::compute_collision_constraint() {
     return std::nullopt;
   }
 
+  ensure_nearest_points_for_pair(*best_index_allowed);
   const auto &pair = pairs[*best_index_allowed];
   const auto &object_a = collision_model->geometryObjects[pair.first];
   const auto &object_b = collision_model->geometryObjects[pair.second];
@@ -418,21 +469,36 @@ KinematicsSolver::compute_collision_constraint() {
   Eigen::RowVectorXd row_b = (rotation_from_negative * jacobian_b).row(0);
 
   CollisionConstraintResult result;
-  result.jacobian.resize(2, robot_->nv());
-  result.jacobian.row(0) = row_a;
-  result.jacobian.row(1) = row_b;
+  // Use a single constraint on the *relative* separating velocity:
+  //   normalᵀ (v_a - v_b) >= lower_bound
+  // Using two separate rows can over-constrain the QP.
+  result.jacobian.resize(1, robot_->nv());
+  result.jacobian.row(0) = row_a + row_b;
 
   double dt = std::max(dt_, 1e-6);
   const auto &config = *collision_constraint_;
-  double lower_bound =
-      (config.min_distance + config.tolerance - distance_norm) / dt;
-  double upper_bound =
-      (config.upper_distance - config.tolerance + distance_norm) / dt;
+  const double signed_distance = distance_result.min_distance;
 
-  result.lower_bounds =
-      Eigen::VectorXd::Constant(2, std::min(lower_bound, 0.0));
+  // Deadband near the boundary to reduce "fighting" jitter:
+  // - outside the band: allow approach but limit it (velocity damper)
+  // - inside the band: prevent decreasing distance (no approach)
+  // - below: enforce separation velocity
+  double lower_bound = 0.0;
+  if (signed_distance >= (config.min_distance + kCollisionRepulsionDeadband)) {
+    lower_bound =
+        (config.min_distance + config.tolerance - signed_distance) / dt;
+  } else if (signed_distance >= config.min_distance) {
+    lower_bound = 0.0;
+  } else {
+    lower_bound =
+        (config.min_distance + config.tolerance - signed_distance) / dt;
+  }
+  const double upper_bound =
+      (config.upper_distance - config.tolerance + signed_distance) / dt;
+
+  result.lower_bounds = Eigen::VectorXd::Constant(1, lower_bound);
   result.upper_bounds =
-      Eigen::VectorXd::Constant(2, std::max(upper_bound, 0.0));
+      Eigen::VectorXd::Constant(1, std::max(upper_bound, 0.0));
   result.distance = distance_norm;
   result.object_a = object_a.name;
   result.object_b = object_b.name;
