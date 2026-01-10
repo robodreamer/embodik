@@ -89,6 +89,18 @@ void bind_kinematics_solver(nb::module_ &m) {
            nb::arg("apply_limits") = true,
            "Solve for joint velocities without integration. Returns velocities "
            "and identifies saturated joints.")
+      .def(
+          "solve_velocity_dq",
+          [](KinematicsSolver &self, const Eigen::VectorXd &current_q,
+             bool apply_limits) {
+            // Fast path: return only dq (avoids packaging the full result
+            // object when callers only need joint velocities).
+            auto r = self.solve_velocity(current_q, apply_limits);
+            return r.joint_velocities;
+          },
+          nb::arg("current_q") = Eigen::VectorXd(),
+          nb::arg("apply_limits") = true,
+          "Solve for joint velocities and return only dq as a NumPy array.")
 
       // Configuration
       .def("enable_velocity_limits", &KinematicsSolver::enable_velocity_limits,
@@ -125,6 +137,11 @@ void bind_kinematics_solver(nb::module_ &m) {
 
       .def("set_tolerance", &KinematicsSolver::set_tolerance,
            nb::arg("tolerance"), "Set solver convergence tolerance")
+
+      .def("enable_timing_breakdown",
+           &KinematicsSolver::enable_timing_breakdown, nb::arg("enable"),
+           "Enable/disable detailed timing breakdown fields in "
+           "VelocitySolverResult")
 
       .def("set_max_iterations", &KinematicsSolver::set_max_iterations,
            nb::arg("max_iter"), "Set maximum solver iterations")

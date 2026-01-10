@@ -79,6 +79,9 @@ def main(args: argparse.Namespace):
     q_current = q_default.copy()
     robot.update_configuration(q_current)
 
+    # Joint limits (used for clipping in both viz and headless modes)
+    q_lower, q_upper = robot.get_joint_limits()
+
     # Get initial end-effector pose
     initial_pose = robot.get_frame_pose(target_link_name)
 
@@ -116,7 +119,7 @@ def main(args: argparse.Namespace):
         "/ik_target",
         scale=0.2,
         position=tuple(initial_pose.translation),
-        wxyz=initial_wxyz  # Use actual end-effector orientation
+        wxyz=initial_wxyz,  # Use actual end-effector orientation
     )
 
     zero_velocity = np.zeros(6, dtype=float)
@@ -156,9 +159,6 @@ def main(args: argparse.Namespace):
     # Joint configuration display (arm joints only)
     joint_sliders = {}
     with server.gui.add_folder("🦾 Joint Configuration", expand_by_default=False):
-        # Get joint limits
-        q_lower, q_upper = robot.get_joint_limits()
-
         # Arm joints only (first 7)
         for i in range(min(7, len(q_current))):  # Only first 7 joints
             # Use joint name from URDF
@@ -189,7 +189,6 @@ def main(args: argparse.Namespace):
         nullspace_gain = server.gui.add_slider("Nullspace Gain", min=0.0, max=2.0, initial_value=1e-2, step=0.1)
         bias_to_initial = server.gui.add_button("Bias to Initial Config")
         bias_to_zero = server.gui.add_button("Bias to Zero Config")
-        nullspace_joint_checkboxes: dict[int, Any] = {}
         with server.gui.add_folder("Joint Selection"):
             for idx in range(robot.nq):
                 joint_name = joint_names[idx] if idx < len(joint_names) else f"joint{idx + 1}"
@@ -384,7 +383,7 @@ def main(args: argparse.Namespace):
         # Solve for joint velocities
         result = solver.solve_velocity(q_current, apply_limits=True)
 
-        # Log solver results
+        # Log solver results (debug)
         if should_log_debug:
             logger.info(f"Solver status: {result.status}")
             logger.info(f"Solver elapsed time: {result.computation_time_ms:.2f} ms")
@@ -444,7 +443,6 @@ def main(args: argparse.Namespace):
             # Ensure we stay within limits
             q_current = np.clip(q_current, q_lower, q_upper)
 
-            # Update robot
             robot.update_configuration(q_current)
 
             # Update visualization

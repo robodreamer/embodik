@@ -79,7 +79,21 @@ NB_MODULE(_embodik_impl, m) {
       .def_ro("limits_applied", &eik::VelocitySolverResult::limits_applied)
       .def_prop_ro("joint_velocities", [](const eik::VelocitySolverResult &r) {
         return r.joint_velocities;
-      });
+      })
+      .def_ro("pinocchio_kinematics_time_ms",
+              &eik::VelocitySolverResult::pinocchio_kinematics_time_ms,
+              "Time spent in Pinocchio forward kinematics (ms)")
+      .def_ro("collision_constraint_time_ms",
+              &eik::VelocitySolverResult::collision_constraint_time_ms,
+              "Time spent evaluating collision distances/constraints (ms)")
+      .def_ro("task_update_time_ms", &eik::VelocitySolverResult::task_update_time_ms,
+              "Time spent updating tasks (Jacobian computation) (ms)")
+      .def_ro("solver_computation_time_ms",
+              &eik::VelocitySolverResult::solver_computation_time_ms,
+              "Time spent in core solver computation (ms)")
+      .def_ro("constraint_setup_time_ms",
+              &eik::VelocitySolverResult::constraint_setup_time_ms,
+              "Time spent setting up constraint matrices (ms)");
 
   nb::class_<eik::PositionIKOptions>(m, "PositionIKOptions",
                                      "Options for position-level IK solving")

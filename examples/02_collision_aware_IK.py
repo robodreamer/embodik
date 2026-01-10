@@ -439,8 +439,13 @@ class embodiKBackend:
 # -----------------------------------------------------------------------------
 
 
-def run_gui(cfg: RobotConfig) -> None:
+def run_gui(cfg: RobotConfig, args: argparse.Namespace) -> None:
     backend = embodiKBackend(cfg)
+    if getattr(args, "timing_breakdown", False):
+        try:
+            backend.solver.enable_timing_breakdown(True)
+        except Exception as exc:  # pragma: no cover
+            print(f"[embodiK] Warning: enable_timing_breakdown failed: {exc}")
 
     if hasattr(backend, "robot"):
         try:
@@ -755,6 +760,7 @@ def run_gui(cfg: RobotConfig) -> None:
     def _(_evt) -> None:
         update_collision_visuals()
 
+    iteration_count = 0
     while True:
         solver_elapsed_ms = 0.0
 
@@ -804,6 +810,15 @@ def run_gui(cfg: RobotConfig) -> None:
 
         timing_handle.value = 0.9 * timing_handle.value + 0.1 * solver_elapsed_ms
 
+        # Optional performance reporting (CLI-controlled)
+        iteration_count += 1
+        if args.perf_log != "off" and args.perf_every > 0 and iteration_count % args.perf_every == 0:
+            # Note: solve_step currently measures wall time around solve_velocity().
+            # If C++ timing breakdown is enabled, fetch it from an extra solve call
+            # would be intrusive; instead we show the wall-time here and rely on
+            # collision_debug/self_collision toggles for deeper analysis.
+            print(f"[Performance] Iter {iteration_count}: solve_step elapsed={solver_elapsed_ms:.3f} ms")
+
         time.sleep(0.001)
 
 
@@ -820,6 +835,24 @@ def parse_args() -> argparse.Namespace:
         default="panda",
         help="Robot model to load (default: panda).",
     )
+    parser.add_argument(
+        "--perf-log",
+        choices=["off", "basic", "verbose"],
+        default="off",
+        help="Performance logging mode. 'basic' prints periodic summaries, "
+             "'verbose' also prints extra warnings.",
+    )
+    parser.add_argument(
+        "--perf-every",
+        type=int,
+        default=200,
+        help="Print performance summary every N iterations when --perf-log is enabled.",
+    )
+    parser.add_argument(
+        "--timing-breakdown",
+        action="store_true",
+        help="Enable C++ timing breakdown fields in VelocitySolverResult (debug).",
+    )
     return parser.parse_args()
 
 
@@ -830,7 +863,7 @@ def main() -> None:
     print(f"  - URDF path: {cfg.urdf_path}")
     print(f"  - Target link: {cfg.target_link}")
 
-    run_gui(cfg)
+    run_gui(cfg, args)
 
 
 if __name__ == "__main__":  # pragma: no cover
