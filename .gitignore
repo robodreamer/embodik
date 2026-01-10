@@ -20,6 +20,10 @@ python_bindings/**/py.typed
 build/**/*.pyi
 build/**/py.typed
 
+# Ignore generated type stubs copied into the source tree (nanobind.stubgen)
+*.pyi
+*.typed
+
 # CMake build artifacts (root directory)
 CMakeCache.txt
 CMakeFiles/
