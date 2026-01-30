@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-01-30
+
+### Added
+- Position IK now supports `excluded_joint_indices` to lock joints during solves
+- Position IK can enforce collision constraints during iterative solves (when configured)
+
+### Changed
+- Velocity solver now groups same-priority tasks to make ordering within a priority level symmetric
+- Collision constraint computation now uses cached allow-masks to skip excluded pairs efficiently
+- Collision recovery near `min_distance` uses deadband + adaptive push to reduce jitter and stalling
+- Collision constraint default `nearest_points_all_pairs` set to true
+- Collision debug evaluation is side-effect free (no solver state mutation)
+
+### Fixed
+- Position IK now applies collision constraints and excluded joint indices consistently with velocity IK
+- Collision constraint pair selection now uses hysteresis across frames for stability
+
 ## [0.1.1] - 2025-01-09
 
 ### Added

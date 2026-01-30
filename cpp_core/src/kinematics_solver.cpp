@@ -11,6 +11,7 @@
 #include <limits>
 #include <pinocchio/algorithm/geometry.hpp>
 #include <stdexcept>
+#include <unordered_set>
 #ifdef PINOCCHIO_WITH_HPP_FCL
 #include <pinocchio/collision/distance.hpp>
 #endif
@@ -23,6 +24,15 @@ namespace {
 constexpr double kCollisionTolerance = 1e-4;
 constexpr double kCollisionUpperDistance = 1e1;
 constexpr double kDistanceEpsilon = 1e-9;
+constexpr double kCollisionMaxSeparationSpeed = 0.5;
+constexpr double kCollisionMaxSeparationSpeedNonPenetration = 0.15;
+constexpr double kCollisionPairSwitchHysteresis = 2e-3;
+constexpr double kCollisionRepulsionDeadband = 3e-3;
+constexpr double kCollisionMinRecoverySpeed = 0.05;
+constexpr double kCollisionRecoveryScale = 0.2;
+constexpr double kCollisionStuckBand = 3e-3;
+constexpr double kCollisionStuckDqNormEps = 1e-6;
+constexpr int kCollisionStuckCountThreshold = 10;
 } // namespace
 
 KinematicsSolver::KinematicsSolver(std::shared_ptr<RobotModel> robot)
@@ -180,28 +190,36 @@ void KinematicsSolver::configure_collision_constraint(
   }
 
   if (collision_data != nullptr && collision_model_ptr != nullptr) {
-    if (collision_data->distanceRequests.size() !=
-        collision_model_ptr->collisionPairs.size()) {
-      collision_data->distanceRequests.resize(
-          collision_model_ptr->collisionPairs.size());
-      collision_data->distanceResults.resize(
-          collision_model_ptr->collisionPairs.size());
+    const std::size_t num_pairs = collision_model_ptr->collisionPairs.size();
+    if (collision_data->distanceRequests.size() != num_pairs) {
+      collision_data->distanceRequests.resize(num_pairs);
+      collision_data->distanceResults.resize(num_pairs);
     }
     for (auto &request : collision_data->distanceRequests) {
-      // Nearest points are expensive; by default we enable them only for the
-      // chosen pair. Debug-heavy use cases can force enabling them for all.
-      request.enable_nearest_points = config.nearest_points_all_pairs;
+      request.enable_nearest_points = nearest_points_all_pairs;
       request.enable_signed_distance = true;
     }
     collision_data->activateAllCollisionPairs();
-    for (std::size_t idx = 0; idx < collision_model_ptr->collisionPairs.size();
-         ++idx) {
+
+    collision_allowed_pair_mask_.assign(num_pairs, 0);
+    for (std::size_t idx = 0; idx < num_pairs; ++idx) {
       const auto &pair = collision_model_ptr->collisionPairs[idx];
       const auto &name_a =
           collision_model_ptr->geometryObjects[pair.first].name;
       const auto &name_b =
           collision_model_ptr->geometryObjects[pair.second].name;
-      if (!collision_pair_allowed(name_a, name_b)) {
+      const auto key = canonical_pair_key(name_a, name_b);
+      bool allowed = true;
+      if (!config.include_pairs.empty() &&
+          config.include_pairs.find(key) == config.include_pairs.end()) {
+        allowed = false;
+      }
+      if (allowed &&
+          config.exclude_pairs.find(key) != config.exclude_pairs.end()) {
+        allowed = false;
+      }
+      collision_allowed_pair_mask_[idx] = allowed ? 1 : 0;
+      if (!allowed) {
         collision_data->activeCollisionPairs[idx] = false;
       }
     }
@@ -211,6 +229,7 @@ void KinematicsSolver::configure_collision_constraint(
   (void)min_distance;
   (void)include_pairs;
   (void)exclude_pairs;
+  (void)nearest_points_all_pairs;
   throw std::runtime_error("Collision avoidance requires Pinocchio to be built "
                            "with hpp-fcl support.");
 #endif
@@ -219,23 +238,35 @@ void KinematicsSolver::configure_collision_constraint(
 std::optional<KinematicsSolver::CollisionDebugInfo>
 KinematicsSolver::evaluate_collision_debug(const Eigen::VectorXd &current_q) {
 #ifdef PINOCCHIO_WITH_HPP_FCL
-  // Snapshot internal state so this call is side-effect free with respect to
-  // solver hysteresis/debug.
-  const auto prev_last_collision_debug = last_collision_debug_;
-  const auto prev_last_pair_index = last_collision_constraint_pair_index_;
+  if (!robot_->has_collision_geometry()) {
+    return std::nullopt;
+  }
 
   if (current_q.size() > 0) {
     if (current_q.size() != robot_->nq()) {
-      return std::nullopt;
+      throw std::runtime_error(
+          "Invalid configuration size for collision evaluation.");
     }
     robot_->update_kinematics(current_q);
+  } else {
+    robot_->update_kinematics(robot_->get_current_configuration());
   }
+
+  const auto prev_last_collision_debug = last_collision_debug_;
+  const auto prev_last_pair_index = last_collision_constraint_pair_index_;
+  const int prev_stuck_counter = collision_stuck_counter_;
+  const auto prev_stuck_pair_index = collision_stuck_pair_index_;
+  const double prev_stuck_last_distance = collision_stuck_last_distance_;
 
   (void)compute_collision_constraint();
   const auto debug = last_collision_debug_;
 
   last_collision_debug_ = prev_last_collision_debug;
   last_collision_constraint_pair_index_ = prev_last_pair_index;
+  collision_stuck_counter_ = prev_stuck_counter;
+  collision_stuck_pair_index_ = prev_stuck_pair_index;
+  collision_stuck_last_distance_ = prev_stuck_last_distance;
+
   return debug;
 #else
   (void)current_q;
@@ -247,7 +278,7 @@ void KinematicsSolver::add_collision_constraint(
     const std::vector<std::pair<std::string, std::string>> &link_pairs,
     double min_distance) {
 #ifdef PINOCCHIO_WITH_HPP_FCL
-  configure_collision_constraint(min_distance, link_pairs, {});
+  configure_collision_constraint(min_distance, link_pairs, {}, true);
 #else
   (void)link_pairs;
   (void)min_distance;
@@ -260,6 +291,7 @@ void KinematicsSolver::clear_collision_constraint() {
   if (collision_constraint_.has_value()) {
     collision_constraint_->enabled = false;
   }
+  collision_allowed_pair_mask_.clear();
 }
 
 std::string KinematicsSolver::canonical_pair_key(const std::string &a,
@@ -308,11 +340,28 @@ KinematicsSolver::get_active_collision_pairs() const {
     return result;
   }
 
-  for (const auto &pair : collision_model_ptr->collisionPairs) {
-    const auto &name_a = collision_model_ptr->geometryObjects[pair.first].name;
-    const auto &name_b = collision_model_ptr->geometryObjects[pair.second].name;
-    if (collision_pair_allowed(name_a, name_b)) {
+  const auto &pairs = collision_model_ptr->collisionPairs;
+  if (collision_allowed_pair_mask_.size() == pairs.size()) {
+    for (std::size_t idx = 0; idx < pairs.size(); ++idx) {
+      if (!collision_allowed_pair_mask_[idx]) {
+        continue;
+      }
+      const auto &pair = pairs[idx];
+      const auto &name_a =
+          collision_model_ptr->geometryObjects[pair.first].name;
+      const auto &name_b =
+          collision_model_ptr->geometryObjects[pair.second].name;
       result.emplace_back(name_a, name_b);
+    }
+  } else {
+    for (const auto &pair : pairs) {
+      const auto &name_a =
+          collision_model_ptr->geometryObjects[pair.first].name;
+      const auto &name_b =
+          collision_model_ptr->geometryObjects[pair.second].name;
+      if (collision_pair_allowed(name_a, name_b)) {
+        result.emplace_back(name_a, name_b);
+      }
     }
   }
 #endif
@@ -322,9 +371,6 @@ KinematicsSolver::get_active_collision_pairs() const {
 std::optional<KinematicsSolver::CollisionConstraintResult>
 KinematicsSolver::compute_collision_constraint() {
 #ifdef PINOCCHIO_WITH_HPP_FCL
-  constexpr double kCollisionPairSwitchHysteresis = 2e-3; // m
-  constexpr double kCollisionRepulsionDeadband = 3e-3;    // m
-
   last_collision_debug_.reset();
   if (!robot_->has_collision_geometry()) {
     return std::nullopt;
@@ -338,6 +384,9 @@ KinematicsSolver::compute_collision_constraint() {
 
   bool constraint_active =
       collision_constraint_.has_value() && collision_constraint_->enabled;
+  const bool nearest_points_all_pairs =
+      collision_constraint_.has_value() &&
+      collision_constraint_->nearest_points_all_pairs;
 
   // Update collision placements and compute distances for all pairs
   pinocchio::updateGeometryPlacements(robot_->model(), robot_->data(),
@@ -351,8 +400,7 @@ KinematicsSolver::compute_collision_constraint() {
   std::optional<std::size_t> best_index_debug;
 
   auto ensure_nearest_points_for_pair = [&](std::size_t idx) {
-    if (collision_constraint_.has_value() &&
-        collision_constraint_->nearest_points_all_pairs) {
+    if (nearest_points_all_pairs) {
       return;
     }
     if (idx >= collision_data->distanceRequests.size()) {
@@ -394,6 +442,14 @@ KinematicsSolver::compute_collision_constraint() {
       continue;
     }
 
+    // Only consider include/exclude-allowed pairs for the constraint.
+    // (We still compute debug info over the closest active pair overall.)
+    if (!collision_allowed_pair_mask_.empty() &&
+        idx < collision_allowed_pair_mask_.size() &&
+        !collision_allowed_pair_mask_[idx]) {
+      continue;
+    }
+
     if (distance < best_distance_allowed) {
       best_distance_allowed = distance;
       best_index_allowed = idx;
@@ -406,15 +462,22 @@ KinematicsSolver::compute_collision_constraint() {
     if (last_collision_constraint_pair_index_.has_value()) {
       const std::size_t prev_idx = *last_collision_constraint_pair_index_;
       if (prev_idx < pairs.size()) {
-        const bool prev_active = collision_data->activeCollisionPairs.empty() ||
-                                 collision_data->activeCollisionPairs[prev_idx];
         const auto &res_prev = collision_data->distanceResults[prev_idx];
         const double prev_dist = res_prev.min_distance;
-        if (prev_active && std::isfinite(prev_dist) &&
-            prev_dist <=
-                best_distance_allowed + kCollisionPairSwitchHysteresis) {
-          best_index_allowed = prev_idx;
-          best_distance_allowed = prev_dist;
+        const bool prev_active = collision_data->activeCollisionPairs.empty() ||
+                                 collision_data->activeCollisionPairs[prev_idx];
+        const bool prev_allowed =
+            collision_allowed_pair_mask_.empty() ||
+            (prev_idx < collision_allowed_pair_mask_.size() &&
+             collision_allowed_pair_mask_[prev_idx]);
+        if (prev_active && prev_allowed && std::isfinite(prev_dist)) {
+          // Keep previous pair unless it's meaningfully worse than the new
+          // best.
+          if (prev_dist <=
+              best_distance_allowed + kCollisionPairSwitchHysteresis) {
+            best_index_allowed = prev_idx;
+            best_distance_allowed = prev_dist;
+          }
         }
       }
     }
@@ -513,27 +576,106 @@ KinematicsSolver::compute_collision_constraint() {
   const auto &config = *collision_constraint_;
   const double signed_distance = distance_result.min_distance;
 
+  // Detect a "stuck" condition: if we are non-penetrating but significantly
+  // inside min_distance for multiple consecutive cycles AND the previous dq was
+  // near-zero, force a stronger recovery push.
+  auto compute_stuck_active = [&]() -> bool {
+    const std::size_t pair_idx = *best_index_allowed;
+    const bool deep_non_penetration =
+        (signed_distance >= 0.0) &&
+        (signed_distance < (config.min_distance - kCollisionStuckBand));
+    const bool dq_small = (last_solution_dq_norm_ < kCollisionStuckDqNormEps);
+    if (!(deep_non_penetration && dq_small)) {
+      collision_stuck_counter_ = 0;
+      collision_stuck_pair_index_.reset();
+      collision_stuck_last_distance_ = std::numeric_limits<double>::infinity();
+      return false;
+    }
+
+    const bool same_pair = collision_stuck_pair_index_.has_value() &&
+                           (*collision_stuck_pair_index_ == pair_idx);
+    const bool not_improving =
+        std::isfinite(collision_stuck_last_distance_) &&
+        (signed_distance <= (collision_stuck_last_distance_ + 1e-6));
+    if (same_pair && not_improving) {
+      collision_stuck_counter_ += 1;
+    } else {
+      collision_stuck_counter_ = 1;
+      collision_stuck_pair_index_ = pair_idx;
+    }
+    collision_stuck_last_distance_ = signed_distance;
+    return collision_stuck_counter_ >= kCollisionStuckCountThreshold;
+  };
+  const bool stuck_active = compute_stuck_active();
   // Deadband near the boundary to reduce "fighting" jitter:
-  // - outside the band: allow approach but limit it (velocity damper)
-  // - inside the band: prevent decreasing distance (no approach)
-  // - below: enforce separation velocity
+  // - outside the band (d >= min + band): allow approach but limit it (velocity
+  // damper)
+  // - inside the band (min - band <= d < min + band): prevent decreasing
+  // distance (no approach)
+  // - deeper penetration (d < min - band): apply repulsion (capped)
   double lower_bound = 0.0;
   if (signed_distance >= (config.min_distance + kCollisionRepulsionDeadband)) {
+    // Outside: limit approach speed (negative lower_bound is allowed).
     lower_bound =
         (config.min_distance + config.tolerance - signed_distance) / dt;
   } else if (signed_distance >= config.min_distance) {
     lower_bound = 0.0;
   } else {
-    lower_bound =
+    // Below min_distance: ensure we can recover (avoid getting stuck).
+    // - if only slightly inside (within deadband), apply a gentle, scaled push
+    // - if in deeper violation (or true penetration), apply stronger push
+    // (capped)
+    const double desired =
         (config.min_distance + config.tolerance - signed_distance) / dt;
+
+    if (signed_distance >=
+            (config.min_distance - kCollisionRepulsionDeadband) &&
+        signed_distance >= 0.0) {
+      // Slightly inside, not penetrating: avoid oscillations; do not force
+      // strong repulsion. However, setting lower_bound=0 here can allow the
+      // solver to get "stuck" slightly inside min_distance with dq≈0. Apply a
+      // *very* gentle recovery push so we slowly return to the boundary while
+      // keeping the system stable.
+      const double gentle_scale = kCollisionRecoveryScale * 0.05;
+      lower_bound = std::min(kCollisionMaxSeparationSpeedNonPenetration,
+                             std::max(0.0, desired * gentle_scale));
+    } else {
+      // Deeper violation or penetration: recover more assertively, still
+      // capped.
+      if (signed_distance >= 0.0) {
+        // Not penetrating: keep recovery gentle to avoid numerical issues.
+        lower_bound =
+            std::min(kCollisionMaxSeparationSpeedNonPenetration,
+                     std::max(0.0, desired * kCollisionRecoveryScale));
+      } else {
+        // Penetration: enforce a minimum recovery speed, still capped.
+        lower_bound = std::min(kCollisionMaxSeparationSpeed, desired);
+        if (lower_bound < kCollisionMinRecoverySpeed) {
+          lower_bound = kCollisionMinRecoverySpeed;
+        }
+      }
+    }
+  }
+  // If we're stuck (deep inside min_distance but non-penetrating), enforce a
+  // stronger non-penetration recovery. This remains capped to preserve
+  // numerical stability.
+  if (stuck_active && signed_distance >= 0.0) {
+    const double desired =
+        (config.min_distance + config.tolerance - signed_distance) / dt;
+    const double strong =
+        std::min(kCollisionMaxSeparationSpeedNonPenetration,
+                 std::max(kCollisionMinRecoverySpeed,
+                          std::max(0.0, desired * kCollisionRecoveryScale)));
+    if (strong > lower_bound) {
+      lower_bound = strong;
+    }
   }
   const double upper_bound =
       (config.upper_distance - config.tolerance + signed_distance) / dt;
 
   result.lower_bounds = Eigen::VectorXd::Constant(1, lower_bound);
-  result.upper_bounds =
-      Eigen::VectorXd::Constant(1, std::max(upper_bound, 0.0));
-  result.distance = distance_norm;
+  result.upper_bounds = Eigen::VectorXd::Constant(1, upper_bound);
+  result.distance = signed_distance;
   result.object_a = object_a.name;
   result.object_b = object_b.name;
   result.point_a_world = p1_world;
@@ -638,17 +780,65 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
     }
   }
 
-  // Collect active tasks
+  // Collect active tasks: group by priority for order-invariant behavior.
   std::vector<Eigen::VectorXd> goals;
   std::vector<Eigen::MatrixXd> jacobians;
+  std::unordered_set<int> excluded_union;
+
+  int current_priority = std::numeric_limits<int>::min();
+  std::vector<Eigen::VectorXd> group_goals;
+  std::vector<Eigen::MatrixXd> group_jacobians;
+  group_goals.reserve(tasks_.size());
+  group_jacobians.reserve(tasks_.size());
+
+  auto flush_group = [&]() {
+    if (group_goals.empty()) {
+      return;
+    }
+    int total_rows = 0;
+    for (const auto &g : group_goals) {
+      total_rows += static_cast<int>(g.rows());
+    }
+    Eigen::VectorXd combined_goal(total_rows);
+    Eigen::MatrixXd combined_jac(total_rows, robot_->nv());
+    combined_goal.setZero();
+    combined_jac.setZero();
+    int offset = 0;
+    for (size_t i = 0; i < group_goals.size(); ++i) {
+      const auto &g = group_goals[i];
+      const auto &J = group_jacobians[i];
+      if (g.rows() > 0) {
+        combined_goal.segment(offset, g.rows()) = g;
+        combined_jac.block(offset, 0, J.rows(), robot_->nv()) = J;
+        offset += static_cast<int>(g.rows());
+      }
+    }
+    goals.push_back(std::move(combined_goal));
+    jacobians.push_back(std::move(combined_jac));
+    group_goals.clear();
+    group_jacobians.clear();
+  };
 
   for (const auto &task : tasks_) {
-    if (!task->isActive())
+    if (!task->isActive()) {
       continue;
-
-    goals.push_back(task->getVelocity());
-    jacobians.push_back(task->getJacobian());
+    }
+    for (int idx : task->get_excluded_joint_indices()) {
+      if (idx >= 0 && idx < robot_->nv()) {
+        excluded_union.insert(idx);
+      }
+    }
+    const int prio = task->getPriority();
+    if (group_goals.empty()) {
+      current_priority = prio;
+    } else if (prio != current_priority) {
+      flush_group();
+      current_priority = prio;
+    }
+    group_goals.push_back(task->getVelocity());
+    group_jacobians.push_back(task->getJacobian());
   }
+  flush_group();
 
   // If no active tasks, return early
   if (goals.empty()) {
@@ -656,11 +846,11 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
     result.solution.resize(robot_->nv(), 0.0);
     result.joint_velocities = Eigen::VectorXd::Zero(robot_->nv());
     result.limits_applied = false;
+    last_solution_dq_norm_ = 0.0;
     return result;
   }
 
   // Collision constraints are expensive when collision geometry exists.
-  // Only evaluate distances when collision avoidance is actually enabled.
   std::optional<CollisionConstraintResult> collision_constraint_result =
       std::nullopt;
   if (collision_constraint_.has_value() && collision_constraint_->enabled) {
@@ -670,6 +860,11 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
       result.collision_constraint_time_ms = get_elapsed_ms(t_collision_start);
     } else {
       collision_constraint_result = compute_collision_constraint();
+    }
+  }
+  if (collision_constraint_result.has_value() && !excluded_union.empty()) {
+    for (int idx : excluded_union) {
+      collision_constraint_result->jacobian.col(idx).setZero();
     }
   }
 
@@ -860,6 +1055,7 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
   if (!result.solution.empty()) {
     result.joint_velocities = Eigen::Map<const Eigen::VectorXd>(
         result.solution.data(), result.solution.size());
+    last_solution_dq_norm_ = result.joint_velocities.norm();
 
     // Identify saturated joints based on constraint bounds
     if (apply_limits && c_lower.size() >= robot_->nv()) {
@@ -878,6 +1074,8 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
         }
       }
     }
+  } else {
+    last_solution_dq_norm_ = 0.0;
   }
 
   return result;
@@ -904,6 +1102,9 @@ PositionIKResult KinematicsSolver::solve_position(
   // Create frame task (using the proper constructor)
   auto frame_task = std::make_shared<FrameTask>(
       "position_ik_task", robot_, frame_name, TaskType::FRAME_POSE);
+  if (!options.excluded_joint_indices.empty()) {
+    frame_task->set_excluded_joint_indices(options.excluded_joint_indices);
+  }
 
   // Create nullspace task if bias is provided
   std::shared_ptr<PostureTask> posture_task = nullptr;
@@ -919,6 +1120,9 @@ PositionIKResult KinematicsSolver::solve_position(
     posture_task->setTargetConfiguration(options.nullspace_bias.value());
     posture_task->setWeight(options.nullspace_gain);
     posture_task->setPriority(1); // Lower priority than main task
+    if (!options.excluded_joint_indices.empty()) {
+      posture_task->set_excluded_joint_indices(options.excluded_joint_indices);
+    }
   }
 
   // Set robot to seed configuration
@@ -1014,10 +1218,35 @@ PositionIKResult KinematicsSolver::solve_position(
       jacobians.push_back(posture_task->getJacobian());
     }
 
-    // Build constraint matrices for velocity limits
-    Eigen::MatrixXd C = Eigen::MatrixXd::Identity(robot_->nv(), robot_->nv());
-    Eigen::VectorXd c_lower = Eigen::VectorXd::Constant(robot_->nv(), -1e10);
-    Eigen::VectorXd c_upper = Eigen::VectorXd::Constant(robot_->nv(), 1e10);
+    // Compute collision constraint if enabled
+    std::optional<CollisionConstraintResult> collision_constraint_result =
+        std::nullopt;
+    if (collision_constraint_.has_value() && collision_constraint_->enabled) {
+      collision_constraint_result = compute_collision_constraint();
+    }
+    if (collision_constraint_result.has_value() &&
+        !options.excluded_joint_indices.empty()) {
+      for (int idx : options.excluded_joint_indices) {
+        if (idx >= 0 && idx < collision_constraint_result->jacobian.cols()) {
+          collision_constraint_result->jacobian.col(idx).setZero();
+        }
+      }
+    }
+
+    // Build constraint matrices for velocity limits + collision
+    int num_constraints = robot_->nv();
+    if (collision_constraint_result.has_value()) {
+      num_constraints +=
+          static_cast<int>(collision_constraint_result->jacobian.rows());
+    }
+
+    Eigen::MatrixXd C = Eigen::MatrixXd::Zero(num_constraints, robot_->nv());
+    Eigen::VectorXd c_lower = Eigen::VectorXd::Constant(num_constraints, -1e10);
+    Eigen::VectorXd c_upper = Eigen::VectorXd::Constant(num_constraints, 1e10);
+
+    // Joint velocity constraints (identity block)
+    C.block(0, 0, robot_->nv(), robot_->nv()) =
+        Eigen::MatrixXd::Identity(robot_->nv(), robot_->nv());
 
     if (use_position_limits_ || use_velocity_limits_) {
       // Apply velocity and position-based limits
@@ -1037,6 +1266,19 @@ PositionIKResult KinematicsSolver::solve_position(
         c_lower[i] = lower_limit;
         c_upper[i] = upper_limit;
       }
+    }
+
+    // Add collision constraint rows if enabled
+    if (collision_constraint_result.has_value()) {
+      int collision_rows =
+          static_cast<int>(collision_constraint_result->jacobian.rows());
+      int constraint_idx = robot_->nv();
+      C.block(constraint_idx, 0, collision_rows, robot_->nv()) =
+          collision_constraint_result->jacobian;
+      c_lower.segment(constraint_idx, collision_rows) =
+          collision_constraint_result->lower_bounds;
+      c_upper.segment(constraint_idx, collision_rows) =
+          collision_constraint_result->upper_bounds;
     }
 
     // Prepare solver configuration

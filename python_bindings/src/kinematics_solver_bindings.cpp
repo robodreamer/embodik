@@ -169,7 +169,7 @@ void bind_kinematics_solver(nb::module_ &m) {
               std::vector<std::pair<std::string, std::string>>{},
           nb::arg("exclude_pairs") =
               std::vector<std::pair<std::string, std::string>>{},
-          nb::arg("nearest_points_all_pairs") = false,
+          nb::arg("nearest_points_all_pairs") = true,
           "Enable collision avoidance with optional include/exclude geometry "
           "pair filters.")
 
