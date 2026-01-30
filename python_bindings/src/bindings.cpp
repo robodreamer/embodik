@@ -77,16 +77,17 @@ NB_MODULE(_embodik_impl, m) {
       m, "VelocitySolverResult", "Extended result for velocity-level solving")
       .def_ro("saturated_joints", &eik::VelocitySolverResult::saturated_joints)
       .def_ro("limits_applied", &eik::VelocitySolverResult::limits_applied)
-      .def_prop_ro("joint_velocities", [](const eik::VelocitySolverResult &r) {
-        return r.joint_velocities;
-      })
+      .def_prop_ro(
+          "joint_velocities",
+          [](const eik::VelocitySolverResult &r) { return r.joint_velocities; })
       .def_ro("pinocchio_kinematics_time_ms",
               &eik::VelocitySolverResult::pinocchio_kinematics_time_ms,
               "Time spent in Pinocchio forward kinematics (ms)")
       .def_ro("collision_constraint_time_ms",
               &eik::VelocitySolverResult::collision_constraint_time_ms,
               "Time spent evaluating collision distances/constraints (ms)")
-      .def_ro("task_update_time_ms", &eik::VelocitySolverResult::task_update_time_ms,
+      .def_ro("task_update_time_ms",
+              &eik::VelocitySolverResult::task_update_time_ms,
               "Time spent updating tasks (Jacobian computation) (ms)")
       .def_ro("solver_computation_time_ms",
               &eik::VelocitySolverResult::solver_computation_time_ms,
@@ -132,6 +133,9 @@ NB_MODULE(_embodik_impl, m) {
           "nullspace_active_joints",
           &eik::PositionIKOptions::nullspace_active_joints,
           "List of joint indices for nullspace control (empty = all joints)")
+      .def_rw("excluded_joint_indices",
+              &eik::PositionIKOptions::excluded_joint_indices,
+              "Joint indices to exclude from position IK updates")
       .def_rw("max_linear_step", &eik::PositionIKOptions::max_linear_step,
               "Maximum linear step per iteration (meters)")
       .def_rw("max_angular_step", &eik::PositionIKOptions::max_angular_step,
@@ -191,7 +195,7 @@ NB_MODULE(_embodik_impl, m) {
           )pbdoc");
 
   // Module metadata
-  m.attr("__version__") = "0.1.0";
+  m.attr("__version__") = "0.2.0";
   m.attr("DEFAULT_REGULARIZATION") = eik::BasicSolverConfig{}.regularization;
 
   // Bind robot model with Pinocchio integration

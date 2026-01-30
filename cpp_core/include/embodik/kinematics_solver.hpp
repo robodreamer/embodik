@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <embodik/robot_model.hpp>
 #include <embodik/tasks.hpp>
 #include <embodik/types.hpp>
@@ -214,8 +215,8 @@ public:
    * @param include_pairs Optional list of geometry/frame name pairs to consider
    * (empty = all pairs).
    * @param exclude_pairs Optional list of geometry/frame name pairs to ignore.
-   * @param nearest_points_all_pairs If false, nearest points will be computed only
-   *        for the selected closest pair (constraint/debug) instead of for every
+   * @param nearest_points_all_pairs If false, nearest points will be computed
+   * only for the selected closest pair (constraint/debug) instead of for every
    *        evaluated pair.
    */
   void configure_collision_constraint(
@@ -224,7 +225,7 @@ public:
           {},
       const std::vector<std::pair<std::string, std::string>> &exclude_pairs =
           {},
-      bool nearest_points_all_pairs = false);
+      bool nearest_points_all_pairs = true);
 
   /**
    * @brief Convenience helper for specifying a list of collision pairs to
@@ -257,17 +258,20 @@ public:
   }
 
   /**
-   * @brief Evaluate collisions at the provided configuration and return debug info.
+   * @brief Evaluate collisions at the provided configuration and return debug
+   * info.
    *
    * This runs collision distance computation (respecting active pair masks /
-   * include-exclude filtering) and returns the closest-pair debug info. Intended
-   * for validating final solutions (e.g., reachability sweeps) where "SUCCESS"
-   * from IK should still be rejected if it ends inside the collision threshold.
+   * include-exclude filtering) and returns the closest-pair debug info.
+   * Intended for validating final solutions (e.g., reachability sweeps) where
+   * "SUCCESS" from IK should still be rejected if it ends inside the collision
+   * threshold.
    *
-   * @param current_q Optional configuration to evaluate (empty => current robot configuration).
+   * @param current_q Optional configuration to evaluate (empty => current robot
+   * configuration).
    */
-  std::optional<CollisionDebugInfo>
-  evaluate_collision_debug(const Eigen::VectorXd &current_q = Eigen::VectorXd());
+  std::optional<CollisionDebugInfo> evaluate_collision_debug(
+      const Eigen::VectorXd &current_q = Eigen::VectorXd());
 
   /**
    * @brief Retrieve the list of currently active collision pairs (after
@@ -312,7 +316,7 @@ private:
     double min_distance = 0.05;
     double upper_distance = 10.0;
     double tolerance = 1e-4;
-    bool nearest_points_all_pairs = false;
+    bool nearest_points_all_pairs = true;
     std::unordered_set<std::string> include_pairs;
     std::unordered_set<std::string> exclude_pairs;
   };
@@ -330,7 +334,15 @@ private:
 
   std::optional<CollisionConstraintConfig> collision_constraint_;
   std::optional<CollisionDebugInfo> last_collision_debug_;
+  // Cached allow-mask aligned with Pinocchio's collisionPairs indices.
+  std::vector<std::uint8_t> collision_allowed_pair_mask_;
   std::optional<std::size_t> last_collision_constraint_pair_index_;
+  // Track solver stagnation near collision boundary for stronger recovery.
+  double last_solution_dq_norm_ = 0.0;
+  int collision_stuck_counter_ = 0;
+  std::optional<std::size_t> collision_stuck_pair_index_;
+  double collision_stuck_last_distance_ =
+      std::numeric_limits<double>::infinity();
 
   std::string canonical_pair_key(const std::string &a,
                                  const std::string &b) const;

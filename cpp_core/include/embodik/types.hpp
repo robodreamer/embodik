@@ -64,11 +64,12 @@ struct VelocitySolverResult : public SolverResult {
       joint_velocities; // Convenience access to solution as VectorXd
 
   // Performance breakdown (for debugging)
-  double pinocchio_kinematics_time_ms = 0.0;  // Forward kinematics time
-  double collision_constraint_time_ms = 0.0;  // Collision distance/constraint time
-  double task_update_time_ms = 0.0;            // Task update (Jacobian) time
-  double solver_computation_time_ms = 0.0;     // Actual solver time (from backend)
-  double constraint_setup_time_ms = 0.0;       // Constraint matrix setup time
+  double pinocchio_kinematics_time_ms = 0.0; // Forward kinematics time
+  double collision_constraint_time_ms =
+      0.0;                                 // Collision distance/constraint time
+  double task_update_time_ms = 0.0;        // Task update (Jacobian) time
+  double solver_computation_time_ms = 0.0; // Actual solver time (from backend)
+  double constraint_setup_time_ms = 0.0;   // Constraint matrix setup time
 };
 
 // Configuration for regularized matrix inversion
@@ -106,6 +107,9 @@ struct PositionIKOptions {
   // Step size limits (for stability)
   double max_linear_step = 0.3;  // Max meters per iteration
   double max_angular_step = 0.3; // Max radians per iteration
+
+  // Optional joint exclusions (e.g., lock torso joints in position IK).
+  std::vector<int> excluded_joint_indices;
 };
 
 // Position IK result
