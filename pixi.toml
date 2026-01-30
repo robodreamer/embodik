@@ -35,6 +35,8 @@ robot_descriptions = ">=1.0.0"
 scipy = ">=1.11.0"
 # YAML parsing for robot presets
 pyyaml = ">=6.0"
+# Xvisio SDK for Seer controller support in teleop examples
+xvisio = ">=0.3.1"
 # Publishing tools
 build = ">=1.0.0"
 twine = ">=5.0.0"
