@@ -490,6 +490,86 @@ class TestCasADiSymbolic:
             assert fn.n_in() == 5
             assert fn.n_out() == 2
 
+    def test_casadi_single_task_matches_cpu(self):
+        """CasADi single-task solver (Python eval) matches CPU when no constraint saturation.
+
+        Scale computation uses unscaled trial and magnitude check (matching C++).
+        When the CPU saturates constraints (augmented projector), we only scale;
+        velocity can differ so we use a relaxed tolerance for random problems.
+        """
+        try:
+            import embodik as eik
+            from embodik.gpu.casadi_velocity_solve import build_velocity_solve_single_task
+        except ImportError as e:
+            pytest.skip(f"embodik or CasADi not available: {e}")
+
+        n_dof = 7
+        task_dim = 6
+        n_constraints = 7
+        fn = build_velocity_solve_single_task(
+            n_dof=n_dof,
+            task_dim=task_dim,
+            n_constraints=n_constraints,
+            n_iterations=15,
+        )
+
+        rng = np.random.default_rng(42)
+        n_samples = 10
+        max_vel_err = 0.0
+        max_scale_err = 0.0
+
+        for _ in range(n_samples):
+            target = rng.uniform(-0.5, 0.5, task_dim).astype(np.float64)
+            J = rng.uniform(-1.0, 1.0, (task_dim, n_dof)).astype(np.float64)
+            C = np.eye(n_dof, dtype=np.float64)
+            lower = np.full(n_dof, -1.0, dtype=np.float64)
+            upper = np.full(n_dof, 1.0, dtype=np.float64)
+
+            # CPU
+            cpu_result = eik.computeMultiObjectiveVelocitySolutionEigen(
+                [target], [np.asfortranarray(J)], C, lower, upper
+            )
+            cpu_vel = np.array(cpu_result.solution, dtype=np.float64).ravel()
+            cpu_scales = np.array(cpu_result.task_scales, dtype=np.float64).ravel()
+
+            # CasADi (same logic as GPU kernel, Python evaluation). Row-major jac_flat.
+            jac_flat = J.flatten()
+            vel_casadi, scales_casadi = fn(target, jac_flat, C, lower, upper)
+            vel_casadi = np.array(vel_casadi).flatten()
+            scales_casadi = np.array(scales_casadi).flatten()
+
+            err_vel = np.max(np.abs(cpu_vel - vel_casadi))
+            err_scale = np.max(np.abs(cpu_scales - scales_casadi))
+            max_vel_err = max(max_vel_err, err_vel)
+            max_scale_err = max(max_scale_err, err_scale)
+
+        # When CPU saturates constraints (augmented projector) we only scale, so allow some gap.
+        CASADI_VS_CPU_VEL_ATOL = 0.5
+        CASADI_VS_CPU_SCALE_ATOL = 0.5
+        assert max_vel_err < CASADI_VS_CPU_VEL_ATOL, (
+            f"CasADi velocity vs CPU max error {max_vel_err} >= {CASADI_VS_CPU_VEL_ATOL}"
+        )
+        assert max_scale_err < CASADI_VS_CPU_SCALE_ATOL, (
+            f"CasADi scales vs CPU max error {max_scale_err} >= {CASADI_VS_CPU_SCALE_ATOL}"
+        )
+
+        # No-saturation case: must match CPU within tight tolerance (solution quality).
+        lower_loose = np.full(n_dof, -10.0, dtype=np.float64)
+        upper_loose = np.full(n_dof, 10.0, dtype=np.float64)
+        target = rng.uniform(-0.5, 0.5, task_dim).astype(np.float64)
+        J = rng.uniform(-1.0, 1.0, (task_dim, n_dof)).astype(np.float64)
+        cpu_loose = eik.computeMultiObjectiveVelocitySolutionEigen(
+            [target], [np.asfortranarray(J)], C, lower_loose, upper_loose
+        )
+        vel_casadi_loose, scales_casadi_loose = fn(target, J.flatten(), C, lower_loose, upper_loose)
+        vel_casadi_loose = np.array(vel_casadi_loose).flatten()
+        np.testing.assert_allclose(
+            np.array(cpu_loose.solution).ravel(),
+            vel_casadi_loose,
+            atol=SIMPLE_ATOL,
+            err_msg="CasADi must match CPU when no saturation (loose bounds)",
+        )
+
 
 # =============================================================================
 # Test runner
