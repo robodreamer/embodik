@@ -50,6 +50,16 @@ examples = [
     "viser>=0.1.0",
     "yourdfpy>=0.0.52",
 ]
+# GPU acceleration via CusADi (requires CUDA + manual cusadi installation)
+gpu = [
+    "casadi>=3.6.0",
+    "torch>=2.0.0",
+    # Note: cusadi must be installed manually from https://github.com/se-hwan/cusadi
+]
+# GPU collision detection via NVIDIA Warp
+gpu-collision = [
+    "warp-lang>=1.0.0",
+]
 dev = ["pytest>=7.0", "pytest-cov>=4.0", "black>=24.0", "isort>=5.13.0"]
 
 [project.urls]

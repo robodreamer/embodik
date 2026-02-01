@@ -32,6 +32,9 @@
 
 #include <embodik/robot_model.hpp>
 
+// Coal geometry types for collision info extraction
+#include <coal/shape/geometric_shapes.h>
+
 namespace nb = nanobind;
 using namespace embodik;
 
@@ -195,6 +198,99 @@ void bind_robot_model(nb::module_ &m) {
 
       .def("get_collision_pair_names", &RobotModel::get_collision_pair_names,
            "Return the list of collision pairs as name tuples")
+
+      .def("has_collision_geometry", &RobotModel::has_collision_geometry,
+           "Check if collision geometry is available")
+
+      // Get collision geometry info as Python-friendly dicts
+      .def(
+          "get_collision_geometries",
+          [](const RobotModel &self) {
+            std::vector<nb::dict> geometries;
+            if (!self.collision_model()) {
+              return geometries;
+            }
+            const auto &geom_model = *self.collision_model();
+            for (size_t i = 0; i < geom_model.geometryObjects.size(); ++i) {
+              const auto &geom = geom_model.geometryObjects[i];
+              nb::dict d;
+              d["name"] = geom.name;
+              d["parent_frame"] = self.model().frames[geom.parentFrame].name;
+              d["parent_joint"] = geom.parentJoint;
+              // Placement as translation + rotation
+              d["placement_translation"] =
+                  Eigen::Vector3d(geom.placement.translation());
+              d["placement_rotation"] =
+                  Eigen::Matrix3d(geom.placement.rotation());
+              // Geometry type and parameters
+              std::string geom_type = "unknown";
+              nb::dict params;
+              if (geom.geometry) {
+                auto type = geom.geometry->getNodeType();
+                switch (type) {
+                case coal::GEOM_BOX: {
+                  geom_type = "box";
+                  auto box =
+                      std::dynamic_pointer_cast<coal::Box>(geom.geometry);
+                  if (box) {
+                    params["half_extents"] = Eigen::Vector3d(
+                        box->halfSide[0], box->halfSide[1], box->halfSide[2]);
+                  }
+                  break;
+                }
+                case coal::GEOM_SPHERE: {
+                  geom_type = "sphere";
+                  auto sphere =
+                      std::dynamic_pointer_cast<coal::Sphere>(geom.geometry);
+                  if (sphere) {
+                    params["radius"] = sphere->radius;
+                  }
+                  break;
+                }
+                case coal::GEOM_CYLINDER: {
+                  geom_type = "cylinder";
+                  auto cyl =
+                      std::dynamic_pointer_cast<coal::Cylinder>(geom.geometry);
+                  if (cyl) {
+                    params["radius"] = cyl->radius;
+                    params["half_length"] = cyl->halfLength;
+                  }
+                  break;
+                }
+                case coal::GEOM_CAPSULE: {
+                  geom_type = "capsule";
+                  auto cap =
+                      std::dynamic_pointer_cast<coal::Capsule>(geom.geometry);
+                  if (cap) {
+                    params["radius"] = cap->radius;
+                    params["half_length"] = cap->halfLength;
+                  }
+                  break;
+                }
+                case coal::GEOM_CONVEX:
+                case coal::BV_AABB:
+                case coal::BV_OBB:
+                case coal::BV_RSS:
+                case coal::BV_kIOS:
+                case coal::BV_OBBRSS:
+                case coal::BV_KDOP16:
+                case coal::BV_KDOP18:
+                case coal::BV_KDOP24:
+                  geom_type = "convex";
+                  break;
+                default:
+                  geom_type = "mesh";
+                  break;
+                }
+              }
+              d["geometry_type"] = geom_type;
+              d["params"] = params;
+              geometries.push_back(d);
+            }
+            return geometries;
+          },
+          "Get collision geometries as list of dicts with name, parent_frame, "
+          "placement, geometry_type, and params")
 
       .def("apply_collision_exclusions",
            &RobotModel::apply_collision_exclusions, nb::arg("collision_pairs"),
