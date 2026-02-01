@@ -1,129 +1,36 @@
 """
-CasADi symbolic implementation of hierarchical velocity IK solver.
+CasADi symbolic implementation of velocity IK solver.
 
-This module builds a CasADi Function that implements a fixed-iteration
-approximation of EmbodiK's hierarchical null-space projection solver.
+This module builds a CasADi Function that closely matches the C++ eSNS
+algorithm using components from casadi_components: regularized inverse,
+feasible scale computation, and single-objective step. Fixed N iterations
+approximate the while-loop for constraint satisfaction.
 
-The C++ solver uses while-loops with data-dependent saturation. CasADi
-requires fixed iteration counts, so we unroll N iterations with soft
-saturation approximations.
+For GPU acceleration, use CusADi to compile to CUDA kernels.
 """
 
 from __future__ import annotations
 
-from typing import Optional, Tuple
+from typing import Optional
 
 try:
     import casadi as ca
 except ImportError:
     ca = None
 
+from embodik.gpu.casadi_components import (
+    compute_regularized_inverse,
+    compute_feasible_velocity_scale,
+    compute_single_objective_step,
+    compute_augmented_projector,
+    compute_single_objective_step_with_saturation,
+    DEFAULT_EPSILON,
+    DEFAULT_REGULARIZATION_FACTOR,
+    DEFAULT_MAGNITUDE_LIMIT,
+)
 
-def _regularized_inverse(
-    J: "ca.SX",
-    P: "ca.SX",
-    epsilon: float = 1e-6,
-    damping: float = 1e-6,
-) -> "ca.SX":
-    """
-    Compute regularized pseudo-inverse of J @ P.
-    
-    Uses damped least squares: (J P)^+ = (J P)^T @ inv((J P)(J P)^T + lambda*I)
-    
-    Args:
-        J: Task Jacobian (m x n)
-        P: Null-space projector (n x n)
-        epsilon: Threshold for singular value damping
-        damping: Damping factor for regularization
-        
-    Returns:
-        Regularized pseudo-inverse (n x m)
-    """
-    JP = J @ P
-    m = JP.shape[0]
-    
-    # Gram matrix
-    gram = JP @ JP.T
-    
-    # Add damping for regularization
-    gram_reg = gram + damping * ca.SX.eye(m)
-    
-    # Pseudo-inverse via regularized Gram
-    return JP.T @ ca.inv(gram_reg)
-
-
-def _compute_feasible_scale(
-    constraint_eval: "ca.SX",
-    contribution: "ca.SX", 
-    lower: "ca.SX",
-    upper: "ca.SX",
-    epsilon: float = 1e-10,
-) -> "ca.SX":
-    """
-    Compute feasible scaling factor for velocity contribution.
-    
-    For each constraint i, find the maximum scale s in [0, 1] such that:
-        lower[i] <= constraint_eval[i] + s * contribution[i] <= upper[i]
-    
-    Uses soft min/max to make it differentiable.
-    
-    Args:
-        constraint_eval: Current constraint values (k,)
-        contribution: Velocity contribution to constraints (k,)
-        lower: Lower bounds (k,)
-        upper: Upper bounds (k,)
-        epsilon: Small value to avoid division by zero
-        
-    Returns:
-        Feasible scale in [0, 1]
-    """
-    k = constraint_eval.shape[0]
-    
-    # For each constraint, compute the scale that would hit the bound
-    # scale = (bound - current) / contribution
-    
-    # Initialize with 1.0 (full scale)
-    scale = ca.SX.ones(1)
-    
-    for i in range(k):
-        c = contribution[i]
-        current = constraint_eval[i]
-        lb = lower[i]
-        ub = upper[i]
-        
-        # Compute scale for lower bound violation
-        # If c < 0 and current + s*c < lb, then s < (lb - current) / c
-        margin_lower = lb - current
-        scale_lower = ca.if_else(
-            ca.fabs(c) > epsilon,
-            ca.if_else(c < 0, margin_lower / c, 1.0),
-            1.0
-        )
-        
-        # Compute scale for upper bound violation
-        # If c > 0 and current + s*c > ub, then s < (ub - current) / c
-        margin_upper = ub - current
-        scale_upper = ca.if_else(
-            ca.fabs(c) > epsilon,
-            ca.if_else(c > 0, margin_upper / c, 1.0),
-            1.0
-        )
-        
-        # Take minimum of both
-        scale_i = ca.fmin(scale_lower, scale_upper)
-        
-        # Clamp to [0, 1]
-        scale_i = ca.fmax(0.0, ca.fmin(1.0, scale_i))
-        
-        # Take minimum across all constraints
-        scale = ca.fmin(scale, scale_i)
-    
-    return scale
-
-
-def _soft_clamp(x: "ca.SX", lower: "ca.SX", upper: "ca.SX") -> "ca.SX":
-    """Soft clamp using fmin/fmax."""
-    return ca.fmax(lower, ca.fmin(upper, x))
+# Fixed iterations for saturation loop (CasADi requires fixed structure)
+N_SATURATION_ITERATIONS = 15
 
 
 def build_velocity_solve_casadi(
@@ -131,163 +38,156 @@ def build_velocity_solve_casadi(
     n_tasks: int,
     task_dims: list[int],
     n_constraints: int,
-    n_iterations: int = 10,
-    epsilon: float = 1e-6,
-    damping: float = 1e-6,
+    epsilon: float = DEFAULT_EPSILON,
+    regularization_factor: float = DEFAULT_REGULARIZATION_FACTOR,
+    magnitude_limit: float = DEFAULT_MAGNITUDE_LIMIT,
+    n_iterations: int = N_SATURATION_ITERATIONS,
 ) -> "ca.Function":
     """
-    Build a CasADi Function for hierarchical velocity IK.
-    
-    This implements a fixed-iteration approximation of EmbodiK's
-    null-space projection solver with constraint saturation.
-    
+    Build a CasADi Function for velocity IK matching C++ eSNS structure.
+
+    Uses regularized inverse, feasible scale per constraint, and fixed
+    iterations for constraint satisfaction. Single task: iterative scale
+    refinement. Multi-task: hierarchical null-space projection.
+
     Args:
         n_dof: Number of degrees of freedom (joint velocities)
         n_tasks: Number of hierarchical tasks
-        task_dims: List of task dimensions [m_0, m_1, ..., m_{n_tasks-1}]
-        n_constraints: Number of constraint rows (typically n_dof + additional)
-        n_iterations: Number of saturation iterations per task (default 10)
-        epsilon: Numerical threshold
-        damping: Regularization damping factor
-        
+        task_dims: List of task dimensions [m_0, m_1, ...]
+        n_constraints: Number of constraint rows (typically n_dof)
+        epsilon: Numerical tolerance (matches C++ solver_config.epsilon)
+        regularization_factor: Regularization factor for pseudo-inverse
+        magnitude_limit: Max scaled contribution norm (C++ solver_config.magnitude_limit)
+        n_iterations: Fixed iterations for scale/saturation loop
+
     Returns:
         CasADi Function with signature:
-            inputs: [objective_targets_flat, objective_jacobians_flat, 
-                     constraint_matrix, min_bounds, max_bounds]
-            outputs: [velocity_solution, task_scales]
+            inputs: [targets, jacobians, C, lower, upper]
+            outputs: [velocity, scales]
     """
     if ca is None:
         raise RuntimeError("CasADi is required: pip install casadi")
-    
+
     if len(task_dims) != n_tasks:
         raise ValueError(f"task_dims length {len(task_dims)} != n_tasks {n_tasks}")
-    
+
     total_task_dim = sum(task_dims)
-    
-    # Define symbolic inputs
-    # Flattened objective targets: [m_0 + m_1 + ... + m_{n_tasks-1}]
-    objective_targets_flat = ca.SX.sym("objective_targets", total_task_dim)
-    
-    # Flattened Jacobians: [m_0*n_dof + m_1*n_dof + ...]
     total_jacobian_size = sum(d * n_dof for d in task_dims)
-    objective_jacobians_flat = ca.SX.sym("jacobians", total_jacobian_size)
-    
-    # Constraint matrix: (n_constraints x n_dof)
-    constraint_matrix = ca.SX.sym("C", n_constraints, n_dof)
-    
-    # Bounds
-    min_bounds = ca.SX.sym("min_bounds", n_constraints)
-    max_bounds = ca.SX.sym("max_bounds", n_constraints)
-    
-    # Initialize solution
+
+    # Symbolic inputs
+    targets = ca.SX.sym("targets", total_task_dim)
+    jacobians_flat = ca.SX.sym("jacobians", total_jacobian_size)
+    C = ca.SX.sym("C", n_constraints, n_dof)
+    lower = ca.SX.sym("lower", n_constraints)
+    upper = ca.SX.sym("upper", n_constraints)
+
     dq = ca.SX.zeros(n_dof)
-    
-    # Initialize null-space projector as identity
     P = ca.SX.eye(n_dof)
-    
-    # Task scales output
     task_scales = ca.SX.zeros(n_tasks)
-    
-    # Extract individual task targets and Jacobians
+
     target_offset = 0
     jacobian_offset = 0
-    
+
     for task_idx in range(n_tasks):
         task_dim = task_dims[task_idx]
-        
-        # Extract target for this task
-        target = objective_targets_flat[target_offset:target_offset + task_dim]
+        target = targets[target_offset:target_offset + task_dim]
         target_offset += task_dim
-        
-        # Extract and reshape Jacobian for this task
         jac_size = task_dim * n_dof
-        jacobian_flat = objective_jacobians_flat[jacobian_offset:jacobian_offset + jac_size]
+        jac_flat = jacobians_flat[jacobian_offset:jacobian_offset + jac_size]
         jacobian_offset += jac_size
-        J = ca.reshape(jacobian_flat, task_dim, n_dof)
-        
-        # Store previous state for saturation loop
-        dq_prev = dq
-        P_constrained = P
-        
-        # Saturation iteration loop (fixed iterations)
-        scale = ca.SX.ones(1)
-        
-        for _ in range(n_iterations):
-            # Compute regularized inverse in constrained null-space
-            J_pinv = _regularized_inverse(J, P_constrained, epsilon, damping)
-            
-            # Compute velocity contribution
-            residual = target - J @ dq_prev
-            delta_dq = J_pinv @ residual
-            
-            # Trial solution
-            dq_trial = dq_prev + scale * delta_dq
-            
-            # Check constraint satisfaction
-            constraint_eval = constraint_matrix @ dq_trial
-            
-            # Compute contribution to constraints from this velocity
-            contribution = constraint_matrix @ delta_dq
-            
-            # Compute feasible scale
-            new_scale = _compute_feasible_scale(
-                constraint_matrix @ dq_prev,
-                contribution,
-                min_bounds,
-                max_bounds,
-                epsilon
-            )
-            
-            # Update scale (take minimum)
-            scale = ca.fmin(scale, new_scale)
-            
-            # Soft clamp scale to [0, 1]
-            scale = ca.fmax(0.0, ca.fmin(1.0, scale))
-        
-        # Apply scaled velocity
-        J_pinv = _regularized_inverse(J, P, epsilon, damping)
-        dq = dq_prev + scale * (J_pinv @ (target - J @ dq_prev))
-        
-        # Store task scale
-        task_scales[task_idx] = scale
-        
-        # Update null-space projector for next task
-        # P_new = P - J_pinv @ J @ P
+        # Row-major flat: flat[i*n_dof + j] = J[i,j]. CasADi reshape is column-major,
+        # so reshape(n_dof, task_dim).T gives (task_dim, n_dof) with (i,j) = flat[i*n_dof + j].
+        J = ca.reshape(jac_flat, n_dof, task_dim).T
+
+        # Projected Jacobian and its regularized inverse (matches C++)
         JP = J @ P
-        JP_pinv = _regularized_inverse(J, P, epsilon, damping)
-        P = P - JP_pinv @ JP
-        
-        # Threshold small values to zero
-        P = ca.if_else(ca.fabs(P) < epsilon, 0.0, P)
-    
-    # Final constraint clamping (soft)
-    final_eval = constraint_matrix @ dq
-    for i in range(n_constraints):
-        violation_lower = min_bounds[i] - final_eval[i]
-        violation_upper = final_eval[i] - max_bounds[i]
-        
-        # If violated, scale down proportionally
-        max_violation = ca.fmax(violation_lower, violation_upper)
-        correction_needed = ca.fmax(0.0, max_violation)
-        
-        # Apply soft correction (reduce velocity magnitude)
-        correction_factor = ca.if_else(
-            correction_needed > epsilon,
-            1.0 / (1.0 + correction_needed),
-            1.0
+        J_pinv = compute_regularized_inverse(
+            JP, epsilon=epsilon, regularization_factor=regularization_factor
         )
-        dq = dq * correction_factor
-    
-    # Build CasADi Function
+
+        # Saturation loop: fixed N iterations (C++ while loop) with augmented projector
+        scale = ca.SX.ones(1)
+        sat_diag = ca.SX.zeros(n_constraints)
+        sat_vals = ca.SX.zeros(n_constraints)
+        dq_task = dq  # Solution after previous tasks
+
+        for _ in range(n_iterations):
+            # C_sat = diag(sat_diag) @ C (C++ saturated_constraint_matrix)
+            C_sat = ca.diag(sat_diag) @ C
+            P_aug = compute_augmented_projector(
+                J_pinv, J, C_sat, P, epsilon=epsilon
+            )
+            # Unscaled trial (scale=1) with saturation correction (C++ lines 425-431)
+            dq_trial = compute_single_objective_step_with_saturation(
+                dq_task, J, P, target, ca.SX.ones(1),
+                J_pinv, P_aug, sat_vals, C_sat,
+            )
+            # Constraint evaluation and contribution decomposition (C++ lines 434-447)
+            constraint_eval = C @ dq_trial
+            scaled_contribution = C @ J_pinv @ target
+            unscaled_contribution = constraint_eval - scaled_contribution
+            contribution_magnitude = ca.norm_2(scaled_contribution)
+            scale_from_constraints = compute_feasible_velocity_scale(
+                scaled_contribution,
+                unscaled_contribution,
+                lower,
+                upper,
+                sat_diag,
+                n_constraints,
+            )
+            scale = ca.if_else(
+                contribution_magnitude < epsilon,
+                1.0,
+                ca.if_else(
+                    contribution_magnitude > magnitude_limit,
+                    0.0,
+                    scale_from_constraints,
+                ),
+            )
+            # Scaled solution with saturation correction (C++ lines 496-499)
+            dq_task = compute_single_objective_step_with_saturation(
+                dq_task, J, P, target, scale,
+                J_pinv, P_aug, sat_vals, C_sat,
+            )
+            # Violations on scaled solution (C++ lines 493-516)
+            constraint_eval_scaled = C @ dq_task
+            # Update saturation: when scale==1, saturate all violating constraints
+            sat_diag_next = ca.SX.zeros(n_constraints)
+            sat_vals_next = ca.SX.zeros(n_constraints)
+            for i in range(n_constraints):
+                violated = ca.if_else(
+                    (constraint_eval_scaled[i] < lower[i] - epsilon)
+                    + (constraint_eval_scaled[i] > upper[i] + epsilon)
+                    > 0,
+                    1.0,
+                    0.0,
+                )
+                add_sat = ca.fmax(sat_diag[i], violated * ca.if_else(scale > 0.99, 1.0, 0.0))
+                sat_diag_next[i] = add_sat
+                sat_vals_next[i] = ca.if_else(
+                    add_sat > 0.5,
+                    ca.fmin(ca.fmax(constraint_eval_scaled[i], lower[i]), upper[i]),
+                    sat_vals[i],
+                )
+            sat_diag = sat_diag_next
+            sat_vals = sat_vals_next
+
+        dq = dq_task
+        task_scales[task_idx] = scale
+
+        # Update null-space projector for next task (C++ lines 651-656)
+        # N = N_prev - (J@N_prev)^# @ (J @ N_prev)
+        P = P - J_pinv @ JP
+        # Threshold small values
+        P = ca.if_else(ca.fabs(P) < epsilon, 0.0, P)
+
     fn = ca.Function(
         "fn_velocity_solve",
-        [objective_targets_flat, objective_jacobians_flat, 
-         constraint_matrix, min_bounds, max_bounds],
+        [targets, jacobians_flat, C, lower, upper],
         [dq, task_scales],
         ["targets", "jacobians", "C", "lower", "upper"],
-        ["velocity", "scales"]
+        ["velocity", "scales"],
     )
-    
     return fn
 
 
@@ -295,23 +195,21 @@ def build_velocity_solve_single_task(
     n_dof: int,
     task_dim: int,
     n_constraints: int,
-    n_iterations: int = 10,
-    epsilon: float = 1e-6,
-    damping: float = 1e-6,
+    epsilon: float = DEFAULT_EPSILON,
+    regularization_factor: float = DEFAULT_REGULARIZATION_FACTOR,
+    n_iterations: int = N_SATURATION_ITERATIONS,
 ) -> "ca.Function":
     """
-    Build a simplified CasADi Function for single-task velocity IK.
-    
-    This is a simpler version for testing and benchmarking with a single task.
-    
+    Build a CasADi Function for single-task velocity IK.
+
     Args:
         n_dof: Number of degrees of freedom
         task_dim: Task dimension (e.g., 6 for SE3 task)
         n_constraints: Number of constraint rows
-        n_iterations: Number of saturation iterations
-        epsilon: Numerical threshold
-        damping: Regularization damping
-        
+        epsilon: Numerical tolerance
+        regularization_factor: Regularization factor
+        n_iterations: Saturation loop iterations
+
     Returns:
         CasADi Function
     """
@@ -320,9 +218,9 @@ def build_velocity_solve_single_task(
         n_tasks=1,
         task_dims=[task_dim],
         n_constraints=n_constraints,
-        n_iterations=n_iterations,
         epsilon=epsilon,
-        damping=damping,
+        regularization_factor=regularization_factor,
+        n_iterations=n_iterations,
     )
 
 
@@ -330,8 +228,8 @@ def build_velocity_solve_single_task(
 ROBOT_CONFIGS = {
     "panda": {
         "n_dof": 7,
-        "default_task_dims": [6],  # Single EE task
-        "n_constraints": 7,  # Joint velocity limits
+        "default_task_dims": [6],
+        "n_constraints": 7,
     },
     "ur5": {
         "n_dof": 6,
@@ -355,28 +253,26 @@ def build_for_robot(
 ) -> "ca.Function":
     """
     Build a CasADi velocity solver for a known robot configuration.
-    
+
     Args:
         robot_name: One of "panda", "ur5", "iiwa14"
         n_tasks: Number of tasks
         task_dims: Task dimensions (uses default if None)
-        extra_constraints: Additional constraint rows beyond joint limits
-        **kwargs: Additional arguments to build_velocity_solve_casadi
-        
+        extra_constraints: Additional constraint rows
+        **kwargs: Passed to build_velocity_solve_casadi
+
     Returns:
         CasADi Function
     """
     if robot_name not in ROBOT_CONFIGS:
         raise ValueError(f"Unknown robot: {robot_name}. Known: {list(ROBOT_CONFIGS.keys())}")
-    
+
     config = ROBOT_CONFIGS[robot_name]
     n_dof = config["n_dof"]
-    
     if task_dims is None:
         task_dims = config["default_task_dims"] * n_tasks
-    
     n_constraints = config["n_constraints"] + extra_constraints
-    
+
     return build_velocity_solve_casadi(
         n_dof=n_dof,
         n_tasks=len(task_dims),

@@ -33,7 +33,7 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
-    
+
     parser.add_argument(
         "--n_dof",
         type=int,
@@ -54,22 +54,16 @@ def main():
         help="Number of constraint rows (default: n_dof)",
     )
     parser.add_argument(
-        "--n_iterations",
-        type=int,
-        default=10,
-        help="Number of saturation iterations (default: 10)",
-    )
-    parser.add_argument(
         "--epsilon",
         type=float,
         default=1e-6,
-        help="Numerical threshold (default: 1e-6)",
+        help="Numerical tolerance (default: 1e-6)",
     )
     parser.add_argument(
-        "--damping",
+        "--regularization_factor",
         type=float,
-        default=1e-6,
-        help="Regularization damping (default: 1e-6)",
+        default=0.1,
+        help="Regularization factor for pseudo-inverse (default: 0.1)",
     )
     parser.add_argument(
         "--out",
@@ -84,20 +78,20 @@ def main():
         choices=["panda", "ur5", "iiwa14"],
         help="Use predefined robot configuration (overrides n_dof, task_dims, n_constraints)",
     )
-    
+
     args = parser.parse_args()
-    
+
     if ca is None:
         print("Error: CasADi is required. Install with: pip install casadi", file=sys.stderr)
         sys.exit(1)
-    
+
     # Import build function
     from embodik.gpu.casadi_velocity_solve import (
         build_velocity_solve_casadi,
         build_for_robot,
         ROBOT_CONFIGS,
     )
-    
+
     # Build the function
     if args.robot:
         print(f"Using predefined robot configuration: {args.robot}")
@@ -105,41 +99,39 @@ def main():
         n_dof = config["n_dof"]
         task_dims = args.task_dims if args.task_dims != [6] else config["default_task_dims"]
         n_constraints = args.n_constraints or config["n_constraints"]
-        
+
         fn = build_velocity_solve_casadi(
             n_dof=n_dof,
             n_tasks=len(task_dims),
             task_dims=task_dims,
             n_constraints=n_constraints,
-            n_iterations=args.n_iterations,
             epsilon=args.epsilon,
-            damping=args.damping,
+            regularization_factor=args.regularization_factor,
         )
     else:
         n_constraints = args.n_constraints or args.n_dof
-        
+
         fn = build_velocity_solve_casadi(
             n_dof=args.n_dof,
             n_tasks=len(args.task_dims),
             task_dims=args.task_dims,
             n_constraints=n_constraints,
-            n_iterations=args.n_iterations,
             epsilon=args.epsilon,
-            damping=args.damping,
+            regularization_factor=args.regularization_factor,
         )
         n_dof = args.n_dof
         task_dims = args.task_dims
-    
+
     # Save the function
     out_path = Path(args.out)
     fn.save(str(out_path))
-    
+
     print(f"Saved CasADi function to: {out_path}")
     print(f"  n_dof: {n_dof}")
     print(f"  task_dims: {task_dims}")
     print(f"  n_tasks: {len(task_dims)}")
     print(f"  n_constraints: {n_constraints}")
-    print(f"  n_iterations: {args.n_iterations}")
+    print(f"  epsilon: {args.epsilon}, regularization_factor: {args.regularization_factor}")
     print()
     print("Next steps:")
     print(f"  1. mv {out_path} cusadi/src/casadi_functions/")
