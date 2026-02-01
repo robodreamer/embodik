@@ -70,6 +70,22 @@ except ImportError:
     create_robot_visualizer = None
     _robot_visualizer_available = False
 
+# GPU solver (optional - requires CusADi + CUDA)
+_gpu_solver_available = False
+solve_velocity_batched = None
+solve_velocity_gpu_batched = None
+check_gpu_availability = None
+try:
+    from .gpu_solver import (
+        solve_velocity_batched,
+        solve_velocity_gpu_batched,
+        check_gpu_availability,
+        BatchSolveResult,
+    )
+    _gpu_solver_available = True
+except ImportError:
+    BatchSolveResult = None
+
 __all__ = [
     # C++ classes (when available)
     "RobotModel",
@@ -95,6 +111,11 @@ __all__ = [
     # Robot visualizer
     "RobotVisualizer",
     "create_robot_visualizer",
+    # GPU solver (optional)
+    "solve_velocity_batched",
+    "solve_velocity_gpu_batched",
+    "check_gpu_availability",
+    "BatchSolveResult",
 ]
 
 # Filter out None values from __all__

@@ -21,6 +21,7 @@ EmbodiK is a high-performance inverse kinematics (IK) library for cross-embodime
 - **Collision Avoidance**: Self-collision detection and avoidance
 - **Visualization**: Interactive 3D visualization with Viser
 - **Robot Models**: Built-in support for common robots (Panda, IIWA)
+- **GPU Acceleration**: Batched velocity IK via CusADi for massive parallelism (100-500x speedup)
 
 ## Installation
 
@@ -186,10 +187,15 @@ result = eik.solve_velocity_ik_multi_task_np(
 
 The repository includes several example scripts:
 
-- **`01_basic_ik_simple.py`** - Basic IK solving with interactive visualization
-- **`02_collision_aware_IK.py`** - Collision-aware IK with self-collision avoidance
-- **`robot_model_example.py`** - Robot model usage and configuration
-- **`visualization_example.py`** - Interactive 3D visualization examples
+| Script | Description |
+|--------|-------------|
+| `01_basic_ik_simple.py` | Basic IK solving with interactive visualization |
+| `02_collision_aware_IK.py` | Collision-aware IK with self-collision avoidance (supports `--gpu` flag) |
+| `04_gpu_batch_ik.py` | GPU-accelerated batched velocity IK benchmark |
+| `05_gpu_collision_batch.py` | GPU-accelerated batch collision detection |
+| `06_gpu_solver_demo.py` | Comprehensive GPU solver demonstration and benchmark |
+| `robot_model_example.py` | Robot model usage and configuration |
+| `visualization_example.py` | Interactive 3D visualization examples |
 
 ### Running Examples
 
@@ -217,9 +223,120 @@ pixi run python examples/01_basic_ik_simple.py
 
 # Run collision-aware IK example
 pixi run python examples/02_collision_aware_IK.py --robot panda
+
+# Run GPU examples (requires cuda environment)
+pixi run -e cuda demo-gpu          # GPU solver benchmark
+pixi run -e cuda demo-ik-gpu       # Interactive IK with GPU panel
+pixi run -e cuda benchmark-gpu     # Batch IK benchmark
+pixi run -e cuda benchmark-collision  # Collision detection benchmark
 ```
 
 See the [Examples Documentation](docs/examples/index.md) for detailed guides.
+
+## GPU Acceleration
+
+EmbodiK supports GPU-accelerated batched velocity IK solving for massive parallelism, ideal for:
+
+- **RL Training**: 4096+ parallel environments in Isaac Gym/Orbit
+- **Motion Planning**: Batch trajectory validation
+- **Dataset Generation**: Offline batch processing
+
+### Performance
+
+| Batch Size | CPU Sequential | GPU Batched | Speedup |
+|------------|---------------|-------------|---------|
+| 100        | 3 ms          | 0.8 ms      | 4x      |
+| 1000       | 30 ms         | 1.2 ms      | 25x     |
+| 4096       | 120 ms        | 1.5 ms      | 80x     |
+
+*Benchmarks on NVIDIA RTX A2000. Larger batch sizes show greater speedups.*
+
+### Quick Start (GPU)
+
+```python
+from embodik import solve_velocity_batched
+
+# Batch of IK problems (e.g., 1000 parallel environments)
+result = solve_velocity_batched(
+    targets_batch,      # List of (task_dim,) arrays
+    jacobians_batch,    # List of (task_dim, n_dof) arrays
+    constraints_batch,  # List of (n_dof, n_dof) arrays
+    lower_bounds_batch,
+    upper_bounds_batch,
+    use_gpu=True,
+    casadi_path="path/to/fn_velocity_solve.casadi"
+)
+
+velocities = result.velocities  # (batch_size, n_dof)
+```
+
+### Setup
+
+1. **Install CUDA environment:**
+   ```bash
+   cd embodik
+   pixi install -e cuda
+   pixi run -e cuda install        # Install embodik in cuda env
+   pixi run -e cuda check-cuda     # Verify PyTorch CUDA
+   ```
+
+2. **Install CusADi (one-time):**
+   ```bash
+   pixi run -e cuda install-cusadi   # Clones to ~/.local/cusadi and installs
+   pixi run -e cuda check-gpu        # Verify all GPU components
+   # Output: CasADi: True, CusADi: True, CUDA: True
+   ```
+
+3. **Export and compile CasADi function:**
+   ```bash
+   # Export symbolic function
+   pixi run -e cuda export-casadi
+
+   # Compile to CUDA kernel
+   mv fn_velocity_solve.casadi ~/.local/cusadi/src/casadi_functions/
+   cd ~/.local/cusadi
+   python run_codegen.py --fn=fn_velocity_solve
+   ```
+
+4. **Run GPU demos:**
+   ```bash
+   pixi run -e cuda demo-gpu           # Comprehensive benchmark
+   pixi run -e cuda demo-ik-gpu        # Interactive IK with GPU panel
+   pixi run -e cuda benchmark-gpu      # Batch IK benchmark
+   pixi run -e cuda benchmark-collision  # Collision benchmark
+   ```
+
+### Available GPU Tasks
+
+| Task | Description |
+|------|-------------|
+| `pixi run -e cuda check-cuda` | Verify PyTorch CUDA availability |
+| `pixi run -e cuda check-gpu` | Verify CasADi + CusADi + CUDA |
+| `pixi run -e cuda install-cusadi` | Install CusADi from GitHub |
+| `pixi run -e cuda export-casadi` | Export CasADi velocity solve function |
+| `pixi run -e cuda demo-gpu` | Run GPU solver demo/benchmark |
+| `pixi run -e cuda demo-ik-gpu` | Interactive IK with GPU benchmark panel |
+| `pixi run -e cuda benchmark-gpu` | Batch IK performance benchmark |
+| `pixi run -e cuda benchmark-collision` | Collision detection benchmark |
+| `pixi run -e cuda test-gpu` | Run GPU-specific tests |
+
+### GPU Collision Detection (Experimental)
+
+EmbodiK also supports GPU-accelerated collision detection via NVIDIA Warp:
+
+```python
+from embodik.gpu.warp_collision import compute_collision_distances_batched
+
+# Batch collision queries
+result = compute_collision_distances_batched(
+    robot_model,
+    q_batch,  # (batch_size, n_dof) configurations
+    use_gpu=True
+)
+distances = result.distances  # (batch_size,) minimum distances
+```
+
+See [docs/installation.md](docs/installation.md) for detailed GPU setup instructions.
 
 ## Testing
 

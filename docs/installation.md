@@ -177,6 +177,169 @@ pip install -e .
 
 ## Optional Dependencies
 
+### GPU Acceleration (CusADi)
+
+EmbodiK supports GPU-accelerated batched velocity IK solving using CusADi. This is useful for:
+- Training RL policies with thousands of parallel environments
+- Batch motion planning and optimization
+- High-throughput inference
+
+**Requirements:**
+- NVIDIA GPU with CUDA support
+- PyTorch with CUDA
+- CasADi
+- CusADi (must be installed manually)
+
+#### Option A: Using Pixi (Recommended)
+
+Pixi manages CUDA-enabled PyTorch automatically:
+
+```bash
+cd embodik
+
+# Step 1: Install the CUDA environment
+pixi install -e cuda
+pixi run -e cuda install        # Install embodik in cuda env
+
+# Step 2: Verify CUDA is available
+pixi run -e cuda check-cuda
+# Output: PyTorch X.Y.Z, CUDA available: True, CUDA version: 12.4
+
+# Step 3: Install CusADi (one-time, clones to ~/.local/cusadi)
+pixi run -e cuda install-cusadi
+
+# Step 4: Verify all GPU components
+pixi run -e cuda check-gpu
+# Output: CasADi: True, CusADi: True, CUDA: True
+
+# Step 5: Export CasADi function
+pixi run -e cuda export-casadi
+
+# Step 6: Compile CUDA kernel
+mv fn_velocity_solve.casadi ~/.local/cusadi/src/casadi_functions/
+cd ~/.local/cusadi
+python run_codegen.py --fn=fn_velocity_solve
+
+# Step 7: Run GPU demos
+pixi run -e cuda demo-gpu           # Comprehensive benchmark
+pixi run -e cuda demo-ik-gpu        # Interactive IK with GPU panel
+pixi run -e cuda benchmark-gpu      # Batch IK benchmark
+```
+
+#### Available GPU Tasks
+
+| Task | Description |
+|------|-------------|
+| `check-cuda` | Verify PyTorch CUDA availability |
+| `check-gpu` | Verify CasADi + CusADi + CUDA |
+| `install-cusadi` | Install CusADi from GitHub to ~/.local/cusadi |
+| `export-casadi` | Export CasADi velocity solve function |
+| `demo-gpu` | Run GPU solver demo/benchmark |
+| `demo-ik-gpu` | Interactive IK with GPU benchmark panel |
+| `benchmark-gpu` | Batch IK performance benchmark |
+| `benchmark-collision` | Collision detection benchmark |
+| `test-gpu` | Run GPU-specific tests |
+
+All GPU tasks should be run with `-e cuda`: `pixi run -e cuda <task>`
+
+<details>
+<summary><strong>Technical notes on pixi + PyTorch CUDA setup</strong></summary>
+
+Getting CUDA-enabled PyTorch to work with pixi requires careful configuration:
+
+**Problem:** By default, pixi's dependency solver picks PyTorch from conda-forge, which is CPU-only.
+
+**Solution:** The `cuda` feature in `pixi.toml` uses:
+1. **Channel priority**: `channels = ["pytorch", "nvidia", "conda-forge"]` with `channel-priority = "strict"`
+2. **Explicit channel specification**: `pytorch = { version = ">=2.0", channel = "pytorch" }`
+3. **Platform-specific**: `pytorch-cuda` only exists for `linux-64`
+4. **Separate solve group**: Avoids conflicts with the default CPU environment
+
+**Verification:**
+```bash
+pixi list -e cuda | grep pytorch
+# Should show: pytorch from pytorch channel (not conda-forge)
+
+pixi run -e cuda python -c "import torch; print(torch.version.cuda)"
+# Should print: 12.4 (not None)
+```
+
+</details>
+
+#### Option B: Using pip
+
+```bash
+# Install GPU dependencies
+pip install "embodik[gpu]"
+
+# Install PyTorch with CUDA
+pip install torch --index-url https://download.pytorch.org/whl/cu121
+
+# Install CusADi
+git clone https://github.com/se-hwan/cusadi
+cd cusadi
+pip install -e .
+
+# Export for 7-DOF robot (e.g., Panda)
+python -m embodik.gpu.export_casadi_velocity_solve --robot panda --out fn_velocity_solve.casadi
+
+# Move to cusadi and compile
+mv fn_velocity_solve.casadi cusadi/src/casadi_functions/
+cd cusadi
+python run_codegen.py --fn=fn_velocity_solve
+```
+
+#### Set environment variable
+
+```bash
+export CUSADI_ROOT=/path/to/cusadi
+```
+
+#### Verify GPU setup
+
+```python
+from embodik.gpu import HAS_CASADI, HAS_CUSADI, HAS_TORCH_CUDA
+print(f"CasADi: {HAS_CASADI}, CusADi: {HAS_CUSADI}, CUDA: {HAS_TORCH_CUDA}")
+# CasADi: True, CusADi: True, CUDA: True
+```
+
+#### Benchmark results (typical, RTX A2000)
+
+| Batch Size | CPU (ms) | GPU (ms) | Speedup |
+|------------|----------|----------|---------|
+| 100        | 3        | 0.8      | 4x      |
+| 1000       | 30       | 1.2      | 25x     |
+| 4096       | 120      | 1.5      | 80x     |
+
+#### Run the demos
+
+```bash
+# Using pixi (recommended)
+pixi run -e cuda demo-gpu              # Comprehensive GPU benchmark
+pixi run -e cuda demo-ik-gpu           # Interactive IK with GPU panel
+pixi run -e cuda benchmark-gpu         # Batch IK benchmark
+pixi run -e cuda benchmark-collision   # Collision detection benchmark
+
+# Or run scripts directly
+python examples/06_gpu_solver_demo.py                    # CPU-only benchmark
+python examples/06_gpu_solver_demo.py --gpu --casadi_path ~/.local/cusadi/src/casadi_functions/fn_velocity_solve.casadi  # GPU benchmark
+python examples/02_collision_aware_IK.py --robot panda --gpu  # Interactive IK with GPU
+```
+
+### GPU Collision Detection (Warp)
+
+For GPU-parallel collision detection using NVIDIA Warp:
+
+```bash
+pip install "embodik[gpu-collision]"
+```
+
+**Example scripts:**
+- `examples/05_gpu_collision_batch.py` - Batch collision detection benchmark
+- Run with: `pixi run -e cuda benchmark-collision`
+
+See the GPU Collision section in the README for more details.
+
 ### Visualization
 
 Install optional visualization dependencies:

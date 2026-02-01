@@ -47,6 +47,9 @@ black = ">=24.0"
 isort = ">=5.13.0"
 mkdocs-material = "*"
 mkdocstrings = { extras = ["python"], version = "*" }
+# GPU acceleration dependencies
+casadi = ">=3.6.0"
+warp-lang = ">=1.0.0"
 
 [tasks]
 # Patch Qhull CMake config before building (workaround for conda-forge qhull package)
@@ -63,6 +66,13 @@ build = { cmd = "pip install --no-build-isolation .", depends-on = [
 ] }
 test = "pytest test/"
 test-verbose = "pytest test/ -v"
+# GPU solver tests (requires CUDA)
+test-gpu = "EMBODIK_GPU_TESTS=1 pytest test/test_gpu_solver.py test/test_gpu_collision.py -v"
+# GPU benchmark
+benchmark-gpu = "python examples/04_gpu_batch_ik.py --batch_sizes 10 100 500 1000"
+benchmark-collision = "python examples/05_gpu_collision_batch.py"
+# Export CasADi function for GPU solver
+export-casadi = "python -m embodik.gpu.export_casadi_velocity_solve --robot panda --out fn_velocity_solve.casadi"
 lint = "black --check python/ test/ && isort --check python/ test/"
 format = "black python/ test/ && isort python/ test/"
 docs-build = "python -W ignore::DeprecationWarning:hppfcl -m mkdocs build"
@@ -86,6 +96,31 @@ pytest-cov = ">=2.0"
 [feature.dev.tasks]
 test-cov = "pytest test/ --cov=embodik --cov-report=term-missing"
 
+# CUDA feature for GPU acceleration
+[feature.cuda]
+# CUDA feature needs pytorch channel first to get CUDA build
+channels = ["pytorch", "nvidia", "conda-forge"]
+channel-priority = "strict"
+
+[feature.cuda.target.linux-64.dependencies]
+# CUDA-enabled PyTorch from pytorch channel (linux only)
+pytorch = { version = ">=2.0", channel = "pytorch" }
+pytorch-cuda = { version = ">=12.1", channel = "pytorch" }
+
+[feature.cuda.tasks]
+# Install CusADi from GitHub (run once)
+install-cusadi = "bash scripts/install_cusadi.sh"
+check-cuda = "python -c \"import torch; print(f'PyTorch {torch.__version__}'); print(f'CUDA available: {torch.cuda.is_available()}'); print(f'CUDA version: {torch.version.cuda}' if torch.cuda.is_available() else 'No CUDA')\""
+check-gpu = "python -c \"from embodik.gpu import HAS_CASADI, HAS_CUSADI, HAS_TORCH_CUDA; print(f'CasADi: {HAS_CASADI}, CusADi: {HAS_CUSADI}, CUDA: {HAS_TORCH_CUDA}')\""
+test-gpu = "EMBODIK_GPU_TESTS=1 pytest test/test_gpu_solver.py test/test_gpu_collision.py -v"
+benchmark-gpu = "python examples/04_gpu_batch_ik.py --batch_sizes 10 100 500 1000"
+benchmark-collision = "python examples/05_gpu_collision_batch.py"
+export-casadi = "python -m embodik.gpu.export_casadi_velocity_solve --robot panda --out fn_velocity_solve.casadi"
+demo-gpu = "python examples/06_gpu_solver_demo.py --batch_sizes 10 100 500 1000 2000"
+demo-ik-gpu = "python examples/02_collision_aware_IK.py --robot panda --gpu"
+
 [environments]
 # Default environment includes dev features for development
-default = { features = ["dev"] }
+default = { features = ["dev"], solve-group = "default" }
+# CUDA environment for GPU acceleration
+cuda = { features = ["dev", "cuda"], solve-group = "cuda" }
