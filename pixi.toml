@@ -68,8 +68,10 @@ test = "pytest test/"
 test-verbose = "pytest test/ -v"
 # GPU solver tests (requires CUDA)
 test-gpu = "EMBODIK_GPU_TESTS=1 pytest test/test_gpu_solver.py test/test_gpu_collision.py -v"
-# GPU benchmark
+# GPU benchmarks
 benchmark-gpu = "python examples/04_gpu_batch_ik.py --batch_sizes 10 100 500 1000"
+benchmark-gpu-batched = "python scripts/benchmark_gpu_batched.py"
+benchmark-fi-pesns = "python scripts/benchmark_fi_pesns.py"
 benchmark-collision = "python examples/05_gpu_collision_batch.py"
 # Export CasADi function for GPU solver
 export-casadi = "python -m embodik.gpu.export_casadi_velocity_solve --robot panda --out fn_velocity_solve.casadi"
