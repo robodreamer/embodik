@@ -89,26 +89,31 @@ def main():
     parser.add_argument(
         "--k_max",
         type=int,
-        default=10,
-        help="Fixed iterations (default: 10)",
+        default=12,
+        help="Fixed iterations (default: 12)",
     )
     parser.add_argument(
         "--mu0",
         type=float,
-        default=1e-2,
-        help="Initial penalty weight (default: 1e-2)",
+        default=1e-3,
+        help="Initial penalty weight (default: 1e-3)",
     )
     parser.add_argument(
         "--gamma",
         type=float,
-        default=2.0,
-        help="Penalty growth factor (default: 2.0)",
+        default=2.5,
+        help="Penalty growth factor (default: 2.5)",
     )
     parser.add_argument(
         "--eta",
         type=float,
         default=0.1,
         help="Penalty gradient step size (default: 0.1)",
+    )
+    parser.add_argument(
+        "--warm-start",
+        action="store_true",
+        help="Enable warm-start input (adds prior_dq input)",
     )
 
     args = parser.parse_args()
@@ -147,6 +152,7 @@ def main():
         mu0=args.mu0,
         gamma=args.gamma,
         eta=args.eta,
+        use_warm_start=args.warm_start,
     )
 
     # Save the function
@@ -160,6 +166,7 @@ def main():
     print(f"  n_constraints: {n_constraints}")
     print(f"  epsilon: {args.epsilon}, damping: {args.damping}")
     print(f"  k_max: {args.k_max}, mu0: {args.mu0}, gamma: {args.gamma}, eta: {args.eta}")
+    print(f"  warm_start: {args.warm_start}")
     print()
     print("Next steps:")
     print(f"  1. mv {out_path} cusadi/src/casadi_functions/")

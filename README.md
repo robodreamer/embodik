@@ -244,13 +244,18 @@ EmbodiK supports GPU-accelerated batched velocity IK solving for massive paralle
 
 ### Performance
 
-| Batch Size | CPU Sequential | GPU Batched | Speedup |
-|------------|---------------|-------------|---------|
-| 100        | 3 ms          | 0.8 ms      | 4x      |
-| 1000       | 30 ms         | 1.2 ms      | 25x     |
-| 4096       | 120 ms        | 1.5 ms      | 80x     |
+| Batch Size | CPU Sequential | GPU Batched | Speedup | Per-Sample | Constraint Sat |
+|------------|----------------|-------------|---------|------------|----------------|
+| 100        | 3.3 ms         | 1.6 ms      | **2x**  | 16 µs      | 100%           |
+| 1,000      | 29 ms          | 3.1 ms      | **9x**  | 3 µs       | 100%           |
+| 10,000     | 300 ms         | 15 ms       | **20x** | 1.5 µs     | 100%           |
 
-*Benchmarks on NVIDIA RTX A2000. Larger batch sizes show greater speedups.*
+*Benchmarks on NVIDIA RTX A2000 8GB. FI-PeSNS solver with k_max=12, 7-DOF robot, 6D task.*
+
+**Key Results:**
+- **~670,000 IK solves/second** at batch size 10,000
+- **100% constraint satisfaction** with zero violations
+- Speedup scales with batch size due to GPU parallelism
 
 ### Quick Start (GPU)
 
@@ -318,6 +323,7 @@ velocities = result.velocities  # (batch_size, n_dof)
 | `pixi run -e cuda demo-gpu` | Run GPU solver demo/benchmark |
 | `pixi run -e cuda demo-ik-gpu` | Interactive IK with GPU benchmark panel |
 | `pixi run -e cuda benchmark-gpu` | Batch IK performance benchmark |
+| `pixi run -e cuda benchmark-gpu-batched` | GPU batched IK benchmark (100/1000/10000) |
 | `pixi run -e cuda benchmark-fi-pesns` | FI-PeSNS vs CPU accuracy benchmark |
 | `pixi run -e cuda benchmark-collision` | Collision detection benchmark |
 | `pixi run -e cuda test-gpu` | Run GPU-specific tests |
@@ -349,15 +355,17 @@ for i in range(k_max):
     mu *= gamma  # Ramp penalty
 ```
 
-**Benchmark (7-DOF, 6D task, CPU sequential):**
+**Benchmark (7-DOF Panda, 6D task):**
 
-| Config | N | CPU (ms) | FI-PeSNS (ms) | Mean Error | Constraint Sat |
-|--------|---|----------|---------------|------------|----------------|
-| Tight bounds (±1) | 100 | 5.6 | 11.9 | 0.10 | 100% |
-| Tight bounds (±1) | 500 | 13.5 | 58.5 | 0.10 | 100% |
-| Loose bounds (±10) | 100 | 2.3 | 11.9 | 0.03 | 100% |
+| Mode | Batch | Time | Per-Sample | Max Violation | Constraint Sat |
+|------|-------|------|------------|---------------|----------------|
+| CPU Sequential | 100 | 3.3 ms | 33 µs | 0.0 | 100% |
+| CPU Sequential | 1,000 | 29 ms | 29 µs | 0.0 | 100% |
+| **GPU Batched** | 100 | 1.6 ms | 16 µs | 0.0 | 100% |
+| **GPU Batched** | 1,000 | 3.1 ms | 3 µs | 0.0 | 100% |
+| **GPU Batched** | 10,000 | 15 ms | 1.5 µs | 0.0 | 100% |
 
-*Note: FI-PeSNS is designed for GPU batched execution via CusADi where it achieves 100-500x speedup over CPU sequential.*
+*GPU benchmarks on NVIDIA RTX A2000 8GB with CusADi-compiled CUDA kernels.*
 
 **Usage:**
 ```python

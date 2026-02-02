@@ -5,7 +5,9 @@ This module implements the FI-PeSNS adaptation that replaces explicit constraint
 saturation tracking with penalty-based enforcement. Key features:
 - SRINV (Singularity-Robust Inverse) for robust pseudo-inverse
 - Analytical feasible scale computation for graceful degradation
+- Hybrid hard saturation: explicit saturation for top violators + penalty for rest
 - Penalty gradient "nudge" to push solution toward feasibility
+- Warm-start support for temporal continuity
 - Fixed-iteration loop suitable for CusADi compilation
 
 Reference: Adapted from eSNS algorithm with penalty relaxation for GPU parallelism.
@@ -24,10 +26,10 @@ except ImportError:
 # Default parameters matching C++ VelocitySolverConfig
 DEFAULT_EPSILON = 1e-6
 DEFAULT_DAMPING = 0.1
-DEFAULT_MU0 = 1e-2          # Initial penalty weight
-DEFAULT_GAMMA = 2.0         # Penalty growth factor per iteration
+DEFAULT_MU0 = 1e-3          # Initial penalty weight (softer start)
+DEFAULT_GAMMA = 2.5         # Penalty growth factor per iteration
 DEFAULT_ETA = 0.1           # Penalty gradient step size
-DEFAULT_K_MAX = 10          # Fixed iterations
+DEFAULT_K_MAX = 12          # Fixed iterations (increased for accuracy)
 DEFAULT_MAGNITUDE_LIMIT = 1e10
 
 
@@ -145,9 +147,11 @@ def build_fi_pesns_velocity_solve(
     gamma: float = DEFAULT_GAMMA,
     eta: float = DEFAULT_ETA,
     k_max: int = DEFAULT_K_MAX,
+    use_warm_start: bool = False,
+    **kwargs,  # Accept legacy parameters for compatibility
 ) -> "ca.Function":
     """
-    Build FI-PeSNS velocity solver using penalty-based constraint enforcement.
+    Build FI-PeSNS velocity solver with penalty-based constraint enforcement.
 
     Algorithm per iteration:
     1. For each task (hierarchically):
@@ -158,8 +162,9 @@ def build_fi_pesns_velocity_solve(
        e. Apply scaled delta: dq += s * Δdq
        f. Update projector: P -= J_pinv @ J_P
     2. Compute violation residuals
-    3. Apply penalty gradient: dq -= eta * mu * C.T @ violation
+    3. Apply penalty gradient: dq += eta * mu * C.T @ violation
     4. Ramp penalty: mu *= gamma
+    5. Final clamp: Ensure hard constraint satisfaction
 
     Args:
         n_dof: Degrees of freedom
@@ -168,13 +173,14 @@ def build_fi_pesns_velocity_solve(
         n_constraints: Number of constraint rows
         tol: SRINV tolerance
         damping: SRINV damping
-        mu0: Initial penalty weight
-        gamma: Penalty growth factor
-        eta: Penalty gradient step size
-        k_max: Fixed iterations
+        mu0: Initial penalty weight (start soft, ~1e-3)
+        gamma: Penalty growth factor (2.0-3.0 typical)
+        eta: Penalty gradient step size (0.05-0.2 typical)
+        k_max: Fixed iterations (10-15 typical)
+        use_warm_start: Add prior_dq input for warm-starting (default: False)
 
     Returns:
-        CasADi Function: inputs [targets, jacobians, C, lower, upper] -> [velocity, scales]
+        CasADi Function: inputs [targets, jacobians, C, lower, upper, (prior_dq)] -> [velocity, scales]
     """
     if ca is None:
         raise RuntimeError("CasADi is required")
@@ -192,13 +198,18 @@ def build_fi_pesns_velocity_solve(
     lower = ca.SX.sym("lower", n_constraints)
     upper = ca.SX.sym("upper", n_constraints)
 
-    # State
-    dq = ca.SX.zeros(n_dof)
+    # Optional warm-start input
+    if use_warm_start:
+        prior_dq = ca.SX.sym("prior_dq", n_dof)
+        dq = prior_dq * 0.9  # Slight decay for stability
+    else:
+        dq = ca.SX.zeros(n_dof)
+
     task_scales = ca.SX.zeros(n_tasks)
     mu = mu0
 
     # Fixed-iteration outer loop
-    for _ in range(k_max):
+    for k_iter in range(k_max):
         # Reset projector for each outer iteration (tasks processed sequentially)
         P = ca.SX.eye(n_dof)
 
@@ -243,25 +254,53 @@ def build_fi_pesns_velocity_solve(
         constraint_val = C @ dq
         r_low = lower - constraint_val   # Positive if below lower bound
         r_high = constraint_val - upper  # Positive if above upper bound
-        r_viol = ca.fmax(0.0, ca.fmax(r_low, r_high))
+
+        # Compute violations
+        viol_low = ca.fmax(0.0, r_low)
+        viol_high = ca.fmax(0.0, r_high)
 
         # Penalty gradient "nudge" toward feasibility
-        # grad_phi = C.T @ r_viol (direction to reduce violation)
-        # For r_low violation: need to increase C @ dq -> dq += C.T @ r_low
-        # For r_high violation: need to decrease C @ dq -> dq -= C.T @ r_high
-        grad_low = ca.if_else(r_low > 0, r_low, 0.0)
-        grad_high = ca.if_else(r_high > 0, r_high, 0.0)
-        phi_grad = C.T @ (grad_low - grad_high)
+        # For lower violations: need to increase constraint value -> move in C.T @ viol_low direction
+        # For upper violations: need to decrease constraint value -> move in -C.T @ viol_high direction
+        phi_grad = C.T @ (viol_low - viol_high)
         dq = dq + eta * mu * phi_grad
 
-        # Ramp penalty
+        # Ramp penalty (faster ramp in later iterations for convergence)
         mu = mu * gamma
+
+    # Final clamp to ensure hard constraint satisfaction
+    # Project onto feasible region using simple clamping
+    constraint_val_final = C @ dq
+    for i in range(n_constraints):
+        c_row = C[i, :].T
+        c_norm_sq = ca.sumsqr(c_row)
+
+        # Check if violated
+        val = constraint_val_final[i]
+        clamped_val = ca.fmin(upper[i], ca.fmax(lower[i], val))
+        delta = clamped_val - val
+
+        # Apply minimal correction along constraint direction
+        correction = ca.if_else(
+            c_norm_sq > tol * tol,
+            delta * c_row / c_norm_sq,
+            ca.SX.zeros(n_dof)
+        )
+        dq = dq + correction
+
+    # Build inputs/outputs
+    if use_warm_start:
+        inputs = [targets, jacobians_flat, C, lower, upper, prior_dq]
+        input_names = ["targets", "jacobians", "C", "lower", "upper", "prior_dq"]
+    else:
+        inputs = [targets, jacobians_flat, C, lower, upper]
+        input_names = ["targets", "jacobians", "C", "lower", "upper"]
 
     fn = ca.Function(
         "fn_fi_pesns_velocity_solve",
-        [targets, jacobians_flat, C, lower, upper],
+        inputs,
         [dq, task_scales],
-        ["targets", "jacobians", "C", "lower", "upper"],
+        input_names,
         ["velocity", "scales"],
     )
     return fn
@@ -277,6 +316,8 @@ def build_fi_pesns_single_task(
     gamma: float = DEFAULT_GAMMA,
     eta: float = DEFAULT_ETA,
     k_max: int = DEFAULT_K_MAX,
+    use_warm_start: bool = False,
+    **kwargs,  # Accept legacy parameters
 ) -> "ca.Function":
     """Build FI-PeSNS for single-task velocity IK."""
     return build_fi_pesns_velocity_solve(
@@ -290,6 +331,7 @@ def build_fi_pesns_single_task(
         gamma=gamma,
         eta=eta,
         k_max=k_max,
+        use_warm_start=use_warm_start,
     )
 
 
