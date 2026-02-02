@@ -562,8 +562,7 @@ def run_gui(cfg: RobotConfig, args: argparse.Namespace) -> None:
     bias_to_zero = server.gui.add_button("Bias → Zero Configuration")
 
     # GPU Benchmark Panel
-    gpu_enabled = getattr(args, "gpu", False) and GPU_AVAILABLE
-    casadi_path = getattr(args, "casadi_path", None)
+    gpu_enabled = HAS_CUSADI and HAS_TORCH_CUDA
     batch_size = getattr(args, "batch_size", 100)
 
     gpu_benchmark_results = {"cpu_ms": 0.0, "gpu_ms": 0.0, "speedup": 0.0, "max_error": 0.0}
@@ -578,13 +577,13 @@ def run_gui(cfg: RobotConfig, args: argparse.Namespace) -> None:
         batch_size_slider = server.gui.add_slider(
             "Batch Size",
             min=10,
-            max=2000,
+            max=10000,
             step=10,
             initial_value=batch_size,
         )
         run_benchmark_button = server.gui.add_button(
             "Run CPU vs GPU Benchmark",
-            disabled=not gpu_enabled or casadi_path is None,
+            disabled=not gpu_enabled,
         )
         benchmark_result_text = server.gui.add_text(
             "Benchmark Result",
@@ -592,22 +591,70 @@ def run_gui(cfg: RobotConfig, args: argparse.Namespace) -> None:
         )
         if not gpu_enabled:
             benchmark_result_text.value = (
-                "GPU disabled. Use --gpu --casadi-path <path> to enable.\n"
+                "GPU unavailable. Install CusADi + CUDA.\n"
                 f"CasADi: {HAS_CASADI}, CusADi: {HAS_CUSADI}, CUDA: {HAS_TORCH_CUDA}"
             )
+
+    # GPU IK solver for real-time use
+    gpu_ik_solver = None
+    if HAS_CUSADI and HAS_TORCH_CUDA:
+        try:
+            import torch
+            import casadi as ca
+            import os
+            home = os.path.expanduser("~")
+            casadi_file = os.path.join(home, ".local", "cusadi", "src", "casadi_functions", "fn_velocity_solve.casadi")
+            if os.path.exists(casadi_file):
+                from embodik.gpu import CusadiFunction
+                fn_casadi = ca.Function.load(casadi_file)
+                gpu_ik_solver = {
+                    "fn_casadi": fn_casadi,
+                    "fn_cusadi": CusadiFunction(fn_casadi, 1),  # Single instance for real-time
+                    "device": torch.device("cuda"),
+                }
+                print(f"[GPU] Loaded real-time GPU IK solver")
+        except Exception as e:
+            print(f"[GPU] Failed to load real-time solver: {e}")
+
+    def solve_gpu_ik(target_velocity: np.ndarray, jacobian: np.ndarray) -> Optional[np.ndarray]:
+        """Solve single IK problem on GPU."""
+        if gpu_ik_solver is None:
+            return None
+
+        import torch
+
+        n_dof = backend.arm_dofs
+        task_dim = 6
+        n_constraints = n_dof
+
+        # Prepare inputs
+        target = target_velocity.reshape(1, task_dim)
+        jac_flat = jacobian.flatten().reshape(1, -1)
+        C = np.eye(n_constraints).flatten().reshape(1, -1)
+        lower = np.full((1, n_constraints), -2.0)
+        upper = np.full((1, n_constraints), 2.0)
+
+        # Convert to torch
+        device = gpu_ik_solver["device"]
+        target_t = torch.from_numpy(target).double().to(device).contiguous()
+        jac_t = torch.from_numpy(jac_flat).double().to(device).contiguous()
+        C_t = torch.from_numpy(C).double().to(device).contiguous()
+        lower_t = torch.from_numpy(lower).double().to(device).contiguous()
+        upper_t = torch.from_numpy(upper).double().to(device).contiguous()
+
+        try:
+            gpu_ik_solver["fn_cusadi"].evaluate([target_t, jac_t, C_t, lower_t, upper_t])
+            velocity = gpu_ik_solver["fn_cusadi"].getDenseOutput(0).cpu().numpy().flatten()
+            return velocity
+        except Exception:
+            return None
 
     def run_gpu_benchmark() -> None:
         """Run batch IK benchmark comparing CPU vs GPU."""
         nonlocal gpu_benchmark_results
 
-        if not gpu_enabled or casadi_path is None:
-            benchmark_result_text.value = "GPU not available or casadi_path not set"
-            return
-
-        try:
-            from embodik import solve_velocity_batched
-        except ImportError:
-            benchmark_result_text.value = "solve_velocity_batched not available"
+        if not HAS_CUSADI or not HAS_TORCH_CUDA:
+            benchmark_result_text.value = "GPU not available (install CusADi + CUDA)"
             return
 
         benchmark_result_text.value = "Running benchmark..."
@@ -616,63 +663,79 @@ def run_gui(cfg: RobotConfig, args: argparse.Namespace) -> None:
         task_dim = 6
         current_batch_size = int(batch_size_slider.value)
 
-        # Generate random IK problems around current configuration
+        # Generate random IK problems
         rng = np.random.RandomState(42)
-        targets_batch = []
-        jacobians_batch = []
-        constraints_batch = []
-        lower_batch = []
-        upper_batch = []
+        targets = rng.randn(current_batch_size, task_dim).astype(np.float64) * 0.1
+        jacobians = rng.randn(current_batch_size, task_dim, n_dof).astype(np.float64)
 
-        lower_lim, upper_lim = backend.get_joint_limits()
-
+        # Improve conditioning
         for i in range(current_batch_size):
-            # Random target velocity
-            target = rng.randn(task_dim) * 0.1
-            targets_batch.append(target)
-
-            # Random Jacobian (simplified - real use would compute from FK)
-            J = rng.randn(task_dim, n_dof)
-            # Improve conditioning
-            U, s, Vt = np.linalg.svd(J, full_matrices=False)
+            U, s, Vt = np.linalg.svd(jacobians[i], full_matrices=False)
             s = np.clip(s, 0.1, 10.0)
-            J = U @ np.diag(s) @ Vt
-            jacobians_batch.append(np.asfortranarray(J))
+            jacobians[i] = U @ np.diag(s) @ Vt
 
-            # Identity constraint
-            C = np.eye(n_dof)
-            constraints_batch.append(np.asfortranarray(C))
-
-            # Velocity limits
-            lower_batch.append(np.full(n_dof, -2.0))
-            upper_batch.append(np.full(n_dof, 2.0))
+        C = np.eye(n_dof)
+        lower = np.full(n_dof, -2.0)
+        upper = np.full(n_dof, 2.0)
 
         # CPU sequential benchmark
         cpu_start = time.perf_counter()
         cpu_solutions = []
         for i in range(current_batch_size):
             result = embodik.computeMultiObjectiveVelocitySolutionEigen(
-                [targets_batch[i]], [jacobians_batch[i]],
-                constraints_batch[i], lower_batch[i], upper_batch[i]
+                [targets[i]], [np.asfortranarray(jacobians[i])],
+                C, lower, upper
             )
             cpu_solutions.append(np.array(result.solution))
         cpu_time = (time.perf_counter() - cpu_start) * 1000
 
         # GPU batched benchmark
         try:
+            import torch
+            import casadi as ca
+            import os
+            from embodik.gpu import CusadiFunction
+
+            home = os.path.expanduser("~")
+            casadi_file = os.path.join(home, ".local", "cusadi", "src", "casadi_functions", "fn_velocity_solve.casadi")
+
+            if not os.path.exists(casadi_file):
+                benchmark_result_text.value = "CasADi file not found. Run: pixi run -e cuda export-casadi"
+                return
+
+            fn_casadi = ca.Function.load(casadi_file)
+            fn_cusadi = CusadiFunction(fn_casadi, current_batch_size)
+            device = torch.device("cuda")
+
+            # Prepare batched inputs
+            jac_flat = jacobians.reshape(current_batch_size, -1)
+            C_batch = np.tile(C.flatten()[np.newaxis, :], (current_batch_size, 1))
+            lower_batch = np.tile(lower[np.newaxis, :], (current_batch_size, 1))
+            upper_batch = np.tile(upper[np.newaxis, :], (current_batch_size, 1))
+
+            targets_t = torch.from_numpy(targets).double().to(device).contiguous()
+            jac_t = torch.from_numpy(jac_flat).double().to(device).contiguous()
+            C_t = torch.from_numpy(C_batch).double().to(device).contiguous()
+            lower_t = torch.from_numpy(lower_batch).double().to(device).contiguous()
+            upper_t = torch.from_numpy(upper_batch).double().to(device).contiguous()
+
+            # Warm-up
+            fn_cusadi.evaluate([targets_t, jac_t, C_t, lower_t, upper_t])
+            torch.cuda.synchronize()
+
+            # Benchmark
+            torch.cuda.synchronize()
             gpu_start = time.perf_counter()
-            gpu_result = solve_velocity_batched(
-                targets_batch, jacobians_batch, constraints_batch,
-                lower_batch, upper_batch,
-                use_gpu=True,
-                casadi_path=casadi_path
-            )
+            fn_cusadi.evaluate([targets_t, jac_t, C_t, lower_t, upper_t])
+            torch.cuda.synchronize()
             gpu_time = (time.perf_counter() - gpu_start) * 1000
+
+            gpu_velocities = fn_cusadi.getDenseOutput(0).cpu().numpy()
 
             # Compute max error
             max_error = 0.0
             for i in range(current_batch_size):
-                error = np.max(np.abs(cpu_solutions[i] - gpu_result.velocities[i]))
+                error = np.max(np.abs(cpu_solutions[i].ravel() - gpu_velocities[i].ravel()))
                 max_error = max(max_error, error)
 
             speedup = cpu_time / gpu_time if gpu_time > 0 else 0
@@ -685,15 +748,17 @@ def run_gui(cfg: RobotConfig, args: argparse.Namespace) -> None:
             }
 
             benchmark_result_text.value = (
-                f"Batch={current_batch_size}: "
-                f"CPU={cpu_time:.1f}ms, GPU={gpu_time:.1f}ms, "
-                f"Speedup={speedup:.1f}x, MaxErr={max_error:.2e}"
+                f"N={current_batch_size}: "
+                f"CPU={cpu_time:.1f}ms, GPU={gpu_time:.2f}ms, "
+                f"{speedup:.1f}x speedup"
             )
             print(f"[GPU Benchmark] {benchmark_result_text.value}")
 
         except Exception as e:
             benchmark_result_text.value = f"GPU error: {str(e)[:50]}"
             print(f"[GPU Benchmark] Error: {e}")
+            import traceback
+            traceback.print_exc()
 
     @run_benchmark_button.on_click
     def _(_evt) -> None:

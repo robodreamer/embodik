@@ -190,10 +190,11 @@ The repository includes several example scripts:
 | Script | Description |
 |--------|-------------|
 | `01_basic_ik_simple.py` | Basic IK solving with interactive visualization |
-| `02_collision_aware_IK.py` | Collision-aware IK with self-collision avoidance (supports `--gpu` flag) |
+| `02_collision_aware_IK.py` | Collision-aware IK with self-collision avoidance + GPU benchmark panel |
 | `04_gpu_batch_ik.py` | GPU-accelerated batched velocity IK benchmark |
 | `05_gpu_collision_batch.py` | GPU-accelerated batch collision detection |
 | `06_gpu_solver_demo.py` | Comprehensive GPU solver demonstration and benchmark |
+| `07_parallel_trajectory_tracking.py` | **100 robots** tracking different trajectories in parallel (GPU demo) |
 | `robot_model_example.py` | Robot model usage and configuration |
 | `visualization_example.py` | Interactive 3D visualization examples |
 | `scripts/benchmark_fi_pesns.py` | FI-PeSNS vs CPU accuracy and performance benchmark |
@@ -326,6 +327,7 @@ velocities = result.velocities  # (batch_size, n_dof)
 | `pixi run -e cuda benchmark-gpu-batched` | GPU batched IK benchmark (100/1000/10000) |
 | `pixi run -e cuda benchmark-fi-pesns` | FI-PeSNS vs CPU accuracy benchmark |
 | `pixi run -e cuda benchmark-collision` | Collision detection benchmark |
+| `pixi run -e cuda demo-parallel-tracking` | 100 robots tracking trajectories in parallel |
 | `pixi run -e cuda test-gpu` | Run GPU-specific tests |
 
 ### FI-PeSNS: Fixed-Iteration Penalized eSNS
@@ -366,6 +368,20 @@ for i in range(k_max):
 | **GPU Batched** | 10,000 | 15 ms | 1.5 µs | 0.0 | 100% |
 
 *GPU benchmarks on NVIDIA RTX A2000 8GB with CusADi-compiled CUDA kernels.*
+
+### Parallel Trajectory Tracking Demo
+
+Visualize GPU parallelization with 100 robot instances simultaneously tracking different trajectories:
+
+```bash
+# Run the interactive demo (requires viser)
+pixi run -e cuda demo-parallel-tracking
+
+# Run benchmark only (no visualization)
+pixi run -e cuda demo-parallel-tracking-benchmark
+```
+
+Each robot tracks a unique trajectory (circles, figure-8s, spirals, hearts) while the GPU solver computes all 100 IK solutions in parallel. With GPU acceleration, this achieves **~50,000+ IK solves/second**.
 
 **Usage:**
 ```python
