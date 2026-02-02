@@ -196,6 +196,7 @@ The repository includes several example scripts:
 | `06_gpu_solver_demo.py` | Comprehensive GPU solver demonstration and benchmark |
 | `robot_model_example.py` | Robot model usage and configuration |
 | `visualization_example.py` | Interactive 3D visualization examples |
+| `scripts/benchmark_fi_pesns.py` | FI-PeSNS vs CPU accuracy and performance benchmark |
 
 ### Running Examples
 
@@ -313,12 +314,79 @@ velocities = result.velocities  # (batch_size, n_dof)
 | `pixi run -e cuda check-cuda` | Verify PyTorch CUDA availability |
 | `pixi run -e cuda check-gpu` | Verify CasADi + CusADi + CUDA |
 | `pixi run -e cuda install-cusadi` | Install CusADi from GitHub |
-| `pixi run -e cuda export-casadi` | Export CasADi velocity solve function |
+| `pixi run -e cuda export-casadi` | Export FI-PeSNS velocity solve function |
 | `pixi run -e cuda demo-gpu` | Run GPU solver demo/benchmark |
 | `pixi run -e cuda demo-ik-gpu` | Interactive IK with GPU benchmark panel |
 | `pixi run -e cuda benchmark-gpu` | Batch IK performance benchmark |
+| `pixi run -e cuda benchmark-fi-pesns` | FI-PeSNS vs CPU accuracy benchmark |
 | `pixi run -e cuda benchmark-collision` | Collision detection benchmark |
 | `pixi run -e cuda test-gpu` | Run GPU-specific tests |
+
+### FI-PeSNS: Fixed-Iteration Penalized eSNS
+
+EmbodiK includes **FI-PeSNS**, a GPU-optimized variant of the eSNS algorithm that trades exact constraint saturation for simpler, parallelizable penalty-based enforcement:
+
+**Key Features:**
+- **SRINV**: Singularity-Robust Inverse for numerical stability
+- **Analytical Scaling**: Computes feasible task scales without iterative saturation
+- **Penalty Gradient**: Nudges solution toward feasibility each iteration
+- **Fixed Iterations**: Predictable compute time, ideal for real-time RL
+
+**Algorithm:**
+```
+for i in range(k_max):
+    P = I  # Reset projector
+    for each task:
+        J_pinv = srinv(J @ P)
+        delta = J_pinv @ (target - J @ dq)
+        scale = get_feasible_scale(...)
+        dq += scale * delta
+        P -= J_pinv @ J @ P
+
+    # Penalty nudge toward feasibility
+    violation = max(0, max(lower - C@dq, C@dq - upper))
+    dq += eta * mu * C.T @ grad_violation
+    mu *= gamma  # Ramp penalty
+```
+
+**Benchmark (7-DOF, 6D task, CPU sequential):**
+
+| Config | N | CPU (ms) | FI-PeSNS (ms) | Mean Error | Constraint Sat |
+|--------|---|----------|---------------|------------|----------------|
+| Tight bounds (±1) | 100 | 5.6 | 11.9 | 0.10 | 100% |
+| Tight bounds (±1) | 500 | 13.5 | 58.5 | 0.10 | 100% |
+| Loose bounds (±10) | 100 | 2.3 | 11.9 | 0.03 | 100% |
+
+*Note: FI-PeSNS is designed for GPU batched execution via CusADi where it achieves 100-500x speedup over CPU sequential.*
+
+**Usage:**
+```python
+from embodik.gpu.casadi_fi_pesns import build_fi_pesns_single_task
+
+# Build solver
+fn = build_fi_pesns_single_task(
+    n_dof=7, task_dim=6, n_constraints=7,
+    k_max=10,    # Fixed iterations
+    mu0=1e-2,    # Initial penalty
+    gamma=2.0,   # Penalty growth
+    eta=0.1,     # Gradient step
+)
+
+# Solve
+velocity, scales = fn(target, jacobian.flatten(), C, lower, upper)
+```
+
+**Export for CusADi:**
+```bash
+# Export FI-PeSNS for CusADi compilation
+pixi run -e cuda python -m embodik.gpu.export_casadi_velocity_solve \
+    --robot panda --k_max 10 \
+    --out fn_velocity_solve.casadi
+
+# Compile to CUDA kernel
+mv fn_velocity_solve.casadi ~/.local/cusadi/src/casadi_functions/
+cd ~/.local/cusadi && python run_codegen.py --fn=fn_velocity_solve
+```
 
 ### GPU Collision Detection (Experimental)
 

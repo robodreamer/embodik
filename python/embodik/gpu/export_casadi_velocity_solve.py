@@ -7,17 +7,24 @@ This creates a .casadi file that can be compiled to CUDA using cusadi:
     1. Move the .casadi file to cusadi/src/casadi_functions/
     2. Run: python run_codegen.py --fn=fn_velocity_solve
 
+Uses FI-PeSNS (Fixed-Iteration Penalized eSNS) - a GPU-optimized solver with:
+    - SRINV (Singularity-Robust Inverse) for stability
+    - Analytical feasible scale computation
+    - Penalty-based constraint enforcement
+
 Example:
-    # Export for 7-DOF robot with 2 tasks (6D + 3D)
+    # Export for 7-DOF Panda robot
+    python -m embodik.gpu.export_casadi_velocity_solve --robot panda --out fn_velocity_solve.casadi
+
+    # Export for custom configuration
     python -m embodik.gpu.export_casadi_velocity_solve \\
-        --n_dof 7 --task_dims 6 3 --n_constraints 14 \\
+        --n_dof 7 --task_dims 6 3 --n_constraints 14 --k_max 15 \\
         --out fn_velocity_solve.casadi
 """
 
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 from pathlib import Path
 
@@ -29,7 +36,7 @@ except ImportError:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Export CasADi velocity solve function for GPU compilation",
+        description="Export FI-PeSNS velocity solve function for GPU compilation",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
@@ -60,10 +67,10 @@ def main():
         help="Numerical tolerance (default: 1e-6)",
     )
     parser.add_argument(
-        "--regularization_factor",
+        "--damping",
         type=float,
         default=0.1,
-        help="Regularization factor for pseudo-inverse (default: 0.1)",
+        help="SRINV damping factor (default: 0.1)",
     )
     parser.add_argument(
         "--out",
@@ -75,8 +82,33 @@ def main():
         "--robot",
         type=str,
         default=None,
-        choices=["panda", "ur5", "iiwa14"],
+        choices=["panda", "ur5", "iiwa14", "humanoid_arm"],
         help="Use predefined robot configuration (overrides n_dof, task_dims, n_constraints)",
+    )
+    # FI-PeSNS specific args
+    parser.add_argument(
+        "--k_max",
+        type=int,
+        default=10,
+        help="Fixed iterations (default: 10)",
+    )
+    parser.add_argument(
+        "--mu0",
+        type=float,
+        default=1e-2,
+        help="Initial penalty weight (default: 1e-2)",
+    )
+    parser.add_argument(
+        "--gamma",
+        type=float,
+        default=2.0,
+        help="Penalty growth factor (default: 2.0)",
+    )
+    parser.add_argument(
+        "--eta",
+        type=float,
+        default=0.1,
+        help="Penalty gradient step size (default: 0.1)",
     )
 
     args = parser.parse_args()
@@ -85,12 +117,12 @@ def main():
         print("Error: CasADi is required. Install with: pip install casadi", file=sys.stderr)
         sys.exit(1)
 
-    # Import build function
-    from embodik.gpu.casadi_velocity_solve import (
-        build_velocity_solve_casadi,
-        build_for_robot,
+    from embodik.gpu.casadi_fi_pesns import (
+        build_fi_pesns_velocity_solve,
         ROBOT_CONFIGS,
     )
+
+    print("Building FI-PeSNS velocity solver...")
 
     # Build the function
     if args.robot:
@@ -99,28 +131,23 @@ def main():
         n_dof = config["n_dof"]
         task_dims = args.task_dims if args.task_dims != [6] else config["default_task_dims"]
         n_constraints = args.n_constraints or config["n_constraints"]
-
-        fn = build_velocity_solve_casadi(
-            n_dof=n_dof,
-            n_tasks=len(task_dims),
-            task_dims=task_dims,
-            n_constraints=n_constraints,
-            epsilon=args.epsilon,
-            regularization_factor=args.regularization_factor,
-        )
     else:
-        n_constraints = args.n_constraints or args.n_dof
-
-        fn = build_velocity_solve_casadi(
-            n_dof=args.n_dof,
-            n_tasks=len(args.task_dims),
-            task_dims=args.task_dims,
-            n_constraints=n_constraints,
-            epsilon=args.epsilon,
-            regularization_factor=args.regularization_factor,
-        )
         n_dof = args.n_dof
         task_dims = args.task_dims
+        n_constraints = args.n_constraints or args.n_dof
+
+    fn = build_fi_pesns_velocity_solve(
+        n_dof=n_dof,
+        n_tasks=len(task_dims),
+        task_dims=task_dims,
+        n_constraints=n_constraints,
+        tol=args.epsilon,
+        damping=args.damping,
+        k_max=args.k_max,
+        mu0=args.mu0,
+        gamma=args.gamma,
+        eta=args.eta,
+    )
 
     # Save the function
     out_path = Path(args.out)
@@ -131,7 +158,8 @@ def main():
     print(f"  task_dims: {task_dims}")
     print(f"  n_tasks: {len(task_dims)}")
     print(f"  n_constraints: {n_constraints}")
-    print(f"  epsilon: {args.epsilon}, regularization_factor: {args.regularization_factor}")
+    print(f"  epsilon: {args.epsilon}, damping: {args.damping}")
+    print(f"  k_max: {args.k_max}, mu0: {args.mu0}, gamma: {args.gamma}, eta: {args.eta}")
     print()
     print("Next steps:")
     print(f"  1. mv {out_path} cusadi/src/casadi_functions/")

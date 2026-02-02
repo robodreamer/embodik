@@ -1,11 +1,12 @@
 """GPU-accelerated solvers for EmbodiK.
 
 This package provides GPU-parallel velocity IK solving using CusADi.
+Uses FI-PeSNS (Fixed-Iteration Penalized eSNS) - a GPU-optimized solver.
 
 Setup (one-time):
     1. Clone and install cusadi: git clone https://github.com/se-hwan/cusadi && pip install -e cusadi
     2. Export the CasADi velocity solve function:
-       python -m embodik.gpu.export_casadi_velocity_solve --n_dof 7 --n_tasks 3 --out fn_velocity_solve.casadi
+       python -m embodik.gpu.export_casadi_velocity_solve --robot panda --out fn_velocity_solve.casadi
     3. Move to cusadi and compile:
        mv fn_velocity_solve.casadi cusadi/src/casadi_functions/
        cd cusadi && python run_codegen.py --fn=fn_velocity_solve

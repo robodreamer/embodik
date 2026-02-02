@@ -3,11 +3,12 @@ GPU-accelerated batched velocity IK solver using CusADi.
 
 This module provides GPU-parallel velocity solving for batched inputs,
 using CusADi to compile CasADi symbolic functions to CUDA kernels.
+Uses FI-PeSNS (Fixed-Iteration Penalized eSNS) - a GPU-optimized solver.
 
 Setup (one-time):
     1. Clone and install cusadi: git clone https://github.com/se-hwan/cusadi && pip install -e cusadi
     2. Export the CasADi velocity solve function:
-       python -m embodik.gpu.export_casadi_velocity_solve --n_dof 7 --task_dims 6 --out fn_velocity_solve.casadi
+       python -m embodik.gpu.export_casadi_velocity_solve --robot panda --out fn_velocity_solve.casadi
     3. Move to cusadi and compile:
        mv fn_velocity_solve.casadi cusadi/src/casadi_functions/
        cd cusadi && python run_codegen.py --fn=fn_velocity_solve
