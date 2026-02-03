@@ -5,6 +5,49 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-02-03
+
+### Added
+- **GPU Acceleration**: Batched velocity IK solving with massive parallelism (100-500x speedup)
+  - Achieves ~670,000 IK solves/second at batch size 10,000
+  - Ideal for RL training (4096+ parallel environments), motion planning, and dataset generation
+  - GPU batched solver via CusADi-compiled CUDA kernels
+- **FI-PeSNS Solver**: Fixed-Iteration Penalized eSNS algorithm optimized for GPU
+  - Singularity-Robust Inverse (SRINV) for numerical stability
+  - Analytical scaling for feasible task scales without iterative saturation
+  - Penalty gradient approach for constraint enforcement
+  - Fixed iterations for predictable compute time (ideal for real-time RL)
+- **GPU Collision Detection**: GPU-accelerated collision detection via NVIDIA Warp
+  - Batched collision queries for parallel processing
+  - Experimental support for GPU-accelerated self-collision avoidance
+- **Parallel Trajectory Tracking Demo**: Visualize 100 robot instances simultaneously tracking different trajectories
+  - Interactive demo with Viser visualization
+  - Demonstrates GPU parallelization capabilities
+  - Achieves ~50,000+ IK solves/second with GPU acceleration
+- **Teleoperation IK Example**: Interactive IK control using Seer wireless controller (Xvisio SDK)
+- **GPU Benchmarks and Demos**: Comprehensive benchmarking tools for GPU performance
+  - Batch IK performance benchmarks
+  - FI-PeSNS vs CPU accuracy benchmarks
+  - Collision detection benchmarks
+  - GPU solver demonstration panels
+- **CasADi Integration**: Export and compile velocity IK functions to CUDA kernels
+  - Symbolic function export for GPU compilation
+  - CusADi integration for CUDA kernel generation
+- **GPU Environment Support**: CUDA feature in pixi.toml with GPU-specific tasks
+  - `check-cuda`, `check-gpu`, `install-cusadi` tasks
+  - GPU demos and benchmarks via pixi tasks
+  - CUDA environment configuration
+
+### Changed
+- Enhanced examples with GPU acceleration support
+- Updated dependencies to include xvisio SDK support for teleoperation examples
+- Improved GPU documentation and setup instructions
+
+### Dependencies
+- Added `casadi>=3.6.0` and `torch>=2.0.0` to `[gpu]` optional dependencies
+- Added `warp-lang>=1.0.0` to `[gpu-collision]` optional dependencies
+- Added `xvisio>=0.3.1` to pixi dependencies for teleoperation examples
+
 ## [0.2.0] - 2026-01-30
 
 ### Added
