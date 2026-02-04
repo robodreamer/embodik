@@ -20,10 +20,20 @@ Hierarchical multi-task inverse kinematics:
 
 The EmbodiK repository includes several example scripts:
 
+**Basic:**
 - `01_basic_ik_simple.py` - Basic IK solving
 - `02_collision_aware_IK.py` - Collision-aware IK with self-collision avoidance
 - `robot_model_example.py` - Robot model usage
 - `visualization_example.py` - Visualization examples
+
+**GPU Acceleration:**
+- `04_gpu_batch_ik.py` - GPU-accelerated batched velocity IK benchmark
+- `05_gpu_collision_batch.py` - GPU-accelerated batch collision detection
+- `06_gpu_solver_demo.py` - Comprehensive GPU solver demonstration
+- `07_parallel_trajectory_tracking.py` - 100 robots tracking trajectories in parallel
+- `scripts/benchmark_fi_pesns.py` - FI-PeSNS vs CPU benchmark
+- `scripts/benchmark_pph_sns_comparison.py` - FI-PeSNS vs PPH-SNS comparison (CPU + GPU)
+- `scripts/benchmark_pph_sns_batched.py` - Batched GPU benchmark for both solvers
 
 ## Running Examples
 

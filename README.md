@@ -198,6 +198,8 @@ The repository includes several example scripts:
 | `robot_model_example.py` | Robot model usage and configuration |
 | `visualization_example.py` | Interactive 3D visualization examples |
 | `scripts/benchmark_fi_pesns.py` | FI-PeSNS vs CPU accuracy and performance benchmark |
+| `scripts/benchmark_pph_sns_comparison.py` | FI-PeSNS vs PPH-SNS solver comparison (CPU + GPU) |
+| `scripts/benchmark_pph_sns_batched.py` | Batched GPU benchmark for both solvers |
 
 ### Running Examples
 
@@ -236,6 +238,8 @@ pixi run -e cuda benchmark-collision  # Collision detection benchmark
 See the [Examples Documentation](docs/examples/index.md) for detailed guides.
 
 ## GPU Acceleration
+
+> **Note:** GPU solvers (FI-PeSNS, PPH-SNS) are **experimental** and require further validation. Use with caution in production systems.
 
 EmbodiK supports GPU-accelerated batched velocity IK solving for massive parallelism, ideal for:
 
@@ -321,6 +325,9 @@ velocities = result.velocities  # (batch_size, n_dof)
 | `pixi run -e cuda check-gpu` | Verify CasADi + CusADi + CUDA |
 | `pixi run -e cuda install-cusadi` | Install CusADi from GitHub |
 | `pixi run -e cuda export-casadi` | Export FI-PeSNS velocity solve function |
+| `pixi run -e cuda export-pph-sns` | Export PPH-SNS velocity solve function |
+| `pixi run -e cuda benchmark-solver-comparison` | Compare FI-PeSNS vs PPH-SNS (CPU + GPU) |
+| `pixi run -e cuda benchmark-solver-batched` | Batched GPU benchmark for both solvers |
 | `pixi run -e cuda demo-gpu` | Run GPU solver demo/benchmark |
 | `pixi run -e cuda demo-ik-gpu` | Interactive IK with GPU benchmark panel |
 | `pixi run -e cuda benchmark-gpu` | Batch IK performance benchmark |
@@ -330,9 +337,33 @@ velocities = result.velocities  # (batch_size, n_dof)
 | `pixi run -e cuda demo-parallel-tracking` | 100 robots tracking trajectories in parallel |
 | `pixi run -e cuda test-gpu` | Run GPU-specific tests |
 
+### GPU Solvers: FI-PeSNS and PPH-SNS
+
+EmbodiK provides two GPU-optimized velocity IK solvers, both suitable for CusADi compilation:
+
+| Solver | Description | Best For |
+|--------|-------------|----------|
+| **FI-PeSNS** | Fixed-Iteration Penalized eSNS | Default choice, proven accuracy |
+| **PPH-SNS** | Parallel Penalized Hierarchical SNS | Alternative with soft top-k violation selection |
+
+Both achieve **100% constraint satisfaction** with zero violations. FI-PeSNS is typically ~7% faster at large batch sizes; PPH-SNS offers a different formulation with limited rank-1 projector updates.
+
+**Benchmark (10,000 instances, 7-DOF Panda):**
+
+| Solver | Time | Throughput |
+|--------|------|------------|
+| FI-PeSNS | 14.8 ms | **675,000 solves/sec** |
+| PPH-SNS | 15.8 ms | **632,000 solves/sec** |
+
+```bash
+# Compare both solvers
+pixi run -e cuda benchmark-solver-comparison
+pixi run -e cuda benchmark-solver-batched
+```
+
 ### FI-PeSNS: Fixed-Iteration Penalized eSNS
 
-EmbodiK includes **FI-PeSNS**, a GPU-optimized variant of the eSNS algorithm that trades exact constraint saturation for simpler, parallelizable penalty-based enforcement:
+**FI-PeSNS** is the primary GPU solver—a variant of eSNS that trades exact constraint saturation for simpler, parallelizable penalty-based enforcement:
 
 **Key Features:**
 - **SRINV**: Singularity-Robust Inverse for numerical stability
@@ -368,6 +399,33 @@ for i in range(k_max):
 | **GPU Batched** | 10,000 | 15 ms | 1.5 µs | 0.0 | 100% |
 
 *GPU benchmarks on NVIDIA RTX A2000 8GB with CusADi-compiled CUDA kernels.*
+
+### PPH-SNS: Parallel Penalized Hierarchical SNS
+
+**PPH-SNS** is an alternative GPU-native design with:
+
+- **Soft top-k violation selection** using softmax weights
+- **Limited rank-1 projector updates** (1–2 violators per iteration)
+- **Aggressive penalty ramping** (γ=3.0)
+- **Fixed-depth unrolling** for CusADi compilation
+
+```bash
+# Export PPH-SNS (writes to ~/.local/cusadi/src/casadi_functions/)
+pixi run -e cuda export-pph-sns
+
+# Compile to CUDA kernel
+cd ~/.local/cusadi && python run_codegen.py --fn=fn_pph_sns_velocity_solve
+```
+
+```python
+from embodik.gpu.casadi_pph_sns import build_pph_sns_single_task
+
+fn = build_pph_sns_single_task(
+    n_dof=7, task_dim=6, n_constraints=7,
+    k_max=14, m_max=2,  # Outer iterations, max saturations per iteration
+)
+velocity, scales = fn(target, jacobian.flatten(), C, lower, upper)
+```
 
 ### Parallel Trajectory Tracking Demo
 
@@ -469,6 +527,7 @@ Full documentation is available at: **https://embodik.github.io/embodik/**
 
 - [Installation Guide](docs/installation.md) - Detailed installation instructions
 - [Quickstart](docs/quickstart.md) - Get started in 5 minutes
+- [GPU Solvers](docs/gpu_solvers.md) - FI-PeSNS and PPH-SNS GPU-accelerated solvers
 - [API Reference](docs/api/index.md) - Complete API documentation
 - [Examples](docs/examples/index.md) - Example code and tutorials
 - [Development Guide](docs/development.md) - Contributing and development

@@ -123,7 +123,11 @@ benchmark-collision = "python examples/05_gpu_collision_batch.py"
 export-casadi = "python -m embodik.gpu.export_casadi_velocity_solve --robot panda --out fn_velocity_solve.casadi"
 demo-gpu = "python examples/06_gpu_solver_demo.py --batch_sizes 10 100 500 1000 2000"
 demo-ik-gpu = "python examples/02_collision_aware_IK.py --robot panda --gpu"
-benchmark-fi-pesns = "python scripts/benchmark_fi_pesns.py"
+# Compare FI-PeSNS vs PPH-SNS solvers
+benchmark-solver-comparison = "python scripts/benchmark_pph_sns_comparison.py --problems 10 --runs 50"
+benchmark-solver-batched = "python scripts/benchmark_pph_sns_batched.py"
+# Export PPH-SNS solver for GPU compilation
+export-pph-sns = "python scripts/export_pph_sns.py"
 
 [environments]
 # Default environment includes dev features for development

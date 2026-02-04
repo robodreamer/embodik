@@ -179,6 +179,8 @@ pip install -e .
 
 ### GPU Acceleration (CusADi)
 
+> **Experimental:** GPU solvers are under active development and need more validation.
+
 EmbodiK supports GPU-accelerated batched velocity IK solving using CusADi. This is useful for:
 - Training RL policies with thousands of parallel environments
 - Batch motion planning and optimization
@@ -212,13 +214,17 @@ pixi run -e cuda install-cusadi
 pixi run -e cuda check-gpu
 # Output: CasADi: True, CusADi: True, CUDA: True
 
-# Step 5: Export CasADi function
+# Step 5: Export CasADi function (FI-PeSNS)
 pixi run -e cuda export-casadi
 
 # Step 6: Compile CUDA kernel
 mv fn_velocity_solve.casadi ~/.local/cusadi/src/casadi_functions/
 cd ~/.local/cusadi
 python run_codegen.py --fn=fn_velocity_solve
+
+# Optional: Export and compile PPH-SNS (alternative solver)
+# pixi run -e cuda export-pph-sns  # Writes directly to cusadi
+# cd ~/.local/cusadi && python run_codegen.py --fn=fn_pph_sns_velocity_solve
 
 # Step 7: Run GPU demos
 pixi run -e cuda demo-gpu           # Comprehensive benchmark
@@ -233,11 +239,17 @@ pixi run -e cuda benchmark-gpu      # Batch IK benchmark
 | `check-cuda` | Verify PyTorch CUDA availability |
 | `check-gpu` | Verify CasADi + CusADi + CUDA |
 | `install-cusadi` | Install CusADi from GitHub to ~/.local/cusadi |
-| `export-casadi` | Export CasADi velocity solve function |
+| `export-casadi` | Export FI-PeSNS velocity solve function |
+| `export-pph-sns` | Export PPH-SNS velocity solve function |
 | `demo-gpu` | Run GPU solver demo/benchmark |
 | `demo-ik-gpu` | Interactive IK with GPU benchmark panel |
 | `benchmark-gpu` | Batch IK performance benchmark |
+| `benchmark-gpu-batched` | GPU batched IK benchmark (100/1000/10000) |
+| `benchmark-solver-comparison` | Compare FI-PeSNS vs PPH-SNS (CPU + GPU) |
+| `benchmark-solver-batched` | Batched GPU benchmark for both solvers |
+| `benchmark-fi-pesns` | FI-PeSNS vs CPU accuracy benchmark |
 | `benchmark-collision` | Collision detection benchmark |
+| `demo-parallel-tracking` | 100 robots tracking trajectories in parallel |
 | `test-gpu` | Run GPU-specific tests |
 
 All GPU tasks should be run with `-e cuda`: `pixi run -e cuda <task>`
