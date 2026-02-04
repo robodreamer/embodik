@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.3.0] - 2026-02-03
 
 ### Added
+- **PPH-SNS Solver**: Alternative GPU-optimized solver (Parallel Penalized Hierarchical SNS)
+  - Soft top-k violation selection using softmax weights
+  - Limited rank-1 projector updates (1–2 violators per iteration)
+  - Achieves ~632,000 IK solves/second at batch size 10,000
+  - Benchmark comparison scripts: `benchmark-solver-comparison`, `benchmark-solver-batched`
 - **GPU Acceleration**: Batched velocity IK solving with massive parallelism (100-500x speedup)
   - Achieves ~670,000 IK solves/second at batch size 10,000
   - Ideal for RL training (4096+ parallel environments), motion planning, and dataset generation

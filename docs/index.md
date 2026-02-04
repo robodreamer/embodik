@@ -45,6 +45,7 @@ pip install embodik
 
 - [Installation Guide](installation.md) - How to install EmbodiK
 - [Quickstart](quickstart.md) - Get started in 5 minutes
+- [GPU Solvers](gpu_solvers.md) - FI-PeSNS and PPH-SNS GPU-accelerated solvers
 - [API Reference](api/index.md) - Complete API documentation
 - [Examples](examples/index.md) - Example code and tutorials
 - [Development Guide](development.md) - Contributing and development

@@ -45,6 +45,13 @@ See the [Tasks](tasks.md) page for detailed documentation.
 
 Optional visualization tools are documented on the [Visualization](visualization.md) page.
 
+## GPU Solvers
+
+For GPU-accelerated batched velocity IK, see the [GPU Solvers](../gpu_solvers.md) documentation. The `embodik.gpu` module provides:
+
+- `build_fi_pesns_single_task` — FI-PeSNS solver (primary)
+- `build_pph_sns_single_task` — PPH-SNS solver (alternative)
+
 ## Enumerations
 
 ### SolverStatus

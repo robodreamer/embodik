@@ -70,6 +70,7 @@ nav:
   - Home: index.md
   - Installation: installation.md
   - Quickstart: quickstart.md
+  - GPU Solvers: gpu_solvers.md
   - Working with Transforms: transforms.md
   - API Reference:
     - Overview: api/index.md
