@@ -13,10 +13,9 @@ from typing import Optional, Tuple, TYPE_CHECKING
 from pathlib import Path
 import logging
 
+# Note: This module is optional and requires 'pin' package (pip install pin)
 try:
-    from ._runtime_deps import import_pinocchio as _import_pinocchio
-
-    pin = _import_pinocchio()
+    import pinocchio as pin
     try:
         from pinocchio.visualize import ViserVisualizer
         _PINOCCHIO_VISER_AVAILABLE = True

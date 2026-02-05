@@ -259,6 +259,26 @@ public:
     return collision_model_ != nullptr && collision_data_ != nullptr;
   }
 
+  /**
+   * @brief Compute minimum collision distance at current configuration.
+   *
+   * Updates geometry placements and computes distances for all collision pairs,
+   * returning the minimum distance found.
+   *
+   * @return Minimum collision distance, or infinity if no collision geometry
+   */
+  double compute_min_collision_distance() const;
+
+  /**
+   * @brief Compute collision distances for all pairs at current configuration.
+   *
+   * Updates geometry placements and computes distances for all collision pairs.
+   *
+   * @return Vector of distances for each collision pair, in order of
+   * collision_model.collisionPairs
+   */
+  std::vector<double> compute_collision_distances() const;
+
   // Access to URDF path for visualization
   const std::string &urdf_path() const { return urdf_path_; }
 

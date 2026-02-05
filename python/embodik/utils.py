@@ -5,7 +5,9 @@ from typing import Any, Optional, Tuple
 
 import numpy as np
 
-from ._runtime_deps import import_pinocchio as _import_pinocchio
+# Import native bindings for log3/exp3 and SE3
+# These replace the Python pinocchio dependency
+from . import _embodik_impl as _native
 
 __all__ = [
     "PoseData",
@@ -73,24 +75,21 @@ def get_pose_error_vector(pose_current, pose_goal):
         raise TypeError(f"Unsupported pose type: {type(pose_goal)}")
 
     pose_error[:3] = t_goal - t_current
-    # Use Pinocchio's log3 for rotation error (equivalent to SO3.log(twist=True))
+    # Use native log3 for rotation error (equivalent to SO3.log(twist=True))
     # Compute relative rotation: R_error = R_goal * R_current^T
     R_error = R_goal @ R_current.T
-    # Pinocchio's log3 handles rotation matrices directly (no need for explicit normalization)
-    pin = _import_pinocchio()
-    pose_error[3:] = pin.log3(R_error)
+    pose_error[3:] = _native.log3(R_error)
     return pose_error
 
 
 def compute_pose_error(pose_current: PoseData | object, pose_goal: PoseData | object) -> np.ndarray:
-    """Compute 6D pose error (goal - current) using Pinocchio's :func:`log3`.
+    """Compute 6D pose error (goal - current) using native :func:`log3`.
 
-    Optimized to work directly with Pinocchio SE3 objects without wrapping when possible.
+    Optimized to work directly with SE3 objects without wrapping when possible.
     Extracts rotation/translation once to minimize Python binding overhead.
     """
-    pin = _import_pinocchio()
-    # Fast path for Pinocchio SE3 objects (most common case)
-    if isinstance(pose_current, pin.SE3) and isinstance(pose_goal, pin.SE3):
+    # Fast path for native SE3 objects (most common case)
+    if isinstance(pose_current, _native.SE3) and isinstance(pose_goal, _native.SE3):
         # Extract rotation and translation once to avoid repeated attribute access overhead
         t_current = pose_current.translation
         t_goal = pose_goal.translation
@@ -99,7 +98,7 @@ def compute_pose_error(pose_current: PoseData | object, pose_goal: PoseData | ob
 
         error = np.empty(6, dtype=float)
         error[:3] = t_goal - t_current
-        error[3:] = pin.log3(R_goal @ R_current.T)
+        error[3:] = _native.log3(R_goal @ R_current.T)
         return error
 
     # Fallback to PoseData.wrap for other types
@@ -107,7 +106,7 @@ def compute_pose_error(pose_current: PoseData | object, pose_goal: PoseData | ob
     goal = PoseData.wrap(pose_goal)
     error = np.empty(6, dtype=float)
     error[:3] = goal.t - current.t
-    error[3:] = pin.log3(goal.R @ current.R.T)
+    error[3:] = _native.log3(goal.R @ current.R.T)
     return error
 
 
@@ -342,7 +341,7 @@ def Rt(R: Optional[np.ndarray] = None, t: Optional[np.ndarray] = None) -> Any:
         t: 3D translation vector (default: zero)
 
     Returns:
-        Pinocchio SE3 transform
+        SE3 transform
 
     Examples:
         >>> R = np.eye(3)
@@ -365,5 +364,4 @@ def Rt(R: Optional[np.ndarray] = None, t: Optional[np.ndarray] = None) -> Any:
     if t.shape != (3,):
         raise ValueError(f"Expected 3D translation vector, got shape {t.shape}")
 
-    pin = _import_pinocchio()
-    return pin.SE3(R, t)
+    return _native.SE3(R, t)

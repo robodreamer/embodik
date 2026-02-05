@@ -25,6 +25,10 @@ EmbodiK is a high-performance inverse kinematics (IK) library for cross-embodime
 
 ## Installation
 
+> **Note (v0.4.0+)**: EmbodiK no longer requires the Python `pin` package at runtime.
+> All Pinocchio functionality is exposed through native C++ bindings. This resolves
+> numpy dependency conflicts when using EmbodiK alongside packages like `hmnd_robot`.
+
 ### Option A: Fresh Environment (No existing Pinocchio)
 
 If you don't have Pinocchio/Boost installed locally, installation is straightforward:
@@ -34,14 +38,14 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -U pip
 
-# Install build dependencies and Pinocchio
+# Install build dependencies (pin is needed for build only, not runtime)
 pip install pin scikit-build-core nanobind cmake ninja
 
 # Set CMAKE_PREFIX_PATH and install
 export CMAKE_PREFIX_PATH=$(python -c "import pinocchio, pathlib; print(pathlib.Path(pinocchio.__file__).resolve().parents[4])")
 pip install --no-build-isolation embodik
 
-# Verify
+# Verify (no pin import needed!)
 python -c "import embodik; print(embodik.__version__, embodik.RobotModel)"
 ```
 
@@ -57,7 +61,7 @@ pip install -U pip
 # IMPORTANT: Clear local Pinocchio paths to avoid library conflicts
 unset LD_LIBRARY_PATH CMAKE_PREFIX_PATH pinocchio_DIR
 
-# Install build dependencies and Pinocchio from PyPI
+# Install build dependencies (pin is needed for build only, not runtime)
 pip install pin scikit-build-core nanobind cmake ninja
 
 # Set CMAKE_PREFIX_PATH to the PyPI pin package
@@ -66,7 +70,7 @@ export CMAKE_PREFIX_PATH=$(python -c "import pinocchio, pathlib; print(pathlib.P
 # Install embodik
 pip install --no-build-isolation embodik
 
-# Verify
+# Verify (no pin import needed!)
 python -c "import embodik; print(embodik.__version__, embodik.RobotModel)"
 ```
 
@@ -123,6 +127,37 @@ if result.status == embodik.SolverStatus.SUCCESS:
 ```
 
 ## API Overview
+
+### Native Math Utilities
+
+EmbodiK provides native bindings for rotation and pose math (no Python `pin` package needed):
+
+```python
+import embodik as eik
+import numpy as np
+
+# Rotation matrix to axis-angle (replaces pin.log3)
+R = np.eye(3)
+omega = eik.log3(R)  # Returns [0, 0, 0]
+
+# Axis-angle to rotation matrix (replaces pin.exp3)
+omega = np.array([0, 0, np.pi/4])
+R = eik.exp3(omega)
+
+# Rotation matrix to quaternion (wxyz format)
+w, x, y, z = eik.matrix_to_quaternion_wxyz(R)
+
+# Quaternion to rotation matrix
+R = eik.quaternion_wxyz_to_matrix(w, x, y, z)
+
+# Create SE3 transform
+T = eik.Rt(R=R, t=np.array([1, 0, 0]))
+
+# Collision distance (no pin needed)
+robot = eik.RobotModel("robot.urdf")
+robot.update_configuration(q)
+min_distance = robot.compute_min_collision_distance()
+```
 
 ### High-Level API (Recommended)
 

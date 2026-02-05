@@ -44,19 +44,19 @@ from .utils import (
 )
 
 # Export visualization classes (optional)
-# Prefer Pinocchio's built-in ViserVisualizer (pin >= 3.8.0) if available
+# Default to direct Viser visualization (no pip pinocchio dependency)
 _visualization_available = False
 EmbodikVisualizer = None
 InteractiveVisualizer = None
 
 try:
-    # Try Pinocchio-based visualization first (recommended)
-    from .visualization_pinocchio import EmbodikVisualizer, InteractiveVisualizer
+    # Use direct Viser visualization (default - no pip pinocchio needed)
+    from .visualization import EmbodikVisualizer, InteractiveVisualizer
     _visualization_available = True
 except ImportError:
-    # Fall back to custom visualization if Pinocchio's not available
+    # Fall back to Pinocchio-based visualization if direct Viser fails
     try:
-        from .visualization import EmbodikVisualizer, InteractiveVisualizer
+        from .visualization_pinocchio import EmbodikVisualizer, InteractiveVisualizer
         _visualization_available = True
     except ImportError:
         _visualization_available = False

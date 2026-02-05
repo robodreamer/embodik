@@ -39,7 +39,7 @@ def test_warp_availability_check():
         assert isinstance(status, dict)
         assert "warp" in status
         assert "cuda" in status
-        assert "pinocchio" in status
+        # Note: "pinocchio" key was removed in v0.4.0 as pin is no longer a runtime dep
 
         for key, value in status.items():
             assert isinstance(value, bool), f"{key} should be bool"

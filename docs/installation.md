@@ -2,6 +2,11 @@
 
 EmbodiK requires Python 3.10+ and is distributed via PyPI as a source distribution (sdist).
 
+> **Note (v0.4.0+)**: EmbodiK no longer requires the Python `pin` package at runtime.
+> All Pinocchio functionality is exposed through native C++ bindings. The `pin` package
+> is only needed at build time to locate Pinocchio's CMake config. This change resolves
+> numpy dependency conflicts when using EmbodiK with packages like `hmnd_robot`.
+
 ## Option A: Fresh Environment (No existing Pinocchio)
 
 If you're starting fresh without any local Pinocchio or Boost installations:
@@ -21,8 +26,8 @@ export CMAKE_PREFIX_PATH=$(python -c "import pinocchio, pathlib; print(pathlib.P
 # Install embodik
 pip install --no-build-isolation embodik
 
-# Verify
-python -c "import embodik; import pinocchio as pin; print(embodik.__version__)"
+# Verify (no pin import needed at runtime!)
+python -c "import embodik; print(embodik.__version__, embodik.RobotModel)"
 ```
 
 ## Option B: Robotics Environment (Existing Pinocchio/ROS/Boost)
@@ -49,11 +54,11 @@ export CMAKE_PREFIX_PATH=$(python -c "import pinocchio, pathlib; print(pathlib.P
 # Install embodik
 pip install --no-build-isolation embodik
 
-# Verify
-python -c "import embodik; import pinocchio as pin; print(embodik.__version__)"
+# Verify (no pin import needed at runtime!)
+python -c "import embodik; print(embodik.__version__, embodik.RobotModel)"
 ```
 
-**Note on package names:** The PyPI package is `pin`, but the Python import is `import pinocchio`.
+**Note on package names:** The PyPI package is `pin` (build-time only), but when imported, it's `import pinocchio`.
 
 ### With Example Dependencies
 
@@ -354,20 +359,26 @@ See the GPU Collision section in the README for more details.
 
 ### Visualization
 
-Install optional visualization dependencies:
+EmbodiK includes direct Viser visualization that works without the Python `pin` package:
 
 ```bash
 pip install embodik[visualization]
 ```
 
 This includes:
-- `pin>=3.8.0` - Pinocchio with built-in ViserVisualizer support
-- `viser>=0.1.0` - 3D visualization (required by Pinocchio's ViserVisualizer)
-- `trimesh>=3.0.0` - Mesh loading (required by Pinocchio's ViserVisualizer)
+- `viser>=0.1.0` - 3D visualization server
+- `trimesh>=3.0.0` - Mesh loading for robot visualization
 
-**Note:** Pinocchio 3.8.0+ includes native Viser visualization support, eliminating the need for custom URDF parsing libraries like `yourdfpy`. The visualization system automatically uses Pinocchio's built-in visualizer when available.
+**Default (v0.4.0+):** EmbodiK now defaults to direct Viser visualization with native bindings
+for rotation/quaternion math. This eliminates runtime dependency conflicts.
 
-For legacy visualization (using custom implementation with yourdfpy):
+**Optional Pinocchio-based visualization:** If you prefer Pinocchio's ViserVisualizer:
+```bash
+pip install embodik[visualization-pinocchio]
+```
+This adds `pin>=3.8.0` which provides Pinocchio's built-in ViserVisualizer.
+
+For legacy visualization (using yourdfpy for URDF parsing):
 ```bash
 pip install embodik[visualization-legacy]
 ```
@@ -391,12 +402,18 @@ This includes:
 Test that EmbodiK is installed correctly:
 
 ```python
-import embodik
-print(f"EmbodiK version: {embodik.__version__}")
+import embodik as eik
+print(f"EmbodiK version: {eik.__version__}")
 
 # Test basic functionality
-model = embodik.RobotModel.from_urdf("path/to/robot.urdf")
+model = eik.RobotModel("path/to/robot.urdf")
 print("Installation successful!")
+
+# Test native math utilities (no pin needed)
+import numpy as np
+R = np.eye(3)
+omega = eik.log3(R)  # Native rotation utilities
+print(f"log3 works: {omega}")
 ```
 
 ## Troubleshooting
