@@ -691,8 +691,17 @@ KinematicsSolver::compute_collision_constraint() {
 std::pair<double, double> KinematicsSolver::calculate_velocity_box_constraint(
     double position_margin_lower, double position_margin_upper,
     double velocity_limit, double acceleration_limit, double dt) const {
+  constexpr double kMarginEpsilon = 1e-4;
+  const double raw_margin_lower = position_margin_lower;
+  const double raw_margin_upper = position_margin_upper;
+  const bool outside_lower = raw_margin_lower < -kMarginEpsilon;
+  const bool outside_upper = raw_margin_upper < -kMarginEpsilon;
 
-  // Clamp margins to be non-negative
+  if (outside_lower && outside_upper) {
+    return std::make_pair(-velocity_limit, velocity_limit);
+  }
+
+  // Clamp margins to be non-negative for nominal bounds.
   position_margin_lower = std::max(0.0, position_margin_lower);
   position_margin_upper = std::max(0.0, position_margin_upper);
 
@@ -711,6 +720,28 @@ std::pair<double, double> KinematicsSolver::calculate_velocity_box_constraint(
       std::max({vel_from_pos_lower, -velocity_limit, vel_from_accel_lower});
   double upper_limit =
       std::min({vel_from_pos_upper, velocity_limit, vel_from_accel_upper});
+
+  if (outside_lower) {
+    const double violation = -raw_margin_lower;
+    const double recovery_min = (limit_recovery_gain_ * violation) / dt;
+    const double recovery_lower = std::min(recovery_min, velocity_limit);
+    if (recovery_lower > lower_limit) {
+      lower_limit = recovery_lower;
+    }
+  } else if (outside_upper) {
+    const double violation = -raw_margin_upper;
+    const double recovery_max = -(limit_recovery_gain_ * violation) / dt;
+    const double recovery_upper = std::max(recovery_max, -velocity_limit);
+    if (recovery_upper < upper_limit) {
+      upper_limit = recovery_upper;
+    }
+  }
+
+  if (lower_limit > upper_limit) {
+    const double midpoint = 0.5 * (lower_limit + upper_limit);
+    lower_limit = midpoint;
+    upper_limit = midpoint;
+  }
 
   return std::make_pair(lower_limit, upper_limit);
 }

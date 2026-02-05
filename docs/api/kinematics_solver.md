@@ -57,6 +57,16 @@ result = solver.solve_velocity_ik(
 )
 ```
 
+## Joint Limit Recovery
+
+When the current configuration violates joint limits, the solver can enforce a
+minimum recovery velocity to pull the joint back inside its bounds. You can
+configure the recovery aggressiveness with a gain in `[0, 1]`.
+
+```python
+solver.set_limit_recovery_gain(0.5)  # default is 0.5
+```
+
 ## Multi-Task IK
 
 Solve hierarchical multi-task IK problems:
