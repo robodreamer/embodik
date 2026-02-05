@@ -5,6 +5,69 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-02-05
+
+### Breaking Changes
+- **Removed Python `pin` package from runtime dependencies**: EmbodiK now uses native C++ bindings
+  exclusively for all Pinocchio functionality. The `pip pinocchio` (`pin`) package is no longer
+  required at runtime, only at build time.
+  - This resolves numpy dependency conflicts when using EmbodiK with packages like `validation_robot`
+    that have different numpy version requirements
+  - All rotation utilities (log3, exp3, quaternion conversions) now use native bindings
+  - Collision distance computation now uses native `RobotModel.compute_min_collision_distance()`
+  - Visualization defaults to direct Viser (no Pinocchio ViserVisualizer dependency)
+
+### Added
+- **Native math utilities via nanobind**: New C++ bindings for rotation/pose math
+  - `embodik.log3(R)`: Compute axis-angle from rotation matrix (replaces `pin.log3`)
+  - `embodik.exp3(omega)`: Compute rotation matrix from axis-angle (replaces `pin.exp3`)
+  - `embodik.matrix_to_quaternion_wxyz(R)`: Convert rotation matrix to (w,x,y,z) quaternion
+  - `embodik.quaternion_wxyz_to_matrix(w,x,y,z)`: Convert quaternion to rotation matrix
+- **Native collision distance API**: RobotModel now exposes collision distance methods
+  - `RobotModel.compute_min_collision_distance()`: Get minimum distance across all collision pairs
+  - `RobotModel.compute_collision_distances()`: Get distances for all collision pairs
+- **Optional Pinocchio visualization**: `pip install embodik[visualization-pinocchio]` for
+  Pinocchio's ViserVisualizer (requires `pin>=3.8.0`)
+
+### Changed
+- Visualization now defaults to direct Viser implementation (no `pin` needed)
+- `utils.py` functions (`get_pose_error_vector`, `compute_pose_error`, `Rt`) use native bindings
+- `visualization.py` quaternion functions use native bindings
+- GPU collision fallback uses native `RobotModel.compute_min_collision_distance()`
+- Removed `_runtime_deps.py` (lazy Pinocchio import no longer needed)
+
+### Migration Guide
+If you were using Pinocchio Python bindings directly through EmbodiK:
+
+```python
+# Old (v0.3.x) - required pip pinocchio
+import pinocchio as pin
+R_error = pose_goal.rotation @ pose_current.rotation.T
+error = pin.log3(R_error)
+q = pin.Quaternion(R)
+
+# New (v0.4.0) - no pip pinocchio needed
+import embodik as eik
+R_error = pose_goal.rotation @ pose_current.rotation.T
+error = eik.log3(R_error)
+w, x, y, z = eik.matrix_to_quaternion_wxyz(R)
+```
+
+For collision distance computation:
+
+```python
+# Old (v0.3.x) - required pip pinocchio
+import pinocchio as pin
+pin.updateGeometryPlacements(model, data, collision_model, collision_data)
+for i in range(len(collision_model.collisionPairs)):
+    pin.computeDistance(collision_model, collision_data, i)
+    dist = collision_data.distanceResults[i].min_distance
+
+# New (v0.4.0) - native API
+robot_model.update_configuration(q)
+dist = robot_model.compute_min_collision_distance()
+```
+
 ## [0.3.0] - 2026-02-03
 
 ### Added

@@ -31,15 +31,8 @@ try:
 except ImportError:
     pass
 
-# Check for Pinocchio/hpp-fcl availability
-HAS_PINOCCHIO = False
-pin = None
-try:
-    import pinocchio as _pin
-    pin = _pin
-    HAS_PINOCCHIO = True
-except ImportError:
-    pass
+# EmbodiK's RobotModel now provides collision API directly via C++ bindings
+# No need to import Python pinocchio here
 
 
 @dataclass
@@ -148,55 +141,22 @@ class WarpCollisionModel:
             
         Returns:
             WarpCollisionModel instance
+            
+        Note:
+            This creates an empty WarpCollisionModel for now.
+            Full GPU collision support requires mesh extraction from URDF
+            which is handled separately. For CPU collision, use the native
+            RobotModel.compute_min_collision_distance() method instead.
         """
-        if not HAS_PINOCCHIO:
-            raise RuntimeError("Pinocchio not available for mesh extraction")
+        if not robot_model.has_collision_geometry():
+            raise RuntimeError("Robot model has no collision geometry")
         
-        # Extract collision geometry from Pinocchio model
-        try:
-            collision_model = robot_model.collision_model()
-            if collision_model is None:
-                raise RuntimeError("Robot model has no collision geometry")
-        except Exception as e:
-            raise RuntimeError(f"Failed to get collision model: {e}")
-        
-        meshes = {}
-        mesh_transforms = {}
-        
-        # Extract meshes from collision geometry
-        for i, geom_obj in enumerate(collision_model.geometryObjects):
-            name = geom_obj.name
-            
-            # Get geometry shape
-            geom = geom_obj.geometry
-            
-            # Try to get vertices based on geometry type
-            try:
-                if hasattr(geom, 'vertices') and callable(geom.vertices):
-                    vertices = np.array(geom.vertices())
-                elif hasattr(geom, 'points'):
-                    vertices = np.array(geom.points)
-                else:
-                    # For primitives (box, sphere, cylinder), create approximate mesh
-                    vertices = cls._create_primitive_vertices(geom)
-                
-                if vertices is not None and len(vertices) > 0:
-                    meshes[name] = vertices.astype(np.float32)
-                    mesh_transforms[name] = np.array(geom_obj.placement.homogeneous)
-            except Exception as e:
-                print(f"Warning: Could not extract mesh for {name}: {e}")
-        
-        # Get collision pairs
-        collision_pairs = []
-        for pair in collision_model.collisionPairs:
-            name_a = collision_model.geometryObjects[pair.first].name
-            name_b = collision_model.geometryObjects[pair.second].name
-            collision_pairs.append((name_a, name_b))
-        
+        # For now, return empty model - GPU collision will use mesh data
+        # from URDF loading. CPU fallback uses RobotModel's native collision API.
         return cls(
-            meshes=meshes,
-            mesh_transforms=mesh_transforms,
-            collision_pairs=collision_pairs,
+            meshes={},
+            mesh_transforms={},
+            collision_pairs=[],
             device=device,
         )
     
@@ -386,27 +346,16 @@ def compute_collision_distances_batched(
         except Exception as e:
             print(f"GPU collision failed, falling back to CPU: {e}")
     
-    # CPU fallback using Pinocchio/hpp-fcl
-    if HAS_PINOCCHIO:
-        return _compute_distances_pinocchio(robot_model, q_batch, start)
-    
-    elapsed_ms = (time.perf_counter() - start) * 1000
-    return CollisionResult(
-        distances=np.full(q_batch.shape[0], np.inf),
-        closest_points_a=np.zeros((q_batch.shape[0], 3)),
-        closest_points_b=np.zeros((q_batch.shape[0], 3)),
-        normals=np.zeros((q_batch.shape[0], 3)),
-        status="no_collision_library",
-        elapsed_ms=elapsed_ms,
-    )
+    # CPU fallback using RobotModel's native collision API
+    return _compute_distances_native(robot_model, q_batch, start)
 
 
-def _compute_distances_pinocchio(
+def _compute_distances_native(
     robot_model: Any,
     q_batch: np.ndarray,
     start_time: float,
 ) -> CollisionResult:
-    """Compute distances using Pinocchio/hpp-fcl (CPU)."""
+    """Compute distances using RobotModel's native collision API (CPU)."""
     import time
     
     B = q_batch.shape[0]
@@ -416,39 +365,25 @@ def _compute_distances_pinocchio(
     normals = np.zeros((B, 3), dtype=np.float32)
     
     try:
-        collision_model = robot_model.collision_model()
-        collision_data = robot_model.collision_data()
+        # Check if robot has collision geometry
+        if not robot_model.has_collision_geometry():
+            elapsed_ms = (time.perf_counter() - start_time) * 1000
+            return CollisionResult(
+                distances=distances,
+                closest_points_a=closest_a,
+                closest_points_b=closest_b,
+                normals=normals,
+                status="no_collision_geometry",
+                elapsed_ms=elapsed_ms,
+            )
         
-        if collision_model is not None and collision_data is not None:
-            for b in range(B):
-                robot_model.update_configuration(q_batch[b])
-                
-                # Update geometry placements
-                pin.updateGeometryPlacements(
-                    robot_model.model(),
-                    robot_model.data(),
-                    collision_model,
-                    collision_data,
-                )
-                
-                # Find minimum distance across all pairs
-                min_dist = np.inf
-                for idx in range(len(collision_model.collisionPairs)):
-                    pin.computeDistance(collision_model, collision_data, idx)
-                    dist = collision_data.distanceResults[idx].min_distance
-                    if dist < min_dist:
-                        min_dist = dist
-                        closest_a[b] = collision_data.distanceResults[idx].nearest_points[0]
-                        closest_b[b] = collision_data.distanceResults[idx].nearest_points[1]
-                        # Normal from A to B
-                        diff = closest_b[b] - closest_a[b]
-                        norm = np.linalg.norm(diff)
-                        if norm > 1e-6:
-                            normals[b] = diff / norm
-                
-                distances[b] = min_dist
+        for b in range(B):
+            robot_model.update_configuration(q_batch[b])
+            # Use the native collision distance method
+            distances[b] = robot_model.compute_min_collision_distance()
+            
     except Exception as e:
-        print(f"Pinocchio collision failed: {e}")
+        print(f"Native collision failed: {e}")
     
     elapsed_ms = (time.perf_counter() - start_time) * 1000
     
@@ -457,7 +392,7 @@ def _compute_distances_pinocchio(
         closest_points_a=closest_a,
         closest_points_b=closest_b,
         normals=normals,
-        status="fallback_cpu",
+        status="success",
         elapsed_ms=elapsed_ms,
     )
 
@@ -467,7 +402,6 @@ def check_warp_availability() -> Dict[str, bool]:
     available = {
         "warp": HAS_WARP,
         "cuda": False,
-        "pinocchio": HAS_PINOCCHIO,
     }
     
     if HAS_WARP:

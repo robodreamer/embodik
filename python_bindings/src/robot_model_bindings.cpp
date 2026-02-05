@@ -27,10 +27,14 @@
 #include <nanobind/stl/pair.h>
 #include <nanobind/stl/shared_ptr.h>
 #include <nanobind/stl/string.h>
+#include <nanobind/stl/tuple.h>
 #include <nanobind/stl/unordered_map.h>
 #include <nanobind/stl/vector.h>
 
 #include <embodik/robot_model.hpp>
+
+// Pinocchio exponential map functions
+#include <pinocchio/spatial/explog.hpp>
 
 // Coal geometry types for collision info extraction
 #include <coal/shape/geometric_shapes.h>
@@ -48,6 +52,9 @@ void bind_robot_model(nb::module_ &m) {
   // Bind SE3 transformation
   nb::class_<pinocchio::SE3>(m, "SE3")
       .def(nb::init<>())
+      .def(nb::init<const Eigen::Matrix3d &, const Eigen::Vector3d &>(),
+           nb::arg("rotation"), nb::arg("translation"),
+           "Create SE3 from rotation matrix and translation vector")
       .def_prop_rw(
           "rotation",
           [](const pinocchio::SE3 &self) { return self.rotation(); },
@@ -71,6 +78,64 @@ void bind_robot_model(nb::module_ &m) {
            << ", rotation=<3x3 matrix>)";
         return ss.str();
       });
+
+  // ============================================================================
+  // Rotation utilities (log3, exp3) - replaces Python pinocchio imports
+  // ============================================================================
+
+  m.def(
+      "log3", [](const Eigen::Matrix3d &R) { return pinocchio::log3(R); },
+      nb::arg("rotation"),
+      "Compute axis-angle vector from 3x3 rotation matrix.\n\n"
+      "Args:\n"
+      "    rotation: 3x3 rotation matrix\n\n"
+      "Returns:\n"
+      "    3D axis-angle vector (rotation axis * angle in radians)");
+
+  m.def(
+      "exp3",
+      [](const Eigen::Vector3d &omega) { return pinocchio::exp3(omega); },
+      nb::arg("omega"),
+      "Compute 3x3 rotation matrix from axis-angle vector.\n\n"
+      "Args:\n"
+      "    omega: 3D axis-angle vector (rotation axis * angle in radians)\n\n"
+      "Returns:\n"
+      "    3x3 rotation matrix");
+
+  // ============================================================================
+  // Quaternion utilities - replaces Python pinocchio.Quaternion
+  // ============================================================================
+
+  m.def(
+      "matrix_to_quaternion_wxyz",
+      [](const Eigen::Matrix3d &R) {
+        Eigen::Quaterniond q(R);
+        q.normalize(); // Ensure unit quaternion
+        return std::make_tuple(q.w(), q.x(), q.y(), q.z());
+      },
+      nb::arg("rotation"),
+      "Convert 3x3 rotation matrix to quaternion (w, x, y, z) format.\n\n"
+      "Args:\n"
+      "    rotation: 3x3 rotation matrix\n\n"
+      "Returns:\n"
+      "    Tuple of (w, x, y, z) quaternion components");
+
+  m.def(
+      "quaternion_wxyz_to_matrix",
+      [](double w, double x, double y, double z) {
+        Eigen::Quaterniond q(w, x, y, z);
+        q.normalize(); // Ensure unit quaternion
+        return q.toRotationMatrix();
+      },
+      nb::arg("w"), nb::arg("x"), nb::arg("y"), nb::arg("z"),
+      "Convert quaternion (w, x, y, z) to 3x3 rotation matrix.\n\n"
+      "Args:\n"
+      "    w: Quaternion scalar component\n"
+      "    x: Quaternion x component\n"
+      "    y: Quaternion y component\n"
+      "    z: Quaternion z component\n\n"
+      "Returns:\n"
+      "    3x3 rotation matrix");
 
   // Bind RobotModel class
   nb::class_<RobotModel>(m, "RobotModel")
@@ -296,6 +361,20 @@ void bind_robot_model(nb::module_ &m) {
            &RobotModel::apply_collision_exclusions, nb::arg("collision_pairs"),
            "Disable the provided collision pairs using an SRDF-style "
            "specification")
+
+      .def("compute_min_collision_distance",
+           &RobotModel::compute_min_collision_distance,
+           "Compute minimum collision distance at current configuration.\n\n"
+           "Returns:\n"
+           "    Minimum distance across all collision pairs, or inf if no "
+           "collision geometry")
+
+      .def("compute_collision_distances",
+           &RobotModel::compute_collision_distances,
+           "Compute collision distances for all pairs at current "
+           "configuration.\n\n"
+           "Returns:\n"
+           "    List of distances for each collision pair")
 
       // Expose URDF path for visualization
       .def_prop_ro("urdf_path", &RobotModel::urdf_path, "Path to URDF file")

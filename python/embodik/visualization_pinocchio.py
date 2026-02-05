@@ -9,10 +9,9 @@ from typing import Optional, Tuple, List, Dict, Any
 import warnings
 
 # Try to import Pinocchio's ViserVisualizer
+# Note: This module is optional and requires 'pin' package (pip install pin)
 try:
-    from ._runtime_deps import import_pinocchio as _import_pinocchio
-
-    pin = _import_pinocchio()
+    import pinocchio as pin
     try:
         from pinocchio.visualize import ViserVisualizer, BaseVisualizer
         _PINOCCHIO_VISER_AVAILABLE = True

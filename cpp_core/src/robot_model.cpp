@@ -26,6 +26,7 @@
 #include <pinocchio/parsers/urdf.hpp>
 #include <pinocchio/algorithm/joint-configuration.hpp>
 #include <pinocchio/algorithm/geometry.hpp>
+#include <pinocchio/collision/distance.hpp>
 #include <stdexcept>
 #include <fstream>
 #include <sstream>
@@ -278,6 +279,76 @@ void RobotModel::apply_collision_exclusions(
         pairs.end());
 
     collision_data_ = std::make_unique<pinocchio::GeometryData>(*collision_model_);
+}
+
+double RobotModel::compute_min_collision_distance() const {
+    if (!has_collision_geometry()) {
+        return std::numeric_limits<double>::infinity();
+    }
+
+    if (!kinematics_updated_) {
+        throw std::runtime_error(
+            "Kinematics not updated. Call update_configuration() first.");
+    }
+
+    // Update geometry placements
+    pinocchio::updateGeometryPlacements(model_, data_, *collision_model_,
+                                        *collision_data_);
+
+    double min_distance = std::numeric_limits<double>::infinity();
+    const auto& pairs = collision_model_->collisionPairs;
+
+    for (std::size_t idx = 0; idx < pairs.size(); ++idx) {
+        // Honor active pair mask
+        if (!collision_data_->activeCollisionPairs.empty() &&
+            !collision_data_->activeCollisionPairs[idx]) {
+            continue;
+        }
+
+        pinocchio::computeDistance(*collision_model_, *collision_data_, idx);
+        double distance = collision_data_->distanceResults[idx].min_distance;
+
+        if (std::isfinite(distance) && distance < min_distance) {
+            min_distance = distance;
+        }
+    }
+
+    return min_distance;
+}
+
+std::vector<double> RobotModel::compute_collision_distances() const {
+    std::vector<double> distances;
+
+    if (!has_collision_geometry()) {
+        return distances;
+    }
+
+    if (!kinematics_updated_) {
+        throw std::runtime_error(
+            "Kinematics not updated. Call update_configuration() first.");
+    }
+
+    // Update geometry placements
+    pinocchio::updateGeometryPlacements(model_, data_, *collision_model_,
+                                        *collision_data_);
+
+    const auto& pairs = collision_model_->collisionPairs;
+    distances.reserve(pairs.size());
+
+    for (std::size_t idx = 0; idx < pairs.size(); ++idx) {
+        // Honor active pair mask - return infinity for inactive pairs
+        if (!collision_data_->activeCollisionPairs.empty() &&
+            !collision_data_->activeCollisionPairs[idx]) {
+            distances.push_back(std::numeric_limits<double>::infinity());
+            continue;
+        }
+
+        pinocchio::computeDistance(*collision_model_, *collision_data_, idx);
+        double distance = collision_data_->distanceResults[idx].min_distance;
+        distances.push_back(distance);
+    }
+
+    return distances;
 }
 
 Eigen::Vector3d RobotModel::get_com_position() const {

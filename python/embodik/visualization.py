@@ -13,41 +13,19 @@ from viser import ViserServer
 from viser.extras import ViserUrdf
 import yourdfpy
 
-# For transforms and quaternions - use system pinocchio if available
-try:
-    from ._runtime_deps import import_pinocchio as _import_pinocchio
-
-    pin = _import_pinocchio()
-except ImportError:
-    # If pinocchio not available, we can use numpy/scipy for transforms
-    pin = None
-    import scipy.spatial.transform as transform
+# Use native bindings for transforms and quaternions
+from . import _embodik_impl as _native
 
 
 def matrix_to_quaternion_wxyz(rotation_matrix):
     """Convert rotation matrix to quaternion in wxyz format."""
-    if pin is not None:
-        # Use Pinocchio
-        q = pin.Quaternion(rotation_matrix)
-        return (q.w, q.x, q.y, q.z)
-    else:
-        # Use scipy
-        r = transform.Rotation.from_matrix(rotation_matrix)
-        q = r.as_quat()  # Returns xyzw
-        return (q[3], q[0], q[1], q[2])  # Convert to wxyz
+    return _native.matrix_to_quaternion_wxyz(rotation_matrix)
 
 
 def quaternion_wxyz_to_matrix(wxyz):
     """Convert quaternion in wxyz format to rotation matrix."""
-    if pin is not None:
-        # Use Pinocchio
-        q = pin.Quaternion(wxyz[0], wxyz[1], wxyz[2], wxyz[3])
-        return q.matrix()
-    else:
-        # Use scipy
-        q_xyzw = [wxyz[1], wxyz[2], wxyz[3], wxyz[0]]  # Convert to xyzw
-        r = transform.Rotation.from_quat(q_xyzw)
-        return r.as_matrix()
+    w, x, y, z = wxyz[0], wxyz[1], wxyz[2], wxyz[3]
+    return _native.quaternion_wxyz_to_matrix(w, x, y, z)
 
 
 class EmbodikVisualizer:
