@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <cstdint>
 #include <embodik/robot_model.hpp>
 #include <embodik/tasks.hpp>
@@ -190,6 +191,15 @@ public:
   void set_damping(double damping) { damping_ = damping; }
 
   /**
+   * @brief Set recovery gain for joint limit violations.
+   *
+   * Values are clamped to [0, 1]. Higher values recover faster.
+   */
+  void set_limit_recovery_gain(double gain) {
+    limit_recovery_gain_ = std::clamp(gain, 0.0, 1.0);
+  }
+
+  /**
    * @brief Enable verbose debugging for position IK iterations.
    * @param enable True to print/log per-iteration errors and store traces.
    */
@@ -280,6 +290,24 @@ public:
   std::vector<std::pair<std::string, std::string>>
   get_active_collision_pairs() const;
 
+  /**
+   * @brief Calculate velocity box constraints based on position, velocity, and
+   * acceleration limits.
+   *
+   * Velocity limits are computed as:
+   * min(position_margin/dt, velocity_limit, sqrt(2*accel*margin))
+   *
+   * @param position_margin_lower Distance from current position to lower limit
+   * @param position_margin_upper Distance from current position to upper limit
+   * @param velocity_limit Maximum allowed velocity
+   * @param acceleration_limit Maximum allowed acceleration
+   * @param dt Time step
+   * @return Pair of (lower_velocity_limit, upper_velocity_limit)
+   */
+  std::pair<double, double> calculate_velocity_box_constraint(
+      double position_margin_lower, double position_margin_upper,
+      double velocity_limit, double acceleration_limit, double dt) const;
+
 private:
   std::shared_ptr<RobotModel> robot_;
   std::vector<std::shared_ptr<Task>> tasks_;
@@ -294,6 +322,7 @@ private:
   double norm_threshold_ = 1e10;
   int max_zero_scale_iterations_ = 2;
   bool position_ik_debug_ = false;
+  double limit_recovery_gain_ = 0.5;
 
   // Constraint options
   bool use_velocity_limits_ = true;
@@ -348,24 +377,6 @@ private:
                                  const std::string &b) const;
   bool collision_pair_allowed(const std::string &a, const std::string &b) const;
   std::optional<CollisionConstraintResult> compute_collision_constraint();
-
-  /**
-   * @brief Calculate velocity box constraints based on position, velocity, and
-   * acceleration limits
-   *
-   * Velocity limits are computed as:
-   * min(position_margin/dt, velocity_limit, sqrt(2*accel*margin))
-   *
-   * @param position_margin_lower Distance from current position to lower limit
-   * @param position_margin_upper Distance from current position to upper limit
-   * @param velocity_limit Maximum allowed velocity
-   * @param acceleration_limit Maximum allowed acceleration
-   * @param dt Time step
-   * @return Pair of (lower_velocity_limit, upper_velocity_limit)
-   */
-  std::pair<double, double> calculate_velocity_box_constraint(
-      double position_margin_lower, double position_margin_upper,
-      double velocity_limit, double acceleration_limit, double dt) const;
 
 public:
   // ========== Position IK Methods ==========

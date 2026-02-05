@@ -148,6 +148,9 @@ void bind_kinematics_solver(nb::module_ &m) {
 
       .def("set_damping", &KinematicsSolver::set_damping, nb::arg("damping"),
            "Set singularity robust damping factor")
+      .def("set_limit_recovery_gain",
+           &KinematicsSolver::set_limit_recovery_gain, nb::arg("gain"),
+           "Set joint limit recovery gain in [0, 1]")
       .def("enable_position_ik_debug",
            &KinematicsSolver::enable_position_ik_debug, nb::arg("enable"),
            "Enable verbose logging for position IK iterations")
@@ -203,6 +206,14 @@ void bind_kinematics_solver(nb::module_ &m) {
            &KinematicsSolver::get_active_collision_pairs,
            "Return the list of collision pairs currently considered by the "
            "solver.")
+
+      .def(
+          "calculate_velocity_box_constraint",
+          &KinematicsSolver::calculate_velocity_box_constraint,
+          nb::arg("position_margin_lower"), nb::arg("position_margin_upper"),
+          nb::arg("velocity_limit"), nb::arg("acceleration_limit"),
+          nb::arg("dt"),
+          "Compute velocity bounds from position/velocity/acceleration limits.")
 
       // Properties
       .def_prop_ro("robot", &KinematicsSolver::robot, "Get the robot model")
