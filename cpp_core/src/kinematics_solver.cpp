@@ -15,6 +15,8 @@
 #ifdef PINOCCHIO_WITH_HPP_FCL
 #include <pinocchio/collision/distance.hpp>
 #endif
+#include <pinocchio/algorithm/joint-configuration.hpp>
+
 #include <embodik/ik_baseline.hpp>
 #include <embodik/kinematics_solver.hpp>
 
@@ -1336,10 +1338,12 @@ PositionIKResult KinematicsSolver::solve_position(
       break;
     }
 
-    // Integrate velocities
+    // Integrate velocities using Lie-group-aware integration
+    // (handles quaternion/SO3 joints correctly for floating-base robots)
     Eigen::VectorXd dq = Eigen::Map<const Eigen::VectorXd>(
         vel_result.solution.data(), vel_result.solution.size());
-    q_current += options.dt * dq;
+    q_current =
+        pinocchio::integrate(robot_->model(), q_current, options.dt * dq);
 
     // Update robot configuration
     robot_->update_configuration(q_current);
