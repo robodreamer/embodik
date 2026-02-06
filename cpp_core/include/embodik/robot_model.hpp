@@ -201,6 +201,69 @@ public:
   bool has_frame(const std::string &frame_name) const;
 
   /**
+   * @brief Integrate a velocity vector into a configuration using Lie group
+   * operations.
+   *
+   * For standard revolute/prismatic joints this is equivalent to q + v*dt,
+   * but for floating-base (SE3), spherical (quaternion), and other non-Euclidean
+   * joint types it performs the correct manifold integration (e.g. quaternion
+   * exponential map).
+   *
+   * @param q Current configuration vector (size nq)
+   * @param v Velocity / tangent vector (size nv)
+   * @param dt Time step (default 1.0, i.e. v is already scaled)
+   * @return Integrated configuration vector (size nq)
+   */
+  Eigen::VectorXd integrate(const Eigen::VectorXd &q,
+                            const Eigen::VectorXd &v, double dt = 1.0) const;
+
+  /**
+   * @brief Compute the tangent-vector difference between two configurations.
+   *
+   * Returns the velocity v such that q1 = integrate(q0, v).
+   * For Euclidean joints this is simply q1 - q0, but for quaternion /
+   * floating-base joints the result lives in the tangent space (size nv).
+   *
+   * @param q0 Start configuration (size nq)
+   * @param q1 End configuration (size nq)
+   * @return Tangent vector v (size nv)
+   */
+  Eigen::VectorXd difference(const Eigen::VectorXd &q0,
+                             const Eigen::VectorXd &q1) const;
+
+  /**
+   * @brief Return the neutral (zero / home) configuration for this model.
+   *
+   * For floating-base robots this includes a valid unit quaternion for the
+   * base orientation rather than all-zeros.
+   *
+   * @return Neutral configuration vector (size nq)
+   */
+  Eigen::VectorXd neutral_configuration() const;
+
+  /**
+   * @brief Generate a random valid configuration within joint limits.
+   *
+   * Uses Pinocchio's randomConfiguration which respects the joint topology
+   * (e.g. generates valid quaternions for floating-base).
+   *
+   * @return Random configuration vector (size nq)
+   */
+  Eigen::VectorXd random_configuration() const;
+
+  /**
+   * @brief Normalize a configuration vector in-place.
+   *
+   * For joints that live on a manifold (quaternion components of
+   * floating-base or spherical joints) this re-normalizes the quaternion
+   * part. For standard revolute/prismatic joints this is a no-op.
+   *
+   * @param q Configuration vector (modified in-place, size nq)
+   * @return Normalized configuration vector (same as input, modified in-place)
+   */
+  Eigen::VectorXd normalize(const Eigen::VectorXd &q) const;
+
+  /**
    * @brief Get current joint configuration
    * @return Current q vector
    */

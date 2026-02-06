@@ -104,6 +104,31 @@ result = solver.solve_velocity_ik(
 
 if result.status == embodik.SolverStatus.SUCCESS:
     dq = result.solution  # Joint velocities
+
+    # IMPORTANT: Use integrate() instead of q += dt * dq
+    # This correctly handles floating-base, quaternion, and continuous joints
+    dt = 0.01
+    q = model.integrate(q, np.array(dq), dt)
+```
+
+## Configuration-Space Operations
+
+EmbodiK provides Lie-group-aware operations for working with joint configurations.
+These are essential for floating-base robots where the base orientation is represented
+as a quaternion:
+
+```python
+# Integrate velocity into configuration (works for ALL joint types)
+q_new = model.integrate(q, v, dt=0.01)
+
+# Compute tangent-space difference between configurations
+delta_v = model.difference(q_start, q_goal)
+
+# Get neutral (home) configuration with valid quaternion
+q_home = model.neutral_configuration()
+
+# Re-normalize quaternion components
+q = model.normalize(q)
 ```
 
 ## Complete Example
