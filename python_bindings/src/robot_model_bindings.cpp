@@ -206,6 +206,57 @@ void bind_robot_model(nb::module_ &m) {
       .def("has_frame", &RobotModel::has_frame, nb::arg("frame_name"),
            "Check if frame exists")
 
+      // Configuration-space operations (Lie-group aware)
+      .def("integrate", &RobotModel::integrate, nb::arg("q"), nb::arg("v"),
+           nb::arg("dt") = 1.0,
+           "Integrate velocity into configuration using Lie group operations.\n\n"
+           "For standard revolute/prismatic joints this is equivalent to q + v*dt,\n"
+           "but for floating-base (SE3), spherical (quaternion), and other\n"
+           "non-Euclidean joint types it performs the correct manifold\n"
+           "integration (e.g. quaternion exponential map).\n\n"
+           "Args:\n"
+           "    q: Current configuration vector (size nq)\n"
+           "    v: Velocity / tangent vector (size nv)\n"
+           "    dt: Time step (default 1.0, i.e. v is already scaled)\n\n"
+           "Returns:\n"
+           "    Integrated configuration vector (size nq)")
+
+      .def("difference", &RobotModel::difference, nb::arg("q0"),
+           nb::arg("q1"),
+           "Compute the tangent-vector difference between two configurations.\n\n"
+           "Returns the velocity v such that q1 = integrate(q0, v).\n"
+           "For Euclidean joints this is simply q1 - q0, but for quaternion /\n"
+           "floating-base joints the result lives in the tangent space (size nv).\n\n"
+           "Args:\n"
+           "    q0: Start configuration (size nq)\n"
+           "    q1: End configuration (size nq)\n\n"
+           "Returns:\n"
+           "    Tangent vector v (size nv)")
+
+      .def("neutral_configuration", &RobotModel::neutral_configuration,
+           "Return the neutral (zero / home) configuration.\n\n"
+           "For floating-base robots this includes a valid unit quaternion\n"
+           "for the base orientation rather than all-zeros.\n\n"
+           "Returns:\n"
+           "    Neutral configuration vector (size nq)")
+
+      .def("random_configuration", &RobotModel::random_configuration,
+           "Generate a random valid configuration within joint limits.\n\n"
+           "Uses Pinocchio's randomConfiguration which respects the joint\n"
+           "topology (e.g. generates valid quaternions for floating-base).\n\n"
+           "Returns:\n"
+           "    Random configuration vector (size nq)")
+
+      .def("normalize", &RobotModel::normalize, nb::arg("q"),
+           "Normalize a configuration vector.\n\n"
+           "For joints on a manifold (quaternion components of floating-base\n"
+           "or spherical joints) this re-normalizes the quaternion part.\n"
+           "For standard revolute/prismatic joints this is a no-op.\n\n"
+           "Args:\n"
+           "    q: Configuration vector (size nq)\n\n"
+           "Returns:\n"
+           "    Normalized configuration vector (size nq)")
+
       // State accessors
       .def("get_current_configuration", &RobotModel::get_current_configuration,
            nb::rv_policy::reference_internal, "Get current joint configuration")

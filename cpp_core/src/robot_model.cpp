@@ -415,6 +415,56 @@ std::vector<std::string> RobotModel::get_joint_names() const {
     return names;
 }
 
+Eigen::VectorXd RobotModel::integrate(const Eigen::VectorXd &q,
+                                      const Eigen::VectorXd &v,
+                                      double dt) const {
+  if (q.size() != model_.nq) {
+    throw std::runtime_error(
+        "Configuration vector size mismatch. Expected " +
+        std::to_string(model_.nq) + ", got " + std::to_string(q.size()));
+  }
+  if (v.size() != model_.nv) {
+    throw std::runtime_error("Velocity vector size mismatch. Expected " +
+                             std::to_string(model_.nv) + ", got " +
+                             std::to_string(v.size()));
+  }
+  return pinocchio::integrate(model_, q, v * dt);
+}
+
+Eigen::VectorXd RobotModel::difference(const Eigen::VectorXd &q0,
+                                        const Eigen::VectorXd &q1) const {
+  if (q0.size() != model_.nq) {
+    throw std::runtime_error(
+        "q0 configuration vector size mismatch. Expected " +
+        std::to_string(model_.nq) + ", got " + std::to_string(q0.size()));
+  }
+  if (q1.size() != model_.nq) {
+    throw std::runtime_error(
+        "q1 configuration vector size mismatch. Expected " +
+        std::to_string(model_.nq) + ", got " + std::to_string(q1.size()));
+  }
+  return pinocchio::difference(model_, q0, q1);
+}
+
+Eigen::VectorXd RobotModel::neutral_configuration() const {
+  return pinocchio::neutral(model_);
+}
+
+Eigen::VectorXd RobotModel::random_configuration() const {
+  return pinocchio::randomConfiguration(model_);
+}
+
+Eigen::VectorXd RobotModel::normalize(const Eigen::VectorXd &q) const {
+  if (q.size() != model_.nq) {
+    throw std::runtime_error(
+        "Configuration vector size mismatch. Expected " +
+        std::to_string(model_.nq) + ", got " + std::to_string(q.size()));
+  }
+  Eigen::VectorXd q_out = q;
+  pinocchio::normalize(model_, q_out);
+  return q_out;
+}
+
 std::pair<Eigen::VectorXd, Eigen::VectorXd> RobotModel::get_joint_limits() const {
     return std::make_pair(model_.lowerPositionLimit, model_.upperPositionLimit);
 }

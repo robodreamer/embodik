@@ -217,6 +217,180 @@ class TestRobotModel:
         assert "nv=2" in repr_str
         assert "floating_base=False" in repr_str
 
+    # =================================================================
+    # Configuration-space (Lie-group) operations
+    # =================================================================
+
+    def test_integrate_fixed_base(self, urdf_path):
+        """Test integrate() for fixed-base (revolute) joints == q + v*dt."""
+        model = embodik.RobotModel(urdf_path, floating_base=False)
+
+        q = np.array([0.5, -0.5])
+        v = np.array([0.1, -0.2])
+        dt = 0.01
+
+        q_new = model.integrate(q, v, dt)
+
+        # For revolute joints, integrate is simply q + v*dt
+        np.testing.assert_allclose(q_new, q + v * dt, atol=1e-12)
+
+    def test_integrate_default_dt(self, urdf_path):
+        """Test integrate() with default dt=1.0."""
+        model = embodik.RobotModel(urdf_path, floating_base=False)
+
+        q = np.zeros(2)
+        v = np.array([0.3, -0.4])
+
+        q_new = model.integrate(q, v)  # dt defaults to 1.0
+        np.testing.assert_allclose(q_new, q + v, atol=1e-12)
+
+    def test_integrate_floating_base(self, urdf_path):
+        """Test integrate() for floating-base robot preserves quaternion unit norm."""
+        model = embodik.RobotModel(urdf_path, floating_base=True)
+        assert model.nq == 9  # 7 (SE3: xyz + wxyz quat) + 2 revolute
+        assert model.nv == 8  # 6 (SE3 tangent) + 2 revolute
+
+        q0 = model.neutral_configuration()
+        # Small velocity: translate x + rotate around z + move joints
+        v = np.array([0.1, 0.0, 0.0, 0.0, 0.0, 0.2, 0.05, -0.05])
+        dt = 0.01
+
+        q1 = model.integrate(q0, v, dt)
+
+        # Result must still have unit quaternion (indices 3..6 for freeflyer)
+        quat = q1[3:7]
+        np.testing.assert_allclose(np.linalg.norm(quat), 1.0, atol=1e-12)
+
+        # Revolute joints should match simple addition
+        np.testing.assert_allclose(q1[7:], q0[7:] + v[6:] * dt, atol=1e-12)
+
+        # Simple addition would NOT preserve unit quaternion -- verify that
+        q_naive = q0 + np.zeros(9)
+        q_naive[:3] += v[:3] * dt
+        q_naive[3:7] += np.array([0, 0, v[5], 0]) * dt  # WRONG: breaks quaternion norm
+        q_naive[7:] += v[6:] * dt
+        quat_naive = q_naive[3:7]
+        # The naive quaternion norm should NOT be 1.0
+        assert abs(np.linalg.norm(quat_naive) - 1.0) > 1e-6
+
+    def test_difference_fixed_base(self, urdf_path):
+        """Test difference() for fixed-base == q1 - q0."""
+        model = embodik.RobotModel(urdf_path, floating_base=False)
+
+        q0 = np.array([0.1, 0.2])
+        q1 = np.array([0.5, -0.3])
+
+        v = model.difference(q0, q1)
+        np.testing.assert_allclose(v, q1 - q0, atol=1e-12)
+
+    def test_difference_floating_base(self, urdf_path):
+        """Test difference() is inverse of integrate() for floating-base."""
+        model = embodik.RobotModel(urdf_path, floating_base=True)
+
+        q0 = model.neutral_configuration()
+        v_original = np.array([0.1, 0.05, -0.02, 0.01, -0.03, 0.04, 0.1, -0.1])
+
+        q1 = model.integrate(q0, v_original)
+        v_recovered = model.difference(q0, q1)
+
+        np.testing.assert_allclose(v_recovered, v_original, atol=1e-10)
+
+    def test_integrate_difference_roundtrip(self, urdf_path):
+        """Test that integrate(q0, difference(q0, q1)) == q1."""
+        model = embodik.RobotModel(urdf_path, floating_base=True)
+
+        q0 = model.neutral_configuration()
+        v = np.array([0.2, 0.1, 0.0, 0.0, 0.0, 0.3, 0.1, -0.2])
+        q1 = model.integrate(q0, v)
+
+        v_diff = model.difference(q0, q1)
+        q1_roundtrip = model.integrate(q0, v_diff)
+
+        np.testing.assert_allclose(q1_roundtrip, q1, atol=1e-10)
+
+    def test_neutral_configuration_fixed_base(self, urdf_path):
+        """Test neutral_configuration() for fixed-base robot."""
+        model = embodik.RobotModel(urdf_path, floating_base=False)
+        q_neutral = model.neutral_configuration()
+        assert q_neutral.shape == (2,)
+        np.testing.assert_allclose(q_neutral, np.zeros(2), atol=1e-12)
+
+    def test_neutral_configuration_floating_base(self, urdf_path):
+        """Test neutral_configuration() for floating-base robot has valid quaternion."""
+        model = embodik.RobotModel(urdf_path, floating_base=True)
+        q_neutral = model.neutral_configuration()
+        assert q_neutral.shape == (9,)
+        # Quaternion part should be unit quaternion [0, 0, 0, 1] (pinocchio uses xyzw internally but stores as wxyz)
+        quat = q_neutral[3:7]
+        np.testing.assert_allclose(np.linalg.norm(quat), 1.0, atol=1e-12)
+
+    def test_random_configuration(self, urdf_path):
+        """Test random_configuration() returns valid configurations."""
+        model = embodik.RobotModel(urdf_path, floating_base=False)
+
+        q = model.random_configuration()
+        assert q.shape == (2,)
+
+        # Should be within joint limits
+        lower, upper = model.get_joint_limits()
+        assert np.all(q >= lower - 1e-6)
+        assert np.all(q <= upper + 1e-6)
+
+    def test_random_configuration_floating_base(self, urdf_path):
+        """Test random_configuration() for floating-base has valid quaternion."""
+        model = embodik.RobotModel(urdf_path, floating_base=True)
+
+        q = model.random_configuration()
+        assert q.shape == (9,)
+
+        # Quaternion should be normalized
+        quat = q[3:7]
+        np.testing.assert_allclose(np.linalg.norm(quat), 1.0, atol=1e-12)
+
+    def test_normalize_fixed_base(self, urdf_path):
+        """Test normalize() is no-op for fixed-base (all revolute)."""
+        model = embodik.RobotModel(urdf_path, floating_base=False)
+
+        q = np.array([1.5, -2.3])
+        q_norm = model.normalize(q)
+        np.testing.assert_allclose(q_norm, q, atol=1e-12)
+
+    def test_normalize_floating_base(self, urdf_path):
+        """Test normalize() re-normalizes quaternion for floating-base."""
+        model = embodik.RobotModel(urdf_path, floating_base=True)
+
+        q = model.neutral_configuration()
+        # Perturb quaternion to have non-unit norm
+        q[3:7] = np.array([0.0, 0.0, 0.1, 2.0])
+        assert abs(np.linalg.norm(q[3:7]) - 1.0) > 0.1  # Not normalized
+
+        q_norm = model.normalize(q)
+        # After normalize, quaternion should be unit
+        np.testing.assert_allclose(np.linalg.norm(q_norm[3:7]), 1.0, atol=1e-12)
+
+    def test_integrate_size_mismatch(self, urdf_path):
+        """Test integrate() raises on wrong-sized inputs."""
+        model = embodik.RobotModel(urdf_path, floating_base=False)
+
+        q = np.zeros(3)  # Wrong size
+        v = np.zeros(2)
+        with pytest.raises(RuntimeError):
+            model.integrate(q, v)
+
+        q = np.zeros(2)
+        v = np.zeros(3)  # Wrong size
+        with pytest.raises(RuntimeError):
+            model.integrate(q, v)
+
+    def test_difference_size_mismatch(self, urdf_path):
+        """Test difference() raises on wrong-sized inputs."""
+        model = embodik.RobotModel(urdf_path, floating_base=False)
+
+        q0 = np.zeros(3)  # Wrong size
+        q1 = np.zeros(2)
+        with pytest.raises(RuntimeError):
+            model.difference(q0, q1)
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

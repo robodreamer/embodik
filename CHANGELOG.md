@@ -5,6 +5,54 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-02-06
+
+### Added
+- **Lie-group-aware `integrate()` method on `RobotModel`**: Properly integrates joint
+  velocities into configurations using Pinocchio's manifold-aware integration. For standard
+  revolute/prismatic joints this is equivalent to `q + v*dt`, but for floating-base (SE3),
+  spherical (quaternion), and other non-Euclidean joint types it performs the correct
+  exponential-map integration (e.g. quaternion update via `exp`). This replaces naive
+  `q += dt * dq` addition which breaks quaternion unit-norm constraints and gives wrong
+  results for continuous and floating-base joints.
+  - `RobotModel.integrate(q, v, dt=1.0)`: Manifold integration
+  - `RobotModel.difference(q0, q1)`: Inverse of integrate; returns tangent vector
+  - `RobotModel.neutral_configuration()`: Returns the home/zero configuration (valid
+    quaternion for floating-base)
+  - `RobotModel.random_configuration()`: Random valid configuration within joint limits
+  - `RobotModel.normalize(q)`: Re-normalize quaternion components of configuration
+
+### Fixed
+- **Position IK `solve_position()` now uses `pinocchio::integrate()`** instead of naive
+  `q += dt * dq` for velocity integration. This fixes incorrect behavior for floating-base
+  robots where quaternion components were being updated via simple addition, breaking the
+  unit-norm constraint and producing invalid configurations.
+
+### Migration Guide
+
+Users who were manually integrating velocities from `solve_velocity()` using `q += dt * dq`
+should switch to `RobotModel.integrate()`:
+
+```python
+# Old (v0.4.x) - broken for floating-base / quaternion joints
+result = solver.solve_velocity(q)
+q = q + dt * np.array(result.solution)  # WRONG for floating-base!
+
+# New (v0.5.0) - correct for all joint types
+result = solver.solve_velocity(q)
+q = robot.integrate(q, np.array(result.solution), dt)  # Always correct
+```
+
+For computing configuration differences:
+
+```python
+# Old - broken for floating-base
+delta = q1 - q0  # WRONG for floating-base
+
+# New - correct for all joint types
+delta = robot.difference(q0, q1)  # Returns tangent vector (size nv)
+```
+
 ## [0.4.0] - 2026-02-05
 
 ### Breaking Changes
