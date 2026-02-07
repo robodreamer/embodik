@@ -658,6 +658,138 @@ class TestRobotModel:
             assert model.check_collision() == False
             assert model.check_collision(min_distance=min_dist + 0.01) == True
 
+    # =================================================================
+    # Joint index access
+    # =================================================================
+
+    def test_has_joint(self, urdf_path):
+        """Test has_joint() returns True for existing joints."""
+        model = embodik.RobotModel(urdf_path, floating_base=False)
+
+        assert model.has_joint("joint1")
+        assert model.has_joint("joint2")
+        assert not model.has_joint("nonexistent_joint")
+
+    def test_get_joint_id(self, urdf_path):
+        """Test get_joint_id() returns valid joint index."""
+        model = embodik.RobotModel(urdf_path, floating_base=False)
+
+        joint_id = model.get_joint_id("joint1")
+        assert isinstance(joint_id, int)
+        assert joint_id >= 0
+
+        joint_id2 = model.get_joint_id("joint2")
+        assert isinstance(joint_id2, int)
+        assert joint_id2 != joint_id  # Different joints have different IDs
+
+        with pytest.raises(RuntimeError):
+            model.get_joint_id("nonexistent_joint")
+
+    def test_get_joint_config_index(self, urdf_path):
+        """Test get_joint_config_index() returns correct idx_q."""
+        model = embodik.RobotModel(urdf_path, floating_base=False)
+
+        idx_q1 = model.get_joint_config_index("joint1")
+        idx_q2 = model.get_joint_config_index("joint2")
+
+        assert isinstance(idx_q1, int)
+        assert isinstance(idx_q2, int)
+        assert idx_q1 >= 0
+        assert idx_q2 >= 0
+        # For a 2-joint robot, joint2 should come after joint1
+        assert idx_q2 >= idx_q1
+
+        with pytest.raises(RuntimeError):
+            model.get_joint_config_index("nonexistent_joint")
+
+    def test_get_joint_config_size(self, urdf_path):
+        """Test get_joint_config_size() returns correct nq."""
+        model = embodik.RobotModel(urdf_path, floating_base=False)
+
+        nq1 = model.get_joint_config_size("joint1")
+        nq2 = model.get_joint_config_size("joint2")
+
+        assert isinstance(nq1, int)
+        assert isinstance(nq2, int)
+        # Revolute joints typically have nq=1
+        assert nq1 == 1
+        assert nq2 == 1
+
+        with pytest.raises(RuntimeError):
+            model.get_joint_config_size("nonexistent_joint")
+
+    def test_get_joint_velocity_index(self, urdf_path):
+        """Test get_joint_velocity_index() returns correct idx_v."""
+        model = embodik.RobotModel(urdf_path, floating_base=False)
+
+        idx_v1 = model.get_joint_velocity_index("joint1")
+        idx_v2 = model.get_joint_velocity_index("joint2")
+
+        assert isinstance(idx_v1, int)
+        assert isinstance(idx_v2, int)
+        assert idx_v1 >= 0
+        assert idx_v2 >= 0
+        # For a 2-joint robot, joint2 should come after joint1
+        assert idx_v2 >= idx_v1
+
+        with pytest.raises(RuntimeError):
+            model.get_joint_velocity_index("nonexistent_joint")
+
+    def test_get_joint_velocity_size(self, urdf_path):
+        """Test get_joint_velocity_size() returns correct nv."""
+        model = embodik.RobotModel(urdf_path, floating_base=False)
+
+        nv1 = model.get_joint_velocity_size("joint1")
+        nv2 = model.get_joint_velocity_size("joint2")
+
+        assert isinstance(nv1, int)
+        assert isinstance(nv2, int)
+        # Revolute joints typically have nv=1
+        assert nv1 == 1
+        assert nv2 == 1
+
+        with pytest.raises(RuntimeError):
+            model.get_joint_velocity_size("nonexistent_joint")
+
+    def test_joint_indices_floating_base(self, urdf_path):
+        """Test joint indices work correctly for floating-base robot."""
+        model = embodik.RobotModel(urdf_path, floating_base=True)
+
+        # Floating base should have nq=7 (xyz + quaternion), nv=6
+        # But we can't query "floating_base" as a joint name - it's implicit
+        # Test that regular joints still work
+        idx_q1 = model.get_joint_config_index("joint1")
+        idx_v1 = model.get_joint_velocity_index("joint1")
+
+        # Joint1 should start after floating base (7 config vars, 6 velocity vars)
+        assert idx_q1 >= 7  # After floating base config
+        assert idx_v1 >= 6  # After floating base velocity
+
+    def test_joint_index_consistency(self, urdf_path):
+        """Test that joint indices are consistent with model structure."""
+        model = embodik.RobotModel(urdf_path, floating_base=False)
+
+        joint_names = model.get_joint_names()
+        assert len(joint_names) == 2
+
+        # Verify indices are sequential and match model.nq/nv
+        idx_q_list = [model.get_joint_config_index(name) for name in joint_names]
+        idx_v_list = [model.get_joint_velocity_index(name) for name in joint_names]
+        nq_list = [model.get_joint_config_size(name) for name in joint_names]
+        nv_list = [model.get_joint_velocity_size(name) for name in joint_names]
+
+        # Total nq/nv should match model
+        assert sum(nq_list) == model.nq
+        assert sum(nv_list) == model.nv
+
+        # Indices should be sequential (no gaps)
+        idx_q_sorted = sorted(idx_q_list)
+        idx_v_sorted = sorted(idx_v_list)
+        for i in range(len(idx_q_sorted) - 1):
+            assert idx_q_sorted[i + 1] == idx_q_sorted[i] + nq_list[idx_q_list.index(idx_q_sorted[i])]
+        for i in range(len(idx_v_sorted) - 1):
+            assert idx_v_sorted[i + 1] == idx_v_sorted[i] + nv_list[idx_v_list.index(idx_v_sorted[i])]
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

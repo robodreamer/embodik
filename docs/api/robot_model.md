@@ -128,6 +128,70 @@ q_new = model.integrate(q, v, dt=0.01)
 model.update_configuration(q_new)
 ```
 
+## Joint Index Access
+
+These methods expose Pinocchio's per-joint configuration-space and velocity-space indexing
+through a name-based API. Useful for building joint-to-motor mappings, extracting per-joint
+slices from q/v vectors, and understanding the configuration structure of the robot.
+
+### `has_joint(joint_name)`
+
+Check whether a joint exists in the model.
+
+```python
+model.has_joint("joint1")       # True
+model.has_joint("nonexistent")  # False
+```
+
+### `get_joint_id(joint_name)`
+
+Get the internal joint index (0-based, excluding universe joint).
+
+```python
+jid = model.get_joint_id("joint1")  # Raises RuntimeError if not found
+```
+
+### `get_joint_config_index(joint_name)` / `get_joint_config_size(joint_name)`
+
+Get the starting index (`idx_q`) and number of variables (`nq`) for a joint in the
+configuration vector `q`.
+
+```python
+idx_q = model.get_joint_config_index("joint1")  # Where this joint starts in q
+nq    = model.get_joint_config_size("joint1")    # 1 for revolute, 2 for continuous, 7 for floating-base
+```
+
+### `get_joint_velocity_index(joint_name)` / `get_joint_velocity_size(joint_name)`
+
+Get the starting index (`idx_v`) and number of variables (`nv`) for a joint in the
+velocity vector `v`.
+
+```python
+idx_v = model.get_joint_velocity_index("joint1")  # Where this joint starts in v
+nv    = model.get_joint_velocity_size("joint1")    # 1 for revolute, 1 for continuous, 6 for floating-base
+```
+
+### Per-Joint Mapping Example
+
+```python
+import embodik
+import numpy as np
+
+model = embodik.RobotModel("robot.urdf")
+
+# Build joint-to-index mapping
+for name in model.get_joint_names():
+    idx_q = model.get_joint_config_index(name)
+    nq    = model.get_joint_config_size(name)
+    idx_v = model.get_joint_velocity_index(name)
+    nv    = model.get_joint_velocity_size(name)
+    print(f"{name}: q[{idx_q}:{idx_q+nq}], v[{idx_v}:{idx_v+nv}]")
+
+# Extract a single joint's config value
+q = model.neutral_configuration()
+joint_q = q[model.get_joint_config_index("joint1")]
+```
+
 ## Inverse Dynamics
 
 EmbodiK provides full inverse dynamics via Pinocchio's RNEA and CRBA, exposed through

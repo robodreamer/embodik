@@ -203,6 +203,53 @@ public:
   bool has_frame(const std::string &frame_name) const;
 
   /**
+   * @brief Check if joint exists
+   * @param joint_name Name of the joint
+   * @return true if joint exists
+   */
+  bool has_joint(const std::string &joint_name) const;
+
+  /**
+   * @brief Get joint index by name
+   * @param joint_name Name of the joint
+   * @return Joint index (0-based, excluding universe joint)
+   * @throws std::runtime_error if joint not found
+   */
+  JointIndex get_joint_id(const std::string &joint_name) const;
+
+  /**
+   * @brief Get configuration-space index for a joint
+   * @param joint_name Name of the joint
+   * @return Starting index in configuration vector q (idx_q)
+   * @throws std::runtime_error if joint not found
+   */
+  int get_joint_config_index(const std::string &joint_name) const;
+
+  /**
+   * @brief Get number of configuration variables for a joint
+   * @param joint_name Name of the joint
+   * @return Number of configuration variables (nq, typically 1 for revolute, 2 for continuous)
+   * @throws std::runtime_error if joint not found
+   */
+  int get_joint_config_size(const std::string &joint_name) const;
+
+  /**
+   * @brief Get velocity-space index for a joint
+   * @param joint_name Name of the joint
+   * @return Starting index in velocity vector v (idx_v)
+   * @throws std::runtime_error if joint not found
+   */
+  int get_joint_velocity_index(const std::string &joint_name) const;
+
+  /**
+   * @brief Get number of velocity variables for a joint
+   * @param joint_name Name of the joint
+   * @return Number of velocity variables (nv, typically 1)
+   * @throws std::runtime_error if joint not found
+   */
+  int get_joint_velocity_size(const std::string &joint_name) const;
+
+  /**
    * @brief Integrate a velocity vector into a configuration using Lie group
    * operations.
    *

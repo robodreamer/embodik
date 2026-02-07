@@ -206,6 +206,64 @@ void bind_robot_model(nb::module_ &m) {
       .def("has_frame", &RobotModel::has_frame, nb::arg("frame_name"),
            "Check if frame exists")
 
+      // Joint index access
+      .def("has_joint", &RobotModel::has_joint, nb::arg("joint_name"),
+           "Check if joint exists")
+
+      .def("get_joint_id", &RobotModel::get_joint_id, nb::arg("joint_name"),
+           "Get joint index by name\n\n"
+           "Returns:\n"
+           "    Joint index (0-based, excluding universe joint)\n\n"
+           "Raises:\n"
+           "    RuntimeError: If joint not found")
+
+      .def("get_joint_config_index", &RobotModel::get_joint_config_index,
+           nb::arg("joint_name"),
+           "Get configuration-space index for a joint\n\n"
+           "Returns the starting index in the configuration vector q where\n"
+           "this joint's configuration variables begin.\n\n"
+           "Args:\n"
+           "    joint_name: Name of the joint\n\n"
+           "Returns:\n"
+           "    Starting index in q (idx_q)\n\n"
+           "Raises:\n"
+           "    RuntimeError: If joint not found")
+
+      .def("get_joint_config_size", &RobotModel::get_joint_config_size,
+           nb::arg("joint_name"),
+           "Get number of configuration variables for a joint\n\n"
+           "For revolute joints this is typically 1, for continuous joints\n"
+           "it is 2 (cos θ, sin θ representation).\n\n"
+           "Args:\n"
+           "    joint_name: Name of the joint\n\n"
+           "Returns:\n"
+           "    Number of configuration variables (nq)\n\n"
+           "Raises:\n"
+           "    RuntimeError: If joint not found")
+
+      .def("get_joint_velocity_index", &RobotModel::get_joint_velocity_index,
+           nb::arg("joint_name"),
+           "Get velocity-space index for a joint\n\n"
+           "Returns the starting index in the velocity vector v where\n"
+           "this joint's velocity variables begin.\n\n"
+           "Args:\n"
+           "    joint_name: Name of the joint\n\n"
+           "Returns:\n"
+           "    Starting index in v (idx_v)\n\n"
+           "Raises:\n"
+           "    RuntimeError: If joint not found")
+
+      .def("get_joint_velocity_size", &RobotModel::get_joint_velocity_size,
+           nb::arg("joint_name"),
+           "Get number of velocity variables for a joint\n\n"
+           "For most joints this is 1 (single velocity DOF).\n\n"
+           "Args:\n"
+           "    joint_name: Name of the joint\n\n"
+           "Returns:\n"
+           "    Number of velocity variables (nv)\n\n"
+           "Raises:\n"
+           "    RuntimeError: If joint not found")
+
       // Configuration-space operations (Lie-group aware)
       .def("integrate", &RobotModel::integrate, nb::arg("q"), nb::arg("v"),
            nb::arg("dt") = 1.0,
