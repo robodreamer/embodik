@@ -391,6 +391,273 @@ class TestRobotModel:
         with pytest.raises(RuntimeError):
             model.difference(q0, q1)
 
+    # =================================================================
+    # Inverse dynamics / gravity
+    # =================================================================
+
+    def test_compute_generalized_gravity(self, urdf_path):
+        """Test compute_generalized_gravity returns correct-sized vector."""
+        model = embodik.RobotModel(urdf_path, floating_base=False)
+        q = np.zeros(model.nq)
+        g = model.compute_generalized_gravity(q)
+        assert g.shape == (model.nv,)
+        # At zero configuration, gravity torques should be finite
+        assert np.all(np.isfinite(g))
+
+    def test_gravity_matches_rnea_zeros(self, urdf_path):
+        """Test that gravity == rnea(q, 0, 0)."""
+        model = embodik.RobotModel(urdf_path, floating_base=False)
+        q = np.array([0.5, -0.3])
+        v_zero = np.zeros(model.nv)
+        a_zero = np.zeros(model.nv)
+
+        g = model.compute_generalized_gravity(q)
+        tau_rnea = model.rnea(q, v_zero, a_zero)
+
+        np.testing.assert_allclose(g, tau_rnea, atol=1e-12)
+
+    def test_rnea_full_dynamics(self, urdf_path):
+        """Test rnea with nonzero velocities and accelerations."""
+        model = embodik.RobotModel(urdf_path, floating_base=False)
+        q = np.array([0.5, -0.3])
+        v = np.array([0.1, -0.2])
+        a = np.array([1.0, -0.5])
+
+        tau = model.rnea(q, v, a)
+        assert tau.shape == (model.nv,)
+        assert np.all(np.isfinite(tau))
+
+        # Full dynamics should differ from gravity-only (nonzero v, a)
+        g = model.compute_generalized_gravity(q)
+        assert not np.allclose(tau, g)
+
+    def test_rnea_decomposition(self, urdf_path):
+        """Test that tau = g + coriolis + inertial via RNEA calls."""
+        model = embodik.RobotModel(urdf_path, floating_base=False)
+        q = np.array([0.5, -0.3])
+        v = np.array([0.1, -0.2])
+        a = np.array([1.0, -0.5])
+        v_zero = np.zeros(model.nv)
+        a_zero = np.zeros(model.nv)
+
+        tau_gravity = model.rnea(q, v_zero, a_zero)
+        tau_coriolis_grav = model.rnea(q, v, a_zero)
+        tau_total = model.rnea(q, v, a)
+
+        # Coriolis = rnea(q,v,0) - rnea(q,0,0)
+        coriolis = tau_coriolis_grav - tau_gravity
+        # Inertial = rnea(q,v,a) - rnea(q,v,0)
+        inertial = tau_total - tau_coriolis_grav
+
+        # Verify decomposition: gravity + coriolis + inertial == total
+        np.testing.assert_allclose(
+            tau_gravity + coriolis + inertial, tau_total, atol=1e-12
+        )
+
+    def test_compute_coriolis(self, urdf_path):
+        """Test compute_coriolis returns C(q,v)*v."""
+        model = embodik.RobotModel(urdf_path, floating_base=False)
+        q = np.array([0.5, -0.3])
+        v = np.array([0.1, -0.2])
+        v_zero = np.zeros(model.nv)
+        a_zero = np.zeros(model.nv)
+
+        coriolis = model.compute_coriolis(q, v)
+        assert coriolis.shape == (model.nv,)
+
+        # Should match rnea(q,v,0) - gravity(q)
+        expected = model.rnea(q, v, a_zero) - model.compute_generalized_gravity(q)
+        np.testing.assert_allclose(coriolis, expected, atol=1e-12)
+
+    def test_compute_mass_matrix(self, urdf_path):
+        """Test compute_mass_matrix returns symmetric positive-definite matrix."""
+        model = embodik.RobotModel(urdf_path, floating_base=False)
+        q = np.array([0.5, -0.3])
+
+        M = model.compute_mass_matrix(q)
+        assert M.shape == (model.nv, model.nv)
+
+        # Should be symmetric
+        np.testing.assert_allclose(M, M.T, atol=1e-12)
+
+        # Should be positive-definite (all eigenvalues > 0)
+        eigenvalues = np.linalg.eigvalsh(M)
+        assert np.all(eigenvalues > 0)
+
+    def test_mass_matrix_times_accel(self, urdf_path):
+        """Test that M(q)*a matches inertial component of RNEA."""
+        model = embodik.RobotModel(urdf_path, floating_base=False)
+        q = np.array([0.5, -0.3])
+        v_zero = np.zeros(model.nv)
+        a = np.array([1.0, -0.5])
+
+        M = model.compute_mass_matrix(q)
+        g = model.compute_generalized_gravity(q)
+        # tau = M*a + g (when v=0)
+        tau_rnea = model.rnea(q, v_zero, a)
+        tau_expected = M @ a + g
+
+        np.testing.assert_allclose(tau_rnea, tau_expected, atol=1e-10)
+
+    def test_set_get_gravity(self, urdf_path):
+        """Test set_gravity and get_gravity."""
+        model = embodik.RobotModel(urdf_path, floating_base=False)
+
+        # Default gravity should be [0, 0, -9.81]
+        g = model.get_gravity()
+        np.testing.assert_allclose(g, [0, 0, -9.81], atol=1e-6)
+
+        # Set custom gravity
+        model.set_gravity(np.array([0.0, 0.0, 0.0]))
+        g = model.get_gravity()
+        np.testing.assert_allclose(g, [0, 0, 0], atol=1e-12)
+
+        # With zero gravity, gravity torques should be zero
+        q = np.zeros(model.nq)
+        grav_torques = model.compute_generalized_gravity(q)
+        np.testing.assert_allclose(grav_torques, np.zeros(model.nv), atol=1e-12)
+
+    def test_gravity_floating_base(self, urdf_path):
+        """Test gravity computation for floating-base robot."""
+        model = embodik.RobotModel(urdf_path, floating_base=True)
+        q = model.neutral_configuration()
+        g = model.compute_generalized_gravity(q)
+        assert g.shape == (model.nv,)
+        assert np.all(np.isfinite(g))
+
+    def test_rnea_size_mismatch(self, urdf_path):
+        """Test rnea raises on wrong-sized inputs."""
+        model = embodik.RobotModel(urdf_path, floating_base=False)
+        q = np.zeros(model.nq)
+        v = np.zeros(model.nv)
+
+        with pytest.raises(RuntimeError):
+            model.rnea(np.zeros(3), v, v)  # Wrong q size
+        with pytest.raises(RuntimeError):
+            model.rnea(q, np.zeros(3), v)  # Wrong v size
+        with pytest.raises(RuntimeError):
+            model.rnea(q, v, np.zeros(3))  # Wrong a size
+
+    # =================================================================
+    # Boolean collision checking
+    # =================================================================
+
+    def test_check_collision_no_geometry(self, urdf_path):
+        """Test check_collision returns False when no collision geometry."""
+        model = embodik.RobotModel(urdf_path, floating_base=False)
+        q = np.zeros(model.nq)
+        model.update_configuration(q)
+        # Our simple URDF has no collision geometry
+        assert model.check_collision() == False
+
+    def test_check_collision_with_geometry(self, tmp_path):
+        """Test check_collision with collision geometry URDF."""
+        # Create a URDF with collision geometry that will collide
+        urdf_content = """<?xml version="1.0"?>
+<robot name="collision_test">
+  <link name="base_link">
+    <inertial>
+      <mass value="1.0"/>
+      <origin xyz="0 0 0"/>
+      <inertia ixx="0.01" ixy="0" ixz="0" iyy="0.01" iyz="0" izz="0.01"/>
+    </inertial>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.2 0.2 0.2"/>
+      </geometry>
+    </collision>
+  </link>
+  <link name="link1">
+    <inertial>
+      <mass value="0.5"/>
+      <origin xyz="0 0 0"/>
+      <inertia ixx="0.005" ixy="0" ixz="0" iyy="0.005" iyz="0" izz="0.005"/>
+    </inertial>
+    <collision>
+      <origin xyz="0.05 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.1 0.1 0.1"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="joint1" type="revolute">
+    <parent link="base_link"/>
+    <child link="link1"/>
+    <origin xyz="0.05 0 0" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit effort="10" lower="-3.14" upper="3.14" velocity="1.0"/>
+  </joint>
+</robot>"""
+        urdf_path = tmp_path / "collision_test.urdf"
+        urdf_path.write_text(urdf_content)
+
+        model = embodik.RobotModel(str(urdf_path), floating_base=False)
+        if not model.has_collision_geometry():
+            pytest.skip("Collision geometry not loaded for this URDF")
+
+        # At zero config, boxes overlap -> should be in collision
+        q_zero = np.zeros(model.nq)
+        model.update_configuration(q_zero)
+        assert model.check_collision() == True
+
+        # With margin check
+        assert model.check_collision(min_distance=0.01) == True
+
+    def test_check_collision_with_distance_threshold(self, tmp_path):
+        """Test check_collision with distance threshold (near-miss detection)."""
+        urdf_content = """<?xml version="1.0"?>
+<robot name="near_miss">
+  <link name="base_link">
+    <inertial>
+      <mass value="1.0"/>
+      <origin xyz="0 0 0"/>
+      <inertia ixx="0.01" ixy="0" ixz="0" iyy="0.01" iyz="0" izz="0.01"/>
+    </inertial>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <sphere radius="0.05"/>
+      </geometry>
+    </collision>
+  </link>
+  <link name="link1">
+    <inertial>
+      <mass value="0.5"/>
+      <origin xyz="0 0 0"/>
+      <inertia ixx="0.005" ixy="0" ixz="0" iyy="0.005" iyz="0" izz="0.005"/>
+    </inertial>
+    <collision>
+      <origin xyz="0.15 0 0" rpy="0 0 0"/>
+      <geometry>
+        <sphere radius="0.05"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="joint1" type="revolute">
+    <parent link="base_link"/>
+    <child link="link1"/>
+    <origin xyz="0.2 0 0" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit effort="10" lower="-3.14" upper="3.14" velocity="1.0"/>
+  </joint>
+</robot>"""
+        urdf_path = tmp_path / "near_miss.urdf"
+        urdf_path.write_text(urdf_content)
+
+        model = embodik.RobotModel(str(urdf_path), floating_base=False)
+        if not model.has_collision_geometry():
+            pytest.skip("Collision geometry not loaded")
+
+        q = np.zeros(model.nq)
+        model.update_configuration(q)
+
+        min_dist = model.compute_min_collision_distance()
+        if np.isfinite(min_dist) and min_dist > 0:
+            # Not in contact, but check with large threshold
+            assert model.check_collision() == False
+            assert model.check_collision(min_distance=min_dist + 0.01) == True
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
