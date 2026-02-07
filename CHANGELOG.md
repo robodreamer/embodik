@@ -5,6 +5,59 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-02-06
+
+### Added
+- **Inverse dynamics API on `RobotModel`**: Full dynamics computations via Pinocchio's
+  RNEA and CRBA algorithms, exposed through native C++ bindings.
+  - `RobotModel.compute_generalized_gravity(q)`: Compute gravity torque vector g(q)
+  - `RobotModel.rnea(q, v, a)`: Full inverse dynamics via Recursive Newton-Euler Algorithm
+    (returns tau = M(q)*a + C(q,v)*v + g(q))
+  - `RobotModel.compute_mass_matrix(q)`: Joint-space mass/inertia matrix M(q) via CRBA
+  - `RobotModel.compute_coriolis(q, v)`: Coriolis + centrifugal torque vector C(q,v)*v
+  - `RobotModel.set_gravity(gravity)` / `get_gravity()`: Configure gravity vector
+- **Boolean collision checking on `RobotModel`**:
+  - `RobotModel.check_collision(min_distance=0.0)`: Returns True if any collision pair
+    has distance below threshold. Simpler API than `compute_min_collision_distance()`
+    for pass/fail collision queries.
+
+### Notes
+These APIs unify robot model functionality that was previously scattered across
+separate Pinocchio imports (e.g. `pin.computeGeneralizedGravity`, `pin.rnea`,
+`hmndlib_pinocchio` collision checks) into EmbodiK's single `RobotModel` class,
+eliminating the need for a separate `pin` runtime dependency for dynamics.
+
+### Migration Guide
+
+Replace direct Pinocchio dynamics calls:
+
+```python
+# Old - required pip pinocchio
+import pinocchio as pin
+model = pin.buildModelFromUrdf("robot.urdf")
+data = model.createData()
+tau_gravity = pin.computeGeneralizedGravity(model, data, q)
+tau_total = pin.rnea(model, data, q, v, a)
+
+# New (v0.6.0) - no pip pinocchio needed
+import embodik
+robot = embodik.RobotModel("robot.urdf")
+tau_gravity = robot.compute_generalized_gravity(q)
+tau_total = robot.rnea(q, v, a)
+```
+
+Replace separate collision checking libraries:
+
+```python
+# Old - required hmndlib_pinocchio or direct pinocchio
+robot_state.check_collision()
+
+# New (v0.6.0) - built into EmbodiK
+robot.update_configuration(q)
+in_collision = robot.check_collision()           # contact check
+too_close = robot.check_collision(min_distance=0.02)  # proximity check
+```
+
 ## [0.5.0] - 2026-02-06
 
 ### Added

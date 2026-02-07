@@ -25,9 +25,11 @@
 #pragma once
 
 #include <pinocchio/algorithm/center-of-mass.hpp>
+#include <pinocchio/algorithm/crba.hpp>
 #include <pinocchio/algorithm/frames.hpp>
 #include <pinocchio/algorithm/jacobian.hpp>
 #include <pinocchio/algorithm/kinematics.hpp>
+#include <pinocchio/algorithm/rnea.hpp>
 #include <pinocchio/multibody/data.hpp>
 #include <pinocchio/multibody/geometry.hpp>
 #include <pinocchio/multibody/model.hpp>
@@ -205,17 +207,17 @@ public:
    * operations.
    *
    * For standard revolute/prismatic joints this is equivalent to q + v*dt,
-   * but for floating-base (SE3), spherical (quaternion), and other non-Euclidean
-   * joint types it performs the correct manifold integration (e.g. quaternion
-   * exponential map).
+   * but for floating-base (SE3), spherical (quaternion), and other
+   * non-Euclidean joint types it performs the correct manifold integration
+   * (e.g. quaternion exponential map).
    *
    * @param q Current configuration vector (size nq)
    * @param v Velocity / tangent vector (size nv)
    * @param dt Time step (default 1.0, i.e. v is already scaled)
    * @return Integrated configuration vector (size nq)
    */
-  Eigen::VectorXd integrate(const Eigen::VectorXd &q,
-                            const Eigen::VectorXd &v, double dt = 1.0) const;
+  Eigen::VectorXd integrate(const Eigen::VectorXd &q, const Eigen::VectorXd &v,
+                            double dt = 1.0) const;
 
   /**
    * @brief Compute the tangent-vector difference between two configurations.
@@ -262,6 +264,102 @@ public:
    * @return Normalized configuration vector (same as input, modified in-place)
    */
   Eigen::VectorXd normalize(const Eigen::VectorXd &q) const;
+
+  // =========================================================================
+  // Inverse dynamics / gravity
+  // =========================================================================
+
+  /**
+   * @brief Compute the generalized gravity torque vector.
+   *
+   * Returns the joint torques required to compensate gravity at the given
+   * configuration (equivalent to RNEA with zero velocity and acceleration).
+   *
+   * @param q Joint configuration vector (size nq)
+   * @return Gravity torque vector g(q) (size nv)
+   */
+  Eigen::VectorXd compute_generalized_gravity(const Eigen::VectorXd &q) const;
+
+  /**
+   * @brief Compute inverse dynamics using the Recursive Newton-Euler Algorithm.
+   *
+   * Returns the joint torques required to produce the given accelerations
+   * at the specified configuration and velocity:
+   *   tau = M(q)*a + C(q,v)*v + g(q)
+   *
+   * Common usage patterns:
+   *  - Gravity only:   rnea(q, zeros, zeros)  == compute_generalized_gravity(q)
+   *  - Coriolis+grav:  rnea(q, v, zeros)
+   *  - Full dynamics:  rnea(q, v, a)
+   *
+   * @param q Joint configuration vector (size nq)
+   * @param v Joint velocity vector (size nv)
+   * @param a Joint acceleration vector (size nv)
+   * @return Joint torque vector tau (size nv)
+   */
+  Eigen::VectorXd rnea(const Eigen::VectorXd &q, const Eigen::VectorXd &v,
+                       const Eigen::VectorXd &a) const;
+
+  /**
+   * @brief Compute the joint-space mass/inertia matrix M(q).
+   *
+   * Uses the Composite Rigid Body Algorithm (CRBA). The returned matrix is
+   * symmetric positive-definite and has size nv x nv.
+   *
+   * @param q Joint configuration vector (size nq)
+   * @return Mass matrix M(q) (size nv x nv)
+   */
+  Eigen::MatrixXd compute_mass_matrix(const Eigen::VectorXd &q) const;
+
+  /**
+   * @brief Compute the Coriolis + centrifugal torque vector C(q,v)*v.
+   *
+   * Computed as: rnea(q, v, 0) - g(q), where g(q) is the gravity vector.
+   *
+   * @param q Joint configuration vector (size nq)
+   * @param v Joint velocity vector (size nv)
+   * @return Coriolis torque vector (size nv)
+   */
+  Eigen::VectorXd compute_coriolis(const Eigen::VectorXd &q,
+                                   const Eigen::VectorXd &v) const;
+
+  /**
+   * @brief Set the gravity vector for the model.
+   *
+   * Default is [0, 0, -9.81]. This affects gravity torque computations.
+   *
+   * @param gravity 3D gravity vector (e.g. [0, 0, -9.81])
+   */
+  void set_gravity(const Eigen::Vector3d &gravity);
+
+  /**
+   * @brief Get the current gravity vector.
+   * @return 3D gravity vector
+   */
+  Eigen::Vector3d get_gravity() const;
+
+  // =========================================================================
+  // Boolean collision checking
+  // =========================================================================
+
+  /**
+   * @brief Check whether any collision pair is in contact at the current
+   * configuration.
+   *
+   * Returns true if the minimum distance across all active collision pairs
+   * is <= 0 (i.e. geometries are overlapping or touching).
+   *
+   * @return true if any collision detected, false otherwise
+   */
+  bool check_collision() const;
+
+  /**
+   * @brief Check whether any collision pair has distance below a threshold.
+   *
+   * @param min_distance Distance threshold (default 0.0 = contact check)
+   * @return true if any pair has distance <= min_distance
+   */
+  bool check_collision(double min_distance) const;
 
   /**
    * @brief Get current joint configuration

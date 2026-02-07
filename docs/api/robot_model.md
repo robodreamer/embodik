@@ -128,6 +128,86 @@ q_new = model.integrate(q, v, dt=0.01)
 model.update_configuration(q_new)
 ```
 
+## Inverse Dynamics
+
+EmbodiK provides full inverse dynamics via Pinocchio's RNEA and CRBA, exposed through
+native C++ bindings (no `pip pinocchio` needed at runtime).
+
+### `compute_generalized_gravity(q)`
+
+Compute gravity torque vector g(q) -- the torques needed to hold the robot stationary.
+
+```python
+q = np.array([0.5, -0.3, 0.0, 0.0, 0.0, 0.0, 0.0])
+tau_gravity = model.compute_generalized_gravity(q)
+```
+
+### `rnea(q, v, a)`
+
+Full inverse dynamics: tau = M(q)*a + C(q,v)*v + g(q).
+
+```python
+# Gravity only (v=0, a=0)
+tau_g = model.rnea(q, np.zeros(nv), np.zeros(nv))
+
+# Coriolis + gravity (a=0)
+tau_cg = model.rnea(q, v, np.zeros(nv))
+
+# Full dynamics
+tau = model.rnea(q, v, a)
+```
+
+### `compute_mass_matrix(q)`
+
+Joint-space mass/inertia matrix M(q) (symmetric positive-definite, nv x nv).
+
+```python
+M = model.compute_mass_matrix(q)
+```
+
+### `compute_coriolis(q, v)`
+
+Coriolis + centrifugal torque vector C(q,v)*v.
+
+```python
+tau_coriolis = model.compute_coriolis(q, v)
+```
+
+### `set_gravity(gravity)` / `get_gravity()`
+
+Configure the gravity vector (default [0, 0, -9.81]).
+
+```python
+model.set_gravity(np.array([0.0, 0.0, -9.81]))  # Standard gravity
+model.set_gravity(np.array([0.0, 0.0, 0.0]))     # Zero-g environment
+```
+
+## Collision Checking
+
+### Distance-Based
+
+```python
+model.update_configuration(q)
+min_dist = model.compute_min_collision_distance()   # Minimum across all pairs
+distances = model.compute_collision_distances()      # All pair distances
+```
+
+### Boolean Collision Check
+
+```python
+model.update_configuration(q)
+in_collision = model.check_collision()               # Contact check (dist <= 0)
+too_close = model.check_collision(min_distance=0.02) # Proximity check
+```
+
+### Collision Pair Management
+
+```python
+model.get_collision_geometry_names()   # List geometry names
+model.get_collision_pair_names()       # List active pairs
+model.apply_collision_exclusions([("geom_a", "geom_b")])  # Disable pairs
+```
+
 ## Floating-Base Example
 
 ```python
@@ -148,4 +228,7 @@ v[5] = 0.1   # Rotate around z
 # Correct manifold integration (quaternion stays normalized)
 q_new = model.integrate(q, v, dt=0.01)
 assert abs(np.linalg.norm(q_new[3:7]) - 1.0) < 1e-12  # Quaternion is valid!
+
+# Gravity compensation torques
+tau_gravity = model.compute_generalized_gravity(q)
 ```

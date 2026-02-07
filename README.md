@@ -19,6 +19,7 @@ EmbodiK is a high-performance inverse kinematics (IK) library for cross-embodime
 - **Singularity Robust**: Advanced inverse methods for stable solutions
 - **Constraint Support**: Joint limits and operational space constraints
 - **Lie-Group Integration**: Manifold-aware `integrate()` / `difference()` for floating-base, quaternion, and continuous joints
+- **Inverse Dynamics**: Gravity compensation, RNEA, mass matrix, and Coriolis via native C++ bindings
 - **Limit Recovery**: Configurable joint limit recovery gain when outside bounds
 - **Collision Avoidance**: Self-collision detection and avoidance
 - **Visualization**: Interactive 3D visualization with Viser
