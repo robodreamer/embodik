@@ -431,6 +431,38 @@ std::vector<std::string> RobotModel::get_joint_names() const {
   return names;
 }
 
+bool RobotModel::has_joint(const std::string &joint_name) const {
+  return model_.existJointName(joint_name);
+}
+
+RobotModel::JointIndex
+RobotModel::get_joint_id(const std::string &joint_name) const {
+  if (!model_.existJointName(joint_name)) {
+    throw std::runtime_error("Joint not found: " + joint_name);
+  }
+  return model_.getJointId(joint_name);
+}
+
+int RobotModel::get_joint_config_index(const std::string &joint_name) const {
+  JointIndex jid = get_joint_id(joint_name);
+  return model_.idx_qs[jid];
+}
+
+int RobotModel::get_joint_config_size(const std::string &joint_name) const {
+  JointIndex jid = get_joint_id(joint_name);
+  return model_.nqs[jid];
+}
+
+int RobotModel::get_joint_velocity_index(const std::string &joint_name) const {
+  JointIndex jid = get_joint_id(joint_name);
+  return model_.idx_vs[jid];
+}
+
+int RobotModel::get_joint_velocity_size(const std::string &joint_name) const {
+  JointIndex jid = get_joint_id(joint_name);
+  return model_.nvs[jid];
+}
+
 Eigen::VectorXd RobotModel::integrate(const Eigen::VectorXd &q,
                                       const Eigen::VectorXd &v,
                                       double dt) const {

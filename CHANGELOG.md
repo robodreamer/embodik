@@ -5,6 +5,48 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-02-06
+
+### Added
+- **Joint index access API on `RobotModel`**: Expose per-joint configuration-space and
+  velocity-space indexing, matching Pinocchio's `model.idx_qs` / `nqs` / `idx_vs` / `nvs`
+  arrays through a clean name-based Python API.
+  - `RobotModel.has_joint(joint_name)`: Check if a joint exists
+  - `RobotModel.get_joint_id(joint_name)`: Get the internal joint index
+  - `RobotModel.get_joint_config_index(joint_name)`: Starting index in q (idx_q)
+  - `RobotModel.get_joint_config_size(joint_name)`: Number of config variables (nq)
+  - `RobotModel.get_joint_velocity_index(joint_name)`: Starting index in v (idx_v)
+  - `RobotModel.get_joint_velocity_size(joint_name)`: Number of velocity variables (nv)
+
+### Notes
+These APIs let users build per-joint q/v mappings without importing Pinocchio directly,
+enabling cleaner joint-to-motor mapping code (e.g. `optional_wheelbase_viser` torque analysis).
+For revolute joints, nq=nv=1. For continuous joints, nq=2 (cos/sin) and nv=1. For
+floating-base, nq=7 (xyz + quaternion) and nv=6 (linear + angular velocity).
+
+### Migration Guide
+
+Replace direct Pinocchio joint index access:
+
+```python
+# Old - required pip pinocchio
+import pinocchio as pin
+model = pin.buildModelFromUrdf("robot.urdf")
+joint_id = model.getJointId("joint1")
+idx_q = model.idx_qs[joint_id]
+nq = model.nqs[joint_id]
+idx_v = model.idx_vs[joint_id]
+nv = model.nvs[joint_id]
+
+# New (v0.7.0) - no pip pinocchio needed
+import embodik
+robot = embodik.RobotModel("robot.urdf")
+idx_q = robot.get_joint_config_index("joint1")
+nq = robot.get_joint_config_size("joint1")
+idx_v = robot.get_joint_velocity_index("joint1")
+nv = robot.get_joint_velocity_size("joint1")
+```
+
 ## [0.6.0] - 2026-02-06
 
 ### Added
