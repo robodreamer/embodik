@@ -209,8 +209,10 @@ void bind_robot_model(nb::module_ &m) {
       // Configuration-space operations (Lie-group aware)
       .def("integrate", &RobotModel::integrate, nb::arg("q"), nb::arg("v"),
            nb::arg("dt") = 1.0,
-           "Integrate velocity into configuration using Lie group operations.\n\n"
-           "For standard revolute/prismatic joints this is equivalent to q + v*dt,\n"
+           "Integrate velocity into configuration using Lie group "
+           "operations.\n\n"
+           "For standard revolute/prismatic joints this is equivalent to q + "
+           "v*dt,\n"
            "but for floating-base (SE3), spherical (quaternion), and other\n"
            "non-Euclidean joint types it performs the correct manifold\n"
            "integration (e.g. quaternion exponential map).\n\n"
@@ -221,12 +223,13 @@ void bind_robot_model(nb::module_ &m) {
            "Returns:\n"
            "    Integrated configuration vector (size nq)")
 
-      .def("difference", &RobotModel::difference, nb::arg("q0"),
-           nb::arg("q1"),
-           "Compute the tangent-vector difference between two configurations.\n\n"
+      .def("difference", &RobotModel::difference, nb::arg("q0"), nb::arg("q1"),
+           "Compute the tangent-vector difference between two "
+           "configurations.\n\n"
            "Returns the velocity v such that q1 = integrate(q0, v).\n"
            "For Euclidean joints this is simply q1 - q0, but for quaternion /\n"
-           "floating-base joints the result lives in the tangent space (size nv).\n\n"
+           "floating-base joints the result lives in the tangent space (size "
+           "nv).\n\n"
            "Args:\n"
            "    q0: Start configuration (size nq)\n"
            "    q1: End configuration (size nq)\n\n"
@@ -256,6 +259,85 @@ void bind_robot_model(nb::module_ &m) {
            "    q: Configuration vector (size nq)\n\n"
            "Returns:\n"
            "    Normalized configuration vector (size nq)")
+
+      // ================================================================
+      // Inverse dynamics / gravity
+      // ================================================================
+
+      .def("compute_generalized_gravity",
+           &RobotModel::compute_generalized_gravity, nb::arg("q"),
+           "Compute the generalized gravity torque vector g(q).\n\n"
+           "Returns the joint torques required to compensate gravity at the\n"
+           "given configuration (equivalent to RNEA with zero velocity and\n"
+           "acceleration).\n\n"
+           "Args:\n"
+           "    q: Joint configuration vector (size nq)\n\n"
+           "Returns:\n"
+           "    Gravity torque vector (size nv)")
+
+      .def("rnea", &RobotModel::rnea, nb::arg("q"), nb::arg("v"),
+           nb::arg("a"),
+           "Compute inverse dynamics using the Recursive Newton-Euler "
+           "Algorithm.\n\n"
+           "Returns tau = M(q)*a + C(q,v)*v + g(q).\n\n"
+           "Common usage patterns:\n"
+           "  - Gravity only:   rnea(q, zeros, zeros)\n"
+           "  - Coriolis+grav:  rnea(q, v, zeros)\n"
+           "  - Full dynamics:  rnea(q, v, a)\n\n"
+           "Args:\n"
+           "    q: Joint configuration vector (size nq)\n"
+           "    v: Joint velocity vector (size nv)\n"
+           "    a: Joint acceleration vector (size nv)\n\n"
+           "Returns:\n"
+           "    Joint torque vector tau (size nv)")
+
+      .def("compute_mass_matrix", &RobotModel::compute_mass_matrix,
+           nb::arg("q"),
+           "Compute the joint-space mass/inertia matrix M(q).\n\n"
+           "Uses the Composite Rigid Body Algorithm (CRBA). The returned\n"
+           "matrix is symmetric positive-definite.\n\n"
+           "Args:\n"
+           "    q: Joint configuration vector (size nq)\n\n"
+           "Returns:\n"
+           "    Mass matrix M(q) (size nv x nv)")
+
+      .def("compute_coriolis", &RobotModel::compute_coriolis, nb::arg("q"),
+           nb::arg("v"),
+           "Compute the Coriolis + centrifugal torque vector C(q,v)*v.\n\n"
+           "Args:\n"
+           "    q: Joint configuration vector (size nq)\n"
+           "    v: Joint velocity vector (size nv)\n\n"
+           "Returns:\n"
+           "    Coriolis torque vector (size nv)")
+
+      .def("set_gravity", &RobotModel::set_gravity, nb::arg("gravity"),
+           "Set the gravity vector for the model.\n\n"
+           "Default is [0, 0, -9.81]. Affects gravity torque computations.\n\n"
+           "Args:\n"
+           "    gravity: 3D gravity vector (e.g. [0, 0, -9.81])")
+
+      .def("get_gravity", &RobotModel::get_gravity,
+           "Get the current gravity vector.\n\n"
+           "Returns:\n"
+           "    3D gravity vector")
+
+      // ================================================================
+      // Boolean collision checking
+      // ================================================================
+
+      .def(
+          "check_collision",
+          [](const RobotModel &self, double min_distance) {
+            return self.check_collision(min_distance);
+          },
+          nb::arg("min_distance") = 0.0,
+          "Check whether any collision pair has distance below a threshold.\n\n"
+          "Returns True if any pair has distance <= min_distance.\n"
+          "With default min_distance=0.0, checks for actual contact/overlap.\n\n"
+          "Args:\n"
+          "    min_distance: Distance threshold (default 0.0)\n\n"
+          "Returns:\n"
+          "    True if collision detected, False otherwise")
 
       // State accessors
       .def("get_current_configuration", &RobotModel::get_current_configuration,
