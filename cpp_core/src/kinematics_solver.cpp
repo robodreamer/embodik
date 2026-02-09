@@ -953,6 +953,39 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
     // Get acceleration limits from robot model
     Eigen::VectorXd accel_limits = robot_->get_acceleration_limits();
 
+    // Map each velocity DoF index to the corresponding configuration DoF index.
+    // This is required when nq != nv (e.g. continuous joints represented as
+    // [cos(theta), sin(theta)] in q but 1 DoF in v).
+    std::vector<int> velocity_to_config_index(robot_->nv(), -1);
+    const auto joint_names = robot_->get_joint_names();
+    for (const auto &joint_name : joint_names) {
+      const int v_idx = robot_->get_joint_velocity_index(joint_name);
+      const int v_size = robot_->get_joint_velocity_size(joint_name);
+      const int q_idx = robot_->get_joint_config_index(joint_name);
+      const int q_size = robot_->get_joint_config_size(joint_name);
+
+      if (v_size <= 0 || v_idx < 0 || q_idx < 0) {
+        continue;
+      }
+
+      // 1-DoF joints with non-scalar q representation (e.g. continuous) do not
+      // admit simple scalar position bounds in q-space. Keep them unconstrained
+      // by position limits here; velocity limits still apply.
+      if (v_size == 1 && q_size != 1) {
+        continue;
+      }
+
+      const int dims = std::min(v_size, q_size);
+      for (int k = 0; k < dims; ++k) {
+        const int vk = v_idx + k;
+        const int qk = q_idx + k;
+        if (vk >= 0 && vk < robot_->nv() && qk >= 0 && qk < q_current.size() &&
+            qk < q_min.size() && qk < q_max.size()) {
+          velocity_to_config_index[vk] = qk;
+        }
+      }
+    }
+
     // For each joint, compute maximum velocity to stay within position limits
     C.block(constraint_idx, 0, robot_->nv(), robot_->nv()) =
         Eigen::MatrixXd::Identity(robot_->nv(), robot_->nv());
@@ -1017,7 +1050,19 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
 
       // Handle joint constraints (remaining DoFs)
       for (int i = 6; i < robot_->nv(); ++i) {
-        int q_idx = i + 1; // Account for quaternion (q has 7 for base, v has 6)
+        const int q_idx = velocity_to_config_index[i];
+        if (q_idx < 0 || q_idx >= q_current.size() || q_idx >= q_min.size() ||
+            q_idx >= q_max.size()) {
+          c_lower(constraint_idx + i) = -1e10;
+          c_upper(constraint_idx + i) = 1e10;
+          continue;
+        }
+
+        if (!std::isfinite(q_min[q_idx]) || !std::isfinite(q_max[q_idx])) {
+          c_lower(constraint_idx + i) = -1e10;
+          c_upper(constraint_idx + i) = 1e10;
+          continue;
+        }
 
         // Calculate margins to limits
         double lower_margin = q_current[q_idx] - q_min[q_idx] - margin_limit;
@@ -1030,11 +1075,26 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
         c_upper(constraint_idx + i) = upper_limit;
       }
     } else {
-      // Fixed-base robot: direct mapping between q and v indices
+      // Fixed-base robot: q-v mapping is only direct for joints with nqs == nvs.
+      // Continuous joints (nqs=2, nvs=1) require explicit index mapping.
       for (int i = 0; i < robot_->nv(); ++i) {
+        const int q_idx = velocity_to_config_index[i];
+        if (q_idx < 0 || q_idx >= q_current.size() || q_idx >= q_min.size() ||
+            q_idx >= q_max.size()) {
+          c_lower(constraint_idx + i) = -1e10;
+          c_upper(constraint_idx + i) = 1e10;
+          continue;
+        }
+
+        if (!std::isfinite(q_min[q_idx]) || !std::isfinite(q_max[q_idx])) {
+          c_lower(constraint_idx + i) = -1e10;
+          c_upper(constraint_idx + i) = 1e10;
+          continue;
+        }
+
         // Calculate margins to limits
-        double lower_margin = q_current[i] - q_min[i] - margin_limit;
-        double upper_margin = q_max[i] - q_current[i] - margin_limit;
+        double lower_margin = q_current[q_idx] - q_min[q_idx] - margin_limit;
+        double upper_margin = q_max[q_idx] - q_current[q_idx] - margin_limit;
 
         auto [lower_limit, upper_limit] = calculate_velocity_box_constraint(
             lower_margin, upper_margin, vel_limits[i], accel_limits[i], dt_);
