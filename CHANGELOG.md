@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.1] - 2026-02-09
+
+### Fixed
+- **Joint position limit enforcement with mixed joint representations**:
+  `KinematicsSolver.solve_velocity(..., apply_limits=True)` now maps velocity-space
+  indices (`v`) to the correct configuration-space indices (`q`) when building
+  position-based velocity constraints. This fixes cases where models include
+  continuous joints (`nq=2, nv=1`) ahead of bounded revolute joints and the
+  bounded joint could be constrained using the wrong `q` index.
+- **Added regression coverage** in `test_joint_limit_recovery.py` for a chain
+  containing a continuous joint followed by a bounded revolute joint to ensure
+  integrated solutions remain within revolute position limits.
+
 ## [0.7.0] - 2026-02-06
 
 ### Added
