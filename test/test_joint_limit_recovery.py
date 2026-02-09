@@ -44,6 +44,36 @@ def create_test_urdf():
     return path
 
 
+def create_continuous_plus_revolute_urdf():
+    """Create a 2-joint chain with continuous then bounded revolute joint."""
+    urdf_content = """<?xml version="1.0"?>
+<robot name="mixed_joint_robot">
+  <link name="base_link"/>
+  <link name="link1"/>
+  <link name="link2"/>
+
+  <joint name="joint_cont" type="continuous">
+    <parent link="base_link"/>
+    <child link="link1"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit velocity="2.0" effort="10.0"/>
+  </joint>
+
+  <joint name="joint_limited" type="revolute">
+    <parent link="link1"/>
+    <child link="link2"/>
+    <origin xyz="0 0 1" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="0.0" upper="1.0" velocity="2.0" effort="10.0"/>
+  </joint>
+</robot>"""
+    fd, path = tempfile.mkstemp(suffix=".urdf")
+    with os.fdopen(fd, "w") as f:
+        f.write(urdf_content)
+    return path
+
+
 @pytest.fixture
 def solver():
     urdf_path = create_test_urdf()
@@ -187,3 +217,29 @@ class TestVelocityBoxConstraintFormulation:
         )
         assert np.isclose(lower, 0.0)
         assert upper > 0.0
+
+
+def test_mixed_joint_index_mapping_preserves_revolute_limit():
+    """Regression: position limits must hold with continuous joints in model."""
+    urdf_path = create_continuous_plus_revolute_urdf()
+    try:
+        robot = eik.RobotModel(urdf_path, floating_base=False)
+        solver = eik.KinematicsSolver(robot)
+        solver.dt = 0.1
+
+        # Drive bounded joint toward +upper limit aggressively.
+        task = solver.add_joint_task("bounded_joint_task", "joint_limited", 2.0)
+        task.weight = 1.0
+
+        q = robot.get_current_configuration().copy()
+        # joint_cont occupies q[0:2] as [cos, sin]; bounded revolute is q[2].
+        q[2] = 0.99
+        robot.update_configuration(q)
+
+        result = solver.solve_velocity(q, apply_limits=True)
+        assert result.status == eik.SolverStatus.SUCCESS
+
+        q_next = robot.integrate(q, np.asarray(result.joint_velocities), solver.dt)
+        assert q_next[2] <= 1.0 + 1e-8
+    finally:
+        os.remove(urdf_path)
