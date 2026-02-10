@@ -192,6 +192,114 @@ def test_multi_task_with_constraints():
     assert error < TASK_ERROR_TOLERANCE, f"Primary task error {error} exceeds tolerance {TASK_ERROR_TOLERANCE}"
 
 
+def test_saturated_joint_still_allows_task_via_redundancy():
+    """Redundant joints achieve the task even when one joint is saturated.
+
+    SNS should find nonzero scale when other joints can contribute.
+    """
+    # 4 joints, 1D task.  J = [1, 1, 1, 1].  Joint 0 capped at 0.
+    J = np.array([[1.0, 1.0, 1.0, 1.0]])
+    goal = np.array([1.0])
+    C = np.eye(4)
+    lower = np.array([-2.0, -2.0, -2.0, -2.0])
+    upper = np.array([ 0.0,  2.0,  2.0,  2.0])
+
+    result = eik.computeMultiObjectiveVelocitySolutionEigen([goal], [J], C, lower, upper)
+    assert result.status == eik.SolverStatus.SUCCESS
+
+    solution = np.array(result.solution)
+    assert result.task_scales[0] > 0.0, "Task scale should be nonzero when redundancy exists"
+    assert solution[0] <= CONSTRAINT_TOLERANCE, "Saturated joint should stay at bound"
+    achieved = (J @ solution).item()
+    assert abs(achieved - result.task_scales[0] * goal[0]) < TASK_ERROR_TOLERANCE
+
+
+def test_saturated_joint_with_forced_recovery_still_achieves_task():
+    """Recovery forcing joint velocity negative should not kill the task."""
+    J = np.array([[1.0, 1.0, 1.0, 1.0]])
+    goal = np.array([1.0])
+    C = np.eye(4)
+    lower = np.array([-2.0, -2.0, -2.0, -2.0])
+    upper = np.array([-0.05, 2.0, 2.0, 2.0])  # joint 0 forced negative
+
+    result = eik.computeMultiObjectiveVelocitySolutionEigen([goal], [J], C, lower, upper)
+    assert result.status == eik.SolverStatus.SUCCESS
+
+    solution = np.array(result.solution)
+    assert result.task_scales[0] > 0.0, "Scale should be nonzero; free joints can compensate"
+    assert solution[0] <= -0.05 + CONSTRAINT_TOLERANCE
+    achieved = (J @ solution).item()
+    assert abs(achieved - result.task_scales[0] * goal[0]) < TASK_ERROR_TOLERANCE
+
+
+def test_saturated_joint_with_coupled_multidim_task():
+    """Multi-row task with well-conditioned Jacobian still achieves partial scale."""
+    J = np.array([
+        [1.0, 0.5, 0.3, 0.1],
+        [0.2, 1.0, 0.8, 0.4],
+    ])
+    goal = np.array([0.5, -0.3])
+    C = np.eye(4)
+    lower = np.full(4, -2.0)
+    upper = np.array([-0.05, 2.0, 2.0, 2.0])  # joint 0 forced negative
+
+    result = eik.computeMultiObjectiveVelocitySolutionEigen([goal], [J], C, lower, upper)
+    assert result.status == eik.SolverStatus.SUCCESS
+
+    solution = np.array(result.solution)
+    assert result.task_scales[0] > 0.0, "Well-conditioned coupled task should have nonzero scale"
+    assert solution[0] <= -0.05 + CONSTRAINT_TOLERANCE
+    achieved = J @ solution
+    scaled_goal = result.task_scales[0] * goal
+    assert np.linalg.norm(achieved - scaled_goal) < TASK_ERROR_TOLERANCE
+
+
+def test_rank_deficient_jacobian_at_limit_collapses_scale():
+    """Near-singular Jacobian at a joint limit legitimately collapses the task scale.
+
+    A planar arm at full extension has proportional Jacobian rows (rank 1 for 2D task),
+    so the solver correctly returns scale=0 when it cannot satisfy both task components.
+    """
+    # Rows are proportional: rank ≈ 1
+    J = np.array([
+        [ 9.56e-4, 7.17e-4, 4.78e-4, 2.39e-4],
+        [-1.20,    -0.90,   -0.60,   -0.30   ],
+    ])
+    goal = np.array([0.0, -0.05])
+    C = np.eye(4)
+    lower = np.full(4, -2.0)
+    upper = np.array([-0.05, 2.0, 2.0, 2.0])
+
+    result = eik.computeMultiObjectiveVelocitySolutionEigen([goal], [J], C, lower, upper)
+    assert result.status == eik.SolverStatus.SUCCESS
+    # Scale collapse is expected here due to rank deficiency, not a bug
+    assert result.task_scales[0] == pytest.approx(0.0, abs=SCALE_EPSILON)
+
+
+def test_split_tasks_bypass_single_scale_limitation():
+    """Splitting infeasible + feasible objectives into separate tasks
+    allows the feasible part to proceed independently.
+    """
+    C = np.eye(2)
+    lower = np.array([0.0, -1.0])  # Joint 0 fully blocked
+    upper = np.array([0.0,  1.0])
+
+    jacobians = [
+        np.array([[1.0, 0.0]]),  # Blocked objective
+        np.array([[0.0, 1.0]]),  # Feasible objective
+    ]
+    goals = [np.array([1.0]), np.array([1.0])]
+
+    result = eik.computeMultiObjectiveVelocitySolutionEigen(goals, jacobians, C, lower, upper)
+    assert result.status == eik.SolverStatus.SUCCESS
+
+    solution = np.array(result.solution)
+    assert solution[0] == pytest.approx(0.0, abs=CONSTRAINT_TOLERANCE)
+    assert solution[1] > 0.0
+    assert result.task_scales[0] == pytest.approx(0.0, abs=SCALE_EPSILON)
+    assert result.task_scales[1] > 0.0
+
+
 def test_multi_task_prioritization():
     """Test that tasks are properly prioritized."""
     # Conflicting tasks - both want to move joint 0
