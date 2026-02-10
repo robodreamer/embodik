@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.2] - 2026-02-09
+
+### Fixed
+- **Improved position-limit robustness near joint bounds**: Increased the
+  position-limit margin used for position-based velocity constraints from
+  `1e-4` to `1e-3` radians to better absorb solver tolerance and numerical
+  drift during integration.
+- **Post-solve velocity bound enforcement for limited solves**:
+  `KinematicsSolver.solve_velocity(..., apply_limits=True)` now clamps the
+  returned velocity vector to the effective per-joint bounds (including the
+  intersection of velocity and position-based bounds when both are active).
+
 ## [0.7.1] - 2026-02-09
 
 ### Fixed

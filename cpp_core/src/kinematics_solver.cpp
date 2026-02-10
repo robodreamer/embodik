@@ -992,7 +992,9 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
 
     // Consider position, velocity, and
     // acceleration constraints
-    double margin_limit = 1e-4; // Small margin from exact limits
+    // 1 mrad margin to absorb QP tolerance and numerical drift (violations
+    // were ~0.4–0.9 mrad with 0.1 mrad margin).
+    constexpr double margin_limit = 1e-3;
 
     if (robot_->is_floating_base()) {
       // Handle floating-base constraints (first 6 DoFs)
@@ -1146,6 +1148,23 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
 
   // Convert solution to Eigen vector
   if (!result.solution.empty()) {
+    // Clamp velocity solution to constraint bounds to avoid post-integration
+    // limit violations from QP tolerance.
+    if (apply_limits && c_lower.size() >= robot_->nv()) {
+      Eigen::Map<Eigen::VectorXd> dq(result.solution.data(),
+                                     result.solution.size());
+      for (int i = 0; i < robot_->nv(); ++i) {
+        double lower = c_lower[i];
+        double upper = c_upper[i];
+        if (use_position_limits_ &&
+            static_cast<int>(c_lower.size()) >= 2 * robot_->nv()) {
+          lower = std::max(lower, c_lower[robot_->nv() + i]);
+          upper = std::min(upper, c_upper[robot_->nv() + i]);
+        }
+        dq[i] = std::clamp(dq[i], lower, upper);
+      }
+    }
+
     result.joint_velocities = Eigen::Map<const Eigen::VectorXd>(
         result.solution.data(), result.solution.size());
     last_solution_dq_norm_ = result.joint_velocities.norm();
