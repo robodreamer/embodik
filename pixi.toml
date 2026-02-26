@@ -80,7 +80,7 @@ demo-parallel-tracking-benchmark = "python examples/07_parallel_trajectory_track
 export-casadi = "python -m embodik.gpu.export_casadi_velocity_solve --robot panda --out fn_velocity_solve.casadi"
 lint = "black --check python/ test/ && isort --check python/ test/"
 format = "black python/ test/ && isort python/ test/"
-docs-build = "python -W ignore::DeprecationWarning:hppfcl -m mkdocs build"
+docs-build = { cmd = "python -W ignore::DeprecationWarning:hppfcl -m mkdocs build", depends-on = ["install"] }
 docs-serve = "mkdocs serve"
 # Build distributions
 build-wheel = { cmd = "python -m build --wheel", depends-on = ["patch-qhull"] }

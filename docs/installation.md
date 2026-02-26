@@ -109,7 +109,7 @@ curl -fsSL https://pixi.sh/install.sh | bash
 
 **Step 2: Clone and Install**
 ```bash
-git clone https://github.com/embodik/embodik.git
+git clone https://github.com/robodreamer/embodik.git
 cd embodik
 pixi run install
 ```
@@ -171,7 +171,7 @@ export CMAKE_PREFIX_PATH=$HOME/.local:$CMAKE_PREFIX_PATH
 
 **3. Install embodiK:**
 ```bash
-git clone https://github.com/embodik/embodik.git
+git clone https://github.com/robodreamer/embodik.git
 cd embodik
 python scripts/patch_qhull_cmake.py  # Required for manual installs
 pip install -e .
