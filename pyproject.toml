@@ -38,6 +38,9 @@ keywords = ["robotics", "inverse-kinematics", "optimization", "motion-planning"]
 embodik-sanitize-env = "embodik.cli:sanitize_env"
 embodik-examples = "embodik.cli:examples_cmd"
 
+[project.entry-points."mkdocs.plugins"]
+version = "embodik.mkdocs_plugin:VersionPlugin"
+
 [project.optional-dependencies]
 visualization = [
     "viser>=0.1.0",   # Required by Pinocchio's ViserVisualizer
@@ -72,10 +75,10 @@ gpu-collision = ["warp-lang>=1.0.0"]
 dev = ["pytest>=7.0", "pytest-cov>=4.0", "black>=24.0", "isort>=5.13.0"]
 
 [project.urls]
-Homepage = "https://github.com/embodik/embodik"
-Repository = "https://github.com/embodik/embodik"
-Documentation = "https://embodik.readthedocs.io"
-"Bug Reports" = "https://github.com/embodik/embodik/issues"
+Homepage = "https://github.com/robodreamer/embodik"
+Repository = "https://github.com/robodreamer/embodik"
+Documentation = "https://robodreamer.github.io/embodik/"
+"Bug Reports" = "https://github.com/robodreamer/embodik/issues"
 
 [tool.scikit-build]
 # Specify the CMake source directory
