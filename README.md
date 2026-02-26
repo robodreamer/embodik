@@ -562,7 +562,7 @@ embodik/
 
 ## Documentation
 
-Full documentation is available at: **https://embodik.github.io/embodik/**
+Full documentation is available at: **https://robodreamer.github.io/embodik/**
 
 - [Installation Guide](docs/installation.md) - Detailed installation instructions
 - [Quickstart](docs/quickstart.md) - Get started in 5 minutes

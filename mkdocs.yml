@@ -1,15 +1,18 @@
 site_name: EmbodiK Documentation
 site_description: High-performance inverse kinematics solver optimized for cross-embodiment VLA/AI applications
-site_url: https://embodik.github.io/embodik/
-repo_url: https://github.com/embodik/embodik
-repo_name: embodik/embodik
+site_url: https://robodreamer.github.io/embodik/
+repo_url: https://github.com/robodreamer/embodik
+repo_name: robodreamer/embodik
 edit_uri: edit/main/docs/
+# Version is injected from pyproject.toml by scripts.mkdocs_version_plugin
 
 # Ensure proper URL handling - use directory URLs (transforms/ instead of transforms.html)
 use_directory_urls: true
 
 theme:
   name: material
+  custom_dir: overrides
+  copyright: Copyright &copy; 2026 Andy Park
   palette:
     - scheme: default
       primary: indigo
@@ -34,6 +37,7 @@ theme:
 
 plugins:
   - search
+  - version:
   - mkdocstrings:
       handlers:
         python:
@@ -54,7 +58,8 @@ markdown_extensions:
       anchor_linenums: true
   - pymdownx.inlinehilite
   - pymdownx.snippets:
-      base_path: "."
+      base_path: ["."]
+      check_paths: true
   - pymdownx.superfences:
       custom_fences:
         - name: mermaid

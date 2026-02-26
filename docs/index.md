@@ -52,6 +52,6 @@ pip install embodik
 
 ## License
 
-MIT License - see the [LICENSE](https://github.com/robodreamer/embodik/blob/main/LICENSE) file for details.
+MIT License - see the [LICENSE](https://github.com/robodreamer/embodik/blob/main/LICENSE) file for details. Source: [robodreamer/embodik](https://github.com/robodreamer/embodik)
 
-**Copyright (c) 2025 Andy Park <andypark.purdue@gmail.com>**
+**Copyright (c) 2026 Andy Park <andypark.purdue@gmail.com>**
