@@ -33,7 +33,9 @@ Usage:
     pixi run python3 examples/03_teleop_ik.py --controller-port /dev/ttyUSB1
 
 Requirements:
-    - xvisio package (pip install xvisio) for Seer controller support
+    - xvisio package for Seer controller support (optional):
+      - With Pixi: pixi run -e teleop demo-teleop
+      - Or: pip install xvisio (requires libxvsdk.so on host)
     - If no controller is connected, runs in GUI-only mode with transform controls
 """
 

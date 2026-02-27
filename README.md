@@ -99,6 +99,8 @@ python 01_basic_ik_simple.py --robot panda
 
 See [docs/installation.md](docs/installation.md) for development setup with Pixi.
 
+**Optional:** For Seer controller teleop (`03_teleop_ik.py`): `pixi install -e teleop` then `pixi run -e teleop demo-teleop`.
+
 See [PUBLISHING.md](PUBLISHING.md) for wheel building and PyPI publishing.
 
 ## Quick Start

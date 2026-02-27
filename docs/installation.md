@@ -125,6 +125,20 @@ That's it! Pixi automatically:
 pixi run install-rebuild
 ```
 
+**Optional: Seer controller (xvisio) for teleop examples**
+
+The teleop example (`03_teleop_ik.py`) uses the xvisio SDK for Seer wireless controller support. xvisio is optional and requires `libxvsdk.so` on the host. To install it via Pixi:
+
+```bash
+# Install the teleop environment (includes xvisio)
+pixi install -e teleop
+
+# Run the teleop demo (requires Seer controller + libxvsdk.so)
+pixi run -e teleop demo-teleop
+```
+
+Without xvisio, the teleop example runs in GUI-only mode with transform controls.
+
 **Activate the environment:**
 ```bash
 pixi shell
@@ -258,6 +272,29 @@ pixi run -e cuda benchmark-gpu      # Batch IK benchmark
 | `test-gpu` | Run GPU-specific tests |
 
 All GPU tasks should be run with `-e cuda`: `pixi run -e cuda <task>`
+
+### Seer Controller (xvisio)
+
+The teleop example (`03_teleop_ik.py`) supports the Seer wireless controller via the xvisio SDK. This is optional; without it, the example runs in GUI-only mode.
+
+**Requirements:**
+- Seer wireless controller hardware
+- `libxvsdk.so` on the host (from xvisio SDK setup)
+
+**Install via Pixi:**
+
+```bash
+# Install the teleop environment (adds xvisio to default deps)
+pixi install -e teleop
+
+# Run the teleop demo
+pixi run -e teleop demo-teleop
+# Or: pixi run -e teleop python examples/03_teleop_ik.py --robot panda
+```
+
+| Task | Description |
+|------|-------------|
+| `demo-teleop` | Run teleop IK example with panda robot |
 
 <details>
 <summary><strong>Technical notes on pixi + PyTorch CUDA setup</strong></summary>
