@@ -79,6 +79,8 @@ pip install -e ".[examples]"
 python examples/01_basic_ik_simple.py --robot panda
 ```
 
+**Teleop example (03_teleop_ik.py) with Seer controller:** Requires xvisio. Install via `pixi install -e teleop`, then run `pixi run -e teleop demo-teleop` (or `pixi run -e teleop python examples/03_teleop_ik.py --robot panda`).
+
 ## Example Helpers
 
 The `examples/example_helpers/` directory contains reusable utilities:

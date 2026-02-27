@@ -35,8 +35,6 @@ robot_descriptions = ">=1.0.0"
 scipy = ">=1.11.0"
 # YAML parsing for robot presets
 pyyaml = ">=6.0"
-# Xvisio SDK for Seer controller support in teleop examples
-xvisio = ">=0.3.1"
 # Publishing tools
 build = ">=1.0.0"
 twine = ">=5.0.0"
@@ -101,6 +99,13 @@ pytest-cov = ">=2.0"
 [feature.dev.tasks]
 test-cov = "pytest test/ --cov=embodik --cov-report=term-missing"
 
+# Teleop feature: Xvisio SDK for Seer controller (requires libxvsdk.so on host)
+[feature.teleop.pypi-dependencies]
+xvisio = ">=0.3.1"
+
+[feature.teleop.tasks]
+demo-teleop = "python examples/03_teleop_ik.py --robot panda"
+
 # CUDA feature for GPU acceleration
 [feature.cuda]
 # CUDA feature needs pytorch channel first to get CUDA build
@@ -132,5 +137,7 @@ export-pph-sns = "python scripts/export_pph_sns.py"
 [environments]
 # Default environment includes dev features for development
 default = { features = ["dev"], solve-group = "default" }
+# Teleop environment for Seer controller examples (run: pixi run -e teleop demo-teleop)
+teleop = { features = ["dev", "teleop"], solve-group = "teleop" }
 # CUDA environment for GPU acceleration
 cuda = { features = ["dev", "cuda"], solve-group = "cuda" }
