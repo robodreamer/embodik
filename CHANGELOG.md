@@ -5,6 +5,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - 2026-02-27
+
+### Added
+- **CoM support-polygon inequality constraint API**: Enforce the 2D projection
+  of the center of mass to remain inside a convex polygon via per-half-plane QP
+  constraints.
+  - `KinematicsSolver.configure_com_constraint()`: Configure constraint with
+    polygon vertices, fractional margin shrink, velocity/acceleration limits,
+    and proximity-based activation.
+  - `KinematicsSolver.clear_com_constraint()`: Disable CoM constraint.
+  - `KinematicsSolver.get_com_proximity_threshold()`: Read back the auto-computed
+    activation distance (proximity_fraction × polygon inradius).
+  - Convex hull computation, half-plane extraction, and polygon inradius are
+    handled internally in C++ — callers only provide raw vertices.
+- **Three-layer velocity bound** per half-plane (matching Spot Flex IK pattern):
+  1. `com_vel_max` — always active, caps CoM speed in every direction.
+  2. `sqrt(2 * com_acc_max * slack)` — always active, smoothly tapers approach
+     speed well before the boundary (bounded tipping energy).
+  3. `slack / dt` — active only near the boundary (when slack < proximity
+     threshold), prevents overshooting in a single time step.
+- **Anti-chattering at boundary**: Slack clamped to non-negative for position
+  and acceleration terms; epsilon dead-zone (0.1 mm) prevents sign-flip
+  oscillation from numerical noise. Matches the `kMarginEpsilon` pattern used
+  in joint position-limit constraints.
+- **Interactive Viser example** (`examples/08_com_constraint_example.py`):
+  CoM sphere, floor projection disk, vertical drop line, inner/outer polygon
+  boundaries, and color-coded status (green/orange/red). GUI sliders for all
+  constraint parameters.
+- **Unit tests** (`test/test_com_constraint.py`): API usage, invalid input
+  rejection, Jacobian shape, CoM containment, velocity/acceleration limits,
+  and frame transforms (123 total tests pass).
+
 ## [0.7.2] - 2026-02-09
 
 ### Fixed
