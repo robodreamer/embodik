@@ -191,6 +191,56 @@ void bind_kinematics_solver(nb::module_ &m) {
            &KinematicsSolver::clear_collision_constraint,
            "Disable collision avoidance constraint.")
 
+      // CoM support-polygon constraint
+      .def(
+          "configure_com_constraint",
+          [](KinematicsSolver &self, const Eigen::MatrixXd &vertices_xy,
+             double margin, const std::string &frame_name, double com_vel_max,
+             double com_acc_max, bool use_acceleration_limits,
+             double proximity_fraction) {
+            self.configure_com_constraint(vertices_xy, margin, frame_name,
+                                          com_vel_max, com_acc_max,
+                                          use_acceleration_limits,
+                                          proximity_fraction);
+          },
+          nb::arg("support_polygon"), nb::arg("margin") = 0.0,
+          nb::arg("frame_name") = "world", nb::arg("com_vel_max") = 0.4,
+          nb::arg("com_acc_max") = 0.1,
+          nb::arg("use_acceleration_limits") = true,
+          nb::arg("proximity_fraction") = 0.0,
+          "Configure a CoM support-polygon inequality constraint.\n\n"
+          "Keeps the 2D projection of the center of mass inside the given\n"
+          "convex polygon. Velocity and acceleration limits are applied to\n"
+          "smoothly saturate CoM velocity near the polygon boundary,\n"
+          "bounding tipping energy.\n\n"
+          "Args:\n"
+          "  support_polygon: Nx2 or Nx3 array of polygon vertices in the\n"
+          "    XY plane of frame_name (Z column is ignored if Nx3).\n"
+          "  margin: Fractional inward shrink in [0, 1].\n"
+          "  frame_name: Frame in which vertices are expressed.\n"
+          "  com_vel_max: Maximum CoM velocity (m/s).\n"
+          "  com_acc_max: Maximum CoM acceleration (m/s²).\n"
+          "  use_acceleration_limits: If True, clamp approach velocity by\n"
+          "    sqrt(2 * com_acc_max * margin) near boundary.\n"
+          "  proximity_fraction: Fraction of the polygon inradius used as\n"
+          "    the per-row activation distance.  A half-plane row is only\n"
+          "    added to the QP when the CoM slack for that row is less than\n"
+          "    proximity_fraction * inradius.  The inradius (minimum\n"
+          "    perpendicular distance from centroid to any edge) is computed\n"
+          "    automatically from the vertices.  Set to 0 (default) to\n"
+          "    disable proximity filtering and always include every row.\n"
+          "    Use get_com_proximity_threshold() to read back the computed\n"
+          "    threshold in metres.")
+      .def("get_com_proximity_threshold",
+           &KinematicsSolver::get_com_proximity_threshold,
+           "Return the proximity threshold (m) computed by the last call to\n"
+           "configure_com_constraint().  Equals proximity_fraction * inradius\n"
+           "where the inradius is the minimum perpendicular distance from the\n"
+           "polygon centroid to any edge.  Returns 0 if no constraint is set.")
+
+      .def("clear_com_constraint", &KinematicsSolver::clear_com_constraint,
+           "Disable CoM support-polygon constraint.")
+
       .def("get_last_collision_debug",
            &KinematicsSolver::get_last_collision_debug,
            "Retrieve debug information for the last evaluated collision pair, "
