@@ -4,7 +4,6 @@ site_url: https://robodreamer.github.io/embodik/
 repo_url: https://github.com/robodreamer/embodik
 repo_name: robodreamer/embodik
 edit_uri: edit/main/docs/
-# Version is injected from pyproject.toml by scripts.mkdocs_version_plugin
 
 # Ensure proper URL handling - use directory URLs (transforms/ instead of transforms.html)
 use_directory_urls: true
@@ -37,7 +36,6 @@ theme:
 
 plugins:
   - search
-  - version:
   - mkdocstrings:
       handlers:
         python:
