@@ -50,6 +50,9 @@ plugins:
             show_if_no_docstring: false
             separate_signature: true
             line_length: 100
+            docstring_options:
+              warn_unknown_params: false
+              warn_missing_types: false
 
 markdown_extensions:
   - pymdownx.highlight:
