@@ -296,6 +296,314 @@ void KinematicsSolver::clear_collision_constraint() {
   collision_allowed_pair_mask_.clear();
 }
 
+// ============================================================
+// CoM support-polygon constraint helpers
+// ============================================================
+namespace {
+
+// 2D cross product of vectors OA and OB.
+static double cross2d(const Eigen::Vector2d &O, const Eigen::Vector2d &A,
+                      const Eigen::Vector2d &B) {
+  return (A.x() - O.x()) * (B.y() - O.y()) -
+         (A.y() - O.y()) * (B.x() - O.x());
+}
+
+// Graham scan: returns convex hull vertices in CCW order.
+static std::vector<Eigen::Vector2d>
+convex_hull_2d(std::vector<Eigen::Vector2d> pts) {
+  const int n = static_cast<int>(pts.size());
+  if (n < 3)
+    return pts;
+
+  std::sort(pts.begin(), pts.end(),
+            [](const Eigen::Vector2d &a, const Eigen::Vector2d &b) {
+              return a.x() < b.x() || (a.x() == b.x() && a.y() < b.y());
+            });
+  pts.erase(std::unique(pts.begin(), pts.end()), pts.end());
+
+  if (static_cast<int>(pts.size()) < 3)
+    return pts;
+
+  std::vector<Eigen::Vector2d> hull;
+  hull.reserve(2 * pts.size());
+
+  // Lower hull
+  for (const auto &p : pts) {
+    while (hull.size() >= 2 &&
+           cross2d(hull[hull.size() - 2], hull[hull.size() - 1], p) <= 0.0)
+      hull.pop_back();
+    hull.push_back(p);
+  }
+
+  // Upper hull
+  const int lower_size = static_cast<int>(hull.size()) + 1;
+  for (int i = static_cast<int>(pts.size()) - 2; i >= 0; --i) {
+    while (static_cast<int>(hull.size()) >= lower_size &&
+           cross2d(hull[hull.size() - 2], hull[hull.size() - 1], pts[i]) <=
+               0.0)
+      hull.pop_back();
+    hull.push_back(pts[i]);
+  }
+  hull.pop_back();
+  return hull;
+}
+
+// Build half-plane representation A * x <= b from a CCW convex polygon.
+// For each edge (v_i -> v_{i+1}), the outward normal points to the right.
+static void polygon_to_halfplanes(const std::vector<Eigen::Vector2d> &hull,
+                                  Eigen::MatrixXd &A, Eigen::VectorXd &b) {
+  const int n = static_cast<int>(hull.size());
+  A.resize(n, 2);
+  b.resize(n);
+  for (int i = 0; i < n; ++i) {
+    const Eigen::Vector2d &v0 = hull[i];
+    const Eigen::Vector2d &v1 = hull[(i + 1) % n];
+    Eigen::Vector2d edge = v1 - v0;
+    // Outward normal (CCW hull: right side is outside)
+    Eigen::Vector2d normal(edge.y(), -edge.x());
+    const double len = normal.norm();
+    if (len < 1e-12)
+      normal = Eigen::Vector2d(1.0, 0.0);
+    else
+      normal /= len;
+    A.row(i) = normal.transpose();
+    b(i) = normal.dot(v0);
+  }
+}
+
+// Shrink polygon vertices toward centroid by fractional margin in [0, 1].
+static std::vector<Eigen::Vector2d>
+shrink_polygon(const std::vector<Eigen::Vector2d> &hull, double margin) {
+  if (margin <= 0.0 || hull.empty())
+    return hull;
+
+  Eigen::Vector2d centroid = Eigen::Vector2d::Zero();
+  for (const auto &v : hull)
+    centroid += v;
+  centroid /= static_cast<double>(hull.size());
+
+  double min_radius = std::numeric_limits<double>::infinity();
+  for (const auto &v : hull)
+    min_radius = std::min(min_radius, (v - centroid).norm());
+
+  const double shrink_dist =
+      std::clamp(margin, 0.0, 1.0) * (min_radius - 1e-9);
+
+  std::vector<Eigen::Vector2d> shrunk;
+  shrunk.reserve(hull.size());
+  for (const auto &v : hull) {
+    Eigen::Vector2d dir = centroid - v;
+    const double d = dir.norm();
+    if (d < 1e-12)
+      shrunk.push_back(v);
+    else
+      shrunk.push_back(v + (shrink_dist / d) * dir);
+  }
+  return shrunk;
+}
+
+// Minimum perpendicular distance from the polygon centroid to any edge.
+// This is the radius of the largest inscribed circle (inradius) and serves
+// as the natural distance scale for the polygon.
+static double polygon_inradius_2d(const std::vector<Eigen::Vector2d> &hull) {
+  if (hull.size() < 3)
+    return 0.0;
+
+  Eigen::Vector2d centroid = Eigen::Vector2d::Zero();
+  for (const auto &v : hull)
+    centroid += v;
+  centroid /= static_cast<double>(hull.size());
+
+  double min_dist = std::numeric_limits<double>::infinity();
+  const int n = static_cast<int>(hull.size());
+  for (int i = 0; i < n; ++i) {
+    const Eigen::Vector2d &a = hull[i];
+    const Eigen::Vector2d &b = hull[(i + 1) % n];
+    const Eigen::Vector2d edge = b - a;
+    const double edge_len = edge.norm();
+    if (edge_len < 1e-12)
+      continue;
+    // Outward unit normal (same convention as polygon_to_halfplanes: CCW hull)
+    const Eigen::Vector2d normal(edge.y(), -edge.x());
+    const double dist = std::fabs((centroid - a).dot(normal) / edge_len);
+    min_dist = std::min(min_dist, dist);
+  }
+  return std::isfinite(min_dist) ? min_dist : 0.0;
+}
+
+} // namespace
+
+void KinematicsSolver::configure_com_constraint(
+    const Eigen::MatrixXd &vertices_xy, double margin,
+    const std::string &frame_name, double com_vel_max, double com_acc_max,
+    bool use_acceleration_limits, double proximity_fraction) {
+  if (vertices_xy.rows() < 3) {
+    throw std::invalid_argument(
+        "configure_com_constraint: support polygon must have at least 3 "
+        "vertices.");
+  }
+  if (vertices_xy.cols() < 2) {
+    throw std::invalid_argument(
+        "configure_com_constraint: vertices must have at least 2 columns (xy).");
+  }
+  if (frame_name != "world" && !robot_->has_frame(frame_name)) {
+    throw std::runtime_error("configure_com_constraint: frame '" + frame_name +
+                             "' not found in robot model.");
+  }
+
+  // Collect 2D points
+  std::vector<Eigen::Vector2d> pts;
+  pts.reserve(vertices_xy.rows());
+  for (int i = 0; i < vertices_xy.rows(); ++i)
+    pts.emplace_back(vertices_xy(i, 0), vertices_xy(i, 1));
+
+  // Compute convex hull (CCW)
+  auto hull = convex_hull_2d(pts);
+  if (hull.size() < 3) {
+    throw std::runtime_error(
+        "configure_com_constraint: convex hull has fewer than 3 vertices "
+        "(points may be collinear).");
+  }
+
+  // Apply inward margin
+  if (margin > 0.0)
+    hull = shrink_polygon(hull, margin);
+
+  // Build half-plane representation in frame_name
+  ComConstraintConfig cfg;
+  cfg.enabled = true;
+  cfg.vertices_xy = vertices_xy;
+  cfg.margin = margin;
+  cfg.frame_name = frame_name;
+  cfg.com_vel_max = com_vel_max;
+  cfg.com_acc_max = com_acc_max;
+  cfg.use_acceleration_limits = use_acceleration_limits;
+  // Auto-compute proximity threshold from the convex hull inradius so the
+  // caller never needs to reason about polygon geometry themselves.
+  if (proximity_fraction > 0.0)
+    cfg.proximity_threshold = proximity_fraction * polygon_inradius_2d(hull);
+  else
+    cfg.proximity_threshold = std::numeric_limits<double>::infinity();
+  polygon_to_halfplanes(hull, cfg.A, cfg.b);
+  com_constraint_ = std::move(cfg);
+}
+
+void KinematicsSolver::clear_com_constraint() { com_constraint_.reset(); }
+
+double KinematicsSolver::get_com_proximity_threshold() const {
+  if (!com_constraint_.has_value())
+    return 0.0;
+  return com_constraint_->proximity_threshold;
+}
+
+std::optional<KinematicsSolver::ComConstraintResult>
+KinematicsSolver::compute_com_constraint() {
+  if (!com_constraint_.has_value() || !com_constraint_->enabled)
+    return std::nullopt;
+
+  const auto &cfg = *com_constraint_;
+
+  // CoM position (world) and Jacobian (3 x nv)
+  const Eigen::Vector3d com_world = robot_->get_com_position();
+  const Eigen::MatrixXd J_com = robot_->get_com_jacobian(); // 3 x nv
+
+  // Half-planes in frame_name; transform to world if necessary
+  Eigen::MatrixXd A_world = cfg.A; // #hp x 2
+  Eigen::VectorXd b_world = cfg.b; // #hp
+
+  if (cfg.frame_name != "world") {
+    const auto frame_pose = robot_->get_frame_pose(cfg.frame_name);
+    const Eigen::Matrix3d R = frame_pose.rotation();
+    const Eigen::Vector3d t = frame_pose.translation();
+    const Eigen::Matrix2d R_xy = R.topLeftCorner<2, 2>();
+
+    // x_F = R_xy^T * (x_world_xy - t_xy)
+    // A_F * x_F <= b_F
+    // => A_F * R_xy^T * x_world_xy <= b_F + A_F * R_xy^T * t_xy
+    A_world = cfg.A * R_xy.transpose(); // #hp x 2
+    b_world = cfg.b;
+    for (int i = 0; i < static_cast<int>(b_world.size()); ++i)
+      b_world(i) += A_world.row(i).dot(t.head<2>());
+  }
+
+  // Slack per half-plane: positive when CoM is inside polygon.
+  const Eigen::VectorXd slack = b_world - A_world * com_world.head<2>();
+
+  // Constraint Jacobian: all half-planes (#hp x nv)
+  const Eigen::MatrixXd J_all = A_world * J_com.topRows(2);
+
+  const int n_hp = static_cast<int>(slack.size());
+  const double vel_max = cfg.com_vel_max;
+  const double acc_max = cfg.com_acc_max;
+  const double prox = cfg.proximity_threshold;
+
+  // Anti-chattering: small epsilon dead-zone at the boundary.  When the
+  // slack is within [-eps, 0] the CoM is treated as "at the boundary"
+  // rather than outside, preventing sign-flip oscillations between
+  // frames.  Matches the kMarginEpsilon pattern in
+  // calculate_velocity_box_constraint().
+  constexpr double kSlackEps = 1e-4; // 0.1 mm
+
+  // All half-plane rows always participate so that vel_max and acceleration
+  // limits are enforced everywhere (matching the Spot Flex IK pattern).
+  //
+  // Three bound layers, from coarsest to tightest:
+  //   1. vel_max              — always active, caps speed in every direction.
+  //   2. sqrt(2*acc*slack_c)  — always active when use_acceleration_limits is
+  //      set; starts tapering velocity well before the boundary, ensuring
+  //      the CoM can decelerate smoothly (bounded tipping energy).
+  //   3. slack_c/dt           — only active when slack < proximity_threshold;
+  //      the hard position-based limit that prevents overshooting the
+  //      boundary in a single time step.
+  //
+  // slack_c = max(0, slack): clamped to non-negative so that position and
+  // acceleration terms never flip sign (same as the joint-limit pattern in
+  // calculate_velocity_box_constraint).  When the CoM is slightly outside
+  // (slack < 0 but > -eps), slack_c = 0 produces upper = 0: the solver
+  // stops outward motion without commanding a recovery kick that would
+  // cause chattering.
+  Eigen::VectorXd lower(n_hp), upper(n_hp);
+
+  for (int i = 0; i < n_hp; ++i) {
+    const double m = slack(i);
+    const double m_clamped = std::max(0.0, m);
+
+    // Start with the velocity cap (always active)
+    double ub = vel_max;
+
+    // Acceleration bound (always active): smoothly reduce approach speed
+    // as the CoM gets closer to the boundary.
+    if (cfg.use_acceleration_limits) {
+      ub = std::min(ub, std::sqrt(2.0 * acc_max * m_clamped));
+    }
+
+    // Position-based limit (near boundary only): prevents overshooting
+    // the boundary in a single time step.
+    if (m < prox) {
+      ub = std::min(ub, m_clamped / dt_);
+    }
+
+    upper(i) = ub;
+
+    // Lower bound: allow full velocity away from boundary, but if the
+    // CoM is significantly outside (slack < -eps) also let the solver
+    // push it back inward without over-restricting.
+    if (m < -kSlackEps) {
+      // Outside by more than epsilon: relax the upper bound so the QP
+      // can push the CoM back toward the interior.
+      upper(i) = vel_max;
+    }
+
+    lower(i) = -vel_max;
+  }
+
+  ComConstraintResult result;
+  result.jacobian = J_all;
+  result.lower_bounds = lower;
+  result.upper_bounds = upper;
+  return result;
+}
+
 std::string KinematicsSolver::canonical_pair_key(const std::string &a,
                                                  const std::string &b) const {
   if (a <= b) {
@@ -901,6 +1209,16 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
     }
   }
 
+  // CoM support-polygon constraint
+  std::optional<ComConstraintResult> com_constraint_result = std::nullopt;
+  if (com_constraint_.has_value() && com_constraint_->enabled) {
+    com_constraint_result = compute_com_constraint();
+  }
+  if (com_constraint_result.has_value() && !excluded_union.empty()) {
+    for (int idx : excluded_union)
+      com_constraint_result->jacobian.col(idx).setZero();
+  }
+
   // Build constraint matrix
   std::optional<std::chrono::high_resolution_clock::time_point>
       t_constraint_start;
@@ -922,6 +1240,11 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
   if (collision_constraint_result.has_value()) {
     num_constraints +=
         static_cast<int>(collision_constraint_result->jacobian.rows());
+  }
+
+  if (com_constraint_result.has_value()) {
+    num_constraints +=
+        static_cast<int>(com_constraint_result->jacobian.rows());
   }
 
   C = Eigen::MatrixXd::Zero(num_constraints, robot_->nv());
@@ -1114,6 +1437,15 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
     C.block(constraint_idx, 0, rows, robot_->nv()) = collision.jacobian;
     c_lower.segment(constraint_idx, rows) = collision.lower_bounds;
     c_upper.segment(constraint_idx, rows) = collision.upper_bounds;
+    constraint_idx += rows;
+  }
+
+  if (com_constraint_result.has_value()) {
+    const auto &com = com_constraint_result.value();
+    int rows = static_cast<int>(com.jacobian.rows());
+    C.block(constraint_idx, 0, rows, robot_->nv()) = com.jacobian;
+    c_lower.segment(constraint_idx, rows) = com.lower_bounds;
+    c_upper.segment(constraint_idx, rows) = com.upper_bounds;
     constraint_idx += rows;
   }
 
