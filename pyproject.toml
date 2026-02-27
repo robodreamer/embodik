@@ -3,7 +3,7 @@
 # source builds (sdists) can still locate Pinocchio's CMake package config via the PyPI wheel.
 # Note: `pin` is only a BUILD dependency (for CMake to find Pinocchio headers/libs).
 # It is NOT a runtime dependency - EmbodiK exposes all needed functionality via native bindings.
-requires = ["scikit-build-core", "nanobind", "numpy>=1.26.0", "pin>=3.8.0"]
+requires = ["scikit-build-core", "nanobind", "pin>=3.8.0"]
 build-backend = "scikit_build_core.build"
 
 [project]
@@ -37,9 +37,6 @@ keywords = ["robotics", "inverse-kinematics", "optimization", "motion-planning"]
 [project.scripts]
 embodik-sanitize-env = "embodik.cli:sanitize_env"
 embodik-examples = "embodik.cli:examples_cmd"
-
-[project.entry-points."mkdocs.plugins"]
-version = "0.8.0"
 
 [project.optional-dependencies]
 visualization = [
