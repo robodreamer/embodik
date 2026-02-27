@@ -252,6 +252,64 @@ public:
    */
   void clear_collision_constraint();
 
+  /**
+   * @brief Configure a CoM support-polygon constraint (inequality).
+   *
+   * Keeps the 2D projection of the center of mass inside the given convex
+   * polygon expressed in @p frame_name.  The constraint is enforced as a set
+   * of half-plane velocity inequalities: A * J_com_xy * dq <= upper_bound.
+   *
+   * Velocity and acceleration limits are applied following the Spot Flex IK
+   * pattern:
+   *   upper = min(margin / dt, com_vel_max)
+   *   if use_acceleration_limits:
+   *     upper = min(upper, sqrt(2 * com_acc_max * margin))  // smooth saturation
+   *
+   * The sqrt term ensures that near the polygon boundary (small margin) the
+   * allowed approach velocity is reduced so that the CoM can stop at the
+   * boundary under max deceleration, preventing tipping overshoot.
+   *
+   * @param vertices_xy  Nx2 matrix of polygon vertices in the XY plane of
+   *                     frame_name (Z column is ignored if Nx3 is passed).
+   * @param margin       Fractional inward shrink in [0, 1]. Applied by moving
+   *                     each vertex toward the centroid by margin * min_radius.
+   * @param frame_name   Frame in which @p vertices_xy are expressed.
+   * @param com_vel_max  Maximum CoM velocity (m/s, default 0.4).
+   * @param com_acc_max  Maximum CoM acceleration (m/s², default 0.1).
+   * @param use_acceleration_limits  If true, also clamp by sqrt(2*a*margin).
+   * @param proximity_fraction  Fraction of the polygon inradius used as the
+   *   per-row activation distance.  A half-plane row is only added to the QP
+   *   when the CoM slack for that row (b[i] - A[i]·com_xy) is less than
+   *   ``proximity_fraction * inradius``.  The inradius is the minimum
+   *   perpendicular distance from the polygon centroid to any edge and is
+   *   computed automatically from the vertices — no external geometry needed.
+   *   Set to 0 (default) to disable proximity filtering and always include
+   *   every row (backward-compatible).  Mirrors the Spot Flex IK
+   *   ``check_proximity_to_com_constraints`` pattern at per-row granularity.
+   */
+  void configure_com_constraint(
+      const Eigen::MatrixXd &vertices_xy,
+      double margin = 0.0,
+      const std::string &frame_name = "world",
+      double com_vel_max = 0.4,
+      double com_acc_max = 0.1,
+      bool use_acceleration_limits = true,
+      double proximity_fraction = 0.0);
+
+  /**
+   * @brief Return the proximity threshold (metres) computed by the last call to
+   *   configure_com_constraint(), or 0 if no constraint is configured.
+   *
+   * Equals ``proximity_fraction * inradius`` where the inradius is the minimum
+   * perpendicular distance from the polygon centroid to any edge.
+   */
+  double get_com_proximity_threshold() const;
+
+  /**
+   * @brief Disable CoM support-polygon constraint.
+   */
+  void clear_com_constraint();
+
   struct CollisionDebugInfo {
     std::string object_a;
     std::string object_b;
@@ -360,6 +418,34 @@ private:
     Eigen::Vector3d point_a_world = Eigen::Vector3d::Zero();
     Eigen::Vector3d point_b_world = Eigen::Vector3d::Zero();
   };
+
+  // ---- CoM support-polygon constraint ----
+  struct ComConstraintConfig {
+    bool enabled = false;
+    Eigen::MatrixXd vertices_xy;        // Nx2 in frame_name coordinates
+    double margin = 0.0;
+    std::string frame_name = "world";
+    double com_vel_max = 0.4;
+    double com_acc_max = 0.1;
+    bool use_acceleration_limits = true;
+    // Per-row activation distance: only include half-plane row i in the QP
+    // when its slack (b[i] - A[i]*com_xy) < proximity_threshold.
+    // +inf → always include all rows (proximity filtering disabled).
+    // Auto-computed as proximity_fraction * inradius inside configure_com_constraint().
+    double proximity_threshold = std::numeric_limits<double>::infinity();
+    // Precomputed half-plane representation: A * x <= b (2D, frame_name)
+    Eigen::MatrixXd A;
+    Eigen::VectorXd b;
+  };
+
+  struct ComConstraintResult {
+    Eigen::MatrixXd jacobian;      // (#half-planes x nv)
+    Eigen::VectorXd lower_bounds;
+    Eigen::VectorXd upper_bounds;
+  };
+
+  std::optional<ComConstraintConfig> com_constraint_;
+  std::optional<ComConstraintResult> compute_com_constraint();
 
   std::optional<CollisionConstraintConfig> collision_constraint_;
   std::optional<CollisionDebugInfo> last_collision_debug_;
