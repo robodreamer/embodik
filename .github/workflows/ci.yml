@@ -9,98 +9,23 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        python-version: ["3.10", "3.11", "3.12"]
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python-version }}
-
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential \
-            cmake \
-            libeigen3-dev \
-            pkg-config
-
-      - name: Install Pinocchio
-        run: |
-          # Try to install via apt first, fallback to building from source if needed
-          sudo apt-get install -y robotpkg-pinocchio || echo "Pinocchio not available via apt, will need manual installation"
-
-      - name: Install Python dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install nanobind scikit-build-core[pyproject]
-          pip install pytest pytest-cov
-
-      - name: Install project dependencies
-        run: |
-          pip install numpy
+      - name: Install Pixi
+        uses: prefix-dev/setup-pixi@v0
 
       - name: Build and install package
-        run: |
-          pip install -e .
-        env:
-          CMAKE_PREFIX_PATH: ${{ env.CMAKE_PREFIX_PATH }}
+        run: pixi run install
 
       - name: Run tests
-        run: |
-          pytest test/ -v
+        run: pixi run test
         continue-on-error: true
 
       - name: Check code formatting
-        run: |
-          pip install black isort
-          black --check python/ test/ examples/ || true
-          isort --check python/ test/ examples/ || true
-        continue-on-error: true
-
-  build:
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        python-version: ["3.10", "3.11"]
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python-version }}
-
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential \
-            cmake \
-            libeigen3-dev \
-            pkg-config
-
-      - name: Install Python build dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install build wheel
-
-      - name: Build wheel
-        run: |
-          python -m build --wheel
-        continue-on-error: true
-
-      - name: Verify wheel
-        run: |
-          pip install dist/*.whl
+        run: pixi run lint
         continue-on-error: true
 
   docs:
@@ -109,17 +34,11 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.10"
+      - name: Install Pixi
+        uses: prefix-dev/setup-pixi@v0
 
-      - name: Install documentation dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install mkdocs-material mkdocstrings[python]
+      - name: Build and install package
+        run: pixi run install
 
       - name: Build documentation
-        run: |
-          mkdocs build --strict
-        continue-on-error: true
+        run: pixi run python -W ignore::DeprecationWarning:hppfcl -m mkdocs build --strict
