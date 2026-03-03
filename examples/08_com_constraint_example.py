@@ -85,16 +85,16 @@ def _polygon_edge_pts(poly_xy: np.ndarray, z: float = 0.002) -> np.ndarray:
 
 
 def _shrink_polygon_2d(poly: np.ndarray, margin_frac: float) -> np.ndarray:
-    """Shrink polygon vertices toward centroid by ``margin_frac`` × min-radius.
+    """Shrink polygon vertices toward centroid by ``margin_frac`` × char_size.
 
-    Mirrors the C++ ``shrink_polygon`` logic so the inner polygon displayed
-    here matches exactly what the solver enforces.
+    Uses mean distance from centroid to vertices (char_size) to match the
+    C++ shrink_polygon and alpha_wheelbase_viser feasibility check.
     """
     if margin_frac <= 0.0:
         return poly.copy()
     centroid = poly.mean(axis=0)
-    min_radius = np.min(np.linalg.norm(poly - centroid, axis=1))
-    shrink = np.clip(margin_frac, 0.0, 1.0) * (min_radius - 1e-9)
+    char_size = np.mean(np.linalg.norm(poly - centroid, axis=1))
+    shrink = np.clip(margin_frac, 0.0, 1.0) * max(0.0, char_size - 1e-9)
     result = []
     for v in poly:
         d = centroid - v

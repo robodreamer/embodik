@@ -372,6 +372,8 @@ static void polygon_to_halfplanes(const std::vector<Eigen::Vector2d> &hull,
 }
 
 // Shrink polygon vertices toward centroid by fractional margin in [0, 1].
+// Uses mean distance from centroid to vertices (char_size) to match the
+// alpha_wheelbase_viser feasibility check (compute_polygon_characteristic_size).
 static std::vector<Eigen::Vector2d>
 shrink_polygon(const std::vector<Eigen::Vector2d> &hull, double margin) {
   if (margin <= 0.0 || hull.empty())
@@ -382,12 +384,14 @@ shrink_polygon(const std::vector<Eigen::Vector2d> &hull, double margin) {
     centroid += v;
   centroid /= static_cast<double>(hull.size());
 
-  double min_radius = std::numeric_limits<double>::infinity();
+  double sum_dist = 0.0;
   for (const auto &v : hull)
-    min_radius = std::min(min_radius, (v - centroid).norm());
+    sum_dist += (v - centroid).norm();
+  const double char_size =
+      (hull.size() > 0) ? (sum_dist / static_cast<double>(hull.size())) : 0.0;
 
   const double shrink_dist =
-      std::clamp(margin, 0.0, 1.0) * (min_radius - 1e-9);
+      std::clamp(margin, 0.0, 1.0) * std::max(0.0, char_size - 1e-9);
 
   std::vector<Eigen::Vector2d> shrunk;
   shrunk.reserve(hull.size());

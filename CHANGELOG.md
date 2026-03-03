@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.1] - 2026-02-27
+
+### Changed
+- **CoM margin definition**: The fractional margin for polygon shrink now uses
+  the mean distance from centroid to vertices (`char_size`) instead of the
+  minimum distance (`min_radius`). This matches the alpha_wheelbase_viser
+  feasibility check (`compute_polygon_characteristic_size`) and produces more
+  consistent shrink behavior across polygon shapes.
+
 ## [0.8.0] - 2026-02-27
 
 ### Added
