@@ -23,6 +23,7 @@ nanobind_add_module(_embodik_impl
     src/robot_model_bindings.cpp
     src/tasks_bindings.cpp
     src/kinematics_solver_bindings.cpp
+    src/pose_metrics_bindings.cpp
 )
 
 # Link with core library

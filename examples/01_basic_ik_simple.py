@@ -15,7 +15,6 @@ import embodik
 from embodik.utils import (
     compute_pose_error,
     limit_task_velocity,
-    apply_joint_limit_barrier_to_velocities,
 )
 from embodik import r2q, q2r, Rt
 from embodik import RobotVisualizer, create_robot_visualizer
@@ -79,8 +78,10 @@ def main(args: argparse.Namespace):
     q_current = q_default.copy()
     robot.update_configuration(q_current)
 
-    # Joint limits (used for clipping in both viz and headless modes)
-    q_lower, q_upper = robot.get_joint_limits()
+    # Original joint limits from URDF
+    q_lower_orig, q_upper_orig = robot.get_joint_limits()
+    q_lower = q_lower_orig.copy()
+    q_upper = q_upper_orig.copy()
 
     # Get initial end-effector pose
     initial_pose = robot.get_frame_pose(target_link_name)
@@ -144,14 +145,62 @@ def main(args: argparse.Namespace):
         max_linear_step = server.gui.add_slider("Max Linear Step (m/s)", min=0.1, max=1.0, initial_value=0.5, step=0.01)
         max_angular_step = server.gui.add_slider("Max Angular Step (rad/s)", min=0.1, max=1.0, initial_value=0.5, step=0.01)
 
-        # Barrier function controls
-        enable_barrier = server.gui.add_checkbox("Enable Barrier Function", initial_value=False)
-        barrier_margin_slider = server.gui.add_slider("Barrier Margin", min=0.01, max=0.5, initial_value=0.15, step=0.01)
-        barrier_gain_slider = server.gui.add_slider("Barrier Gain", min=0.1, max=5.0, initial_value=1.6, step=0.1)
+        # C++ barrier task controls (solver-level, priority-1 nullspace)
+        enable_barrier = server.gui.add_checkbox("Enable Barrier Task", initial_value=False)
+        barrier_margin_slider = server.gui.add_slider("Barrier Margin", min=0.01, max=0.5, initial_value=0.3, step=0.01)
+        barrier_gain_slider = server.gui.add_slider("Barrier Gain", min=0.1, max=5.0, initial_value=1.0, step=0.1)
 
         # Target control buttons
         snap_target_button = server.gui.add_button("Snap Target to Current EE")
         reset_arm_button = server.gui.add_button("Reset Arm & Target")
+
+    # Joint limit scaling for interactive saturation testing
+    with server.gui.add_folder("Joint Limit Scaling"):
+        limit_scale_slider = server.gui.add_slider(
+            "Limit Scale",
+            min=0.1, max=1.0, initial_value=1.0, step=0.01,
+        )
+        limit_scale_info = server.gui.add_text(
+            "Info", initial_value="1.0 = original limits, smaller = narrower",
+        )
+        apply_limit_scale_button = server.gui.add_button("Apply Limit Scale")
+        reset_limits_button = server.gui.add_button("Reset to Original Limits")
+
+    def _apply_limit_scale(scale: float):
+        """Narrow joint limits symmetrically around the center of each range."""
+        nonlocal q_lower, q_upper, q_current
+        center = 0.5 * (q_lower_orig + q_upper_orig)
+        half_range = 0.5 * (q_upper_orig - q_lower_orig) * scale
+        q_lower = center - half_range
+        q_upper = center + half_range
+        robot.set_joint_limits(q_lower, q_upper)
+        # Clip current configuration to stay inside new limits
+        q_current = np.clip(q_current, q_lower, q_upper)
+        robot.update_configuration(q_current)
+        update_visualization(q_current)
+        # Update joint slider ranges
+        for i, slider in joint_sliders.items():
+            if i < len(q_lower):
+                slider.min = float(q_lower[i])
+                slider.max = float(q_upper[i])
+                slider.value = float(q_current[i])
+        limit_scale_info.value = f"Scale={scale:.2f}  range={float(np.mean(q_upper - q_lower)):.3f} rad"
+        logger.info(f"Joint limits scaled to {scale:.0%} of original range")
+
+    @apply_limit_scale_button.on_click
+    def _(_):
+        _apply_limit_scale(limit_scale_slider.value)
+
+    @reset_limits_button.on_click
+    def _(_):
+        limit_scale_slider.value = 1.0
+        _apply_limit_scale(1.0)
+
+    # Metrics display
+    with server.gui.add_folder("Diagnostics", expand_by_default=False):
+        jl_dist_text = server.gui.add_text("JL Distance", initial_value="--")
+        manip_text = server.gui.add_text("Manipulability", initial_value="--")
+        combined_text = server.gui.add_text("Combined Metric", initial_value="--")
 
     # Get joint names from robot model (parsed from URDF) - used throughout
     joint_names = robot.get_joint_names()
@@ -218,6 +267,25 @@ def main(args: argparse.Namespace):
         solver.set_damping(damping_slider.value)
         if enable_debug.value:
             logger.info(f"Solver damping updated to: {damping_slider.value:.3f}")
+
+    @enable_barrier.on_update
+    def _(_):
+        if enable_barrier.value:
+            solver.set_joint_limit_barrier_task(barrier_margin_slider.value, barrier_gain_slider.value)
+            logger.info(f"Barrier task enabled: margin={barrier_margin_slider.value:.2f}, gain={barrier_gain_slider.value:.1f}")
+        else:
+            solver.clear_joint_limit_barrier_task()
+            logger.info("Barrier task disabled")
+
+    @barrier_margin_slider.on_update
+    def _(_):
+        if enable_barrier.value:
+            solver.set_joint_limit_barrier_task(barrier_margin_slider.value, barrier_gain_slider.value)
+
+    @barrier_gain_slider.on_update
+    def _(_):
+        if enable_barrier.value:
+            solver.set_joint_limit_barrier_task(barrier_margin_slider.value, barrier_gain_slider.value)
 
     @snap_target_button.on_click
     def _(_):
@@ -397,7 +465,6 @@ def main(args: argparse.Namespace):
                     logger.info(f"Limits applied: {result.limits_applied}")
 
                 # Check for joints near position limits (exclude gripper joints)
-                q_lower, q_upper = robot.get_joint_limits()
                 joints_near_limits = []
 
                 # For Panda, only check arm joints (0-6), not gripper joints (7-8)
@@ -418,23 +485,8 @@ def main(args: argparse.Namespace):
                     logger.info(f"Task errors: [{', '.join(f'{e:.4f}' for e in result.task_errors)}]")
 
         if result.status == embodik.SolverStatus.SUCCESS:
-            # Get joint velocities
+            # Get joint velocities (barrier task is handled internally by solver)
             joint_velocities = result.joint_velocities.copy()
-
-            # Apply barrier function to velocities if enabled
-            if enable_barrier.value:
-                joint_velocities = apply_joint_limit_barrier_to_velocities(
-                    q_current,
-                    q_lower,
-                    q_upper,
-                    joint_velocities,
-                    solver.dt,
-                    barrier_margin=barrier_margin_slider.value,
-                    barrier_gain=barrier_gain_slider.value,
-                    num_arm_joints=7,
-                    enable_debug=enable_debug.value and should_log_debug,
-                    debug_logger=logger,
-                )
 
             # Integrate velocities
             dq = joint_velocities * solver.dt
@@ -452,6 +504,16 @@ def main(args: argparse.Namespace):
             for i, slider in joint_sliders.items():
                 if i < len(q_current):
                     slider.value = float(q_current[i])
+
+            # Update diagnostics (throttled to ~10 Hz)
+            if should_log_debug or (current_time - last_debug_time) >= 0.1:
+                _, jl_agg = embodik.joint_limit_distance(q_current, q_lower, q_upper)
+                J = robot.get_frame_jacobian(target_link_name)
+                manip = embodik.velocity_manipulability(J)
+                combined = embodik.singularity_joint_limit_metric(q_current, J, q_lower, q_upper)
+                jl_dist_text.value = f"{jl_agg:.4f}"
+                manip_text.value = f"{manip:.6f}"
+                combined_text.value = f"{combined:.6f}"
         else:
             if enable_debug.value or result.status == embodik.SolverStatus.NUMERICAL_ERROR:
                 logger.warning(f"Solver failed with status: {result.status}")
@@ -470,16 +532,14 @@ def main(args: argparse.Namespace):
                         logger.warning(f"  Linear velocity: {np.linalg.norm(target_velocity[:3]):.3f} m/s")
                         logger.warning(f"  Angular velocity: {np.linalg.norm(target_velocity[3:]):.3f} rad/s")
 
-                    # Check if we might be in a singularity
-                    if hasattr(robot, 'compute_jacobian'):
-                        try:
-                            J = robot.compute_jacobian(target_link_name)
-                            J_rank = np.linalg.matrix_rank(J)
-                            logger.warning(f"  Jacobian rank: {J_rank} (full rank = 6)")
-                            if J_rank < 6:
-                                logger.warning("  ⚠️  Robot may be near a singularity!")
-                        except:
-                            pass
+                    try:
+                        J = robot.get_frame_jacobian(target_link_name)
+                        J_rank = np.linalg.matrix_rank(J)
+                        logger.warning(f"  Jacobian rank: {J_rank} (full rank = 6)")
+                        if J_rank < 6:
+                            logger.warning("  Robot may be near a singularity!")
+                    except Exception:
+                        pass
 
         # Update timing
         elapsed_time = (time.time() - start_time) * 1000

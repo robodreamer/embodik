@@ -31,7 +31,7 @@ EmbodiK is a high-performance inverse kinematics (IK) library for cross-embodime
 
 > **Note (v0.4.0+)**: EmbodiK no longer requires the Python `pin` package at runtime.
 > All Pinocchio functionality is exposed through native C++ bindings. This resolves
-> numpy dependency conflicts when using EmbodiK alongside packages like `hmnd_robot`.
+> numpy dependency conflicts when using EmbodiK alongside other packages.
 
 ### Option A: Fresh Environment (No existing Pinocchio)
 
