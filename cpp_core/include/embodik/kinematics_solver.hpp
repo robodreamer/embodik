@@ -198,6 +198,53 @@ public:
   void set_limit_recovery_gain(double gain) {
     limit_recovery_gain_ = std::clamp(gain, 0.0, 1.0);
   }
+  /**
+   * @brief Configure joint-limit recovery hysteresis thresholds (in radians/meters).
+   *
+   * A joint is treated as outside if margin < -enter_epsilon.  exit_epsilon is
+   * retained for API symmetry and future stateful recovery policies.
+   */
+  void set_limit_recovery_hysteresis(double enter_epsilon,
+                                     double exit_epsilon) {
+    limit_recovery_enter_epsilon_ = std::max(0.0, enter_epsilon);
+    limit_recovery_exit_epsilon_ =
+        std::max(limit_recovery_enter_epsilon_, exit_epsilon);
+  }
+
+  /**
+   * @brief Set release margin used to relax recovery forcing near boundaries.
+   *
+   * Small violations smaller than this value are treated as already recovered
+   * for the recovery-forcing term, reducing chattering near limits.
+   */
+  void set_limit_exit_release_margin(double margin) {
+    limit_exit_release_margin_ = std::max(0.0, margin);
+  }
+
+  /**
+   * @brief Enable a joint-limit barrier gradient task (priority 1, nullspace).
+   *
+   * When enabled, the solver automatically computes an analytical gradient of
+   * the joint-limit-distance metric and injects it as a priority-1 velocity
+   * target.  The gradient uses a barrier shape: near-zero in a configurable
+   * deadband and growing as ~1/dist^2 near each limit.
+   *
+   * If other priority-1 tasks already exist (e.g. a posture bias), the barrier
+   * velocity is appended to the same priority group so the SNS finds a single
+   * least-squares solution instead of competing scales.
+   *
+   * The task is skipped (zero cost) when all joints are inside the deadband.
+   *
+   * @param barrier_margin Fraction of joint range from each limit where the
+   *   barrier activates (e.g. 0.3 = outer 30% on each side).
+   * @param gain Peak velocity magnitude at the limit boundary (rad/s).
+   */
+  void set_joint_limit_barrier_task(double barrier_margin, double gain);
+
+  /**
+   * @brief Disable the joint-limit barrier gradient task.
+   */
+  void clear_joint_limit_barrier_task();
 
   /**
    * @brief Enable verbose debugging for position IK iterations.
@@ -274,7 +321,7 @@ public:
    * @param margin       Fractional inward shrink in [0, 1]. Applied by moving
    *                     each vertex toward the centroid by margin * char_size,
    *                     where char_size is the mean distance from centroid to
-   *                     vertices. Matches optional_wheelbase_viser feasibility check.
+   *                     vertices for consistent shrink behavior across polygon shapes.
    * @param frame_name   Frame in which @p vertices_xy are expressed.
    * @param com_vel_max  Maximum CoM velocity (m/s, default 0.4).
    * @param com_acc_max  Maximum CoM acceleration (m/s², default 0.1).
@@ -383,10 +430,19 @@ private:
   int max_zero_scale_iterations_ = 2;
   bool position_ik_debug_ = false;
   double limit_recovery_gain_ = 0.5;
+  double limit_recovery_enter_epsilon_ = 1e-4;
+  double limit_recovery_exit_epsilon_ = 1e-4;
+  double limit_exit_release_margin_ = 0.0;
 
   // Constraint options
   bool use_velocity_limits_ = true;
   bool use_position_limits_ = true;
+
+  // Joint-limit barrier task
+  bool barrier_task_enabled_ = false;
+  double barrier_margin_ = 0.3;
+  double barrier_gain_ = 1.0;
+  static constexpr double barrier_epsilon_ = 0.04;
 
   // Debug/perf instrumentation (off by default)
   bool timing_breakdown_enabled_ = false;
@@ -399,6 +455,13 @@ private:
 
   // Sort tasks by priority
   void sort_tasks_by_priority();
+
+  // Compute barrier gradient in velocity space (nv).
+  Eigen::VectorXd compute_joint_limit_barrier_gradient(
+      const Eigen::VectorXd &q_current,
+      const Eigen::VectorXd &q_min,
+      const Eigen::VectorXd &q_max,
+      const std::vector<int> &velocity_to_config_index) const;
 
   struct CollisionConstraintConfig {
     bool enabled = false;

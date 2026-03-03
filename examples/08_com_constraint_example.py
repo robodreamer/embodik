@@ -1,7 +1,6 @@
 """CoM Support-Polygon Constraint Example
 
-Demonstrates the ``configure_com_constraint`` API.  Visualization follows the
-Alpha Wheelbase Viser style:
+Demonstrates the ``configure_com_constraint`` API.  Visualization style:
 
 * **Outer polygon** (blue, thick lines) – the full support region.
 * **Inner / active polygon** (green, medium lines) – after inward margin is applied;
@@ -88,7 +87,7 @@ def _shrink_polygon_2d(poly: np.ndarray, margin_frac: float) -> np.ndarray:
     """Shrink polygon vertices toward centroid by ``margin_frac`` × char_size.
 
     Uses mean distance from centroid to vertices (char_size) to match the
-    C++ shrink_polygon and optional_wheelbase_viser feasibility check.
+    C++ shrink_polygon behavior.
     """
     if margin_frac <= 0.0:
         return poly.copy()

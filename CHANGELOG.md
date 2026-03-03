@@ -5,13 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] - 2026-03-03
+
+### Added
+- **Joint-limit barrier gradient task**: `set_joint_limit_barrier_task(margin, gain)` and `clear_joint_limit_barrier_task()` to proactively drive joints away from limits via an analytical barrier gradient in nullspace. Reduces EE return error and stalls when joints saturate during round-trip motion.
+- **Pose metrics module** (`embodik.pose_metrics`): C++ implementations with Python bindings for `joint_limit_distance`, `joint_limit_distance_gradient`, `velocity_manipulability`, and `singularity_joint_limit_metric` for diagnostics and monitoring.
+- **Interactive example** (`01_basic_ik_simple.py`): Joint limit scaling slider, barrier task toggle, and real-time pose metrics display.
+
+### Fixed
+- **Joint-6 spurious drift bug**: `kMinBoundFraction` in velocity box constraints no longer injects headroom *toward* a limit when a joint is already at that limit. Added `kMarginThreshold` (0.01 rad) so softening applies only in the direction away from limits.
+- **Limit scaling in example**: When narrowing joint limits via the slider, the current configuration is now clipped to the new limits to avoid spurious recovery behavior.
+
+### Changed
+- Moved `kMinBoundFraction`, `kMarginThreshold`, and pose_metrics constants to file-level for clarity.
+
 ## [0.8.1] - 2026-02-27
 
 ### Changed
 - **CoM margin definition**: The fractional margin for polygon shrink now uses
   the mean distance from centroid to vertices (`char_size`) instead of the
-  minimum distance (`min_radius`). This matches the optional_wheelbase_viser
-  feasibility check (`compute_polygon_characteristic_size`) and produces more
+  minimum distance (`min_radius`), producing more
   consistent shrink behavior across polygon shapes.
 
 ## [0.8.0] - 2026-02-27
@@ -86,7 +99,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Notes
 These APIs let users build per-joint q/v mappings without importing Pinocchio directly,
-enabling cleaner joint-to-motor mapping code (e.g. `optional_wheelbase_viser` torque analysis).
+enabling cleaner joint-to-motor mapping code.
 For revolute joints, nq=nv=1. For continuous joints, nq=2 (cos/sin) and nv=1. For
 floating-base, nq=7 (xyz + quaternion) and nv=6 (linear + angular velocity).
 
@@ -132,7 +145,7 @@ nv = robot.get_joint_velocity_size("joint1")
 ### Notes
 These APIs unify robot model functionality that was previously scattered across
 separate Pinocchio imports (e.g. `pin.computeGeneralizedGravity`, `pin.rnea`,
-`validationlib_pinocchio` collision checks) into EmbodiK's single `RobotModel` class,
+downstream packages collision checks) into EmbodiK's single `RobotModel` class,
 eliminating the need for a separate `pin` runtime dependency for dynamics.
 
 ### Migration Guide
@@ -157,7 +170,7 @@ tau_total = robot.rnea(q, v, a)
 Replace separate collision checking libraries:
 
 ```python
-# Old - required validationlib_pinocchio or direct pinocchio
+# Old - required direct pinocchio
 robot_state.check_collision()
 
 # New (v0.6.0) - built into EmbodiK
@@ -220,7 +233,7 @@ delta = robot.difference(q0, q1)  # Returns tangent vector (size nv)
 - **Removed Python `pin` package from runtime dependencies**: EmbodiK now uses native C++ bindings
   exclusively for all Pinocchio functionality. The `pip pinocchio` (`pin`) package is no longer
   required at runtime, only at build time.
-  - This resolves numpy dependency conflicts when using EmbodiK with packages like `validation_robot`
+  - This resolves numpy dependency conflicts when using EmbodiK with other packages
     that have different numpy version requirements
   - All rotation utilities (log3, exp3, quaternion conversions) now use native bindings
   - Collision distance computation now uses native `RobotModel.compute_min_collision_distance()`

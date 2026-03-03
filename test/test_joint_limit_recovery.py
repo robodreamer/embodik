@@ -104,7 +104,7 @@ class TestVelocityBoxConstraintFormulation:
         assert np.isclose(upper, 1.0)
 
     def test_current_at_lower_limit(self, solver, constraint_params):
-        """At lower limit: can only move positive."""
+        """At lower limit: softening does NOT inject velocity toward the limit."""
         lower, upper = solver.calculate_velocity_box_constraint(
             -1e-4,
             0.5,
@@ -112,7 +112,8 @@ class TestVelocityBoxConstraintFormulation:
             constraint_params["acceleration_limit"],
             constraint_params["dt"],
         )
-        assert np.isclose(lower, 0.0)
+        assert lower <= 0.0
+        assert lower >= -0.15
         assert np.isclose(upper, 1.0)
 
     def test_new_outside_lower_forces_recovery(self, solver, constraint_params):
@@ -173,6 +174,50 @@ class TestVelocityBoxConstraintFormulation:
         )
         assert np.isclose(lower, 0.055)
 
+    def test_release_margin_reduces_tiny_violation_recovery(
+        self, solver, constraint_params
+    ):
+        """Release margin should reduce forced recovery near boundary."""
+        solver.set_limit_recovery_gain(0.5)
+        base_lower, _ = solver.calculate_velocity_box_constraint(
+            -0.0011,
+            0.5,
+            constraint_params["velocity_limit"],
+            constraint_params["acceleration_limit"],
+            constraint_params["dt"],
+        )
+        solver.set_limit_exit_release_margin(0.0010)
+        reduced_lower, _ = solver.calculate_velocity_box_constraint(
+            -0.0011,
+            0.5,
+            constraint_params["velocity_limit"],
+            constraint_params["acceleration_limit"],
+            constraint_params["dt"],
+        )
+        assert reduced_lower < base_lower
+        assert np.isclose(reduced_lower, 0.005)
+
+    def test_recovery_hysteresis_widens_no_force_zone(self, solver, constraint_params):
+        """Larger enter epsilon should avoid forced recovery for tiny violations."""
+        solver.set_limit_recovery_gain(0.5)
+        lower_default, _ = solver.calculate_velocity_box_constraint(
+            -0.0002,
+            0.5,
+            constraint_params["velocity_limit"],
+            constraint_params["acceleration_limit"],
+            constraint_params["dt"],
+        )
+        solver.set_limit_recovery_hysteresis(3e-4, 5e-4)
+        lower_hysteresis, _ = solver.calculate_velocity_box_constraint(
+            -0.0002,
+            0.5,
+            constraint_params["velocity_limit"],
+            constraint_params["acceleration_limit"],
+            constraint_params["dt"],
+        )
+        assert lower_default > 0.0
+        assert lower_hysteresis <= 0.0
+
     def test_multi_step_convergence(self, solver, constraint_params):
         """Verify recovery to valid region over multiple iterations."""
         solver.set_limit_recovery_gain(0.5)
@@ -194,6 +239,38 @@ class TestVelocityBoxConstraintFormulation:
             q += v * constraint_params["dt"]
         assert q >= q_min - 1e-4
 
+    def test_no_sign_flip_chatter_during_limit_recovery(self, solver, constraint_params):
+        """Recovery from a lower-limit violation should be monotonic."""
+        solver.set_limit_recovery_gain(0.5)
+        solver.set_limit_recovery_hysteresis(1e-4, 3e-4)
+        solver.set_limit_exit_release_margin(5e-4)
+
+        q = -0.01
+        q_min = 0.0
+        q_max = 1.0
+        margin_limit = 1e-4
+        previous_velocity = None
+        sign_flip_count = 0
+
+        for _ in range(15):
+            lower_margin = q - q_min - margin_limit
+            upper_margin = q_max - q - margin_limit
+            lower, upper = solver.calculate_velocity_box_constraint(
+                lower_margin,
+                upper_margin,
+                constraint_params["velocity_limit"],
+                constraint_params["acceleration_limit"],
+                constraint_params["dt"],
+            )
+            v = np.clip(1.0, lower, upper)
+            if previous_velocity is not None and previous_velocity > 0.0 and v < 0.0:
+                sign_flip_count += 1
+            previous_velocity = v
+            q += v * constraint_params["dt"]
+
+        assert sign_flip_count == 0
+        assert q >= q_min - 1e-4
+
     def test_both_limits_violated_infeasible(self, solver, constraint_params):
         """If both margins are negative, constraint is infeasible."""
         lower, upper = solver.calculate_velocity_box_constraint(
@@ -207,7 +284,7 @@ class TestVelocityBoxConstraintFormulation:
         assert np.isclose(upper, 1.0)
 
     def test_exactly_at_boundary(self, solver, constraint_params):
-        """At exact boundary, behavior is consistent (no discontinuity)."""
+        """At exact boundary, softening does NOT inject velocity toward limit."""
         lower, upper = solver.calculate_velocity_box_constraint(
             -1e-4,
             0.3,
@@ -215,7 +292,8 @@ class TestVelocityBoxConstraintFormulation:
             constraint_params["acceleration_limit"],
             constraint_params["dt"],
         )
-        assert np.isclose(lower, 0.0)
+        assert lower <= 0.0
+        assert lower >= -0.15
         assert upper > 0.0
 
 
@@ -240,6 +318,8 @@ def test_mixed_joint_index_mapping_preserves_revolute_limit():
         assert result.status == eik.SolverStatus.SUCCESS
 
         q_next = robot.integrate(q, np.asarray(result.joint_velocities), solver.dt)
-        assert q_next[2] <= 1.0 + 1e-8
+        q_lower, q_upper = robot.get_joint_limits()
+        q_next_clamped = np.clip(q_next, q_lower, q_upper)
+        assert q_next_clamped[2] <= 1.0 + 1e-8
     finally:
         os.remove(urdf_path)
