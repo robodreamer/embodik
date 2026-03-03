@@ -151,9 +151,33 @@ void bind_kinematics_solver(nb::module_ &m) {
       .def("set_limit_recovery_gain",
            &KinematicsSolver::set_limit_recovery_gain, nb::arg("gain"),
            "Set joint limit recovery gain in [0, 1]")
+      .def("set_limit_recovery_hysteresis",
+           &KinematicsSolver::set_limit_recovery_hysteresis,
+           nb::arg("enter_epsilon"), nb::arg("exit_epsilon"),
+           "Set enter/exit hysteresis epsilons for joint-limit recovery.")
+      .def("set_limit_exit_release_margin",
+           &KinematicsSolver::set_limit_exit_release_margin, nb::arg("margin"),
+           "Set release margin that relaxes tiny post-limit recovery forcing.")
       .def("enable_position_ik_debug",
            &KinematicsSolver::enable_position_ik_debug, nb::arg("enable"),
            "Enable verbose logging for position IK iterations")
+
+      .def("set_joint_limit_barrier_task",
+           &KinematicsSolver::set_joint_limit_barrier_task,
+           nb::arg("barrier_margin"), nb::arg("gain"),
+           "Enable a joint-limit barrier gradient task (priority 1).\n\n"
+           "Computes an analytical gradient of the joint-limit-distance metric\n"
+           "and injects it as a priority-1 velocity target.  The gradient uses\n"
+           "a barrier shape: near-zero in the deadband and growing rapidly\n"
+           "near each limit.  If other priority-1 tasks exist (e.g. posture\n"
+           "bias), the barrier is appended to the same group.\n\n"
+           "Args:\n"
+           "  barrier_margin: Fraction of joint range from each limit where\n"
+           "    the barrier activates (e.g. 0.3 = outer 30% on each side).\n"
+           "  gain: Peak velocity magnitude at the limit boundary (rad/s).")
+      .def("clear_joint_limit_barrier_task",
+           &KinematicsSolver::clear_joint_limit_barrier_task,
+           "Disable the joint-limit barrier gradient task.")
 
       .def(
           "configure_collision_constraint",

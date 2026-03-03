@@ -5,7 +5,7 @@ EmbodiK requires Python 3.10+ and is distributed via PyPI as a source distributi
 > **Note (v0.4.0+)**: EmbodiK no longer requires the Python `pin` package at runtime.
 > All Pinocchio functionality is exposed through native C++ bindings. The `pin` package
 > is only needed at build time to locate Pinocchio's CMake config. This change resolves
-> numpy dependency conflicts when using EmbodiK with packages like `validation_robot`.
+> numpy dependency conflicts when using EmbodiK with other packages.
 
 ## Option A: Fresh Environment (No existing Pinocchio)
 
