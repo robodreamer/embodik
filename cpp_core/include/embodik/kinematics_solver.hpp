@@ -272,7 +272,9 @@ public:
    * @param vertices_xy  Nx2 matrix of polygon vertices in the XY plane of
    *                     frame_name (Z column is ignored if Nx3 is passed).
    * @param margin       Fractional inward shrink in [0, 1]. Applied by moving
-   *                     each vertex toward the centroid by margin * min_radius.
+   *                     each vertex toward the centroid by margin * char_size,
+   *                     where char_size is the mean distance from centroid to
+   *                     vertices. Matches optional_wheelbase_viser feasibility check.
    * @param frame_name   Frame in which @p vertices_xy are expressed.
    * @param com_vel_max  Maximum CoM velocity (m/s, default 0.4).
    * @param com_acc_max  Maximum CoM acceleration (m/s², default 0.1).
