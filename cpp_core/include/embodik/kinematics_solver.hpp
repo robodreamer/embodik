@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <embodik/dual_arm_ects.hpp>
 #include <embodik/robot_model.hpp>
 #include <embodik/tasks.hpp>
 #include <embodik/types.hpp>
@@ -84,6 +85,57 @@ public:
   std::shared_ptr<JointTask> add_joint_task(const std::string &name,
                                             const std::string &joint_name,
                                             double target_value = 0.0);
+
+  /**
+   * @brief Add a relative frame task (tracks T_a^{-1} * T_b)
+   * @param name Unique task name
+   * @param frame_a Reference frame name
+   * @param frame_b Target frame name
+   * @return Shared pointer to the created task
+   */
+  std::shared_ptr<RelativeFrameTask>
+  add_relative_frame_task(const std::string &name,
+                          const std::string &frame_a,
+                          const std::string &frame_b);
+
+  /**
+   * @brief Add an absolute frame task (tracks weighted average of two frames)
+   * @param name Unique task name
+   * @param frame_a First frame name
+   * @param frame_b Second frame name
+   * @param alpha Coordination ratio [0,1] (0.5 = midpoint)
+   * @return Shared pointer to the created task
+   */
+  std::shared_ptr<AbsoluteFrameTask>
+  add_absolute_frame_task(const std::string &name,
+                          const std::string &frame_a,
+                          const std::string &frame_b,
+                          double alpha = 0.5);
+
+  /**
+   * @brief Configure a relative pose inequality constraint between two frames
+   *
+   * Constrains each masked axis of the relative pose (T_a^{-1} * T_b) to stay
+   * within the given bounds. Uses the relative Jacobian to formulate velocity
+   * inequality rows in the QP, following the same pattern as the CoM constraint.
+   *
+   * @param frame_a Reference frame
+   * @param frame_b Target frame
+   * @param lower_bounds 6D lower bounds (pos xyz + ori xyz)
+   * @param upper_bounds 6D upper bounds (pos xyz + ori xyz)
+   * @param axis_mask 6D mask (1=constrained, 0=free). Empty = all constrained.
+   */
+  void configure_relative_pose_constraint(
+      const std::string &frame_a,
+      const std::string &frame_b,
+      const Eigen::VectorXd &lower_bounds,
+      const Eigen::VectorXd &upper_bounds,
+      const Eigen::VectorXd &axis_mask = Eigen::VectorXd());
+
+  /**
+   * @brief Disable relative pose constraint
+   */
+  void clear_relative_pose_constraint();
 
   /**
    * @brief Remove a task by name
@@ -511,6 +563,25 @@ private:
 
   std::optional<ComConstraintConfig> com_constraint_;
   std::optional<ComConstraintResult> compute_com_constraint();
+
+  // ---- Relative pose constraint ----
+  struct RelativePoseConstraintConfig {
+    bool enabled = false;
+    std::string frame_a;
+    std::string frame_b;
+    Eigen::VectorXd lower_bounds;  // 6D
+    Eigen::VectorXd upper_bounds;  // 6D
+    Eigen::VectorXd axis_mask;     // 6D: 1=constrained, 0=free
+  };
+
+  struct RelativePoseConstraintResult {
+    Eigen::MatrixXd jacobian;      // (num_active_axes x nv)
+    Eigen::VectorXd lower_bounds;
+    Eigen::VectorXd upper_bounds;
+  };
+
+  std::optional<RelativePoseConstraintConfig> relative_pose_constraint_;
+  std::optional<RelativePoseConstraintResult> compute_relative_pose_constraint();
 
   std::optional<CollisionConstraintConfig> collision_constraint_;
   std::optional<CollisionDebugInfo> last_collision_debug_;

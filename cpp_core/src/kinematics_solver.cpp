@@ -120,6 +120,136 @@ KinematicsSolver::add_joint_task(const std::string &name,
   return task;
 }
 
+std::shared_ptr<RelativeFrameTask>
+KinematicsSolver::add_relative_frame_task(const std::string &name,
+                                          const std::string &frame_a,
+                                          const std::string &frame_b) {
+  if (task_map_.find(name) != task_map_.end())
+    throw std::runtime_error("Task with name '" + name + "' already exists");
+
+  auto task =
+      std::make_shared<RelativeFrameTask>(name, robot_, frame_a, frame_b);
+  tasks_.push_back(task);
+  task_map_[name] = task;
+  return task;
+}
+
+std::shared_ptr<AbsoluteFrameTask>
+KinematicsSolver::add_absolute_frame_task(const std::string &name,
+                                          const std::string &frame_a,
+                                          const std::string &frame_b,
+                                          double alpha) {
+  if (task_map_.find(name) != task_map_.end())
+    throw std::runtime_error("Task with name '" + name + "' already exists");
+
+  auto task =
+      std::make_shared<AbsoluteFrameTask>(name, robot_, frame_a, frame_b, alpha);
+  tasks_.push_back(task);
+  task_map_[name] = task;
+  return task;
+}
+
+void KinematicsSolver::configure_relative_pose_constraint(
+    const std::string &frame_a, const std::string &frame_b,
+    const Eigen::VectorXd &lower_bounds, const Eigen::VectorXd &upper_bounds,
+    const Eigen::VectorXd &axis_mask) {
+  if (lower_bounds.size() != 6 || upper_bounds.size() != 6)
+    throw std::invalid_argument(
+        "lower_bounds and upper_bounds must be 6D (pos xyz + ori xyz)");
+
+  RelativePoseConstraintConfig cfg;
+  cfg.enabled = true;
+  cfg.frame_a = frame_a;
+  cfg.frame_b = frame_b;
+  cfg.lower_bounds = lower_bounds;
+  cfg.upper_bounds = upper_bounds;
+
+  if (axis_mask.size() == 0) {
+    cfg.axis_mask = Eigen::VectorXd::Ones(6);
+  } else if (axis_mask.size() == 6) {
+    cfg.axis_mask = axis_mask;
+  } else {
+    throw std::invalid_argument("axis_mask must be empty or 6D");
+  }
+
+  relative_pose_constraint_ = std::move(cfg);
+}
+
+void KinematicsSolver::clear_relative_pose_constraint() {
+  relative_pose_constraint_.reset();
+}
+
+std::optional<KinematicsSolver::RelativePoseConstraintResult>
+KinematicsSolver::compute_relative_pose_constraint() {
+  if (!relative_pose_constraint_.has_value() ||
+      !relative_pose_constraint_->enabled)
+    return std::nullopt;
+
+  const auto &cfg = *relative_pose_constraint_;
+
+  pinocchio::SE3 T_a = robot_->get_frame_pose(cfg.frame_a);
+  pinocchio::SE3 T_b = robot_->get_frame_pose(cfg.frame_b);
+
+  pinocchio::SE3 T_rel = compute_relative_frame(T_a, T_b);
+
+  Matrix6Xd J_a = robot_->get_frame_jacobian(cfg.frame_a);
+  Matrix6Xd J_b = robot_->get_frame_jacobian(cfg.frame_b);
+
+  Eigen::MatrixXd J_rel_full =
+      compute_relative_jacobian(J_a, J_b, T_a.rotation(), T_rel.translation());
+
+  // Current relative pose as 6D vector: [pos_x, pos_y, pos_z, ori_x, ori_y, ori_z]
+  Eigen::Vector3d rel_pos = T_rel.translation();
+  Eigen::Vector3d rel_ori_log = Eigen::Vector3d::Zero();
+  {
+    Eigen::Matrix3d R = T_rel.rotation();
+    double trace = R.trace();
+    double cos_theta = std::clamp((trace - 1.0) / 2.0, -1.0, 1.0);
+    double theta = std::acos(cos_theta);
+    if (std::abs(theta) > 1e-6) {
+      rel_ori_log = (theta / (2.0 * std::sin(theta))) *
+                    Eigen::Vector3d(R(2, 1) - R(1, 2), R(0, 2) - R(2, 0),
+                                    R(1, 0) - R(0, 1));
+    } else {
+      rel_ori_log = 0.5 * Eigen::Vector3d(R(2, 1) - R(1, 2), R(0, 2) - R(2, 0),
+                                           R(1, 0) - R(0, 1));
+    }
+  }
+
+  Eigen::VectorXd rel_state(6);
+  rel_state.head<3>() = rel_pos;
+  rel_state.tail<3>() = rel_ori_log;
+
+  // Count active axes
+  int num_active = 0;
+  for (int i = 0; i < 6; ++i)
+    if (cfg.axis_mask(i) > 0.5)
+      num_active++;
+
+  if (num_active == 0)
+    return std::nullopt;
+
+  RelativePoseConstraintResult result;
+  result.jacobian.resize(num_active, robot_->nv());
+  result.lower_bounds.resize(num_active);
+  result.upper_bounds.resize(num_active);
+
+  int row = 0;
+  for (int i = 0; i < 6; ++i) {
+    if (cfg.axis_mask(i) > 0.5) {
+      result.jacobian.row(row) = J_rel_full.row(i);
+      // Velocity bounds to keep within positional bounds
+      double slack_lower = rel_state(i) - cfg.lower_bounds(i);
+      double slack_upper = cfg.upper_bounds(i) - rel_state(i);
+      result.lower_bounds(row) = -std::max(slack_lower / dt_, 0.0);
+      result.upper_bounds(row) = std::max(slack_upper / dt_, 0.0);
+      row++;
+    }
+  }
+
+  return result;
+}
+
 void KinematicsSolver::remove_task(const std::string &name) {
   auto it = task_map_.find(name);
   if (it != task_map_.end()) {
@@ -1292,6 +1422,8 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
   }
 
   // Inject joint-limit barrier gradient as a priority-1 nullspace task.
+  // Only add rows for joints with non-zero gradient (near limits) to avoid
+  // expensive nv×nv identity matrix when most joints are in the deadband.
   if (barrier_task_enabled_ && apply_limits) {
     const int nv = robot_->nv();
     auto [q_min, q_max] = robot_->get_joint_limits();
@@ -1302,22 +1434,40 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
                                              velocity_to_config_index);
 
     if (barrier_vel.squaredNorm() >= 1e-12) {
-      if (goals.size() >= 2) {
-        // Existing priority-1 group: append barrier rows.
-        Eigen::VectorXd &existing_goal = goals[1];
-        Eigen::MatrixXd &existing_jac = jacobians[1];
-        const int existing_rows = static_cast<int>(existing_goal.rows());
-        Eigen::VectorXd combined(existing_rows + nv);
-        combined.head(existing_rows) = existing_goal;
-        combined.tail(nv) = barrier_vel;
-        Eigen::MatrixXd combined_jac(existing_rows + nv, nv);
-        combined_jac.topRows(existing_rows) = existing_jac;
-        combined_jac.bottomRows(nv) = Eigen::MatrixXd::Identity(nv, nv);
-        existing_goal = std::move(combined);
-        existing_jac = std::move(combined_jac);
-      } else {
-        goals.push_back(barrier_vel);
-        jacobians.push_back(Eigen::MatrixXd::Identity(nv, nv));
+      // Collect indices for near-limit joints (non-zero gradient)
+      std::vector<int> active_indices;
+      active_indices.reserve(nv);
+      for (int i = 0; i < nv; ++i) {
+        if (std::abs(barrier_vel[i]) >= 1e-12) {
+          active_indices.push_back(i);
+        }
+      }
+      const int k = static_cast<int>(active_indices.size());
+      if (k > 0) {
+        Eigen::VectorXd barrier_goal(k);
+        Eigen::MatrixXd barrier_jac(k, nv);
+        barrier_jac.setZero();
+        for (int j = 0; j < k; ++j) {
+          const int idx = active_indices[j];
+          barrier_goal[j] = barrier_vel[idx];
+          barrier_jac(j, idx) = 1.0;
+        }
+        if (goals.size() >= 2) {
+          Eigen::VectorXd &existing_goal = goals[1];
+          Eigen::MatrixXd &existing_jac = jacobians[1];
+          const int existing_rows = static_cast<int>(existing_goal.rows());
+          Eigen::VectorXd combined(existing_rows + k);
+          combined.head(existing_rows) = existing_goal;
+          combined.tail(k) = barrier_goal;
+          Eigen::MatrixXd combined_jac(existing_rows + k, nv);
+          combined_jac.topRows(existing_rows) = existing_jac;
+          combined_jac.bottomRows(k) = barrier_jac;
+          existing_goal = std::move(combined);
+          existing_jac = std::move(combined_jac);
+        } else {
+          goals.push_back(std::move(barrier_goal));
+          jacobians.push_back(std::move(barrier_jac));
+        }
       }
     }
   }
@@ -1360,6 +1510,18 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
       com_constraint_result->jacobian.col(idx).setZero();
   }
 
+  // Relative pose constraint
+  std::optional<RelativePoseConstraintResult> rel_pose_constraint_result =
+      std::nullopt;
+  if (relative_pose_constraint_.has_value() &&
+      relative_pose_constraint_->enabled) {
+    rel_pose_constraint_result = compute_relative_pose_constraint();
+  }
+  if (rel_pose_constraint_result.has_value() && !excluded_union.empty()) {
+    for (int idx : excluded_union)
+      rel_pose_constraint_result->jacobian.col(idx).setZero();
+  }
+
   // Build constraint matrix
   std::optional<std::chrono::high_resolution_clock::time_point>
       t_constraint_start;
@@ -1386,6 +1548,11 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
   if (com_constraint_result.has_value()) {
     num_constraints +=
         static_cast<int>(com_constraint_result->jacobian.rows());
+  }
+
+  if (rel_pose_constraint_result.has_value()) {
+    num_constraints +=
+        static_cast<int>(rel_pose_constraint_result->jacobian.rows());
   }
 
   C = Eigen::MatrixXd::Zero(num_constraints, robot_->nv());
@@ -1559,6 +1726,15 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
     C.block(constraint_idx, 0, rows, robot_->nv()) = com.jacobian;
     c_lower.segment(constraint_idx, rows) = com.lower_bounds;
     c_upper.segment(constraint_idx, rows) = com.upper_bounds;
+    constraint_idx += rows;
+  }
+
+  if (rel_pose_constraint_result.has_value()) {
+    const auto &rpc = rel_pose_constraint_result.value();
+    int rows = static_cast<int>(rpc.jacobian.rows());
+    C.block(constraint_idx, 0, rows, robot_->nv()) = rpc.jacobian;
+    c_lower.segment(constraint_idx, rows) = rpc.lower_bounds;
+    c_upper.segment(constraint_idx, rows) = rpc.upper_bounds;
     constraint_idx += rows;
   }
 
