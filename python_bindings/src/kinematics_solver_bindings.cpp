@@ -75,6 +75,44 @@ void bind_kinematics_solver(nb::module_ &m) {
            nb::arg("joint_name"), nb::arg("target_value") = 0.0,
            "Add a single joint tracking task")
 
+      .def("add_relative_frame_task",
+           &KinematicsSolver::add_relative_frame_task, nb::arg("name"),
+           nb::arg("frame_a"), nb::arg("frame_b"),
+           "Add a relative frame task (tracks T_a^{-1} * T_b)")
+
+      .def("add_absolute_frame_task",
+           &KinematicsSolver::add_absolute_frame_task, nb::arg("name"),
+           nb::arg("frame_a"), nb::arg("frame_b"),
+           nb::arg("alpha") = 0.5,
+           "Add an absolute frame task (weighted average of two frames)")
+
+      .def(
+          "configure_relative_pose_constraint",
+          [](KinematicsSolver &self, const std::string &frame_a,
+             const std::string &frame_b, const Eigen::VectorXd &lower_bounds,
+             const Eigen::VectorXd &upper_bounds,
+             const Eigen::VectorXd &axis_mask) {
+            self.configure_relative_pose_constraint(frame_a, frame_b,
+                                                    lower_bounds, upper_bounds,
+                                                    axis_mask);
+          },
+          nb::arg("frame_a"), nb::arg("frame_b"), nb::arg("lower_bounds"),
+          nb::arg("upper_bounds"),
+          nb::arg("axis_mask") = Eigen::VectorXd(),
+          "Configure a relative pose inequality constraint.\n\n"
+          "Constrains each masked axis of T_a^{-1} * T_b to stay within\n"
+          "the given bounds. Uses relative Jacobian as QP inequality rows.\n\n"
+          "Args:\n"
+          "  frame_a: Reference frame name\n"
+          "  frame_b: Target frame name\n"
+          "  lower_bounds: 6D lower bounds (pos xyz + ori xyz)\n"
+          "  upper_bounds: 6D upper bounds (pos xyz + ori xyz)\n"
+          "  axis_mask: 6D mask (1=constrained, 0=free). Empty = all.")
+
+      .def("clear_relative_pose_constraint",
+           &KinematicsSolver::clear_relative_pose_constraint,
+           "Disable relative pose constraint")
+
       .def("remove_task", &KinematicsSolver::remove_task, nb::arg("name"),
            "Remove a task by name")
 

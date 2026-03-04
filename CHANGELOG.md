@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0] - 2026-03-03
+
+### Added
+- **ECTS (Extended Cooperative Task Space)**: Dual-arm coordination tasks (reference: H. A. Park, IROS 2016, doi:10.1109/IROS.2016.7759161).
+  - `add_absolute_frame_task()`: Alpha-blended midpoint frame (Serial L/R, Parallel, Blended).
+  - `add_relative_frame_task()`: Grasp configuration (right EE relative to left EE).
+  - `add_frame_task()`: Single-frame pose task for Orthogonal mode.
+  - `embodik.map_ects_mode()`, `map_ects_mode_blended()`: ECTS config mapping.
+- **Relative pose constraint**: `configure_relative_pose_constraint()`, `clear_relative_pose_constraint()` for bounds on stored relative target.
+- **Interactive example** (`09_dual_arm_ects.py`): Dual LBR iiwa ECTS demo with Viser.
+  - Six coordination modes (Orthogonal, Serial L/R, Blended, Parallel).
+  - Orthogonal mode: two independent EE pose controls (blue marker → left EE, green → right EE).
+  - Mode-change snap keeps arms at current config; markers snap to effective frames.
+  - Collision avoidance with primitive collision shapes; collision debug visualization.
+- **Dual iiwa URDF builder** (`utils/dual_iiwa_urdf.py`): Composes two iiwa14 arms with shared base.
+  - Strips Drake namespace attributes (`drake:acceleration`) for parser compatibility.
+  - Replaces high-poly mesh collision (links 6 & 7) with spheres for ~100× faster collision queries.
+
+### Changed
+- Renamed `ects.hpp` / `ects.cpp` to `dual_arm_ects.hpp` / `dual_arm_ects.cpp` for clarity. Added IROS 2016 paper citation in headers.
+
+### Fixed
+- Drake iiwa mesh-based collision geometry (links 6 & 7) caused ~100× slowdown; now replaced with sphere primitives in dual_iiwa_urdf.
+
 ## [0.9.0] - 2026-03-03
 
 ### Added
