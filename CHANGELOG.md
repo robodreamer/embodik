@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0] - 2026-03-04
+
+### Added
+- **RobotModel constructor with actuated joint names**: `RobotModel(urdf_path, actuated_joint_names=[...], floating_base=False)` builds a reduced model by locking all joints not in the list at their neutral configuration. The resulting model's `nq`/`nv` match the actuated joint count, eliminating index mapping when integrating with external systems (e.g. hmndlib) that use reduced configurations. Visual and collision geometry are reduced in sync with the model.
+
+### Changed
+- For floating-base robots, the root freeflyer joint is never locked when using the actuated_joint_names constructor.
+
 ## [0.10.0] - 2026-03-03
 
 ### Added
