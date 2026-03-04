@@ -141,6 +141,15 @@ void bind_robot_model(nb::module_ &m) {
   nb::class_<RobotModel>(m, "RobotModel")
       .def(nb::init<const std::string &, bool>(), nb::arg("urdf_path"),
            nb::arg("floating_base") = false, "Load robot model from URDF file")
+      .def(nb::init<const std::string &,
+                    const std::vector<std::string> &,
+                    bool>(),
+           nb::arg("urdf_path"), nb::arg("actuated_joint_names"),
+           nb::arg("floating_base") = false,
+           "Load reduced robot model with only actuated joints.\n\n"
+           "Builds a reduced model by locking all joints not in actuated_joint_names\n"
+           "at their neutral configuration. model.nq/nv match the actuated joint\n"
+           "count, eliminating index mapping when integrating with external systems.")
 
       .def_static("from_xacro", &RobotModel::from_xacro, nb::arg("xacro_path"),
                   nb::arg("floating_base") = false,

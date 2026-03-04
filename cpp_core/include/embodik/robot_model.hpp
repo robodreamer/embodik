@@ -70,6 +70,26 @@ public:
   explicit RobotModel(const std::string &urdf_path, bool floating_base = false);
 
   /**
+   * @brief Construct reduced robot model with only actuated joints.
+   *
+   * Loads the full URDF, then builds a reduced model by locking all joints
+   * not in actuated_joint_names at their neutral configuration. The resulting
+   * model's nq/nv match the actuated joint count, eliminating index mapping
+   * when integrating with external systems (e.g. validationlib) that use reduced
+   * configurations.
+   *
+   * @param urdf_path Path to URDF file
+   * @param actuated_joint_names Names of joints to keep actuated (all others
+   *        are locked at neutral)
+   * @param floating_base Whether robot has floating base (default: false)
+   * @throws std::runtime_error if URDF loading fails or any actuated joint
+   *         name is not found in the model
+   */
+  RobotModel(const std::string &urdf_path,
+             const std::vector<std::string> &actuated_joint_names,
+             bool floating_base = false);
+
+  /**
    * @brief Create robot model from XACRO file
    * @param xacro_path Path to XACRO file
    * @param floating_base Whether robot has floating base
