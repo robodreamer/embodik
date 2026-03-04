@@ -23,12 +23,14 @@
  */
 
 #include <Eigen/Geometry>
+#include <algorithm>
 #include <cstdlib>
 #include <embodik/robot_model.hpp>
 #include <fstream>
 #include <iostream>
 #include <pinocchio/algorithm/geometry.hpp>
 #include <pinocchio/algorithm/joint-configuration.hpp>
+#include <pinocchio/algorithm/model.hpp>
 #include <pinocchio/collision/distance.hpp>
 #include <pinocchio/parsers/urdf.hpp>
 #include <sstream>
@@ -85,6 +87,120 @@ RobotModel::RobotModel(const std::string &urdf_path, bool floating_base)
     visual_data_.reset();
     collision_model_.reset();
     collision_data_.reset();
+  }
+
+  // Initialize configuration vectors
+  current_q_ = pinocchio::neutral(model_);
+  current_v_ = Eigen::VectorXd::Zero(model_.nv);
+
+  // Build frame mapping
+  build_frame_map();
+
+  // Initial forward kinematics
+  update_configuration(current_q_);
+}
+
+namespace {
+template <typename T>
+bool is_in_vector(const std::vector<T> &vec, const T &elt) {
+  return std::find(vec.begin(), vec.end(), elt) != vec.end();
+}
+}  // namespace
+
+RobotModel::RobotModel(const std::string &urdf_path,
+                       const std::vector<std::string> &actuated_joint_names,
+                       bool floating_base)
+    : floating_base_(floating_base), urdf_path_(urdf_path) {
+  // Check if file exists
+  std::ifstream file(urdf_path);
+  if (!file.good()) {
+    throw std::runtime_error("URDF file not found: " + urdf_path);
+  }
+  file.close();
+
+  // Build full model from URDF
+  Model full_model;
+  if (floating_base) {
+    pinocchio::urdf::buildModel(urdf_path, pinocchio::JointModelFreeFlyer(),
+                               full_model);
+  } else {
+    pinocchio::urdf::buildModel(urdf_path, full_model);
+  }
+
+  // Validate actuated joint names and build set of actuated joint IDs
+  std::vector<JointIndex> actuated_joint_ids;
+  actuated_joint_ids.reserve(actuated_joint_names.size());
+  for (const std::string &name : actuated_joint_names) {
+    if (!full_model.existJointName(name)) {
+      std::ostringstream oss;
+      oss << "Actuated joint '" << name << "' not found in model.";
+      throw std::runtime_error(oss.str());
+    }
+    actuated_joint_ids.push_back(full_model.getJointId(name));
+  }
+
+  // Build list of joints to lock: all joints not in actuated set.
+  // Skip universe (j=0) always. For floating base, also skip the root
+  // freeflyer (j=1) — it must remain unlocked.
+  JointIndex start_j = floating_base ? 2 : 1;
+  std::vector<JointIndex> joints_to_lock;
+  for (JointIndex j = start_j;
+       j < static_cast<JointIndex>(full_model.njoints); ++j) {
+    if (!is_in_vector(actuated_joint_ids, j)) {
+      joints_to_lock.push_back(j);
+    }
+  }
+
+  Eigen::VectorXd reference_config = pinocchio::neutral(full_model);
+
+  // Try to build reduced model together with geometry models (preferred).
+  // Falls back to model-only reduction if geometry loading fails.
+  bool geometry_loaded = false;
+  try {
+    std::string package_dir =
+        urdf_path.substr(0, urdf_path.find_last_of("/\\"));
+
+    pinocchio::GeometryModel full_visual;
+    pinocchio::urdf::buildGeom(full_model, urdf_path, pinocchio::VISUAL,
+                               full_visual, package_dir);
+
+    pinocchio::GeometryModel full_collision;
+    pinocchio::urdf::buildGeom(full_model, urdf_path, pinocchio::COLLISION,
+                               full_collision, package_dir);
+    if (full_collision.collisionPairs.empty()) {
+      full_collision.addAllCollisionPairs();
+    }
+
+    std::vector<pinocchio::GeometryModel> geom_list;
+    geom_list.push_back(std::move(full_visual));
+    geom_list.push_back(std::move(full_collision));
+
+    std::vector<pinocchio::GeometryModel> geom_reduced;
+    pinocchio::buildReducedModel(full_model, geom_list, joints_to_lock,
+                                 reference_config, model_, geom_reduced);
+    data_ = pinocchio::Data(model_);
+
+    visual_model_ = std::make_unique<pinocchio::GeometryModel>(
+        std::move(geom_reduced[0]));
+    visual_data_ = std::make_unique<pinocchio::GeometryData>(*visual_model_);
+
+    collision_model_ = std::make_unique<pinocchio::GeometryModel>(
+        std::move(geom_reduced[1]));
+    collision_data_ =
+        std::make_unique<pinocchio::GeometryData>(*collision_model_);
+
+    geometry_loaded = true;
+  } catch (const std::exception &) {
+    visual_model_.reset();
+    visual_data_.reset();
+    collision_model_.reset();
+    collision_data_.reset();
+  }
+
+  if (!geometry_loaded) {
+    pinocchio::buildReducedModel(full_model, joints_to_lock, reference_config,
+                                 model_);
+    data_ = pinocchio::Data(model_);
   }
 
   // Initialize configuration vectors
