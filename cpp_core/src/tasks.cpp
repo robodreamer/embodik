@@ -4,6 +4,7 @@
  */
 
 #include <algorithm>
+#include <embodik/dual_arm_ects.hpp>
 #include <embodik/robot_model.hpp>
 #include <embodik/tasks.hpp>
 #include <iostream>
@@ -827,6 +828,192 @@ Eigen::MatrixXd MultiJointTask::getJacobian() const {
   for (int i = 0; i < static_cast<int>(joint_indices_.size()); ++i) {
     J.row(i) *= joint_weights_(i);
   }
+  return J;
+}
+
+//=============================================================================
+// RelativeFrameTask Implementation
+//=============================================================================
+
+RelativeFrameTask::RelativeFrameTask(const std::string &name,
+                                     std::shared_ptr<RobotModel> model,
+                                     const std::string &frame_a,
+                                     const std::string &frame_b, int priority,
+                                     double weight)
+    : Task(name, priority, weight), model_(model), frame_a_(frame_a),
+      frame_b_(frame_b) {
+  if (!model_->has_frame(frame_a))
+    throw std::invalid_argument("Frame '" + frame_a +
+                                "' not found in robot model");
+  if (!model_->has_frame(frame_b))
+    throw std::invalid_argument("Frame '" + frame_b +
+                                "' not found in robot model");
+}
+
+void RelativeFrameTask::setTargetPose(const Eigen::Vector3d &position,
+                                      const Eigen::Matrix3d &rotation) {
+  target_position_ = position;
+  target_orientation_ = rotation;
+}
+
+void RelativeFrameTask::captureCurrentAsTarget() {
+  target_position_ = current_rel_position_;
+  target_orientation_ = current_rel_orientation_;
+}
+
+void RelativeFrameTask::update(const RobotModel &model) {
+  pinocchio::SE3 T_a = model.get_frame_pose(frame_a_);
+  pinocchio::SE3 T_b = model.get_frame_pose(frame_b_);
+
+  pinocchio::SE3 T_rel = compute_relative_frame(T_a, T_b);
+  current_rel_position_ = T_rel.translation();
+  current_rel_orientation_ = T_rel.rotation();
+
+  Matrix6Xd J_a = model.get_frame_jacobian(frame_a_);
+  Matrix6Xd J_b = model.get_frame_jacobian(frame_b_);
+
+  relative_jacobian_ = compute_relative_jacobian(J_a, J_b, T_a.rotation(),
+                                                 current_rel_position_);
+}
+
+Eigen::VectorXd RelativeFrameTask::getError() const {
+  Eigen::VectorXd error(6);
+
+  if (!target_position_) {
+    error.head<3>().setZero();
+  } else {
+    Eigen::Vector3d pos_err = *target_position_ - current_rel_position_;
+    error.head<3>() = pos_err.cwiseProduct(position_mask_);
+  }
+
+  if (!target_orientation_) {
+    error.tail<3>().setZero();
+  } else {
+    Eigen::Matrix3d R_error =
+        *target_orientation_ * current_rel_orientation_.transpose();
+    Eigen::Vector3d ori_err = logMap(R_error);
+    error.tail<3>() = ori_err.cwiseProduct(orientation_mask_);
+  }
+
+  return error;
+}
+
+Eigen::MatrixXd RelativeFrameTask::getJacobian() const {
+  Eigen::MatrixXd J = relative_jacobian_;
+
+  for (int i = 0; i < 3; ++i) {
+    if (position_mask_(i) == 0)
+      J.row(i).setZero();
+    if (orientation_mask_(i) == 0)
+      J.row(i + 3).setZero();
+  }
+
+  for (int excluded_idx : excluded_joint_indices_) {
+    if (excluded_idx >= 0 && excluded_idx < J.cols())
+      J.col(excluded_idx).setZero();
+  }
+
+  return J;
+}
+
+//=============================================================================
+// AbsoluteFrameTask Implementation
+//=============================================================================
+
+AbsoluteFrameTask::AbsoluteFrameTask(const std::string &name,
+                                     std::shared_ptr<RobotModel> model,
+                                     const std::string &frame_a,
+                                     const std::string &frame_b, double alpha,
+                                     int priority, double weight)
+    : Task(name, priority, weight), model_(model), frame_a_(frame_a),
+      frame_b_(frame_b), alpha_(alpha) {
+  if (!model_->has_frame(frame_a))
+    throw std::invalid_argument("Frame '" + frame_a +
+                                "' not found in robot model");
+  if (!model_->has_frame(frame_b))
+    throw std::invalid_argument("Frame '" + frame_b +
+                                "' not found in robot model");
+}
+
+void AbsoluteFrameTask::setTargetPose(const Eigen::Vector3d &position,
+                                      const Eigen::Matrix3d &rotation) {
+  target_position_ = position;
+  target_orientation_ = rotation;
+}
+
+void AbsoluteFrameTask::setTcpOffsets(const Eigen::Matrix4d &offset_a,
+                                      const Eigen::Matrix4d &offset_b) {
+  offset_a_ = pinocchio::SE3(offset_a.topLeftCorner<3, 3>(),
+                              offset_a.topRightCorner<3, 1>());
+  offset_b_ = pinocchio::SE3(offset_b.topLeftCorner<3, 3>(),
+                              offset_b.topRightCorner<3, 1>());
+}
+
+void AbsoluteFrameTask::setObjectCenterFrame(
+    const Eigen::Matrix4d &object_frame) {
+  pinocchio::SE3 T_obj(object_frame.topLeftCorner<3, 3>(),
+                       object_frame.topRightCorner<3, 1>());
+  pinocchio::SE3 T_a = model_->get_frame_pose(frame_a_);
+  pinocchio::SE3 T_b = model_->get_frame_pose(frame_b_);
+
+  offset_a_ = T_a.inverse() * T_obj;
+  offset_b_ = T_b.inverse() * T_obj;
+}
+
+void AbsoluteFrameTask::update(const RobotModel &model) {
+  pinocchio::SE3 T_a_raw = model.get_frame_pose(frame_a_);
+  pinocchio::SE3 T_b_raw = model.get_frame_pose(frame_b_);
+
+  pinocchio::SE3 T_a = T_a_raw * offset_a_;
+  pinocchio::SE3 T_b = T_b_raw * offset_b_;
+
+  pinocchio::SE3 T_abs = compute_absolute_frame(T_a, T_b, alpha_);
+  current_abs_position_ = T_abs.translation();
+  current_abs_orientation_ = T_abs.rotation();
+
+  Matrix6Xd J_a = model.get_frame_jacobian(frame_a_);
+  Matrix6Xd J_b = model.get_frame_jacobian(frame_b_);
+
+  absolute_jacobian_ = compute_absolute_jacobian(J_a, J_b, alpha_);
+}
+
+Eigen::VectorXd AbsoluteFrameTask::getError() const {
+  Eigen::VectorXd error(6);
+
+  if (!target_position_) {
+    error.head<3>().setZero();
+  } else {
+    Eigen::Vector3d pos_err = *target_position_ - current_abs_position_;
+    error.head<3>() = pos_err.cwiseProduct(position_mask_);
+  }
+
+  if (!target_orientation_) {
+    error.tail<3>().setZero();
+  } else {
+    Eigen::Matrix3d R_error =
+        *target_orientation_ * current_abs_orientation_.transpose();
+    Eigen::Vector3d ori_err = logMap(R_error);
+    error.tail<3>() = ori_err.cwiseProduct(orientation_mask_);
+  }
+
+  return error;
+}
+
+Eigen::MatrixXd AbsoluteFrameTask::getJacobian() const {
+  Eigen::MatrixXd J = absolute_jacobian_;
+
+  for (int i = 0; i < 3; ++i) {
+    if (position_mask_(i) == 0)
+      J.row(i).setZero();
+    if (orientation_mask_(i) == 0)
+      J.row(i + 3).setZero();
+  }
+
+  for (int excluded_idx : excluded_joint_indices_) {
+    if (excluded_idx >= 0 && excluded_idx < J.cols())
+      J.col(excluded_idx).setZero();
+  }
+
   return J;
 }
 

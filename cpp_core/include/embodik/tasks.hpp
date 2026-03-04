@@ -583,4 +583,130 @@ private:
     Eigen::MatrixXd jacobian_;
 };
 
+/**
+ * @brief Task for tracking the relative pose between two frames
+ *
+ * Drives T_a^{-1} * T_b toward a target relative pose.
+ * Supports per-axis masking to free individual DOFs.
+ */
+class RelativeFrameTask : public Task {
+public:
+    RelativeFrameTask(const std::string& name,
+                      std::shared_ptr<RobotModel> model,
+                      const std::string& frame_a,
+                      const std::string& frame_b,
+                      int priority = 0,
+                      double weight = 1.0);
+
+    void setTargetPose(const Eigen::Vector3d& position,
+                       const Eigen::Matrix3d& rotation);
+
+    void setPositionMask(const Eigen::Vector3d& mask) { position_mask_ = mask; }
+    void setOrientationMask(const Eigen::Vector3d& mask) { orientation_mask_ = mask; }
+
+    /**
+     * @brief Capture the current relative pose as the target
+     *
+     * Call after update() to snapshot the current T_a^{-1} * T_b.
+     */
+    void captureCurrentAsTarget();
+
+    const Eigen::Vector3d& getCurrentPosition() const { return current_rel_position_; }
+    const Eigen::Matrix3d& getCurrentOrientation() const { return current_rel_orientation_; }
+
+    const std::string& getFrameA() const { return frame_a_; }
+    const std::string& getFrameB() const { return frame_b_; }
+
+    void update(const RobotModel& model) override;
+    Eigen::VectorXd getError() const override;
+    Eigen::MatrixXd getJacobian() const override;
+    int getDimension() const override { return 6; }
+    TaskType getType() const override { return TaskType::FRAME_POSE; }
+
+private:
+    std::shared_ptr<RobotModel> model_;
+    std::string frame_a_, frame_b_;
+
+    std::optional<Eigen::Vector3d> target_position_;
+    std::optional<Eigen::Matrix3d> target_orientation_;
+
+    Eigen::Vector3d current_rel_position_;
+    Eigen::Matrix3d current_rel_orientation_;
+
+    Eigen::MatrixXd relative_jacobian_;
+
+    Eigen::Vector3d position_mask_ = Eigen::Vector3d::Ones();
+    Eigen::Vector3d orientation_mask_ = Eigen::Vector3d::Ones();
+};
+
+/**
+ * @brief Task for tracking the absolute (object-centric) pose of two frames
+ *
+ * The absolute frame is a weighted interpolation of two end-effector frames,
+ * parameterized by alpha (coordination ratio). Supports virtual-tip offsets.
+ */
+class AbsoluteFrameTask : public Task {
+public:
+    AbsoluteFrameTask(const std::string& name,
+                      std::shared_ptr<RobotModel> model,
+                      const std::string& frame_a,
+                      const std::string& frame_b,
+                      double alpha = 0.5,
+                      int priority = 0,
+                      double weight = 1.0);
+
+    void setTargetPose(const Eigen::Vector3d& position,
+                       const Eigen::Matrix3d& rotation);
+
+    void setAlpha(double alpha) { alpha_ = alpha; }
+    double getAlpha() const { return alpha_; }
+
+    void setPositionMask(const Eigen::Vector3d& mask) { position_mask_ = mask; }
+    void setOrientationMask(const Eigen::Vector3d& mask) { orientation_mask_ = mask; }
+
+    /**
+     * @brief Set virtual TCP offsets applied to each frame before ECTS computation
+     *
+     * T_virtual_a = T_frame_a * offset_a, T_virtual_b = T_frame_b * offset_b
+     */
+    void setTcpOffsets(const Eigen::Matrix4d& offset_a,
+                       const Eigen::Matrix4d& offset_b);
+
+    /**
+     * @brief Auto-compute TCP offsets so both virtual TCPs coincide at object_frame
+     */
+    void setObjectCenterFrame(const Eigen::Matrix4d& object_frame);
+
+    const Eigen::Vector3d& getCurrentPosition() const { return current_abs_position_; }
+    const Eigen::Matrix3d& getCurrentOrientation() const { return current_abs_orientation_; }
+
+    const std::string& getFrameA() const { return frame_a_; }
+    const std::string& getFrameB() const { return frame_b_; }
+
+    void update(const RobotModel& model) override;
+    Eigen::VectorXd getError() const override;
+    Eigen::MatrixXd getJacobian() const override;
+    int getDimension() const override { return 6; }
+    TaskType getType() const override { return TaskType::FRAME_POSE; }
+
+private:
+    std::shared_ptr<RobotModel> model_;
+    std::string frame_a_, frame_b_;
+    double alpha_;
+
+    std::optional<Eigen::Vector3d> target_position_;
+    std::optional<Eigen::Matrix3d> target_orientation_;
+
+    Eigen::Vector3d current_abs_position_;
+    Eigen::Matrix3d current_abs_orientation_;
+
+    Eigen::MatrixXd absolute_jacobian_;
+
+    pinocchio::SE3 offset_a_ = pinocchio::SE3::Identity();
+    pinocchio::SE3 offset_b_ = pinocchio::SE3::Identity();
+
+    Eigen::Vector3d position_mask_ = Eigen::Vector3d::Ones();
+    Eigen::Vector3d orientation_mask_ = Eigen::Vector3d::Ones();
+};
+
 } // namespace embodik

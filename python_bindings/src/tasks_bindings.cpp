@@ -10,6 +10,7 @@
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/vector.h>
 
+#include <embodik/dual_arm_ects.hpp>
 #include <embodik/robot_model.hpp>
 #include <embodik/tasks.hpp>
 
@@ -174,6 +175,84 @@ void bind_tasks(nb::module_ &m) {
                    "Get controlled joint indices")
       .def_prop_ro("target_values", &MultiJointTask::getTargetValues,
                    "Get target values");
+
+  // RelativeFrameTask
+  nb::class_<RelativeFrameTask, Task>(m, "RelativeFrameTask")
+      .def(nb::init<const std::string &, std::shared_ptr<RobotModel>,
+                    const std::string &, const std::string &, int, double>(),
+           nb::arg("name"), nb::arg("model"), nb::arg("frame_a"),
+           nb::arg("frame_b"), nb::arg("priority") = 0,
+           nb::arg("weight") = 1.0,
+           "Create a relative frame task (tracks T_a^{-1} * T_b)")
+      .def("set_target_pose", &RelativeFrameTask::setTargetPose,
+           nb::arg("position"), nb::arg("rotation"),
+           "Set target relative pose (position + orientation)")
+      .def("set_position_mask", &RelativeFrameTask::setPositionMask,
+           nb::arg("mask"), "Set position mask (1=controlled, 0=free)")
+      .def("set_orientation_mask", &RelativeFrameTask::setOrientationMask,
+           nb::arg("mask"), "Set orientation mask (1=controlled, 0=free)")
+      .def("capture_current_as_target",
+           &RelativeFrameTask::captureCurrentAsTarget,
+           "Capture current relative pose as target")
+      .def_prop_ro("current_position", &RelativeFrameTask::getCurrentPosition,
+                   "Current relative position")
+      .def_prop_ro("current_orientation",
+                   &RelativeFrameTask::getCurrentOrientation,
+                   "Current relative orientation")
+      .def_prop_ro("frame_a", &RelativeFrameTask::getFrameA, "Frame A name")
+      .def_prop_ro("frame_b", &RelativeFrameTask::getFrameB, "Frame B name");
+
+  // AbsoluteFrameTask
+  nb::class_<AbsoluteFrameTask, Task>(m, "AbsoluteFrameTask")
+      .def(nb::init<const std::string &, std::shared_ptr<RobotModel>,
+                    const std::string &, const std::string &, double, int,
+                    double>(),
+           nb::arg("name"), nb::arg("model"), nb::arg("frame_a"),
+           nb::arg("frame_b"), nb::arg("alpha") = 0.5,
+           nb::arg("priority") = 0, nb::arg("weight") = 1.0,
+           "Create an absolute frame task (weighted average of two frames)")
+      .def("set_target_pose", &AbsoluteFrameTask::setTargetPose,
+           nb::arg("position"), nb::arg("rotation"),
+           "Set target absolute pose (position + orientation)")
+      .def("set_alpha", &AbsoluteFrameTask::setAlpha, nb::arg("alpha"),
+           "Set coordination ratio [0,1]")
+      .def("get_alpha", &AbsoluteFrameTask::getAlpha,
+           "Get coordination ratio")
+      .def("set_position_mask", &AbsoluteFrameTask::setPositionMask,
+           nb::arg("mask"), "Set position mask")
+      .def("set_orientation_mask", &AbsoluteFrameTask::setOrientationMask,
+           nb::arg("mask"), "Set orientation mask")
+      .def("set_tcp_offsets", &AbsoluteFrameTask::setTcpOffsets,
+           nb::arg("offset_a"), nb::arg("offset_b"),
+           "Set virtual TCP offsets (4x4 matrices)")
+      .def("set_object_center_frame",
+           &AbsoluteFrameTask::setObjectCenterFrame,
+           nb::arg("object_frame"),
+           "Auto-compute TCP offsets so both virtual TCPs coincide at object_frame")
+      .def_prop_ro("current_position", &AbsoluteFrameTask::getCurrentPosition,
+                   "Current absolute position")
+      .def_prop_ro("current_orientation",
+                   &AbsoluteFrameTask::getCurrentOrientation,
+                   "Current absolute orientation")
+      .def_prop_ro("frame_a", &AbsoluteFrameTask::getFrameA, "Frame A name")
+      .def_prop_ro("frame_b", &AbsoluteFrameTask::getFrameB, "Frame B name");
+
+  // ECTSConfig
+  nb::class_<ECTSConfig>(m, "ECTSConfig",
+                         "Configuration for ECTS coordination mode")
+      .def(nb::init<>())
+      .def_rw("alpha", &ECTSConfig::alpha, "Coordination ratio [0,1]")
+      .def_rw("coordinated", &ECTSConfig::coordinated,
+              "Whether arms are coordinated");
+
+  // ECTS utility functions
+  m.def("map_ects_mode", &map_ects_mode, nb::arg("mode"),
+        "Map a named coordination mode to ECTSConfig.\n\n"
+        "Supported modes: orthogonal, serial_left, serial_right, parallel, "
+        "blended");
+
+  m.def("map_ects_mode_blended", &map_ects_mode_blended, nb::arg("ratio"),
+        "Map a blended coordination mode with custom ratio");
 
   // Helper function to create rotation matrix from roll-pitch-yaw
   m.def(
