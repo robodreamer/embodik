@@ -183,6 +183,7 @@ class RobotVisualizer:
 
         if open_browser:
             import webbrowser
+
             webbrowser.open(f"http://{self.host}:{self.port}")
 
     def _infer_description_name(self) -> Optional[str]:
@@ -301,4 +302,3 @@ def create_robot_visualizer(
         package_root=package_root,
         load_collisions=load_collisions,
     )
-

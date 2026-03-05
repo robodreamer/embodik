@@ -19,7 +19,6 @@ import pytest
 
 import embodik
 
-
 # ---------------------------------------------------------------------------
 # Minimal test robot (2-DOF revolute arm with enough mass for CoM)
 # ---------------------------------------------------------------------------
@@ -121,6 +120,7 @@ FAR_TRIANGLE = np.array([[0.5, 0.5], [1.0, 0.5], [0.75, 1.0]])
 # Phase 3.1 / 3.2 – API surface and invalid input
 # ===========================================================================
 
+
 class TestConfigureApi:
     def test_configure_and_clear(self, solver):
         """configure_com_constraint should accept valid Nx2 polygon; clear resets."""
@@ -173,6 +173,7 @@ class TestConfigureApi:
 # Phase 3.3 – Jacobian shape
 # ===========================================================================
 
+
 class TestJacobianShape:
     def test_jacobian_rows_match_halfplanes(self, robot, solver):
         """
@@ -212,6 +213,7 @@ class TestJacobianShape:
 # Phase 3.4 – Velocity/acceleration limit clamping
 # ===========================================================================
 
+
 class TestVelocityAccelerationLimits:
     def _run_many_steps_track_com(self, robot, solver, n_steps=60):
         """Solve velocity IK repeatedly and track CoM XY trajectory."""
@@ -232,13 +234,10 @@ class TestVelocityAccelerationLimits:
 
     def test_com_stays_inside_large_polygon(self, robot, solver):
         """With a large polygon and a reachable target, CoM stays inside."""
-        solver.configure_com_constraint(LARGE_SQUARE, margin=0.0,
-                                        com_vel_max=0.4, com_acc_max=0.1)
+        solver.configure_com_constraint(LARGE_SQUARE, margin=0.0, com_vel_max=0.4, com_acc_max=0.1)
         task = solver.add_frame_task("ee", "end_effector")
         ee_pose = robot.get_frame_pose("end_effector")
-        task.set_target_pose(
-            ee_pose.translation + np.array([0.0, 0.0, 0.05]), ee_pose.rotation
-        )
+        task.set_target_pose(ee_pose.translation + np.array([0.0, 0.0, 0.05]), ee_pose.rotation)
         task.weight = 1.0
         posture = solver.add_posture_task("posture")
         posture.weight = 0.01
@@ -258,15 +257,12 @@ class TestVelocityAccelerationLimits:
     def test_constraint_active_keeps_com_inside_tight_polygon(self, robot, solver):
         """Tight polygon around nominal CoM: CoM should not stray far beyond."""
         solver.configure_com_constraint(
-            TIGHT_SQUARE, margin=0.0, com_vel_max=0.4, com_acc_max=0.1,
-            use_acceleration_limits=True
+            TIGHT_SQUARE, margin=0.0, com_vel_max=0.4, com_acc_max=0.1, use_acceleration_limits=True
         )
         task = solver.add_frame_task("ee", "end_effector")
         ee_pose = robot.get_frame_pose("end_effector")
         # Target that would push CoM far outside tight polygon
-        task.set_target_pose(
-            ee_pose.translation + np.array([0.3, 0.0, 0.0]), ee_pose.rotation
-        )
+        task.set_target_pose(ee_pose.translation + np.array([0.3, 0.0, 0.0]), ee_pose.rotation)
         task.weight = 1.0
         posture = solver.add_posture_task("posture")
         posture.weight = 0.01
@@ -276,9 +272,9 @@ class TestVelocityAccelerationLimits:
         # (QP may not enforce exactly, but should be much smaller than unconstrained)
         assert len(com_traj) > 0
         max_deviation = np.max(np.abs(com_traj[:, 0]))
-        assert max_deviation < 0.3, (
-            f"CoM x deviated {max_deviation:.3f} m, constraint not effective."
-        )
+        assert (
+            max_deviation < 0.3
+        ), f"CoM x deviated {max_deviation:.3f} m, constraint not effective."
 
         solver.clear_tasks()
         solver.clear_com_constraint()
@@ -287,9 +283,7 @@ class TestVelocityAccelerationLimits:
         """Without constraint, CoM can move freely (baseline comparison)."""
         task = solver.add_frame_task("ee", "end_effector")
         ee_pose = robot.get_frame_pose("end_effector")
-        task.set_target_pose(
-            ee_pose.translation + np.array([0.3, 0.0, 0.0]), ee_pose.rotation
-        )
+        task.set_target_pose(ee_pose.translation + np.array([0.3, 0.0, 0.0]), ee_pose.rotation)
         task.weight = 1.0
         posture = solver.add_posture_task("posture")
         posture.weight = 0.01
@@ -311,22 +305,23 @@ class TestVelocityAccelerationLimits:
 
         for use_acc in (True, False):
             solver.configure_com_constraint(
-                TIGHT_SQUARE, margin=0.0, com_vel_max=0.4, com_acc_max=0.1,
-                use_acceleration_limits=use_acc
+                TIGHT_SQUARE,
+                margin=0.0,
+                com_vel_max=0.4,
+                com_acc_max=0.1,
+                use_acceleration_limits=use_acc,
             )
             task = solver.add_frame_task("ee", "end_effector")
             ee_pose = robot.get_frame_pose("end_effector")
-            task.set_target_pose(
-                ee_pose.translation + np.array([0.2, 0.0, 0.0]), ee_pose.rotation
-            )
+            task.set_target_pose(ee_pose.translation + np.array([0.2, 0.0, 0.0]), ee_pose.rotation)
             task.weight = 1.0
             posture = solver.add_posture_task("posture")
             posture.weight = 0.01
 
             result = solver.solve_velocity(q0)
-            assert result.status == embodik.SolverStatus.SUCCESS, (
-                f"Solve failed with use_acceleration_limits={use_acc}"
-            )
+            assert (
+                result.status == embodik.SolverStatus.SUCCESS
+            ), f"Solve failed with use_acceleration_limits={use_acc}"
             solver.clear_tasks()
             solver.clear_com_constraint()
 
@@ -335,12 +330,11 @@ class TestVelocityAccelerationLimits:
 # Phase 3.5 – Frame transform
 # ===========================================================================
 
+
 class TestFrameTransform:
     def test_base_link_frame(self, robot, solver):
         """Specifying frame_name='base_link' (= world for fixed-base) should work."""
-        solver.configure_com_constraint(
-            LARGE_SQUARE, margin=0.0, frame_name="base_link"
-        )
+        solver.configure_com_constraint(LARGE_SQUARE, margin=0.0, frame_name="base_link")
         task = solver.add_frame_task("ee", "end_effector")
         ee_pose = robot.get_frame_pose("end_effector")
         task.set_target_pose(ee_pose.translation, ee_pose.rotation)
@@ -354,9 +348,7 @@ class TestFrameTransform:
 
     def test_end_effector_frame(self, robot, solver):
         """Using the end_effector frame (rotated/translated) should not crash."""
-        solver.configure_com_constraint(
-            LARGE_SQUARE, margin=0.0, frame_name="end_effector"
-        )
+        solver.configure_com_constraint(LARGE_SQUARE, margin=0.0, frame_name="end_effector")
         task = solver.add_frame_task("ee", "end_effector")
         ee_pose = robot.get_frame_pose("end_effector")
         task.set_target_pose(ee_pose.translation, ee_pose.rotation)

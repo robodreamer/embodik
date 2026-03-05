@@ -45,10 +45,7 @@ def _setup(limit_scale: float = 0.4):
     return robot, solver, q_init.copy(), q_lo, q_hi
 
 
-def _track_ee_and_record_joint6(
-    robot, solver, q, q_lo, q_hi,
-    ee_offset, steps=300, gain=60.0
-):
+def _track_ee_and_record_joint6(robot, solver, q, q_lo, q_hi, ee_offset, steps=300, gain=60.0):
     """Drive EE toward offset, record per-step joint-6 values and velocities."""
     from embodik.utils import compute_pose_error
 
@@ -101,7 +98,11 @@ class TestJoint6DriftBug:
         j6_init = q[6]
 
         j6_vals, j6_vels, sat = _track_ee_and_record_joint6(
-            robot, solver, q, q_lo, q_hi,
+            robot,
+            solver,
+            q,
+            q_lo,
+            q_hi,
             ee_offset=np.array([0.15, 0.0, 0.0]),
             steps=400,
         )
@@ -137,7 +138,11 @@ class TestJoint6DriftBug:
         j6_init = q[6]
 
         j6_vals, j6_vels, sat = _track_ee_and_record_joint6(
-            robot, solver, q, q_lo, q_hi,
+            robot,
+            solver,
+            q,
+            q_lo,
+            q_hi,
             ee_offset=np.array([0.0, 0.15, 0.0]),
             steps=400,
         )
@@ -166,7 +171,11 @@ class TestJoint6DriftBug:
         j6_init = q[6]
 
         j6_vals, j6_vels, _ = _track_ee_and_record_joint6(
-            robot, solver, q, q_lo, q_hi,
+            robot,
+            solver,
+            q,
+            q_lo,
+            q_hi,
             ee_offset=np.array([0.15, 0.0, 0.0]),
             steps=400,
         )
@@ -175,9 +184,9 @@ class TestJoint6DriftBug:
         print(f"\n--- Joint-6 drift (original limits, +X) ---")
         print(f"  j6_max_drift: {j6_max_drift:.4f}")
 
-        assert j6_max_drift < 0.15, (
-            f"Joint 6 drifted {j6_max_drift:.4f} rad even with original limits."
-        )
+        assert (
+            j6_max_drift < 0.15
+        ), f"Joint 6 drifted {j6_max_drift:.4f} rad even with original limits."
 
 
 class TestKMinBoundFractionFixed:

@@ -17,7 +17,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
 
-
 _DEFAULT_REMOVE_SUBSTRINGS = [
     # Common local pinocchio build install path used during development
     "/pinocchio/install",
@@ -72,7 +71,7 @@ def sanitize_env(argv: Optional[List[str]] = None) -> int:
             "Cause: LD_LIBRARY_PATH points at a local Pinocchio install (e.g. pinocchio/install-fcl/lib),\n"
             "which overrides the pip wheel's bundled shared libraries.\n\n"
             "Recommended usage:\n"
-            "  eval \"$(embodik-sanitize-env --shell)\"\n"
+            '  eval "$(embodik-sanitize-env --shell)"\n'
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -272,7 +271,10 @@ def examples_cmd(argv: Optional[List[str]] = None) -> int:
             if examples_dir.exists():
                 examples_dir_resolved = examples_dir
             else:
-                print(f"ERROR: Examples directory does not exist: {examples_dir_resolved}", file=sys.stderr)
+                print(
+                    f"ERROR: Examples directory does not exist: {examples_dir_resolved}",
+                    file=sys.stderr,
+                )
                 print(f"Original path: {examples_dir}", file=sys.stderr)
                 print(f"Original exists: {examples_dir.exists()}", file=sys.stderr)
                 # Try to find it again
@@ -291,7 +293,10 @@ def examples_cmd(argv: Optional[List[str]] = None) -> int:
 
         # Verify it's actually a directory
         if not examples_dir_resolved.is_dir():
-            print(f"ERROR: Examples path exists but is not a directory: {examples_dir_resolved}", file=sys.stderr)
+            print(
+                f"ERROR: Examples path exists but is not a directory: {examples_dir_resolved}",
+                file=sys.stderr,
+            )
             return 1
 
         if dest.exists():
@@ -351,4 +356,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

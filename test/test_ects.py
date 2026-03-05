@@ -209,10 +209,8 @@ class TestRelativeFrame:
         T_right = right_pose.homogeneous()
         T_rel_expected = np.linalg.inv(T_left) @ T_right
 
-        np.testing.assert_allclose(rel_task.current_position,
-                                   T_rel_expected[:3, 3], atol=1e-10)
-        np.testing.assert_allclose(rel_task.current_orientation,
-                                   T_rel_expected[:3, :3], atol=1e-10)
+        np.testing.assert_allclose(rel_task.current_position, T_rel_expected[:3, 3], atol=1e-10)
+        np.testing.assert_allclose(rel_task.current_orientation, T_rel_expected[:3, :3], atol=1e-10)
         os.unlink(path)
 
     def test_capture_and_error_zero(self, dual_arm):

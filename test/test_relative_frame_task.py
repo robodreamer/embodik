@@ -52,8 +52,7 @@ class TestRelativeFrameTaskSolve:
 
         rel_task.update(robot)
         pos_drift = np.linalg.norm(rel_task.current_position - initial_rel_pos)
-        assert pos_drift < 0.005, \
-            f"Relative position drifted by {pos_drift:.4f} (should be < 5mm)"
+        assert pos_drift < 0.005, f"Relative position drifted by {pos_drift:.4f} (should be < 5mm)"
 
     def test_per_axis_masking_free_z_rotation(self, dual_arm_solver):
         """Free Z-rotation in relative frame, verify it can change"""
@@ -70,9 +69,7 @@ class TestRelativeFrameTaskSolve:
         left_task = solver.add_frame_task("left", "left_ee", embodik.TaskType.FRAME_POSE)
         left_task.weight = 10.0
         left_pose = robot.get_frame_pose("left_ee")
-        Rz = np.array([[np.cos(0.2), -np.sin(0.2), 0],
-                        [np.sin(0.2), np.cos(0.2), 0],
-                        [0, 0, 1]])
+        Rz = np.array([[np.cos(0.2), -np.sin(0.2), 0], [np.sin(0.2), np.cos(0.2), 0], [0, 0, 1]])
         target_rot = Rz @ left_pose.rotation
         left_task.set_target_pose(left_pose.translation, target_rot)
 
@@ -100,8 +97,7 @@ class TestRelativeFrameTaskSolve:
         left_task.priority = 0
         left_pose = robot.get_frame_pose("left_ee")
         left_task.set_target_pose(
-            left_pose.translation + np.array([0.05, 0.0, 0.0]),
-            left_pose.rotation
+            left_pose.translation + np.array([0.05, 0.0, 0.0]), left_pose.rotation
         )
 
         q_hard = q.copy()
@@ -111,9 +107,7 @@ class TestRelativeFrameTaskSolve:
             robot.update_configuration(q_hard)
 
         rel_task.update(robot)
-        drift_hard = np.linalg.norm(
-            rel_task.current_position - rel_task.current_position
-        )
+        drift_hard = np.linalg.norm(rel_task.current_position - rel_task.current_position)
 
         # Cleanup for soft test
         solver.remove_task("rel_hard")
@@ -132,8 +126,7 @@ class TestRelativeFrameTaskSolve:
         left_task2.priority = 0
         left_pose2 = robot.get_frame_pose("left_ee")
         left_task2.set_target_pose(
-            left_pose2.translation + np.array([0.05, 0.0, 0.0]),
-            left_pose2.rotation
+            left_pose2.translation + np.array([0.05, 0.0, 0.0]), left_pose2.rotation
         )
 
         q_soft = q.copy()
@@ -146,4 +139,6 @@ class TestRelativeFrameTaskSolve:
         drift_soft = np.linalg.norm(rel_task_soft.current_position - initial_pos_soft)
 
         # Soft weight should allow more drift than hard weight
-        assert drift_soft > 0.001, f"Soft relative task should allow some drift, got {drift_soft:.6f}"
+        assert (
+            drift_soft > 0.001
+        ), f"Soft relative task should allow some drift, got {drift_soft:.6f}"

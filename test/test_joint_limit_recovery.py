@@ -174,9 +174,7 @@ class TestVelocityBoxConstraintFormulation:
         )
         assert np.isclose(lower, 0.055)
 
-    def test_release_margin_reduces_tiny_violation_recovery(
-        self, solver, constraint_params
-    ):
+    def test_release_margin_reduces_tiny_violation_recovery(self, solver, constraint_params):
         """Release margin should reduce forced recovery near boundary."""
         solver.set_limit_recovery_gain(0.5)
         base_lower, _ = solver.calculate_velocity_box_constraint(

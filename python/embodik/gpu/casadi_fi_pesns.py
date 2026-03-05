@@ -26,10 +26,10 @@ except ImportError:
 # Default parameters matching C++ VelocitySolverConfig
 DEFAULT_EPSILON = 1e-6
 DEFAULT_DAMPING = 0.1
-DEFAULT_MU0 = 1e-3          # Initial penalty weight (softer start)
-DEFAULT_GAMMA = 2.5         # Penalty growth factor per iteration
-DEFAULT_ETA = 0.1           # Penalty gradient step size
-DEFAULT_K_MAX = 12          # Fixed iterations (increased for accuracy)
+DEFAULT_MU0 = 1e-3  # Initial penalty weight (softer start)
+DEFAULT_GAMMA = 2.5  # Penalty growth factor per iteration
+DEFAULT_ETA = 0.1  # Penalty gradient step size
+DEFAULT_K_MAX = 12  # Fixed iterations (increased for accuracy)
 DEFAULT_MAGNITUDE_LIMIT = 1e10
 
 
@@ -115,12 +115,10 @@ def get_feasible_task_scale(
         di_bar = d_bar[i]
 
         abs_ai = ca.fabs(ai)
-        valid = ca.if_else(
-            (abs_ai > eps_small) * (abs_ai < eps_large), 1.0, 0.0
-        )
+        valid = ca.if_else((abs_ai > eps_small) * (abs_ai < eps_large), 1.0, 0.0)
 
         # Margin from current position to bounds
-        margin_low = di - bi      # Need s*a >= margin_low
+        margin_low = di - bi  # Need s*a >= margin_low
         margin_high = di_bar - bi  # Need s*a <= margin_high
 
         # For a > 0: s <= margin_high/a, s >= margin_low/a
@@ -218,11 +216,11 @@ def build_fi_pesns_velocity_solve(
 
         for task_idx in range(n_tasks):
             task_dim = task_dims[task_idx]
-            target = targets[target_offset:target_offset + task_dim]
+            target = targets[target_offset : target_offset + task_dim]
             target_offset += task_dim
 
             jac_size = task_dim * n_dof
-            jac_flat = jacobians_flat[jacobian_offset:jacobian_offset + jac_size]
+            jac_flat = jacobians_flat[jacobian_offset : jacobian_offset + jac_size]
             jacobian_offset += jac_size
             # Row-major flat -> (task_dim, n_dof)
             J = ca.reshape(jac_flat, n_dof, task_dim).T
@@ -238,7 +236,7 @@ def build_fi_pesns_velocity_solve(
             # Analytical feasible scale
             # a = contribution from delta_dq, b = current constraint value
             a = C @ delta_dq  # Scaled contribution
-            b = C @ dq        # Unscaled (current)
+            b = C @ dq  # Unscaled (current)
             scale = get_feasible_task_scale(a, b, lower, upper, n_constraints)
 
             # Apply scaled delta
@@ -252,7 +250,7 @@ def build_fi_pesns_velocity_solve(
 
         # Violation residuals after all tasks
         constraint_val = C @ dq
-        r_low = lower - constraint_val   # Positive if below lower bound
+        r_low = lower - constraint_val  # Positive if below lower bound
         r_high = constraint_val - upper  # Positive if above upper bound
 
         # Compute violations
@@ -282,9 +280,7 @@ def build_fi_pesns_velocity_solve(
 
         # Apply minimal correction along constraint direction
         correction = ca.if_else(
-            c_norm_sq > tol * tol,
-            delta * c_row / c_norm_sq,
-            ca.SX.zeros(n_dof)
+            c_norm_sq > tol * tol, delta * c_row / c_norm_sq, ca.SX.zeros(n_dof)
         )
         dq = dq + correction
 
@@ -370,7 +366,11 @@ def build_fi_pesns_for_robot(
     config = ROBOT_CONFIGS[robot_name]
     n_dof = config["n_dof"]
     if task_dims is None:
-        task_dims = config["default_task_dims"][:n_tasks] if n_tasks <= len(config["default_task_dims"]) else config["default_task_dims"] * n_tasks
+        task_dims = (
+            config["default_task_dims"][:n_tasks]
+            if n_tasks <= len(config["default_task_dims"])
+            else config["default_task_dims"] * n_tasks
+        )
     n_constraints = config["n_constraints"] + extra_constraints
 
     return build_fi_pesns_velocity_solve(
