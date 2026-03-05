@@ -224,10 +224,12 @@ void bind_kinematics_solver(nb::module_ &m) {
                  &include_pairs,
              const std::vector<std::pair<std::string, std::string>>
                  &exclude_pairs,
-             bool nearest_points_all_pairs) {
+             bool nearest_points_all_pairs,
+             int max_constraints) {
             self.configure_collision_constraint(min_distance, include_pairs,
                                                 exclude_pairs,
-                                                nearest_points_all_pairs);
+                                                nearest_points_all_pairs,
+                                                max_constraints);
           },
           nb::arg("min_distance"),
           nb::arg("include_pairs") =
@@ -235,8 +237,21 @@ void bind_kinematics_solver(nb::module_ &m) {
           nb::arg("exclude_pairs") =
               std::vector<std::pair<std::string, std::string>>{},
           nb::arg("nearest_points_all_pairs") = true,
+          nb::arg("max_constraints") = 1,
           "Enable collision avoidance with optional include/exclude geometry "
-          "pair filters.")
+          "pair filters.\n\n"
+          "Args:\n"
+          "  min_distance: Minimum separation distance to enforce (metres).\n"
+          "  include_pairs: List of (geom_a, geom_b) tuples to consider "
+          "(empty = all).\n"
+          "  exclude_pairs: List of (geom_a, geom_b) tuples to ignore.\n"
+          "  nearest_points_all_pairs: If False, compute nearest points only "
+          "for the selected pair.\n"
+          "  max_constraints: Number of simultaneous QP constraint rows. Each "
+          "row protects one of the closest pairs independently. Defaults to 1 "
+          "(original behaviour). Values of 3-5 are recommended for complex "
+          "robots with multiple tight-clearance regions (e.g. base/leg and "
+          "arm/torso simultaneously).")
 
       .def(
           "add_collision_constraint",
@@ -306,8 +321,16 @@ void bind_kinematics_solver(nb::module_ &m) {
 
       .def("get_last_collision_debug",
            &KinematicsSolver::get_last_collision_debug,
-           "Retrieve debug information for the last evaluated collision pair, "
-           "if available.")
+           "Retrieve debug information for the closest active collision pair "
+           "after the last solve, if available. When max_constraints > 1, "
+           "use get_last_collision_debug_list() for all active pairs.")
+
+      .def("get_last_collision_debug_list",
+           &KinematicsSolver::get_last_collision_debug_list,
+           "Retrieve debug information for all active collision constraint "
+           "pairs after the last solve (one entry per constraint row, up to "
+           "max_constraints). Returns an empty list when no collision "
+           "constraint is configured or no solve has been performed.")
 
       .def("evaluate_collision_debug",
            &KinematicsSolver::evaluate_collision_debug,

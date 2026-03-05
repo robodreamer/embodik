@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.0] - 2026-03-05
+
+### Added
+- **Top-K simultaneous collision constraints** (`max_constraints` parameter on `configure_collision_constraint()`): instead of protecting only the single globally closest pair, the solver now emits up to K independent QP constraint rows — one per closest pair. Each row has its own Jacobian, velocity-damper bounds, and stuck-detection counter, so multiple tight-clearance regions (e.g. base/leg and arm/torso on a wheeled humanoid) are protected simultaneously.
+- **`get_last_collision_debug_list()`**: returns a `list[CollisionDebugInfo]` with one entry per active constraint row (up to `max_constraints`). The existing single-pair `get_last_collision_debug()` remains unchanged for backward compatibility.
+- **Per-pair hysteresis and stuck detection**: previous active pair indices are tracked as a vector; each pair has its own stuck counter in a map. Pairs that fall out of the top-K are cleaned up automatically each step.
+
+### Changed
+- **Continuous recovery ramp** (collision escape improvement): removed the discrete "slightly-inside deadband" special case that used a `gentle_scale = 0.01` multiplier (producing ~0.005 m/s — too weak to overcome EE task pulls). All non-penetrating violations now use a uniform `kCollisionRecoveryScale = 0.2`, producing a proportional recovery push at all violation depths.
+- **Task normal projection** (collision escape improvement): when a collision pair is violated (`lower_bound > 0`), the collision normal is projected out of all EE task Jacobians before the SNS solve. Only the approach component (`proj < 0`) is removed; tangential and escape directions remain fully available. This eliminates the "frozen in all directions" symptom where the entire task velocity was scaled to zero by the SNS solver.
+- **`kCollisionStuckRecoverySpeed = 0.10 m/s`** added: stuck condition now boosts recovery to at least 0.10 m/s (previously 0.05 m/s, shared with penetration floor).
+
 ## [0.11.0] - 2026-03-04
 
 ### Added
