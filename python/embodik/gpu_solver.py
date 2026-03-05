@@ -30,6 +30,7 @@ import numpy as np
 # Check for CasADi
 try:
     import casadi as ca
+
     HAS_CASADI = True
 except ImportError:
     HAS_CASADI = False
@@ -40,14 +41,17 @@ HAS_CUSADI = False
 CusadiFunction = None
 try:
     from cusadi import CusadiFunction
+
     HAS_CUSADI = True
 except ImportError:
     try:
         import sys
+
         cusadi_root = os.environ.get("CUSADI_ROOT", "")
         if cusadi_root and cusadi_root not in sys.path:
             sys.path.insert(0, cusadi_root)
         from src.CusadiFunction import CusadiFunction
+
         HAS_CUSADI = True
     except ImportError:
         pass
@@ -57,10 +61,12 @@ HAS_TORCH_CUDA = False
 torch = None
 try:
     import torch as _torch
+
     torch = _torch
     HAS_TORCH_CUDA = torch.cuda.is_available()
 except ImportError:
     pass
+
 
 # Default paths - search CUSADI_ROOT env var or common locations
 def _find_cusadi_root() -> str:
@@ -83,8 +89,13 @@ def _find_cusadi_root() -> str:
 
     return ""
 
+
 CUSADI_ROOT = _find_cusadi_root()
-DEFAULT_FN_PATH = os.path.join(CUSADI_ROOT, "src/casadi_functions/fn_velocity_solve.casadi") if CUSADI_ROOT else ""
+DEFAULT_FN_PATH = (
+    os.path.join(CUSADI_ROOT, "src/casadi_functions/fn_velocity_solve.casadi")
+    if CUSADI_ROOT
+    else ""
+)
 
 # Global cache for CusADi functions
 _cusadi_fn_cache: Dict[Tuple[str, int], Any] = {}
@@ -93,6 +104,7 @@ _cusadi_fn_cache: Dict[Tuple[str, int], Any] = {}
 @dataclass
 class BatchSolveResult:
     """Result from batched velocity solve."""
+
     velocities: np.ndarray  # (B, n_dof)
     scales: np.ndarray  # (B, n_tasks)
     status: str  # "success", "fallback_cpu", "error"
@@ -150,6 +162,7 @@ def _solve_cpu_sequential(
         BatchSolveResult with CPU solutions
     """
     import time
+
     start = time.perf_counter()
 
     try:
@@ -193,8 +206,7 @@ def _solve_cpu_sequential(
             jacobians_list = [np.asfortranarray(j.astype(np.float64)) for j in jacobians]
 
         result = eik.computeMultiObjectiveVelocitySolutionEigen(
-            targets_list, jacobians_list, C,
-            lower.astype(np.float64), upper.astype(np.float64)
+            targets_list, jacobians_list, C, lower.astype(np.float64), upper.astype(np.float64)
         )
 
         velocities_list.append(np.array(result.solution))
@@ -236,6 +248,7 @@ def solve_velocity_gpu_batched(
         RuntimeError: If GPU is requested but not available
     """
     import time
+
     start = time.perf_counter()
 
     if not HAS_TORCH_CUDA:

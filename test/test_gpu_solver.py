@@ -73,6 +73,7 @@ def flatten_problem(
 # Availability checks
 # =============================================================================
 
+
 def test_gpu_availability_check():
     """Test that GPU availability check works."""
     try:
@@ -100,7 +101,9 @@ def test_cpu_fallback_always_available():
         from embodik.gpu_solver import solve_velocity_batched
 
         # Generate a simple problem
-        goals, jacobians, C, lower, upper = generate_random_problem(seed=42, n_dof=3, n_tasks=1, task_dims=[2])
+        goals, jacobians, C, lower, upper = generate_random_problem(
+            seed=42, n_dof=3, n_tasks=1, task_dims=[2]
+        )
 
         targets_flat, jacobians_flat = flatten_problem(goals, jacobians)
 
@@ -126,9 +129,10 @@ def test_cpu_fallback_always_available():
 # GPU vs CPU validation tests
 # =============================================================================
 
+
 @pytest.mark.skipif(
     not os.environ.get("EMBODIK_GPU_TESTS", ""),
-    reason="GPU tests disabled. Set EMBODIK_GPU_TESTS=1 to enable."
+    reason="GPU tests disabled. Set EMBODIK_GPU_TESTS=1 to enable.",
 )
 class TestGPUvsCPU:
     """Tests comparing GPU and CPU solver outputs."""
@@ -140,8 +144,8 @@ class TestGPUvsCPU:
 
         # Simple problem that doesn't need saturation
         goals = [np.array([0.1, 0.1], dtype=np.float64)]
-        jacobians = [np.array([[1.0, 0.0], [0.0, 1.0]], dtype=np.float64, order='F')]
-        C = np.eye(2, dtype=np.float64, order='F')
+        jacobians = [np.array([[1.0, 0.0], [0.0, 1.0]], dtype=np.float64, order="F")]
+        C = np.eye(2, dtype=np.float64, order="F")
         lower = np.array([-1.0, -1.0], dtype=np.float64)
         upper = np.array([1.0, 1.0], dtype=np.float64)
 
@@ -153,8 +157,7 @@ class TestGPUvsCPU:
         # GPU solve
         targets_flat, jacobians_flat = flatten_problem(goals, jacobians)
         gpu_result = solve_velocity_batched(
-            [targets_flat], [jacobians_flat], [C], [lower], [upper],
-            use_gpu=True
+            [targets_flat], [jacobians_flat], [C], [lower], [upper], use_gpu=True
         )
 
         # Compare
@@ -182,8 +185,7 @@ class TestGPUvsCPU:
         # GPU solve
         targets_flat, jacobians_flat = flatten_problem(goals, jacobians)
         gpu_result = solve_velocity_batched(
-            [targets_flat], [jacobians_flat], [C], [lower], [upper],
-            use_gpu=True
+            [targets_flat], [jacobians_flat], [C], [lower], [upper], use_gpu=True
         )
 
         # Compare with looser tolerance (saturation approximation)
@@ -231,8 +233,7 @@ class TestGPUvsCPU:
         jacobians_batch = [flatten_problem(g, j)[1] for g, j in zip(all_goals, all_jacobians)]
 
         gpu_result = solve_velocity_batched(
-            targets_batch, jacobians_batch, all_C, all_lower, all_upper,
-            use_gpu=True
+            targets_batch, jacobians_batch, all_C, all_lower, all_upper, use_gpu=True
         )
 
         # Compare each
@@ -251,8 +252,8 @@ class TestGPUvsCPU:
 
         # Large goal with tight bounds - forces scaling
         goals = [np.array([1.0, 1.0, 1.0], dtype=np.float64)]
-        jacobians = [np.eye(3, dtype=np.float64, order='F')]
-        C = np.eye(3, dtype=np.float64, order='F')
+        jacobians = [np.eye(3, dtype=np.float64, order="F")]
+        C = np.eye(3, dtype=np.float64, order="F")
         lower = np.array([-0.1, -0.1, -0.1], dtype=np.float64)
         upper = np.array([0.1, 0.1, 0.1], dtype=np.float64)
 
@@ -264,8 +265,7 @@ class TestGPUvsCPU:
         # GPU solve
         targets_flat, jacobians_flat = flatten_problem(goals, jacobians)
         gpu_result = solve_velocity_batched(
-            [targets_flat], [jacobians_flat], [C], [lower], [upper],
-            use_gpu=True
+            [targets_flat], [jacobians_flat], [C], [lower], [upper], use_gpu=True
         )
 
         # Both should have scaled down
@@ -282,14 +282,14 @@ class TestGPUvsCPU:
 
         # Two tasks wanting opposite directions
         goals = [
-            np.array([1.0], dtype=np.float64),   # Task 0: positive
+            np.array([1.0], dtype=np.float64),  # Task 0: positive
             np.array([-1.0], dtype=np.float64),  # Task 1: negative
         ]
         jacobians = [
-            np.array([[1.0, 0.0]], dtype=np.float64, order='F'),
-            np.array([[1.0, 0.0]], dtype=np.float64, order='F'),
+            np.array([[1.0, 0.0]], dtype=np.float64, order="F"),
+            np.array([[1.0, 0.0]], dtype=np.float64, order="F"),
         ]
-        C = np.eye(2, dtype=np.float64, order='F')
+        C = np.eye(2, dtype=np.float64, order="F")
         lower = np.array([-0.5, -0.5], dtype=np.float64)
         upper = np.array([0.5, 0.5], dtype=np.float64)
 
@@ -301,8 +301,7 @@ class TestGPUvsCPU:
         # GPU solve
         targets_flat, jacobians_flat = flatten_problem(goals, jacobians)
         gpu_result = solve_velocity_batched(
-            [targets_flat], [jacobians_flat], [C], [lower], [upper],
-            use_gpu=True
+            [targets_flat], [jacobians_flat], [C], [lower], [upper], use_gpu=True
         )
 
         # Both should prioritize Task 0 (positive direction)
@@ -313,6 +312,7 @@ class TestGPUvsCPU:
 # =============================================================================
 # Batch correctness tests
 # =============================================================================
+
 
 class TestBatchCorrectness:
     """Tests for batch processing correctness."""
@@ -328,8 +328,10 @@ class TestBatchCorrectness:
         n_problems = 10
 
         # Generate problems
-        problems = [generate_random_problem(seed=i, n_dof=5, n_tasks=1, task_dims=[3])
-                    for i in range(n_problems)]
+        problems = [
+            generate_random_problem(seed=i, n_dof=5, n_tasks=1, task_dims=[3])
+            for i in range(n_problems)
+        ]
 
         # Sequential CPU
         cpu_solutions = []
@@ -347,8 +349,7 @@ class TestBatchCorrectness:
         upper_batch = [p[4] for p in problems]
 
         batch_result = solve_velocity_batched(
-            targets_batch, jacobians_batch, C_batch, lower_batch, upper_batch,
-            use_gpu=False
+            targets_batch, jacobians_batch, C_batch, lower_batch, upper_batch, use_gpu=False
         )
 
         # Compare
@@ -359,6 +360,7 @@ class TestBatchCorrectness:
 # =============================================================================
 # Edge cases and fallback tests
 # =============================================================================
+
 
 class TestEdgeCases:
     """Tests for edge cases and error handling."""
@@ -377,8 +379,7 @@ class TestEdgeCases:
 
         # Force CPU path
         result = solve_velocity_batched(
-            [targets_flat], [jacobians_flat], [C], [lower], [upper],
-            use_gpu=False
+            [targets_flat], [jacobians_flat], [C], [lower], [upper], use_gpu=False
         )
 
         assert result.status == "fallback_cpu"
@@ -394,8 +395,8 @@ class TestEdgeCases:
 
         # Near-singular Jacobian
         goals = [np.array([0.1, 0.1], dtype=np.float64)]
-        jacobians = [np.array([[1.0, 1.0], [1.0, 1.0 + 1e-8]], dtype=np.float64, order='F')]
-        C = np.eye(2, dtype=np.float64, order='F')
+        jacobians = [np.array([[1.0, 1.0], [1.0, 1.0 + 1e-8]], dtype=np.float64, order="F")]
+        C = np.eye(2, dtype=np.float64, order="F")
         lower = np.array([-1.0, -1.0], dtype=np.float64)
         upper = np.array([1.0, 1.0], dtype=np.float64)
 
@@ -407,8 +408,7 @@ class TestEdgeCases:
         # GPU/CPU fallback solve
         targets_flat, jacobians_flat = flatten_problem(goals, jacobians)
         result = solve_velocity_batched(
-            [targets_flat], [jacobians_flat], [C], [lower], [upper],
-            use_gpu=False
+            [targets_flat], [jacobians_flat], [C], [lower], [upper], use_gpu=False
         )
 
         # Both should produce finite results

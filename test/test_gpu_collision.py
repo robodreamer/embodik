@@ -29,6 +29,7 @@ def generate_random_configurations(
 # Availability checks
 # =============================================================================
 
+
 def test_warp_availability_check():
     """Test that Warp availability check works."""
     try:
@@ -72,6 +73,7 @@ def test_collision_result_dataclass():
 # CPU fallback tests (always run)
 # =============================================================================
 
+
 class TestCPUFallback:
     """Tests for CPU fallback collision detection."""
 
@@ -84,7 +86,7 @@ class TestCPUFallback:
             pytest.skip("Required modules not available")
 
         # Create a simple robot with collision geometry
-        urdf_content = '''<?xml version="1.0"?>
+        urdf_content = """<?xml version="1.0"?>
 <robot name="simple_arm">
   <link name="base">
     <collision>
@@ -105,7 +107,7 @@ class TestCPUFallback:
     <axis xyz="0 0 1"/>
     <limit effort="10" lower="-1.57" upper="1.57" velocity="1"/>
   </joint>
-</robot>'''
+</robot>"""
 
         urdf_path = tmp_path / "simple_arm.urdf"
         urdf_path.write_text(urdf_content)
@@ -119,9 +121,7 @@ class TestCPUFallback:
         q_batch = generate_random_configurations(5, robot.nq, seed=42, joint_limits=(-1.5, 1.5))
 
         # Compute distances with CPU fallback
-        result = compute_collision_distances_batched(
-            robot, q_batch, use_gpu=False
-        )
+        result = compute_collision_distances_batched(robot, q_batch, use_gpu=False)
 
         # Check results
         assert result.distances.shape == (5,)
@@ -135,9 +135,10 @@ class TestCPUFallback:
 # GPU vs CPU validation tests
 # =============================================================================
 
+
 @pytest.mark.skipif(
     not os.environ.get("EMBODIK_GPU_TESTS", ""),
-    reason="GPU tests disabled. Set EMBODIK_GPU_TESTS=1 to enable."
+    reason="GPU tests disabled. Set EMBODIK_GPU_TESTS=1 to enable.",
 )
 class TestGPUvsCPUCollision:
     """Tests comparing GPU and CPU collision detection."""
@@ -159,7 +160,7 @@ class TestGPUvsCPUCollision:
             pytest.skip("Warp + CUDA not available")
 
         # Create test robot
-        urdf_content = '''<?xml version="1.0"?>
+        urdf_content = """<?xml version="1.0"?>
 <robot name="test_arm">
   <link name="base">
     <collision>
@@ -180,7 +181,7 @@ class TestGPUvsCPUCollision:
     <axis xyz="0 0 1"/>
     <limit effort="10" lower="-3.14" upper="3.14" velocity="1"/>
   </joint>
-</robot>'''
+</robot>"""
 
         urdf_path = tmp_path / "test_arm.urdf"
         urdf_path.write_text(urdf_content)
@@ -194,22 +195,16 @@ class TestGPUvsCPUCollision:
         q_batch = generate_random_configurations(20, robot.nq, seed=123)
 
         # CPU distances (ground truth)
-        cpu_result = compute_collision_distances_batched(
-            robot, q_batch, use_gpu=False
-        )
+        cpu_result = compute_collision_distances_batched(robot, q_batch, use_gpu=False)
 
         # GPU distances
-        gpu_result = compute_collision_distances_batched(
-            robot, q_batch, use_gpu=True
-        )
+        gpu_result = compute_collision_distances_batched(robot, q_batch, use_gpu=True)
 
         # Compare if GPU succeeded
         if gpu_result.status == "success":
             # Distances should match within tolerance
             assert np.allclose(
-                cpu_result.distances,
-                gpu_result.distances,
-                atol=DISTANCE_ATOL
+                cpu_result.distances, gpu_result.distances, atol=DISTANCE_ATOL
             ), f"Distance mismatch: max diff = {np.max(np.abs(cpu_result.distances - gpu_result.distances))}"
 
     def test_batch_consistency(self, tmp_path):
@@ -220,7 +215,7 @@ class TestGPUvsCPUCollision:
         except ImportError:
             pytest.skip("Required modules not available")
 
-        urdf_content = '''<?xml version="1.0"?>
+        urdf_content = """<?xml version="1.0"?>
 <robot name="simple">
   <link name="base">
     <collision><geometry><box size="0.1 0.1 0.1"/></geometry></collision>
@@ -233,7 +228,7 @@ class TestGPUvsCPUCollision:
     <origin xyz="0.05 0 0"/><axis xyz="0 0 1"/>
     <limit effort="10" lower="-1.57" upper="1.57" velocity="1"/>
   </joint>
-</robot>'''
+</robot>"""
 
         urdf_path = tmp_path / "simple.urdf"
         urdf_path.write_text(urdf_content)
@@ -252,9 +247,7 @@ class TestGPUvsCPUCollision:
         # Sequential computation
         sequential_dists = []
         for i in range(q_batch.shape[0]):
-            result = compute_collision_distances_batched(
-                robot, q_batch[i:i+1], use_gpu=False
-            )
+            result = compute_collision_distances_batched(robot, q_batch[i : i + 1], use_gpu=False)
             sequential_dists.append(result.distances[0])
 
         sequential_dists = np.array(sequential_dists)
@@ -266,6 +259,7 @@ class TestGPUvsCPUCollision:
 # =============================================================================
 # WarpCollisionModel tests
 # =============================================================================
+
 
 class TestWarpCollisionModel:
     """Tests for WarpCollisionModel class."""
@@ -325,6 +319,7 @@ class TestWarpCollisionModel:
 # Jacobian tests
 # =============================================================================
 
+
 class TestCollisionJacobian:
     """Tests for collision Jacobian computation."""
 
@@ -336,7 +331,7 @@ class TestCollisionJacobian:
         except ImportError:
             pytest.skip("Required modules not available")
 
-        urdf_content = '''<?xml version="1.0"?>
+        urdf_content = """<?xml version="1.0"?>
 <robot name="test">
   <link name="base">
     <collision><geometry><box size="0.1 0.1 0.1"/></geometry></collision>
@@ -349,7 +344,7 @@ class TestCollisionJacobian:
     <origin xyz="0.05 0 0"/><axis xyz="0 0 1"/>
     <limit effort="10" lower="-1.57" upper="1.57" velocity="1"/>
   </joint>
-</robot>'''
+</robot>"""
 
         urdf_path = tmp_path / "test.urdf"
         urdf_path.write_text(urdf_content)

@@ -65,8 +65,9 @@ class TestAbsoluteFrameTaskSolve:
         left_change = np.linalg.norm(q[:3] - q_init[:3])
         right_change = np.linalg.norm(q[3:] - q_init[3:])
         assert left_change > 0.001, f"Left arm should move, got {left_change:.6f}"
-        assert right_change < left_change, \
-            f"Right arm moved more than left: {right_change:.4f} vs {left_change:.4f}"
+        assert (
+            right_change < left_change
+        ), f"Right arm moved more than left: {right_change:.4f} vs {left_change:.4f}"
 
     def test_alpha_variation_serial_right(self, dual_arm_solver):
         """With alpha=0.0, only right arm Jacobian columns are active"""
@@ -87,8 +88,9 @@ class TestAbsoluteFrameTaskSolve:
         left_change = np.linalg.norm(q[:3] - q_init[:3])
         right_change = np.linalg.norm(q[3:] - q_init[3:])
         assert right_change > 0.001, f"Right arm should move, got {right_change:.6f}"
-        assert left_change < right_change, \
-            f"Left arm moved more than right: {left_change:.4f} vs {right_change:.4f}"
+        assert (
+            left_change < right_change
+        ), f"Left arm moved more than right: {left_change:.4f} vs {right_change:.4f}"
 
     def test_set_alpha_runtime(self, dual_arm_solver):
         """Verify alpha can be changed at runtime"""

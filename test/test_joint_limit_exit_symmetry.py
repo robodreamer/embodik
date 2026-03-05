@@ -49,8 +49,7 @@ class SymmetryMetrics:
         w_oscillation: float = 1.0,
     ) -> float:
         return (
-            w_entry_exit
-            * abs(self.entry_steps_to_saturation - self.exit_steps_from_saturation)
+            w_entry_exit * abs(self.entry_steps_to_saturation - self.exit_steps_from_saturation)
             + w_return_error * self.return_error
             + w_stall * self.stall_count_reverse
             + w_oscillation * self.oscillation_count_near_limit

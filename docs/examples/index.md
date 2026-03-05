@@ -23,6 +23,8 @@ The EmbodiK repository includes several example scripts:
 **Basic:**
 - `01_basic_ik_simple.py` - Basic IK solving
 - `02_collision_aware_IK.py` - Collision-aware IK with self-collision avoidance
+- `08_com_constraint_demo.py` - CoM support-polygon constraint with Viser visualization
+- `09_dual_arm_ects.py` - Dual-arm ECTS (Orthogonal + ECTS modes), collision avoidance, mode snap
 - `robot_model_example.py` - Robot model usage
 - `visualization_example.py` - Visualization examples
 

@@ -16,8 +16,10 @@ import logging
 # Note: This module is optional and requires 'pin' package (pip install pin)
 try:
     import pinocchio as pin
+
     try:
         from pinocchio.visualize import ViserVisualizer
+
         _PINOCCHIO_VISER_AVAILABLE = True
     except ImportError:
         _PINOCCHIO_VISER_AVAILABLE = False
@@ -30,6 +32,7 @@ except ImportError:
 if TYPE_CHECKING:
     # Type hints for viser objects (avoid direct import)
     from typing import Any
+
     ViserServer = Any
     ViserScene = Any
     ViserGui = Any
@@ -52,10 +55,9 @@ def get_viser_server_from_visualizer(visualizer: ViserVisualizer) -> "ViserServe
             "Install pinocchio >= 3.8.0 to use this functionality."
         )
 
-    if not hasattr(visualizer, 'viewer'):
+    if not hasattr(visualizer, "viewer"):
         raise RuntimeError(
-            "Visualizer has not been initialized. "
-            "Call initViewer() before accessing the viewer."
+            "Visualizer has not been initialized. " "Call initViewer() before accessing the viewer."
         )
 
     return visualizer.viewer
@@ -130,17 +132,11 @@ def create_visualizer_with_viser_access(
         visual_model=visual_model,
         data=pin_data,
         collision_data=robot_model.collision_data if load_collisions else None,
-        visual_data=robot_model.visual_data
+        visual_data=robot_model.visual_data,
     )
 
     # Initialize viewer
-    visualizer.initViewer(
-        viewer=None,
-        open=open_browser,
-        loadModel=True,
-        host=host,
-        port=str(port)
-    )
+    visualizer.initViewer(viewer=None, open=open_browser, loadModel=True, host=host, port=str(port))
 
     # Get viser access objects
     server = visualizer.viewer
@@ -178,7 +174,7 @@ def _find_package_root(urdf_path: str, description_name: Optional[str] = None) -
         parts = urdf_dir.parts
         try:
             robot_models_idx = parts.index("robot_models")
-            robot_models_root = Path(*parts[:robot_models_idx + 1])  # .../robot_models
+            robot_models_root = Path(*parts[: robot_models_idx + 1])  # .../robot_models
 
             # URDF files should use package://<robot_name>/... where <robot_name> matches
             # the directory name in robot_models/. For example:
@@ -207,7 +203,9 @@ def _find_package_root(urdf_path: str, description_name: Optional[str] = None) -
 
     # Add robot-specific root if description_name provided
     if description_name:
-        possible_package_roots.insert(0, cache_dir / "example-robot-data" / "robots" / description_name)
+        possible_package_roots.insert(
+            0, cache_dir / "example-robot-data" / "robots" / description_name
+        )
 
     for possible_root in possible_package_roots:
         if possible_root.exists():
@@ -218,10 +216,7 @@ def _find_package_root(urdf_path: str, description_name: Optional[str] = None) -
 
 
 def _load_geometry_models(
-    pin_model: "pin.Model",
-    urdf_path: str,
-    robot_model=None,
-    package_root: Optional[str] = None
+    pin_model: "pin.Model", urdf_path: str, robot_model=None, package_root: Optional[str] = None
 ) -> Tuple["pin.GeometryModel", "pin.GeometryModel", "pin.GeometryData", "pin.GeometryData"]:
     """Load visual and collision geometry models from URDF.
 
@@ -240,8 +235,15 @@ def _load_geometry_models(
             visual_model = robot_model.visual_model
             collision_model = robot_model.collision_model
             if visual_model is not None and collision_model is not None:
-                logger.info(f"Using robot's pre-loaded geometry: {len(visual_model.geometryObjects)} visual objects and {len(collision_model.geometryObjects)} collision objects")
-                return visual_model, collision_model, robot_model.visual_data, robot_model.collision_data
+                logger.info(
+                    f"Using robot's pre-loaded geometry: {len(visual_model.geometryObjects)} visual objects and {len(collision_model.geometryObjects)} collision objects"
+                )
+                return (
+                    visual_model,
+                    collision_model,
+                    robot_model.visual_data,
+                    robot_model.collision_data,
+                )
         except (TypeError, AttributeError):
             # If there's a binding issue or attribute doesn't exist, fall through to loading from URDF
             pass
@@ -265,25 +267,32 @@ def _load_geometry_models(
 
     try:
         visual_model = pin.buildGeomFromUrdf(
-            pin_model, urdf_path, pin.GeometryType.VISUAL,
-            package_dirs=package_dirs
+            pin_model, urdf_path, pin.GeometryType.VISUAL, package_dirs=package_dirs
         )
         collision_model = pin.buildGeomFromUrdf(
-            pin_model, urdf_path, pin.GeometryType.COLLISION,
-            package_dirs=package_dirs
+            pin_model, urdf_path, pin.GeometryType.COLLISION, package_dirs=package_dirs
         )
         visual_data = pin.GeometryData(visual_model)
         collision_data = pin.GeometryData(collision_model)
-        logger.info(f"✓ Loaded {len(visual_model.geometryObjects)} visual objects and {len(collision_model.geometryObjects)} collision objects")
+        logger.info(
+            f"✓ Loaded {len(visual_model.geometryObjects)} visual objects and {len(collision_model.geometryObjects)} collision objects"
+        )
         return visual_model, collision_model, visual_data, collision_data
     except Exception as e:
         # Fallback: try using robot model's geometry if available
         if robot_model is not None and robot_model.visual_model is not None:
             logger.info("Using robot model's geometry models (fallback)")
-            return robot_model.visual_model, robot_model.collision_model, robot_model.visual_data, robot_model.collision_data
+            return (
+                robot_model.visual_model,
+                robot_model.collision_model,
+                robot_model.visual_data,
+                robot_model.collision_data,
+            )
 
         # Last resort: empty models
-        logger.warning(f"Failed to load geometry models: {e}. Robot will be displayed without visual meshes.")
+        logger.warning(
+            f"Failed to load geometry models: {e}. Robot will be displayed without visual meshes."
+        )
         visual_model = pin.GeometryModel()
         collision_model = pin.GeometryModel()
         visual_data = pin.GeometryData(visual_model)
@@ -313,6 +322,7 @@ def _patch_loadViewerGeometryObject_for_colors(visualizer: ViserVisualizer) -> N
         """
         try:
             import trimesh
+
             try:
                 import coal  # New name for hppfcl
             except ImportError:
@@ -337,7 +347,9 @@ def _patch_loadViewerGeometryObject_for_colors(visualizer: ViserVisualizer) -> N
                 frame = self.viewer.scene.add_mesh_trimesh(name, mesh)
             else:
                 # When color is provided, use add_mesh_simple with color override
-                color_override = color or getattr(geometry_object, 'meshColor', [0.7, 0.7, 0.7, 1.0])
+                color_override = color or getattr(
+                    geometry_object, "meshColor", [0.7, 0.7, 0.7, 1.0]
+                )
                 frame = self.viewer.scene.add_mesh_simple(
                     name,
                     mesh.vertices,
@@ -350,13 +362,16 @@ def _patch_loadViewerGeometryObject_for_colors(visualizer: ViserVisualizer) -> N
             return original_loadViewerGeometryObject(geometry_object, prefix, color)
 
         # Store frame reference (matching roboplan's implementation)
-        if hasattr(self, 'frames'):
+        if hasattr(self, "frames"):
             self.frames[name] = frame
         return frame
 
     # Apply monkey-patch
     import types
-    visualizer.loadViewerGeometryObject = types.MethodType(loadViewerGeometryObject_preserve_colors, visualizer)
+
+    visualizer.loadViewerGeometryObject = types.MethodType(
+        loadViewerGeometryObject_preserve_colors, visualizer
+    )
 
 
 def create_viser_visualizer(
@@ -417,7 +432,7 @@ def create_viser_visualizer(
         visual_model=visual_model,
         data=pin_data,
         collision_data=collision_data,
-        visual_data=visual_data
+        visual_data=visual_data,
     )
 
     # Monkey-patch to preserve mesh colors (like roboplan)
@@ -430,25 +445,27 @@ def create_viser_visualizer(
         open=open_browser,
         loadModel=False,  # Don't load model yet, we'll load it with visual_color=None
         host=host,
-        port=str(port)
+        port=str(port),
     )
 
     # Load model with visual_color=None to ensure mesh colors are preserved
     # The monkey-patched loadViewerGeometryObject will use add_mesh_trimesh when color=None
     model_loaded = False
     try:
-        if hasattr(visualizer, 'loadViewerModel'):
+        if hasattr(visualizer, "loadViewerModel"):
             visualizer.loadViewerModel(visual_color=None, collision_color=None)
             model_loaded = True
             if preserve_mesh_colors:
                 logger.info("Loaded model with visual_color=None to preserve mesh colors")
     except Exception as e:
-        logger.warning(f"Could not load with visual_color=None: {e}. Falling back to default loading.")
+        logger.warning(
+            f"Could not load with visual_color=None: {e}. Falling back to default loading."
+        )
 
     # Fallback: load without explicit color parameter
     if not model_loaded:
         try:
-            if hasattr(visualizer, 'loadViewerModel'):
+            if hasattr(visualizer, "loadViewerModel"):
                 visualizer.loadViewerModel()
                 model_loaded = True
         except Exception as e2:
@@ -460,4 +477,3 @@ def create_viser_visualizer(
     gui = server.gui
 
     return visualizer, server, scene, gui
-

@@ -60,7 +60,7 @@ class EmbodikVisualizer:
     def _load_urdf_visualization(self):
         """Load URDF for visualization using yourdfpy."""
         # Get URDF path from robot model
-        urdf_path = getattr(self.robot_model, 'urdf_path', None)
+        urdf_path = getattr(self.robot_model, "urdf_path", None)
         if not urdf_path:
             print("Warning: No URDF path available from robot model")
             self.urdf = None
@@ -85,11 +85,7 @@ class EmbodikVisualizer:
             )
 
             # Create ViserUrdf for visualization
-            self.urdf_vis = ViserUrdf(
-                self.server,
-                self.urdf,
-                root_node_name="/robot"
-            )
+            self.urdf_vis = ViserUrdf(self.server, self.urdf, root_node_name="/robot")
 
             print(f"✓ URDF loaded successfully for visualization")
             print(f"  URDF joints: {self.urdf.joint_names}")
@@ -162,15 +158,15 @@ class EmbodikVisualizer:
             robot_joint_names = self.robot_model.get_joint_names()
 
             # Debug first call
-            if not hasattr(self, '_debug_printed'):
+            if not hasattr(self, "_debug_printed"):
                 print(f"  Robot joints: {robot_joint_names}")
                 print(f"  Joint config q: {q}")
                 self._debug_printed = True
 
             # Map joint values - try different approaches
             # 1. First try using controlled_joints if available
-            controlled_joints = getattr(self.robot_model, 'controlled_joint_names', [])
-            controlled_indices = getattr(self.robot_model, 'controlled_joint_indices', {})
+            controlled_joints = getattr(self.robot_model, "controlled_joint_names", [])
+            controlled_indices = getattr(self.robot_model, "controlled_joint_indices", {})
 
             if controlled_joints and controlled_indices:
                 for joint_name in controlled_joints:
@@ -189,7 +185,7 @@ class EmbodikVisualizer:
             self.urdf_vis.update_cfg(cfg)
 
         # Update COM if enabled
-        if hasattr(self, 'gui_show_com') and self.gui_show_com and self.gui_show_com.value:
+        if hasattr(self, "gui_show_com") and self.gui_show_com and self.gui_show_com.value:
             com_position = self.robot_model.get_com_position()
             self.visualize_com(com_position)
 
@@ -197,7 +193,9 @@ class EmbodikVisualizer:
         """Alias for display() to maintain compatibility."""
         self.display(q)
 
-    def set_display_options(self, visuals: bool = True, collisions: bool = False, frames: bool = False):
+    def set_display_options(
+        self, visuals: bool = True, collisions: bool = False, frames: bool = False
+    ):
         """Set display options for robot visualization."""
         # With direct Viser control, we can toggle visibility
         if self.urdf_vis:
@@ -209,8 +207,13 @@ class EmbodikVisualizer:
         if collisions:
             print("Collision display not yet implemented in direct Viser mode")
 
-    def add_target_marker(self, name: str, pose: np.ndarray,
-                         color: Tuple[float, float, float] = (0, 1, 0), size: float = 0.05):
+    def add_target_marker(
+        self,
+        name: str,
+        pose: np.ndarray,
+        color: Tuple[float, float, float] = (0, 1, 0),
+        size: float = 0.05,
+    ):
         """Add IK target marker."""
         position = pose[:3, 3]
         # Convert to quaternion (wxyz format)
@@ -219,10 +222,7 @@ class EmbodikVisualizer:
         # Add sphere for position
         sphere_name = f"/targets/{name}/sphere"
         sphere = self.server.scene.add_icosphere(
-            sphere_name,
-            radius=size,
-            position=position,
-            color=color
+            sphere_name, radius=size, position=position, color=color
         )
 
         # Add frame for orientation
@@ -232,26 +232,29 @@ class EmbodikVisualizer:
             wxyz=quaternion,
             position=position,
             axes_length=size * 2,
-            axes_radius=size * 0.2
+            axes_radius=size * 0.2,
         )
 
         self._targets[name] = (sphere_name, frame_name, sphere, frame)
 
-    def visualize_com(self, com_position: np.ndarray, color: Tuple[float, float, float] = (1, 1, 0)):
+    def visualize_com(
+        self, com_position: np.ndarray, color: Tuple[float, float, float] = (1, 1, 0)
+    ):
         """Visualize center of mass."""
         if self._com_marker:
             # Update position instead of recreating
             self._com_marker.position = com_position
         else:
             self._com_marker = self.server.scene.add_icosphere(
-                "/com",
-                radius=0.02,
-                position=com_position,
-                color=color
+                "/com", radius=0.02, position=com_position, color=color
             )
 
-    def visualize_support_polygon(self, vertices: np.ndarray,
-                                 color: Tuple[float, float, float] = (0, 0, 1), opacity: float = 0.3):
+    def visualize_support_polygon(
+        self,
+        vertices: np.ndarray,
+        color: Tuple[float, float, float] = (0, 0, 1),
+        opacity: float = 0.3,
+    ):
         """Visualize support polygon for balance constraint."""
         if len(vertices) < 3:
             return
@@ -269,7 +272,7 @@ class EmbodikVisualizer:
         try:
             mesh = trimesh.Trimesh(
                 vertices=vertices_3d,
-                faces=trimesh.earcut.triangulate_polygon(vertices_3d[:, :2])[0]
+                faces=trimesh.earcut.triangulate_polygon(vertices_3d[:, :2])[0],
             )
 
             self._support_polygon = self.server.scene.add_mesh_simple(
@@ -277,7 +280,7 @@ class EmbodikVisualizer:
                 vertices=mesh.vertices,
                 faces=mesh.faces,
                 color=color,
-                opacity=opacity
+                opacity=opacity,
             )
         except Exception as e:
             print(f"Error creating support polygon: {e}")
@@ -293,10 +296,8 @@ class EmbodikVisualizer:
         """Set up GUI controls."""
         with self.server.gui.add_folder("Swift IK Controls"):
             # Display options
-            self.gui_show_visuals = self.server.gui.add_checkbox(
-                "Show Visuals", initial_value=True)
-            self.gui_show_com = self.server.gui.add_checkbox(
-                "Show COM", initial_value=True)
+            self.gui_show_visuals = self.server.gui.add_checkbox("Show Visuals", initial_value=True)
+            self.gui_show_com = self.server.gui.add_checkbox("Show COM", initial_value=True)
 
             # Callbacks for display options
             @self.gui_show_visuals.on_update
@@ -306,12 +307,10 @@ class EmbodikVisualizer:
 
         # Add robot info
         with self.server.gui.add_folder("Robot Info"):
-            nq = self.robot_model.nq if hasattr(self.robot_model, 'nq') else 'N/A'
-            nv = self.robot_model.nv if hasattr(self.robot_model, 'nv') else 'N/A'
+            nq = self.robot_model.nq if hasattr(self.robot_model, "nq") else "N/A"
+            nv = self.robot_model.nv if hasattr(self.robot_model, "nv") else "N/A"
             self.server.gui.add_markdown(
-                f"**Configuration dimensions:**\n"
-                f"- nq: {nq}\n"
-                f"- nv: {nv}"
+                f"**Configuration dimensions:**\n" f"- nq: {nq}\n" f"- nv: {nv}"
             )
 
     def capture_image(self, width: int = 1920, height: int = 1080) -> Optional[np.ndarray]:
@@ -321,8 +320,9 @@ class EmbodikVisualizer:
         print("Image capture not yet implemented in direct Viser mode")
         return None
 
-    def create_animation(self, q_trajectory: List[np.ndarray], dt: float = 0.01,
-                        filename: Optional[str] = None):
+    def create_animation(
+        self, q_trajectory: List[np.ndarray], dt: float = 0.01, filename: Optional[str] = None
+    ):
         """Create animation from trajectory."""
         if filename:
             print(f"Animation recording to {filename} not yet implemented in direct Viser mode")
@@ -340,6 +340,7 @@ class EmbodikVisualizer:
             update_callback: Function that returns new configuration q
             dt: Time step in seconds
         """
+
         def animation_thread():
             while True:
                 try:
@@ -371,8 +372,13 @@ class InteractiveVisualizer(EmbodikVisualizer):
         # Callbacks
         self._target_update_callbacks = {}
 
-    def add_interactive_target(self, name: str, initial_pose: np.ndarray,
-                              callback: Optional[Callable[[np.ndarray], None]] = None, color: Tuple[float, float, float] = (0, 1, 0)):
+    def add_interactive_target(
+        self,
+        name: str,
+        initial_pose: np.ndarray,
+        callback: Optional[Callable[[np.ndarray], None]] = None,
+        color: Tuple[float, float, float] = (0, 1, 0),
+    ):
         """
         Add an interactive target that can be manipulated.
 
@@ -387,9 +393,7 @@ class InteractiveVisualizer(EmbodikVisualizer):
 
         # Create transform controls
         controls = self.server.scene.add_transform_controls(
-            f"/interactive_targets/{name}",
-            wxyz=quaternion,
-            position=position
+            f"/interactive_targets/{name}", wxyz=quaternion, position=position
         )
 
         self._interactive_targets[name] = controls

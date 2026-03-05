@@ -59,13 +59,13 @@ def get_pose_error_vector(pose_current, pose_goal):
     pose_error = np.zeros(6, dtype=np.float64)
 
     # Handle both PoseData (has .t) and Pinocchio SE3 (has .translation)
-    if hasattr(pose_goal, 'translation'):
+    if hasattr(pose_goal, "translation"):
         # Pinocchio SE3 object
         t_goal = pose_goal.translation
         t_current = pose_current.translation
         R_goal = pose_goal.rotation
         R_current = pose_current.rotation
-    elif hasattr(pose_goal, 't'):
+    elif hasattr(pose_goal, "t"):
         # PoseData object
         t_goal = pose_goal.t
         t_current = pose_current.t
@@ -155,7 +155,9 @@ def normalize_quaternion(quaternion: np.ndarray) -> np.ndarray:
     return quat / norm
 
 
-def clamp_configuration(configuration: np.ndarray, lower: np.ndarray, upper: np.ndarray) -> np.ndarray:
+def clamp_configuration(
+    configuration: np.ndarray, lower: np.ndarray, upper: np.ndarray
+) -> np.ndarray:
     """Clip joint configuration to provided limits."""
 
     return np.clip(configuration, lower, upper)
@@ -269,6 +271,7 @@ def r2q(rotation: np.ndarray, order: str = "sxyz") -> np.ndarray:
 
     # Use scipy for conversion (faster than Pinocchio Quaternion object creation)
     from scipy.spatial.transform import Rotation as R
+
     r = R.from_matrix(rotation)
     quat_xyzw = r.as_quat()  # Returns [x, y, z, w]
 
@@ -315,18 +318,21 @@ def q2r(quaternion: np.ndarray, order: str = "sxyz") -> np.ndarray:
         raise ValueError(f"Unknown quaternion order: {order}. Use 'sxyz' or 'xyzs'")
 
     # Normalize quaternion
-    norm = np.sqrt(w*w + x*x + y*y + z*z)
+    norm = np.sqrt(w * w + x * x + y * y + z * z)
     if norm < 1e-12:
         return np.eye(3, dtype=float)
-    w, x, y, z = w/norm, x/norm, y/norm, z/norm
+    w, x, y, z = w / norm, x / norm, y / norm, z / norm
 
     # Direct rotation matrix computation (faster than Pinocchio Quaternion object creation)
     # Using standard quaternion to rotation matrix formula
-    R = np.array([
-        [1 - 2*(y*y + z*z), 2*(x*y - w*z), 2*(x*z + w*y)],
-        [2*(x*y + w*z), 1 - 2*(x*x + z*z), 2*(y*z - w*x)],
-        [2*(x*z - w*y), 2*(y*z + w*x), 1 - 2*(x*x + y*y)]
-    ], dtype=float)
+    R = np.array(
+        [
+            [1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y)],
+            [2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x)],
+            [2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)],
+        ],
+        dtype=float,
+    )
     return R
 
 

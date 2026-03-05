@@ -12,8 +12,10 @@ import warnings
 # Note: This module is optional and requires 'pin' package (pip install pin)
 try:
     import pinocchio as pin
+
     try:
         from pinocchio.visualize import ViserVisualizer, BaseVisualizer
+
         _PINOCCHIO_VISER_AVAILABLE = True
     except ImportError:
         # ViserVisualizer not available (pin < 3.8.0)
@@ -29,6 +31,7 @@ except ImportError:
 # Try to import viser (required for visualization)
 try:
     import viser
+
     _VISER_AVAILABLE = True
 except ImportError:
     _VISER_AVAILABLE = False
@@ -60,8 +63,7 @@ def _build_geometry_models(robot_model, urdf_path: str, pin_model=None):
 
         try:
             visual_model = pin.buildGeomFromUrdf(
-                pin_model, urdf_path, pin.GeometryType.VISUAL,
-                package_dirs=[]
+                pin_model, urdf_path, pin.GeometryType.VISUAL, package_dirs=[]
             )
         except Exception as e:
             warnings.warn(f"Could not build visual model: {e}")
@@ -69,8 +71,7 @@ def _build_geometry_models(robot_model, urdf_path: str, pin_model=None):
 
         try:
             collision_model = pin.buildGeomFromUrdf(
-                pin_model, urdf_path, pin.GeometryType.COLLISION,
-                package_dirs=[]
+                pin_model, urdf_path, pin.GeometryType.COLLISION, package_dirs=[]
             )
         except Exception as e:
             warnings.warn(f"Could not build collision model: {e}")
@@ -101,7 +102,7 @@ class EmbodikVisualizer:
         port: int = 8080,
         open_browser: bool = True,
         host: str = "localhost",
-        use_pinocchio_visualizer: bool = True
+        use_pinocchio_visualizer: bool = True,
     ):
         """
         Initialize visualizer.
@@ -130,12 +131,11 @@ class EmbodikVisualizer:
                         "Install pinocchio >= 3.8.0 to use built-in visualization."
                     )
                 elif not _VISER_AVAILABLE:
-                    warnings.warn(
-                        "Viser not available. Install viser to use visualization."
-                    )
+                    warnings.warn("Viser not available. Install viser to use visualization.")
 
             # Fall back to custom implementation
             from .visualization import EmbodikVisualizer as CustomVisualizer
+
             self._custom_viz = CustomVisualizer(robot_model, port, open_browser)
             self._use_pinocchio = False
             return
@@ -180,16 +180,12 @@ class EmbodikVisualizer:
             visual_model=visual_model,
             data=self._pin_data,
             collision_data=collision_data,
-            visual_data=visual_data
+            visual_data=visual_data,
         )
 
         # Initialize viewer
         self.viz.initViewer(
-            viewer=None,
-            open=open_browser,
-            loadModel=True,
-            host=self.host,
-            port=str(self.port)
+            viewer=None, open=open_browser, loadModel=True, host=self.host, port=str(self.port)
         )
 
     def display(self, q: np.ndarray):
@@ -215,10 +211,7 @@ class EmbodikVisualizer:
         self.display(q)
 
     def set_display_options(
-        self,
-        visuals: bool = True,
-        collisions: bool = False,
-        frames: bool = False
+        self, visuals: bool = True, collisions: bool = False, frames: bool = False
     ):
         """Set display options for robot visualization.
 
@@ -239,7 +232,7 @@ class EmbodikVisualizer:
         name: str,
         pose: np.ndarray,
         color: Tuple[float, float, float] = (0, 1, 0),
-        size: float = 0.05
+        size: float = 0.05,
     ):
         """Add IK target marker.
 
@@ -261,10 +254,7 @@ class EmbodikVisualizer:
             # Add sphere
             sphere_name = f"/targets/{name}/sphere"
             self.viz.viewer.scene.add_icosphere(
-                sphere_name,
-                radius=size,
-                position=position,
-                color=color
+                sphere_name, radius=size, position=position, color=color
             )
 
             # Add frame
@@ -274,15 +264,13 @@ class EmbodikVisualizer:
                 wxyz=wxyz,
                 position=position,
                 axes_length=size * 2,
-                axes_radius=size * 0.2
+                axes_radius=size * 0.2,
             )
         else:
             self._custom_viz.add_target_marker(name, pose, color, size)
 
     def visualize_com(
-        self,
-        com_position: np.ndarray,
-        color: Tuple[float, float, float] = (1, 1, 0)
+        self, com_position: np.ndarray, color: Tuple[float, float, float] = (1, 1, 0)
     ):
         """Visualize center of mass.
 
@@ -291,12 +279,9 @@ class EmbodikVisualizer:
             color: RGB color tuple
         """
         if self._use_pinocchio:
-            if not hasattr(self, '_com_marker'):
+            if not hasattr(self, "_com_marker"):
                 self._com_marker = self.viz.viewer.scene.add_icosphere(
-                    "/com",
-                    radius=0.02,
-                    position=com_position,
-                    color=color
+                    "/com", radius=0.02, position=com_position, color=color
                 )
             else:
                 self._com_marker.position = com_position
@@ -313,11 +298,7 @@ class EmbodikVisualizer:
         else:
             self._custom_viz.clear_targets()
 
-    def capture_image(
-        self,
-        width: int = 1920,
-        height: int = 1080
-    ) -> Optional[np.ndarray]:
+    def capture_image(self, width: int = 1920, height: int = 1080) -> Optional[np.ndarray]:
         """Capture current view as image.
 
         Args:
@@ -340,6 +321,7 @@ class EmbodikVisualizer:
         """Keep the server running (blocking call)."""
         if self._use_pinocchio:
             import time
+
             while True:
                 time.sleep(0.1)
         else:
@@ -366,6 +348,7 @@ class InteractiveVisualizer(EmbodikVisualizer):
         else:
             # Use custom interactive visualizer
             from .visualization import InteractiveVisualizer as CustomInteractive
+
             self._custom_interactive = CustomInteractive(robot_model, port)
             self._custom_viz = self._custom_interactive
 
@@ -374,7 +357,7 @@ class InteractiveVisualizer(EmbodikVisualizer):
         name: str,
         initial_pose: np.ndarray,
         callback=None,
-        color: Tuple[float, float, float] = (0, 1, 0)
+        color: Tuple[float, float, float] = (0, 1, 0),
     ):
         """
         Add an interactive target that can be manipulated.
@@ -395,9 +378,7 @@ class InteractiveVisualizer(EmbodikVisualizer):
 
             # Create transform controls
             controls = self.viz.viewer.scene.add_transform_controls(
-                f"/interactive_targets/{name}",
-                wxyz=wxyz,
-                position=position
+                f"/interactive_targets/{name}", wxyz=wxyz, position=position
             )
 
             self._interactive_targets[name] = controls
@@ -417,8 +398,9 @@ class InteractiveVisualizer(EmbodikVisualizer):
                 pose[:3, 3] = np.array(controls.position)
 
                 # Convert quaternion to rotation matrix
-                q_update = pin.Quaternion(controls.wxyz[0], controls.wxyz[1],
-                                         controls.wxyz[2], controls.wxyz[3])
+                q_update = pin.Quaternion(
+                    controls.wxyz[0], controls.wxyz[1], controls.wxyz[2], controls.wxyz[3]
+                )
                 pose[:3, :3] = q_update.matrix()
 
                 # Update visual marker
@@ -427,10 +409,9 @@ class InteractiveVisualizer(EmbodikVisualizer):
                 # Call callback if registered
                 if name in self._target_update_callbacks:
                     self._target_update_callbacks[name](pose)
+
         else:
-            self._custom_interactive.add_interactive_target(
-                name, initial_pose, callback, color
-            )
+            self._custom_interactive.add_interactive_target(name, initial_pose, callback, color)
 
     def get_interactive_target_pose(self, name: str) -> Optional[np.ndarray]:
         """Get current pose of interactive target."""
@@ -445,8 +426,9 @@ class InteractiveVisualizer(EmbodikVisualizer):
             pose[:3, 3] = np.array(controls.position)
 
             # Convert quaternion to rotation matrix
-            q = pin.Quaternion(controls.wxyz[0], controls.wxyz[1],
-                              controls.wxyz[2], controls.wxyz[3])
+            q = pin.Quaternion(
+                controls.wxyz[0], controls.wxyz[1], controls.wxyz[2], controls.wxyz[3]
+            )
             pose[:3, :3] = q.matrix()
 
             return pose
