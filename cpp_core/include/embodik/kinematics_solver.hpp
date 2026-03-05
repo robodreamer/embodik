@@ -327,6 +327,12 @@ public:
    * @param nearest_points_all_pairs If false, nearest points will be computed
    * only for the selected closest pair (constraint/debug) instead of for every
    *        evaluated pair.
+   * @param max_constraints Maximum number of simultaneous collision constraint
+   * rows to emit into the QP. The @p max_constraints closest pairs (each
+   * within @p upper_distance of the corresponding min_distance) each get their
+   * own Jacobian row and velocity-damper bounds, so the QP protects multiple
+   * pairs at once. Defaults to 1 (original behaviour). Values of 3-5 are
+   * recommended for complex robots with multiple tight-clearance regions.
    */
   void configure_collision_constraint(
       double min_distance,
@@ -334,7 +340,8 @@ public:
           {},
       const std::vector<std::pair<std::string, std::string>> &exclude_pairs =
           {},
-      bool nearest_points_all_pairs = true);
+      bool nearest_points_all_pairs = true,
+      int max_constraints = 1);
 
   /**
    * @brief Convenience helper for specifying a list of collision pairs to
@@ -421,9 +428,19 @@ public:
 
   /**
    * @brief Retrieve debug information about the last evaluated collision pair.
+   * When max_constraints > 1, this returns info for the closest active pair.
    */
   std::optional<CollisionDebugInfo> get_last_collision_debug() const {
     return last_collision_debug_;
+  }
+
+  /**
+   * @brief Retrieve debug information for all active collision constraint pairs.
+   * Returns one entry per active constraint row (up to max_constraints). Empty
+   * when no collision constraint is configured or no solve has been performed.
+   */
+  std::vector<CollisionDebugInfo> get_last_collision_debug_list() const {
+    return last_collision_debug_list_;
   }
 
   /**
@@ -523,6 +540,8 @@ private:
     bool nearest_points_all_pairs = true;
     std::unordered_set<std::string> include_pairs;
     std::unordered_set<std::string> exclude_pairs;
+    // Maximum number of simultaneous QP constraint rows (one per pair).
+    int max_constraints = 1;
   };
 
   struct CollisionConstraintResult {
@@ -585,15 +604,16 @@ private:
 
   std::optional<CollisionConstraintConfig> collision_constraint_;
   std::optional<CollisionDebugInfo> last_collision_debug_;
+  // All active constraint pairs (up to max_constraints), populated after each solve.
+  std::vector<CollisionDebugInfo> last_collision_debug_list_;
   // Cached allow-mask aligned with Pinocchio's collisionPairs indices.
   std::vector<std::uint8_t> collision_allowed_pair_mask_;
-  std::optional<std::size_t> last_collision_constraint_pair_index_;
-  // Track solver stagnation near collision boundary for stronger recovery.
+  // Active constraint pair indices from the previous solve step (for hysteresis).
+  std::vector<std::size_t> last_collision_constraint_pair_indices_;
+  // Track solver stagnation near collision boundary for stronger recovery (per-pair).
   double last_solution_dq_norm_ = 0.0;
-  int collision_stuck_counter_ = 0;
-  std::optional<std::size_t> collision_stuck_pair_index_;
-  double collision_stuck_last_distance_ =
-      std::numeric_limits<double>::infinity();
+  std::unordered_map<std::size_t, int> collision_stuck_counters_;
+  std::unordered_map<std::size_t, double> collision_stuck_last_distances_;
 
   std::string canonical_pair_key(const std::string &a,
                                  const std::string &b) const;
