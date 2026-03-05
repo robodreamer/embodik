@@ -33,6 +33,5 @@ def run_example(example_name: str):
         robot_model_example()
     else:
         raise ValueError(
-            f"Unknown example: {example_name}. "
-            f"Available examples: basic_ik, robot_model"
+            f"Unknown example: {example_name}. " f"Available examples: basic_ik, robot_model"
         )

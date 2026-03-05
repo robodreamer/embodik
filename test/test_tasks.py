@@ -70,7 +70,7 @@ def create_test_urdf():
 </robot>
 """
     fd, path = tempfile.mkstemp(suffix=".urdf")
-    with os.fdopen(fd, 'w') as f:
+    with os.fdopen(fd, "w") as f:
         f.write(urdf_content)
     return path
 
@@ -88,8 +88,14 @@ class TestTasks:
     def test_frame_task_position(self, robot_model):
         """Test FrameTask for position tracking"""
         # Create a position-only frame task
-        task = embodik.FrameTask("ee_position", robot_model, "end_effector",
-                                  embodik.TaskType.FRAME_POSITION, priority=0, weight=1.0)
+        task = embodik.FrameTask(
+            "ee_position",
+            robot_model,
+            "end_effector",
+            embodik.TaskType.FRAME_POSITION,
+            priority=0,
+            weight=1.0,
+        )
 
         # Set target position
         target_pos = np.array([0.1, 0.2, 0.3])
@@ -116,8 +122,14 @@ class TestTasks:
     def test_frame_task_orientation(self, robot_model):
         """Test FrameTask for orientation tracking"""
         # Create an orientation-only frame task
-        task = embodik.FrameTask("ee_orientation", robot_model, "end_effector",
-                                  embodik.TaskType.FRAME_ORIENTATION, priority=0, weight=1.0)
+        task = embodik.FrameTask(
+            "ee_orientation",
+            robot_model,
+            "end_effector",
+            embodik.TaskType.FRAME_ORIENTATION,
+            priority=0,
+            weight=1.0,
+        )
 
         # Set target orientation (rotation matrix)
         target_rot = embodik.rotation_from_rpy(0.1, 0.2, 0.3)
@@ -140,8 +152,14 @@ class TestTasks:
     def test_frame_task_pose(self, robot_model):
         """Test FrameTask for full pose tracking"""
         # Create a pose frame task
-        task = embodik.FrameTask("ee_pose", robot_model, "end_effector",
-                                  embodik.TaskType.FRAME_POSE, priority=0, weight=1.0)
+        task = embodik.FrameTask(
+            "ee_pose",
+            robot_model,
+            "end_effector",
+            embodik.TaskType.FRAME_POSE,
+            priority=0,
+            weight=1.0,
+        )
 
         # Set target pose
         target_pos = np.array([0.1, 0.2, 0.3])
@@ -216,8 +234,9 @@ class TestTasks:
         """Test PostureTask for specific joints"""
         # Create posture task for specific joints (only joint1)
         controlled_indices = [0]  # Only control first joint
-        task = embodik.PostureTask("posture_partial", robot_model,
-                                    controlled_indices, priority=10, weight=0.1)
+        task = embodik.PostureTask(
+            "posture_partial", robot_model, controlled_indices, priority=10, weight=0.1
+        )
 
         # Set target values for controlled joints
         target_values = np.array([0.5])
@@ -244,8 +263,7 @@ class TestTasks:
     def test_joint_task(self, robot_model):
         """Test JointTask"""
         # Create joint task by index
-        task = embodik.JointTask("joint1", robot_model, 0,
-                                  target_value=0.5, priority=0, weight=1.0)
+        task = embodik.JointTask("joint1", robot_model, 0, target_value=0.5, priority=0, weight=1.0)
 
         # Update task
         task.update(robot_model)
@@ -271,9 +289,9 @@ class TestTasks:
         # Create multi-joint task controlling both joints
         joint_indices = [0, 1]
         target_values = np.array([0.5, -0.5])
-        task = embodik.MultiJointTask("multi_joint", robot_model,
-                                       joint_indices, target_values,
-                                       priority=0, weight=1.0)
+        task = embodik.MultiJointTask(
+            "multi_joint", robot_model, joint_indices, target_values, priority=0, weight=1.0
+        )
 
         # Update task
         task.update(robot_model)

@@ -56,7 +56,7 @@ def create_test_urdf():
 </robot>"""
 
     # Create temporary file
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.urdf', delete=False) as f:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".urdf", delete=False) as f:
         f.write(urdf_content)
         return f.name
 
@@ -107,8 +107,8 @@ class TestRobotModel:
         pose = model.get_frame_pose("end_effector")
 
         # Check that it returns SE3 object
-        assert hasattr(pose, 'translation')
-        assert hasattr(pose, 'rotation')
+        assert hasattr(pose, "translation")
+        assert hasattr(pose, "rotation")
 
         # At zero configuration, end effector should be at (0, 0, 2)
         assert abs(pose.translation[2] - 2.0) < 1e-6
@@ -450,9 +450,7 @@ class TestRobotModel:
         inertial = tau_total - tau_coriolis_grav
 
         # Verify decomposition: gravity + coriolis + inertial == total
-        np.testing.assert_allclose(
-            tau_gravity + coriolis + inertial, tau_total, atol=1e-12
-        )
+        np.testing.assert_allclose(tau_gravity + coriolis + inertial, tau_total, atol=1e-12)
 
     def test_compute_coriolis(self, urdf_path):
         """Test compute_coriolis returns C(q,v)*v."""
@@ -786,9 +784,13 @@ class TestRobotModel:
         idx_q_sorted = sorted(idx_q_list)
         idx_v_sorted = sorted(idx_v_list)
         for i in range(len(idx_q_sorted) - 1):
-            assert idx_q_sorted[i + 1] == idx_q_sorted[i] + nq_list[idx_q_list.index(idx_q_sorted[i])]
+            assert (
+                idx_q_sorted[i + 1] == idx_q_sorted[i] + nq_list[idx_q_list.index(idx_q_sorted[i])]
+            )
         for i in range(len(idx_v_sorted) - 1):
-            assert idx_v_sorted[i + 1] == idx_v_sorted[i] + nv_list[idx_v_list.index(idx_v_sorted[i])]
+            assert (
+                idx_v_sorted[i + 1] == idx_v_sorted[i] + nv_list[idx_v_list.index(idx_v_sorted[i])]
+            )
 
 
 def create_4joint_urdf():
@@ -859,7 +861,7 @@ def create_4joint_urdf():
     <limit lower="-1.57" upper="1.57" velocity="1.0" effort="5.0"/>
   </joint>
 </robot>"""
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.urdf', delete=False) as f:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".urdf", delete=False) as f:
         f.write(urdf_content)
         return f.name
 
@@ -876,9 +878,15 @@ class TestReducedModel:
     def test_all_joints_actuated_matches_full(self, urdf_path):
         """When all joints are listed, reduced model == full model."""
         full = embodik.RobotModel(urdf_path)
-        reduced = embodik.RobotModel(urdf_path, actuated_joint_names=[
-            "joint_a", "joint_b", "joint_c", "joint_d",
-        ])
+        reduced = embodik.RobotModel(
+            urdf_path,
+            actuated_joint_names=[
+                "joint_a",
+                "joint_b",
+                "joint_c",
+                "joint_d",
+            ],
+        )
         assert reduced.nq == full.nq
         assert reduced.nv == full.nv
 
@@ -887,9 +895,13 @@ class TestReducedModel:
         full = embodik.RobotModel(urdf_path)
         assert full.nq == 4
 
-        reduced = embodik.RobotModel(urdf_path, actuated_joint_names=[
-            "joint_a", "joint_c",
-        ])
+        reduced = embodik.RobotModel(
+            urdf_path,
+            actuated_joint_names=[
+                "joint_a",
+                "joint_c",
+            ],
+        )
         assert reduced.nq == 2
         assert reduced.nv == 2
 
@@ -901,9 +913,13 @@ class TestReducedModel:
 
     def test_joint_names_match(self, urdf_path):
         """Reduced model only has the requested actuated joints."""
-        reduced = embodik.RobotModel(urdf_path, actuated_joint_names=[
-            "joint_a", "joint_d",
-        ])
+        reduced = embodik.RobotModel(
+            urdf_path,
+            actuated_joint_names=[
+                "joint_a",
+                "joint_d",
+            ],
+        )
         joint_names = reduced.get_joint_names()
         assert "joint_a" in joint_names
         assert "joint_d" in joint_names
@@ -919,9 +935,13 @@ class TestReducedModel:
     def test_fk_consistent(self, urdf_path):
         """FK at neutral q should match full model at neutral q."""
         full = embodik.RobotModel(urdf_path)
-        reduced = embodik.RobotModel(urdf_path, actuated_joint_names=[
-            "joint_a", "joint_d",
-        ])
+        reduced = embodik.RobotModel(
+            urdf_path,
+            actuated_joint_names=[
+                "joint_a",
+                "joint_d",
+            ],
+        )
 
         q_full = full.neutral_configuration()
         q_reduced = reduced.neutral_configuration()
@@ -932,18 +952,18 @@ class TestReducedModel:
         full_pose = full.get_frame_pose("link_d")
         reduced_pose = reduced.get_frame_pose("link_d")
 
-        np.testing.assert_allclose(
-            full_pose.translation, reduced_pose.translation, atol=1e-10
-        )
-        np.testing.assert_allclose(
-            full_pose.rotation, reduced_pose.rotation, atol=1e-10
-        )
+        np.testing.assert_allclose(full_pose.translation, reduced_pose.translation, atol=1e-10)
+        np.testing.assert_allclose(full_pose.rotation, reduced_pose.rotation, atol=1e-10)
 
     def test_integrate_works(self, urdf_path):
         """integrate() works on the reduced model."""
-        reduced = embodik.RobotModel(urdf_path, actuated_joint_names=[
-            "joint_b", "joint_c",
-        ])
+        reduced = embodik.RobotModel(
+            urdf_path,
+            actuated_joint_names=[
+                "joint_b",
+                "joint_c",
+            ],
+        )
         q = reduced.neutral_configuration()
         v = np.array([0.1, -0.2])
         dt = 0.01
@@ -952,9 +972,13 @@ class TestReducedModel:
 
     def test_jacobian_shape(self, urdf_path):
         """Jacobian has correct shape for the reduced model."""
-        reduced = embodik.RobotModel(urdf_path, actuated_joint_names=[
-            "joint_a", "joint_c",
-        ])
+        reduced = embodik.RobotModel(
+            urdf_path,
+            actuated_joint_names=[
+                "joint_a",
+                "joint_c",
+            ],
+        )
         q = reduced.neutral_configuration()
         reduced.update_configuration(q)
         J = reduced.get_frame_jacobian("link_d")
@@ -962,9 +986,13 @@ class TestReducedModel:
 
     def test_gravity_torques(self, urdf_path):
         """Gravity computation works on reduced model."""
-        reduced = embodik.RobotModel(urdf_path, actuated_joint_names=[
-            "joint_a", "joint_b",
-        ])
+        reduced = embodik.RobotModel(
+            urdf_path,
+            actuated_joint_names=[
+                "joint_a",
+                "joint_b",
+            ],
+        )
         q = reduced.neutral_configuration()
         g = reduced.compute_generalized_gravity(q)
         assert g.shape == (reduced.nv,)
@@ -989,9 +1017,13 @@ class TestReducedModel:
 
     def test_com_on_reduced(self, urdf_path):
         """CoM computation works on the reduced model."""
-        reduced = embodik.RobotModel(urdf_path, actuated_joint_names=[
-            "joint_a", "joint_d",
-        ])
+        reduced = embodik.RobotModel(
+            urdf_path,
+            actuated_joint_names=[
+                "joint_a",
+                "joint_d",
+            ],
+        )
         q = reduced.neutral_configuration()
         reduced.update_configuration(q)
         com = reduced.get_com_position()

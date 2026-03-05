@@ -22,6 +22,7 @@ from __future__ import annotations
 HAS_CASADI = False
 try:
     import casadi as ca
+
     HAS_CASADI = True
 except ImportError:
     pass
@@ -32,17 +33,20 @@ CusadiFunction = None
 try:
     # Try direct import (if cusadi is properly installed as a package)
     from cusadi import CusadiFunction
+
     HAS_CUSADI = True
 except ImportError:
     try:
         # Try importing from src module (cusadi's internal structure)
         from src.CusadiFunction import CusadiFunction
+
         HAS_CUSADI = True
     except ImportError:
         try:
             # Try with CUSADI_ROOT environment variable
             import os
             import sys
+
             cusadi_root = os.environ.get("CUSADI_ROOT", "")
             if not cusadi_root:
                 # Try common locations
@@ -60,6 +64,7 @@ except ImportError:
                 if cusadi_root not in sys.path:
                     sys.path.insert(0, cusadi_root)
                 from src.CusadiFunction import CusadiFunction
+
                 HAS_CUSADI = True
         except ImportError:
             pass
@@ -68,6 +73,7 @@ except ImportError:
 HAS_TORCH_CUDA = False
 try:
     import torch
+
     HAS_TORCH_CUDA = torch.cuda.is_available()
 except ImportError:
     pass
@@ -76,6 +82,7 @@ except ImportError:
 HAS_WARP = False
 try:
     import warp as wp
+
     HAS_WARP = True
 except ImportError:
     pass
@@ -102,11 +109,13 @@ __all__ = [
 ]
 
 if HAS_CASADI:
-    __all__.extend([
-        "build_fi_pesns_velocity_solve",
-        "build_fi_pesns_single_task",
-        "build_fi_pesns_for_robot",
-        "build_pph_sns_velocity_solve",
-        "build_pph_sns_single_task",
-        "build_pph_sns_for_robot",
-    ])
+    __all__.extend(
+        [
+            "build_fi_pesns_velocity_solve",
+            "build_fi_pesns_single_task",
+            "build_fi_pesns_for_robot",
+            "build_pph_sns_velocity_solve",
+            "build_pph_sns_single_task",
+            "build_pph_sns_for_robot",
+        ]
+    )

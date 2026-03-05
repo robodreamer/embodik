@@ -17,23 +17,29 @@ _cpp_extension_available = False
 _cpp_extension_error: str | None = None
 try:
     import sys
-    module_key = f'{__name__}._embodik_impl'
+
+    module_key = f"{__name__}._embodik_impl"
 
     if module_key not in sys.modules:
         from ._embodik_impl import *
+
         _cpp_extension_available = True
     else:
         # Module already loaded, just get the symbols
         _embodik_impl = sys.modules[module_key]
         for name in dir(_embodik_impl):
-            if not name.startswith('_') and hasattr(_embodik_impl, name):
+            if not name.startswith("_") and hasattr(_embodik_impl, name):
                 globals()[name] = getattr(_embodik_impl, name)
         _cpp_extension_available = True
 
 except ImportError as e:
     import warnings
+
     _cpp_extension_error = str(e)
-    warnings.warn(f"C++ extension not available: {e}. Please build and install the package properly.", ImportWarning)
+    warnings.warn(
+        f"C++ extension not available: {e}. Please build and install the package properly.",
+        ImportWarning,
+    )
 
 # Export utility functions
 from .utils import (
@@ -52,11 +58,13 @@ InteractiveVisualizer = None
 try:
     # Use direct Viser visualization (default - no pip pinocchio needed)
     from .visualization import EmbodikVisualizer, InteractiveVisualizer
+
     _visualization_available = True
 except ImportError:
     # Fall back to Pinocchio-based visualization if direct Viser fails
     try:
         from .visualization_pinocchio import EmbodikVisualizer, InteractiveVisualizer
+
         _visualization_available = True
     except ImportError:
         _visualization_available = False
@@ -64,6 +72,7 @@ except ImportError:
 # Export robot visualizer (always available if dependencies are installed)
 try:
     from .robot_visualizer import RobotVisualizer, create_robot_visualizer
+
     _robot_visualizer_available = True
 except ImportError:
     RobotVisualizer = None
@@ -82,6 +91,7 @@ try:
         check_gpu_availability,
         BatchSolveResult,
     )
+
     _gpu_solver_available = True
 except ImportError:
     BatchSolveResult = None

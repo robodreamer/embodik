@@ -27,12 +27,12 @@ except ImportError:
 
 # Default parameters for PPH-SNS
 DEFAULT_EPSILON = 1e-6
-DEFAULT_DAMPING = 0.12         # Higher damping for stability
-DEFAULT_MU0 = 1e-3            # Initial penalty weight (softer start)
-DEFAULT_GAMMA = 3.0           # Aggressive penalty growth (vs 2.5 in FI-PeSNS)
-DEFAULT_ETA = 0.1             # Penalty gradient step size
-DEFAULT_K_MAX = 14            # Outer iterations (increased for accuracy)
-DEFAULT_M_MAX = 2             # Max explicit saturations per iteration
+DEFAULT_DAMPING = 0.12  # Higher damping for stability
+DEFAULT_MU0 = 1e-3  # Initial penalty weight (softer start)
+DEFAULT_GAMMA = 3.0  # Aggressive penalty growth (vs 2.5 in FI-PeSNS)
+DEFAULT_ETA = 0.1  # Penalty gradient step size
+DEFAULT_K_MAX = 14  # Outer iterations (increased for accuracy)
+DEFAULT_M_MAX = 2  # Max explicit saturations per iteration
 DEFAULT_MAGNITUDE_LIMIT = 1e10
 
 
@@ -118,12 +118,10 @@ def get_feasible_task_scale(
         di_bar = d_bar[i]
 
         abs_ai = ca.fabs(ai)
-        valid = ca.if_else(
-            (abs_ai > eps_small) * (abs_ai < eps_large), 1.0, 0.0
-        )
+        valid = ca.if_else((abs_ai > eps_small) * (abs_ai < eps_large), 1.0, 0.0)
 
         # Margin from current position to bounds
-        margin_low = di - bi      # Need s*a >= margin_low
+        margin_low = di - bi  # Need s*a >= margin_low
         margin_high = di_bar - bi  # Need s*a <= margin_high
 
         # For a > 0: s <= margin_high/a, s >= margin_low/a
@@ -264,11 +262,11 @@ def build_pph_sns_velocity_solve(
         # 1. Hierarchical Task Processing (Unrolled)
         for task_idx in range(n_tasks):
             task_dim = task_dims[task_idx]
-            target = targets[target_offset:target_offset + task_dim]
+            target = targets[target_offset : target_offset + task_dim]
             target_offset += task_dim
 
             jac_size = task_dim * n_dof
-            jac_flat = jacobians_flat[jacobian_offset:jacobian_offset + jac_size]
+            jac_flat = jacobians_flat[jacobian_offset : jacobian_offset + jac_size]
             jacobian_offset += jac_size
             # Row-major flat -> (task_dim, n_dof)
             J = ca.reshape(jac_flat, n_dof, task_dim).T
@@ -284,7 +282,7 @@ def build_pph_sns_velocity_solve(
             # Analytical feasible scale factor
             # a = contribution from Delta_ddq, b = current constraint value
             a = C @ Delta_ddq  # Scaled contribution
-            b = C @ ddq        # Current constraint value
+            b = C @ ddq  # Current constraint value
             s_k = get_feasible_task_scale(a, b, lower, upper, n_constraints)
 
             # Apply scaled delta with graceful scaling
@@ -295,7 +293,7 @@ def build_pph_sns_velocity_solve(
             # 2. Limited Rank-1 Projector Update (Top-M violators)
             # Compute current violations
             constraint_val = C @ ddq
-            r_low = lower - constraint_val   # Positive if violated low
+            r_low = lower - constraint_val  # Positive if violated low
             r_high = constraint_val - upper  # Positive if violated high
             violations = ca.fmax(0.0, r_low) + ca.fmax(0.0, r_high)
 
@@ -329,7 +327,7 @@ def build_pph_sns_velocity_solve(
         # 3. Strong Penalty Nudge (Approximate remaining saturation)
         # Compute violations after all tasks
         constraint_val = C @ ddq
-        r_low = ca.fmax(0.0, lower - constraint_val)   # Low violations
+        r_low = ca.fmax(0.0, lower - constraint_val)  # Low violations
         r_high = ca.fmax(0.0, constraint_val - upper)  # High violations
         violations_total = r_low + r_high
 

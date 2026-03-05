@@ -13,9 +13,11 @@ import numpy as np
 from typing import Tuple, List
 
 # Test tolerances
-VELOCITY_ATOL = 0.4       # FI-PeSNS vs CPU (penalty approximation allows gap; focus is constraint satisfaction)
-SIMPLE_ATOL = 1e-6        # No-saturation case
-CONSTRAINT_TOL = 1e-3     # Constraint satisfaction tolerance (primary goal)
+VELOCITY_ATOL = (
+    0.4  # FI-PeSNS vs CPU (penalty approximation allows gap; focus is constraint satisfaction)
+)
+SIMPLE_ATOL = 1e-6  # No-saturation case
+CONSTRAINT_TOL = 1e-3  # Constraint satisfaction tolerance (primary goal)
 
 
 def generate_random_problem(
@@ -55,6 +57,7 @@ def generate_random_problem(
 # SRINV Tests
 # =============================================================================
 
+
 def test_srinv_matches_numpy_pinv():
     """SRINV should match NumPy pseudo-inverse for well-conditioned matrices."""
     try:
@@ -87,10 +90,13 @@ def test_srinv_near_singular():
         pytest.skip(f"CasADi or modules not available: {e}")
 
     # Near-singular: repeated row
-    A_np = np.array([
-        [1.0, 0.0, 0.0],
-        [1.0 + 1e-8, 0.0, 0.0],  # Nearly identical to first row
-    ], dtype=np.float64)
+    A_np = np.array(
+        [
+            [1.0, 0.0, 0.0],
+            [1.0 + 1e-8, 0.0, 0.0],  # Nearly identical to first row
+        ],
+        dtype=np.float64,
+    )
 
     A_sx = ca.SX.sym("A", 2, 3)
     srinv_sx = srinv(A_sx, tol=1e-6, damping=0.1)
@@ -104,6 +110,7 @@ def test_srinv_near_singular():
 # Feasible Scale Tests
 # =============================================================================
 
+
 def test_get_feasible_task_scale_unconstrained():
     """Scale = 1 when solution is within bounds."""
     try:
@@ -114,7 +121,7 @@ def test_get_feasible_task_scale_unconstrained():
 
     n_constraints = 3
     a = np.array([0.1, -0.2, 0.3], dtype=np.float64)  # Contribution
-    b = np.array([0.0, 0.0, 0.0], dtype=np.float64)   # Current position
+    b = np.array([0.0, 0.0, 0.0], dtype=np.float64)  # Current position
     d = np.array([-1.0, -1.0, -1.0], dtype=np.float64)
     d_bar = np.array([1.0, 1.0, 1.0], dtype=np.float64)
 
@@ -161,6 +168,7 @@ def test_get_feasible_task_scale_constrained():
 # =============================================================================
 # FI-PeSNS Full Solver Tests
 # =============================================================================
+
 
 def test_fi_pesns_builds():
     """FI-PeSNS function builds without error."""
@@ -262,8 +270,7 @@ def test_fi_pesns_matches_cpu_loose_bounds():
 
     # With loose bounds, FI-PeSNS should match CPU closely
     np.testing.assert_allclose(
-        cpu_vel, vel_pesns, atol=SIMPLE_ATOL,
-        err_msg="FI-PeSNS must match CPU with loose bounds"
+        cpu_vel, vel_pesns, atol=SIMPLE_ATOL, err_msg="FI-PeSNS must match CPU with loose bounds"
     )
 
 
@@ -319,13 +326,13 @@ def test_fi_pesns_vs_cpu_tight_bounds():
         max_constraint_viol = max(max_constraint_viol, max_viol)
 
     # FI-PeSNS should be close to CPU (penalty approximation allows some gap)
-    assert max_vel_err < VELOCITY_ATOL, (
-        f"FI-PeSNS velocity vs CPU max error {max_vel_err} >= {VELOCITY_ATOL}"
-    )
+    assert (
+        max_vel_err < VELOCITY_ATOL
+    ), f"FI-PeSNS velocity vs CPU max error {max_vel_err} >= {VELOCITY_ATOL}"
     # Constraints should be approximately satisfied
-    assert max_constraint_viol < CONSTRAINT_TOL, (
-        f"FI-PeSNS max constraint violation {max_constraint_viol} >= {CONSTRAINT_TOL}"
-    )
+    assert (
+        max_constraint_viol < CONSTRAINT_TOL
+    ), f"FI-PeSNS max constraint violation {max_constraint_viol} >= {CONSTRAINT_TOL}"
 
 
 def test_fi_pesns_constraint_satisfaction():
@@ -363,9 +370,9 @@ def test_fi_pesns_constraint_satisfaction():
         viol = np.maximum(0, np.maximum(lower - constraint_val, constraint_val - upper))
         max_viol = max(max_viol, np.max(viol))
 
-    assert max_viol < CONSTRAINT_TOL, (
-        f"FI-PeSNS max constraint violation {max_viol} >= {CONSTRAINT_TOL}"
-    )
+    assert (
+        max_viol < CONSTRAINT_TOL
+    ), f"FI-PeSNS max constraint violation {max_viol} >= {CONSTRAINT_TOL}"
 
 
 def test_fi_pesns_multi_task():

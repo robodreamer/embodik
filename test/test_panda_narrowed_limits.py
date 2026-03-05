@@ -151,9 +151,7 @@ def run_round_trip(
             metrics.total_saturated_joint_steps += len(result.saturated_joints)
 
             if is_reverse:
-                metrics.min_task_scale_reverse = min(
-                    metrics.min_task_scale_reverse, scale
-                )
+                metrics.min_task_scale_reverse = min(metrics.min_task_scale_reverse, scale)
                 if np.linalg.norm(dq) < stall_vel_threshold:
                     metrics.stall_steps_reverse += 1
 
@@ -370,12 +368,12 @@ class TestStrategyComparison:
         _narrow_limits(robot, margin=0.25)
         b_result = _run_strategy_b(robot, solver, offset)
 
-        assert b_result.stall_steps_reverse <= baseline.stall_steps_reverse + 5, (
-            f"axis={axis}: B stalls {b_result.stall_steps_reverse} > baseline {baseline.stall_steps_reverse}+5"
-        )
-        assert b_result.ee_return_error <= baseline.ee_return_error + 0.02, (
-            f"axis={axis}: B error {b_result.ee_return_error:.4f} > baseline {baseline.ee_return_error:.4f}+0.02"
-        )
+        assert (
+            b_result.stall_steps_reverse <= baseline.stall_steps_reverse + 5
+        ), f"axis={axis}: B stalls {b_result.stall_steps_reverse} > baseline {baseline.stall_steps_reverse}+5"
+        assert (
+            b_result.ee_return_error <= baseline.ee_return_error + 0.02
+        ), f"axis={axis}: B error {b_result.ee_return_error:.4f} > baseline {baseline.ee_return_error:.4f}+0.02"
 
     def test_strategy_b_no_oscillation(self, panda_narrow):
         robot, solver = panda_narrow
@@ -391,12 +389,12 @@ class TestStrategyComparison:
         _narrow_limits(robot, margin=0.25)
         b_posture = _run_strategy_b_with_posture(robot, solver, _SINGLE_AXIS_OFFSETS[0])
 
-        assert b_posture.oscillation_count < 30, (
-            f"B+posture oscillations: {b_posture.oscillation_count}"
-        )
-        assert b_posture.ee_return_error < b_alone.ee_return_error + 0.03, (
-            f"B+posture error {b_posture.ee_return_error:.4f} >> B alone {b_alone.ee_return_error:.4f}"
-        )
+        assert (
+            b_posture.oscillation_count < 30
+        ), f"B+posture oscillations: {b_posture.oscillation_count}"
+        assert (
+            b_posture.ee_return_error < b_alone.ee_return_error + 0.03
+        ), f"B+posture error {b_posture.ee_return_error:.4f} >> B alone {b_alone.ee_return_error:.4f}"
 
     def test_strategy_b_with_posture_near_limits_stress(self, panda_narrow):
         """B + posture bias targeting near-limit config should not oscillate."""
@@ -407,9 +405,7 @@ class TestStrategyComparison:
         m = _run_strategy_b_with_posture(
             robot, solver, _SINGLE_AXIS_OFFSETS[0], q_target=q_near_limit
         )
-        assert m.oscillation_count < 30, (
-            f"Stress test oscillations: {m.oscillation_count}"
-        )
+        assert m.oscillation_count < 30, f"Stress test oscillations: {m.oscillation_count}"
 
     @pytest.mark.parametrize("axis", [0, 1, 2], ids=["X", "Y", "Z"])
     def test_strategy_a_vs_baseline(self, panda_narrow, axis):
@@ -420,9 +416,9 @@ class TestStrategyComparison:
         _narrow_limits(robot, margin=0.25)
         a_result = _run_strategy_a(robot, solver, _SINGLE_AXIS_OFFSETS[axis])
 
-        assert a_result.stall_steps_reverse <= baseline.stall_steps_reverse + 5, (
-            f"axis={axis}: A stalls {a_result.stall_steps_reverse} > baseline {baseline.stall_steps_reverse}+5"
-        )
+        assert (
+            a_result.stall_steps_reverse <= baseline.stall_steps_reverse + 5
+        ), f"axis={axis}: A stalls {a_result.stall_steps_reverse} > baseline {baseline.stall_steps_reverse}+5"
 
 
 class TestBarrierQuantitativeBenefit:

@@ -18,6 +18,7 @@ import numpy as np
 try:
     import torch
     from torch import Tensor
+
     HAS_TORCH = True
 except ImportError:
     HAS_TORCH = False
@@ -25,6 +26,7 @@ except ImportError:
 
 try:
     import pytorch_kinematics as pk
+
     HAS_PK = True
 except ImportError:
     HAS_PK = False
@@ -211,6 +213,7 @@ class PandaKinematics(BatchedKinematics):
             # Try to load from robot_descriptions
             try:
                 from robot_descriptions.panda_description import URDF_PATH
+
                 urdf_path = URDF_PATH
             except ImportError:
                 raise ImportError(
@@ -266,7 +269,9 @@ def benchmark_kinematics(batch_size: int = 100, device: str = "cuda", n_runs: in
     jac_time = (time.perf_counter() - start) / n_runs * 1000
 
     print(f"FK ({batch_size} samples): {fk_time:.2f} ms ({fk_time/batch_size*1000:.2f} µs/sample)")
-    print(f"Jacobian ({batch_size} samples): {jac_time:.2f} ms ({jac_time/batch_size*1000:.2f} µs/sample)")
+    print(
+        f"Jacobian ({batch_size} samples): {jac_time:.2f} ms ({jac_time/batch_size*1000:.2f} µs/sample)"
+    )
 
     return fk_time, jac_time
 
@@ -292,9 +297,9 @@ if __name__ == "__main__":
     print(f"Jacobian:\n{J[0].cpu().numpy()}")
 
     # Benchmark
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print("BENCHMARK")
-    print("="*60)
+    print("=" * 60)
     for batch_size in [100, 1000, 10000]:
         benchmark_kinematics(batch_size, device)
         print()
