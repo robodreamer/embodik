@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.1] - 2026-03-06
+
+### Fixed
+- Decoupled velocity-solver tolerances to avoid unintended over-regularization:
+  - `set_tolerance()` now maps to regularized pseudoinverse damping threshold
+    (`regularization_config.epsilon`), preserving historical behavior.
+  - Added `set_constraint_tolerance()` to control constraint violation deadband
+    (`VelocitySolverConfig::epsilon`) independently.
+  - Updated Python bindings/docstrings to reflect the separated semantics.
+
 ## [0.12.0] - 2026-03-05
 
 ### Added
