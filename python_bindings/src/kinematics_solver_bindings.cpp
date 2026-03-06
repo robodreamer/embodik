@@ -174,7 +174,17 @@ void bind_kinematics_solver(nb::module_ &m) {
                    "Time step for velocity integration")
 
       .def("set_tolerance", &KinematicsSolver::set_tolerance,
-           nb::arg("tolerance"), "Set solver convergence tolerance")
+           nb::arg("tolerance"),
+           "Set singular-value damping threshold for the regularized "
+           "pseudoinverse (default 1e-6).")
+      .def("set_regularization_epsilon",
+           &KinematicsSolver::set_regularization_epsilon, nb::arg("epsilon"),
+           "Alias of set_tolerance(): set singular-value damping threshold "
+           "for the regularized pseudoinverse.")
+      .def("set_constraint_tolerance",
+           &KinematicsSolver::set_constraint_tolerance, nb::arg("epsilon"),
+           "Set constraint violation deadband and COD pseudoinverse "
+           "relative threshold (VelocitySolverConfig.epsilon).")
 
       .def("enable_timing_breakdown",
            &KinematicsSolver::enable_timing_breakdown, nb::arg("enable"),

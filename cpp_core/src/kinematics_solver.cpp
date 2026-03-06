@@ -1831,7 +1831,7 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
 
   // Configure solver
   VelocitySolverConfig config;
-  config.epsilon = solver_tolerance_;
+  config.epsilon = constraint_tolerance_;
   config.precision_threshold = tight_tolerance_;
   config.iteration_limit = max_iterations_;
   config.magnitude_limit = norm_threshold_;
@@ -2108,7 +2108,7 @@ PositionIKResult KinematicsSolver::solve_position(
 
     // Prepare solver configuration
     VelocitySolverConfig config;
-    config.epsilon = solver_tolerance_;
+    config.epsilon = constraint_tolerance_;
     config.precision_threshold = tight_tolerance_;
     config.iteration_limit = max_iterations_;
     config.magnitude_limit = norm_threshold_;
