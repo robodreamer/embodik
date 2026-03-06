@@ -113,6 +113,60 @@ class TestRobotModel:
         # At zero configuration, end effector should be at (0, 0, 2)
         assert abs(pose.translation[2] - 2.0) < 1e-6
 
+    def test_se3_composition_operator(self):
+        """Test SE3 composition via operator* (torso_emb * target_se3)"""
+        # Create two SE3 transforms
+        R1 = np.eye(3)
+        t1 = np.array([1.0, 0.0, 0.0])
+        T1 = embodik.SE3(R1, t1)
+
+        R2 = np.eye(3)
+        t2 = np.array([0.0, 1.0, 0.0])
+        T2 = embodik.SE3(R2, t2)
+
+        # Compose: T1 * T2 (Pinocchio: ^A M_B * ^B M_C = ^A M_C)
+        T_composed = T1 * T2
+
+        # Expected: R = R1 @ R2, t = R1 @ t2 + t1
+        R_expected = R1 @ R2
+        t_expected = R1 @ t2 + t1
+        np.testing.assert_array_almost_equal(T_composed.rotation, R_expected)
+        np.testing.assert_array_almost_equal(T_composed.translation, t_expected)
+
+        # Verify inverse: T * T.inverse() = identity
+        T_inv = T1.inverse()
+        T_id = T1 * T_inv
+        np.testing.assert_array_almost_equal(T_id.rotation, np.eye(3))
+        np.testing.assert_array_almost_equal(T_id.translation, np.zeros(3))
+
+    def test_se3_equality_operators(self):
+        """Test SE3 operator== and operator!="""
+        T1 = embodik.SE3(np.eye(3), np.array([1.0, 0.0, 0.0]))
+        T2 = embodik.SE3(np.eye(3), np.array([1.0, 0.0, 0.0]))
+        T3 = embodik.SE3(np.eye(3), np.array([0.0, 1.0, 0.0]))
+        assert T1 == T2
+        assert T1 != T3
+        assert not (T1 != T2)
+        assert not (T1 == T3)
+
+    def test_se3_act_actInv(self):
+        """Test SE3 act() and actInv() for 3D point transform"""
+        R = np.eye(3)
+        t = np.array([1.0, 2.0, 3.0])
+        T = embodik.SE3(R, t)
+
+        p_local = np.array([0.0, 0.0, 0.0])
+        p_world = T.act(p_local)
+        np.testing.assert_array_almost_equal(p_world, t)
+
+        p_local = np.array([1.0, 0.0, 0.0])
+        p_world = T.act(p_local)
+        np.testing.assert_array_almost_equal(p_world, np.array([2.0, 2.0, 3.0]))
+
+        # Roundtrip: actInv(act(p)) == p
+        p_roundtrip = T.actInv(p_world)
+        np.testing.assert_array_almost_equal(p_roundtrip, p_local)
+
     def test_get_frame_jacobian(self, urdf_path):
         """Test getting frame Jacobian"""
         model = embodik.RobotModel(urdf_path, floating_base=False)
