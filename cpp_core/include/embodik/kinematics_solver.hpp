@@ -225,10 +225,46 @@ public:
   double get_dt() const { return dt_; }
 
   /**
-   * @brief Set solver tolerance
-   * @param tolerance Convergence tolerance
+   * @brief Set singular-value damping threshold for regularized pseudoinverse.
+   *
+   * This preserves historical behavior: set_tolerance() maps to
+   * VelocitySolverConfig::regularization_config.epsilon.
+   *
+   * @param tolerance Regularization epsilon (default 1e-6).
    */
   void set_tolerance(double tolerance) { solver_tolerance_ = tolerance; }
+
+  /**
+   * @brief Override the singular-value damping threshold for the regularized
+   *        pseudoinverse, decoupling it from the solver tolerance.
+   *
+   * By default (when this has never been called), the regularization epsilon
+   * mirrors @c solver_tolerance_ for backward compatibility.  Call this to
+   * pin it to an independent value.
+   *
+   * Any Jacobian singular value below @p epsilon is treated as near-singular
+   * and receives additional damping proportional to
+   * @c damping * (1 - (sigma/epsilon)^2).  Setting this too large (e.g. 0.1)
+   * will over-regularize the pseudoinverse and suppress joint velocities for
+   * high-DOF robots where many singular values are naturally small but nonzero.
+   *
+   * For most robots, 1e-6 is the right value.  Call this when you need to set
+   * @c set_tolerance() to a larger value for constraint-violation leniency
+   * without inflating the regularization threshold.
+   *
+   * @param epsilon Singular-value damping threshold.
+   */
+  void set_regularization_epsilon(double epsilon) { solver_tolerance_ = epsilon; }
+
+  /**
+   * @brief Set constraint violation deadband for bound checks.
+   *
+   * Maps to VelocitySolverConfig::epsilon and is independent from
+   * regularization epsilon.
+   */
+  void set_constraint_tolerance(double epsilon) {
+    constraint_tolerance_ = epsilon;
+  }
 
   /**
    * @brief Set maximum iterations
@@ -491,7 +527,10 @@ private:
 
   // Solver parameters
   double dt_ = 0.01;
+  // Singular-value damping threshold for regularized pseudoinverse.
   double solver_tolerance_ = 1e-6;
+  // Constraint violation deadband + COD pseudoinverse relative threshold.
+  double constraint_tolerance_ = 1e-6;
   double tight_tolerance_ = 1e-10;
   int max_iterations_ = 20;
   double damping_ = 1e-3;
