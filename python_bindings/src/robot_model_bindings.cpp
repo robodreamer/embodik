@@ -24,6 +24,7 @@
 
 #include <nanobind/eigen/dense.h>
 #include <nanobind/nanobind.h>
+#include <nanobind/operators.h>
 #include <nanobind/stl/pair.h>
 #include <nanobind/stl/shared_ptr.h>
 #include <nanobind/stl/string.h>
@@ -72,6 +73,26 @@ void bind_robot_model(nb::module_ &m) {
           [](const pinocchio::SE3 &self) { return self.toHomogeneousMatrix(); },
           "Get 4x4 homogeneous transformation matrix")
       .def("inverse", &pinocchio::SE3::inverse)
+      .def(nb::self * nb::self,
+           "Compose two SE3 transforms: (T1 * T2) gives world-to-frame for "
+           "T2 expressed in T1's frame. Pinocchio convention: ^A M_B * ^B M_C "
+           "= ^A M_C.")
+      .def(nb::self == nb::self, "Equality comparison")
+      .def(nb::self != nb::self, "Inequality comparison")
+      .def(
+          "act",
+          [](const pinocchio::SE3 &self, const Eigen::Vector3d &p) {
+            return self.act(p);
+          },
+          nb::arg("point"),
+          "Transform 3D point from local to world frame: p_world = R @ p + t")
+      .def(
+          "actInv",
+          [](const pinocchio::SE3 &self, const Eigen::Vector3d &p) {
+            return self.actInv(p);
+          },
+          nb::arg("point"),
+          "Transform 3D point from world to local frame: p_local = R.T @ (p - t)")
       .def("__repr__", [](const pinocchio::SE3 &self) {
         std::stringstream ss;
         ss << "SE3(translation=" << self.translation().transpose()
