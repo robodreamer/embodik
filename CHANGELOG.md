@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.3] - 2026-03-06
+
+### Added
+- **Native Rotation helper** (`embodik.Rotation` / `SO3`): Lightweight SO(3) class replacing `scipy.spatial.transform.Rotation`. Constructors: `from_matrix`, `from_quat`, `from_rotvec`, `from_euler`, `identity`. Spatialmath-style shorthands: `Rx`, `Ry`, `Rz`, `RPY`, `AngVec`, `EulerVec`.
+- **SE3 property aliases**: `R`, `t`, `A` (spatialmath-style). `SE3.Rt(R, t)` classmethod.
+- **Transform benchmarks** (`pixi run benchmark-transforms`): Latency and throughput benchmarks; native r2q/q2r ~24×/2× faster than SciPy.
+
+### Changed
+- **r2q / q2r**: Now use native Pinocchio conversion (no SciPy dependency).
+- **API documentation**: Added `docs/api/transforms.md` for Rotation, SO3, SE3. Updated `docs/api/utils.md` with r2q, q2r, Rt, compute_pose_error.
+
 ## [0.12.2] - 2026-03-06
 
 ### Added
