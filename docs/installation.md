@@ -389,7 +389,8 @@ pip install "embodik[gpu-collision]"
 ```
 
 **Example scripts:**
-- `examples/05_gpu_collision_batch.py` - Batch collision detection benchmark
+
+- `examples/05_gpu_collision_batch.py` — Batch collision detection benchmark
 - Run with: `pixi run -e cuda benchmark-collision`
 
 See the GPU Collision section in the README for more details.
@@ -403,8 +404,9 @@ pip install embodik[visualization]
 ```
 
 This includes:
-- `viser>=0.1.0` - 3D visualization server
-- `trimesh>=3.0.0` - Mesh loading for robot visualization
+
+- `viser>=0.1.0` — 3D visualization server
+- `trimesh>=3.0.0` — Mesh loading for robot visualization
 
 **Default (v0.4.0+):** EmbodiK now defaults to direct Viser visualization with native bindings
 for rotation/quaternion math. This eliminates runtime dependency conflicts.
@@ -429,10 +431,11 @@ pip install embodik[examples]
 ```
 
 This includes:
-- `robot_descriptions` - Robot model descriptions
-- `pyyaml` - YAML parsing for robot preset configs
-- `viser` - visualization server used by interactive examples
-- `yourdfpy` - URDF loader used by some examples (via `robot_descriptions.loaders.yourdfpy`)
+
+- `robot_descriptions` — Robot model descriptions
+- `pyyaml` — YAML parsing for robot preset configs
+- `viser` — visualization server used by interactive examples
+- `yourdfpy` — URDF loader used by some examples (via `robot_descriptions.loaders.yourdfpy`)
 
 ## Verify Installation
 
@@ -523,6 +526,6 @@ If you encounter build errors:
 
 ## Next Steps
 
-- [Quickstart Guide](quickstart.md) - Get started with EmbodiK
-- [API Reference](api/index.md) - Explore the API
-- [Examples](examples/index.md) - See example code
+- [Quickstart Guide](quickstart.md) — Get started with EmbodiK
+- [API Reference](api/index.md) — Explore the API
+- [Examples](examples/index.md) — See example code

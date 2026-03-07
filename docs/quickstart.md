@@ -166,7 +166,7 @@ else:
 
 ## Next Steps
 
-- [Working with Transforms](transforms.md) - Learn how to create and manipulate 3D transforms
-- [API Reference](api/index.md) - Detailed API documentation
-- [Examples](examples/index.md) - More complex examples
-- [Development Guide](development.md) - Contributing to EmbodiK
+- [Working with Transforms](transforms.md) — Learn how to create and manipulate 3D transforms
+- [API Reference](api/index.md) — Detailed API documentation
+- [Examples](examples/index.md) — More complex examples
+- [Development Guide](development.md) — Contributing to EmbodiK

@@ -265,8 +265,8 @@ R_from_q = q2.matrix()
 
 **Critical**: Different libraries use different quaternion orders. Always specify the `order` parameter to prevent errors:
 
-- **`'sxyz'` or `'wxyz'`** (default): `[w, x, y, z]` - Used by viser, Pinocchio, EmbodiK, most robotics libraries
-- **`'xyzs'` or `'xyzw'`**: `[x, y, z, w]` - Used by some libraries (e.g., SciPy in some contexts)
+- **`'sxyz'` or `'wxyz'`** (default): `[w, x, y, z]` — Used by viser, Pinocchio, EmbodiK, most robotics libraries
+- **`'xyzs'` or `'xyzw'`**: `[x, y, z, w]` — Used by some libraries (e.g., SciPy in some contexts)
 
 **Best Practice**: Always explicitly specify the `order` parameter when converting quaternions:
 
@@ -288,9 +288,10 @@ R2 = q2r(q_xyzw, order='xyzs')  # Correct - matches r2q order
 R_wrong = q2r(q, order='xyzs')  # WRONG - will produce incorrect result
 ```
 
-**All quaternion functions support the `order` parameter**:
-- `r2q(R, order='sxyz')` - rotation matrix to quaternion
-- `q2r(q, order='sxyz')` - quaternion to rotation matrix
+**All quaternion functions support the `order` parameter:**
+
+- `r2q(R, order='sxyz')` — rotation matrix to quaternion
+- `q2r(q, order='sxyz')` — quaternion to rotation matrix
 
 **Tip**: When integrating with other libraries, check their quaternion format documentation and always specify the `order` parameter explicitly to prevent convention mismatches.
 
