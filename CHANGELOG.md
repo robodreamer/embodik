@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.4] - 2026-03-06
+
+### Changed
+- **Saturation exit behavior disabled by default**: Velocity-box softening near joint limits (kMinBoundFraction) is now opt-in. Use `enable_saturation_exit_behavior(True)` to restore previous behavior; requires more testing before enabling broadly.
+
+### Added
+- **`enable_saturation_exit_behavior(bool)`** / **`saturation_exit_behavior_enabled()`**: Python API to toggle velocity-box softening near limits.
+
 ## [0.12.3] - 2026-03-06
 
 ### Added

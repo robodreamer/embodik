@@ -206,6 +206,12 @@ void bind_kinematics_solver(nb::module_ &m) {
       .def("set_limit_exit_release_margin",
            &KinematicsSolver::set_limit_exit_release_margin, nb::arg("margin"),
            "Set release margin that relaxes tiny post-limit recovery forcing.")
+      .def("enable_saturation_exit_behavior",
+           &KinematicsSolver::enable_saturation_exit_behavior, nb::arg("enable"),
+           "Enable velocity-box softening near limits (disabled by default).")
+      .def("saturation_exit_behavior_enabled",
+           &KinematicsSolver::saturation_exit_behavior_enabled,
+           "Return whether saturation-exit softening is enabled.")
       .def("enable_position_ik_debug",
            &KinematicsSolver::enable_position_ik_debug, nb::arg("enable"),
            "Enable verbose logging for position IK iterations")
