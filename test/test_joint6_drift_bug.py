@@ -244,6 +244,7 @@ class TestKMinBoundFractionFixed:
     def test_headroom_in_both_dirs_when_centered(self):
         """When well inside both limits, softening works in both directions."""
         robot, solver, q, q_lo, q_hi = _setup(limit_scale=0.4)
+        solver.enable_saturation_exit_behavior(True)
 
         vel_limits = robot.get_velocity_limits()
         margin_lo = q[4] - q_lo[4]

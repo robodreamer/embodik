@@ -310,6 +310,20 @@ public:
   }
 
   /**
+   * @brief Enable or disable saturation-exit velocity-box softening.
+   *
+   * When enabled, joints inside both limits get a minimum velocity headroom
+   * (kMinBoundFraction) so the SNS solver can find partial solutions near
+   * saturation. Disabled by default; requires more testing.
+   */
+  void enable_saturation_exit_behavior(bool enable) {
+    enable_saturation_exit_behavior_ = enable;
+  }
+  bool saturation_exit_behavior_enabled() const {
+    return enable_saturation_exit_behavior_;
+  }
+
+  /**
    * @brief Enable a joint-limit barrier gradient task (priority 1, nullspace).
    *
    * When enabled, the solver automatically computes an analytical gradient of
@@ -541,6 +555,9 @@ private:
   double limit_recovery_enter_epsilon_ = 1e-4;
   double limit_recovery_exit_epsilon_ = 1e-4;
   double limit_exit_release_margin_ = 0.0;
+  /// When false (default), skip velocity-box softening near limits (saturation
+  /// exit behavior). Enable for testing; behavior may change in future.
+  bool enable_saturation_exit_behavior_ = false;
 
   // Constraint options
   bool use_velocity_limits_ = true;
