@@ -85,7 +85,7 @@ Multi-task multi-constraints IK uses a velocity-based loop:
 2. **Posture task** (priority 1): Maintains preferred joint configuration in null space via `set_target_configuration()`
 3. **CoM constraint** (`configure_com_constraint`): Keeps the 2D CoM projection inside the support polygon — a hard inequality constraint, not a task
 
-For a full interactive demo with CoM visualization, see [08_com_constraint_example.py](../../examples/08_com_constraint_example.py).
+For a full interactive demo with CoM visualization, see [CoM Constraint Example Overview](com_constraint_ik.md).
 
 ## Task Hierarchy
 
