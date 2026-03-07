@@ -34,6 +34,15 @@ EmbodiK supports various task types for multi-task IK:
 
 See the [Tasks](tasks.md) page for detailed documentation.
 
+## Transforms
+
+Native spatial transform helpers (no SciPy dependency):
+
+- **Rotation** / **SO3**: SO(3) rotations with spatialmath-style shorthands (`Rx`, `Ry`, `Rz`, `RPY`, etc.)
+- **SE3**: Rigid-body transforms with composition (`T1 * T2`), point transforms (`act`, `actInv`), and property aliases (`R`, `t`, `A`)
+
+See the [Transforms](transforms.md) page for full API.
+
 ## Utilities
 
 ::: embodik.utils

@@ -148,9 +148,67 @@ transformed_point = transformed_homogeneous[:3]
 
 ## Working with Rotations
 
-### Creating Rotation Matrices
+### embodiK.Rotation (Recommended, No SciPy)
 
-For basic rotations, you can use NumPy or SciPy:
+EmbodiK provides a native `Rotation` helper that replaces `scipy.spatial.transform.Rotation` for common use cases. It uses Pinocchio-backed operations and has no SciPy dependency.
+
+**Canonical API** (primary):
+
+```python
+from embodik import Rotation
+import numpy as np
+
+# Constructors
+R = Rotation.from_matrix(np.eye(3))       # From 3x3 matrix
+R = Rotation.from_quat([0, 0, 0, 1])     # From [x,y,z,w] quaternion
+R = Rotation.from_rotvec([0, 0, np.pi/2]) # From axis-angle
+R = Rotation.from_euler('xyz', [0, 0, np.pi/2])  # From Euler (xyz, x, y, z)
+R = Rotation.identity()
+
+# Outputs
+mat = R.as_matrix()   # 3x3 rotation matrix
+quat = R.as_quat()    # [x, y, z, w]
+rotvec = R.as_rotvec() # Axis-angle
+
+# Operations
+R_inv = R.inv()
+R_composed = R1 * R2
+v_rotated = R.apply([1, 0, 0])
+```
+
+**Spatialmath-style shorthands** (convenience aliases):
+
+```python
+from embodik import SO3  # Alias for Rotation
+
+# Single-axis rotations
+R = SO3.Rx(np.pi/2)
+R = SO3.Ry(np.pi/2)
+R = SO3.Rz(np.pi/2)
+
+# Roll-pitch-yaw
+R = SO3.RPY([roll, pitch, yaw], order='xyz')
+
+# Angle-axis
+R = SO3.AngVec(theta, axis)
+R = SO3.EulerVec(omega)  # Same as from_rotvec
+```
+
+**SE3 property aliases** (spatialmath-style):
+
+```python
+from embodik import Rt, SE3
+
+T = Rt(R=np.eye(3), t=[1, 2, 3])  # Module-level helper
+T = SE3.Rt(np.eye(3), [1, 2, 3])  # Classmethod (same result)
+# T.R  -> rotation matrix (alias for .rotation)
+# T.t  -> translation (alias for .translation)
+# T.A  -> 4x4 homogeneous matrix (alias for .homogeneous())
+```
+
+### Creating Rotation Matrices (Alternative: SciPy)
+
+For basic rotations, you can also use NumPy or SciPy:
 
 ```python
 import numpy as np
@@ -479,7 +537,10 @@ For more advanced transform operations, see:
 - **SE3 Class**: Pinocchio's `SE3` class provides additional methods for Lie group operations
 - **Quaternion Operations**: Pinocchio's `Quaternion` class for quaternion-based rotations
 - **Rotation Utilities**: Functions like `pin.log3()`, `pin.exp3()` for exponential coordinates
+- **embodiK.Rotation**: Native `Rotation` and `SO3` helpers (no SciPy); see "embodiK.Rotation (Recommended)" above
 - **SciPy Rotations**: [scipy.spatial.transform.Rotation](https://docs.scipy.org/doc/scipy/reference/generated/scipy.spatial.transform.Rotation.html) for creating rotation matrices from various representations
+
+**Note**: `r2q` and `q2r` use native embodiK conversion and do not depend on SciPy.
 
 ## Comparison with spatialmath-python
 
@@ -491,9 +552,9 @@ If you're familiar with spatialmath-python, here's a quick comparison:
 | `SE3.Rt(R, t)` | `embodik.Rt(R=R, t=t)` |
 | `T1 * T2` | `T1 * T2` |
 | `T.inv()` | `T.inverse()` |
-| `T.t` | `T.translation` |
-| `T.R` | `T.rotation` |
-| `T.A` | `T.homogeneous()` |
+| `T.t` | `T.translation` or `T.t` |
+| `T.R` | `T.rotation` or `T.R` |
+| `T.A` | `T.homogeneous()` or `T.A` |
 | `r2q(R)` | `embodik.r2q(R)` |
 | `q2r(q)` | `embodik.q2r(q)` |
 

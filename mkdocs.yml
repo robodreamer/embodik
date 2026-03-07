@@ -83,11 +83,13 @@ nav:
   - Quickstart: quickstart.md
   - GPU Solvers: gpu_solvers.md
   - Working with Transforms: transforms.md
+  - Transform Benchmarks: benchmark_transforms.md
   - API Reference:
     - Overview: api/index.md
     - RobotModel: api/robot_model.md
     - KinematicsSolver: api/kinematics_solver.md
     - Tasks: api/tasks.md
+    - Transforms: api/transforms.md
     - Utilities: api/utils.md
     - Visualization: api/visualization.md
   - Examples:

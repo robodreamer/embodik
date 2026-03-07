@@ -49,6 +49,9 @@ from .utils import (
     Rt,
 )
 
+# Export transform helpers (Rotation/SO3 - native, no SciPy)
+from .transforms import Rotation, SO3
+
 # Export visualization classes (optional)
 # Default to direct Viser visualization (no pip pinocchio dependency)
 _visualization_available = False
@@ -115,6 +118,8 @@ __all__ = [
     "r2q",
     "q2r",
     "Rt",
+    "Rotation",
+    "SO3",
     # Visualization (optional)
     "EmbodikVisualizer",
     "InteractiveVisualizer",
