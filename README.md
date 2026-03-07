@@ -236,7 +236,7 @@ The repository includes several example scripts:
 | `05_gpu_collision_batch.py` | GPU-accelerated batch collision detection |
 | `06_gpu_solver_demo.py` | Comprehensive GPU solver demonstration and benchmark |
 | `07_parallel_trajectory_tracking.py` | **100 robots** tracking different trajectories in parallel (GPU demo) |
-| `08_com_constraint_demo.py` | CoM support-polygon constraint with Viser visualization |
+| `08_com_constraint_example.py` | CoM support-polygon constraint with Viser visualization |
 | `09_dual_arm_ects.py` | Dual-arm ECTS (Orthogonal + ECTS modes), collision avoidance, mode snap |
 | `robot_model_example.py` | Robot model usage and configuration |
 | `visualization_example.py` | Interactive 3D visualization examples |
