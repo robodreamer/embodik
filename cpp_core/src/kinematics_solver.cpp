@@ -1237,7 +1237,10 @@ std::pair<double, double> KinematicsSolver::calculate_velocity_box_constraint(
   // Only guarantee headroom in the direction AWAY from a nearby limit.
   // kMarginThreshold prevents softening from injecting velocity toward a
   // limit the joint is already at.
-  if (!outside_lower && !outside_upper) {
+  //
+  // Disabled by default (enable_saturation_exit_behavior_); requires more
+  // testing before enabling.
+  if (enable_saturation_exit_behavior_ && !outside_lower && !outside_upper) {
     const double min_vel = kMinBoundFraction * velocity_limit;
     if (lower_limit > -min_vel && raw_margin_lower > kMarginThreshold)
       lower_limit = -min_vel;
