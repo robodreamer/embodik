@@ -95,5 +95,15 @@ nav:
   - Examples:
     - Overview: examples/index.md
     - Basic IK: examples/basic_ik.md
-    - Multi-task IK: examples/multi_task_ik.md
+    - Multi-Task Multi-Constraints IK: examples/multi_task_ik.md
+    - Collision-Aware IK: examples/collision_aware_ik.md
+    - CoM Constraint: examples/com_constraint_ik.md
+    - Dual-Arm ECTS: examples/dual_arm_ects.md
+    - Teleop IK: examples/teleop_ik.md
+    - GPU Batch IK: examples/gpu_batch_ik.md
+    - GPU Collision Batch: examples/gpu_collision_batch.md
+    - GPU Solver Demo: examples/gpu_solver_demo.md
+    - Parallel Trajectory Tracking: examples/parallel_trajectory_tracking.md
+    - Robot Model Usage: examples/robot_model_usage.md
+    - Visualization: examples/visualization_examples.md
   - Development: development.md
