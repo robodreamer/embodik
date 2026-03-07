@@ -56,6 +56,13 @@ void bind_robot_model(nb::module_ &m) {
       .def(nb::init<const Eigen::Matrix3d &, const Eigen::Vector3d &>(),
            nb::arg("rotation"), nb::arg("translation"),
            "Create SE3 from rotation matrix and translation vector")
+      .def_static(
+          "Rt",
+          [](const Eigen::Matrix3d &R, const Eigen::Vector3d &t) {
+            return pinocchio::SE3(R, t);
+          },
+          nb::arg("R"), nb::arg("t"),
+          "Create SE3 from rotation matrix and translation (spatialmath-style)")
       .def_prop_rw(
           "rotation",
           [](const pinocchio::SE3 &self) { return self.rotation(); },
@@ -72,6 +79,18 @@ void bind_robot_model(nb::module_ &m) {
           "homogeneous",
           [](const pinocchio::SE3 &self) { return self.toHomogeneousMatrix(); },
           "Get 4x4 homogeneous transformation matrix")
+      .def_prop_ro(
+          "R",
+          [](const pinocchio::SE3 &self) { return self.rotation(); },
+          "Rotation matrix (alias for rotation)")
+      .def_prop_ro(
+          "t",
+          [](const pinocchio::SE3 &self) { return self.translation(); },
+          "Translation vector (alias for translation)")
+      .def_prop_ro(
+          "A",
+          [](const pinocchio::SE3 &self) { return self.toHomogeneousMatrix(); },
+          "4x4 homogeneous matrix (alias for homogeneous())")
       .def("inverse", &pinocchio::SE3::inverse)
       .def(nb::self * nb::self,
            "Compose two SE3 transforms: (T1 * T2) gives world-to-frame for "
@@ -155,6 +174,35 @@ void bind_robot_model(nb::module_ &m) {
       "    x: Quaternion x component\n"
       "    y: Quaternion y component\n"
       "    z: Quaternion z component\n\n"
+      "Returns:\n"
+      "    3x3 rotation matrix");
+
+  // XYZW format (scipy/ROS convention: [x, y, z, w])
+  m.def(
+      "matrix_to_quaternion_xyzw",
+      [](const Eigen::Matrix3d &R) {
+        Eigen::Quaterniond q(R);
+        q.normalize();
+        return Eigen::Vector4d(q.x(), q.y(), q.z(), q.w());
+      },
+      nb::arg("rotation"),
+      "Convert 3x3 rotation matrix to quaternion (x, y, z, w) format.\n\n"
+      "Args:\n"
+      "    rotation: 3x3 rotation matrix\n\n"
+      "Returns:\n"
+      "    4D vector [x, y, z, w] (scipy/ROS convention)");
+
+  m.def(
+      "quaternion_xyzw_to_matrix",
+      [](double x, double y, double z, double w) {
+        Eigen::Quaterniond q(w, x, y, z);
+        q.normalize();
+        return q.toRotationMatrix();
+      },
+      nb::arg("x"), nb::arg("y"), nb::arg("z"), nb::arg("w"),
+      "Convert quaternion (x, y, z, w) to 3x3 rotation matrix.\n\n"
+      "Args:\n"
+      "    x, y, z, w: Quaternion components (scipy/ROS convention)\n\n"
       "Returns:\n"
       "    3x3 rotation matrix");
 

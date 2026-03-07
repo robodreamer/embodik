@@ -249,7 +249,7 @@ def r2q(rotation: np.ndarray, order: str = "sxyz") -> np.ndarray:
     """
     Convert rotation matrix to quaternion (spatialmath-python compatible).
 
-    Optimized implementation using scipy for better performance than Pinocchio Quaternion.
+    Uses native embodiK/Pinocchio conversion (no SciPy dependency).
 
     Args:
         rotation: 3x3 rotation matrix
@@ -269,18 +269,14 @@ def r2q(rotation: np.ndarray, order: str = "sxyz") -> np.ndarray:
     if rotation.shape != (3, 3):
         raise ValueError(f"Expected 3x3 rotation matrix, got shape {rotation.shape}")
 
-    # Use scipy for conversion (faster than Pinocchio Quaternion object creation)
-    from scipy.spatial.transform import Rotation as R
-
-    r = R.from_matrix(rotation)
-    quat_xyzw = r.as_quat()  # Returns [x, y, z, w]
-
     if order == "sxyz" or order == "wxyz":
-        # Scalar first: [w, x, y, z]
-        return np.array([quat_xyzw[3], quat_xyzw[0], quat_xyzw[1], quat_xyzw[2]], dtype=float)
+        # Scalar first: [w, x, y, z] via native wxyz converter
+        quat = _native.matrix_to_quaternion_wxyz(rotation)
+        return np.array(quat, dtype=float)
     elif order == "xyzs" or order == "xyzw":
-        # Scalar last: [x, y, z, w]
-        return quat_xyzw.copy()
+        # Scalar last: [x, y, z, w] via native xyzw converter
+        quat = _native.matrix_to_quaternion_xyzw(rotation)
+        return np.array(quat, dtype=float)
     else:
         raise ValueError(f"Unknown quaternion order: {order}. Use 'sxyz' or 'xyzs'")
 
@@ -289,7 +285,7 @@ def q2r(quaternion: np.ndarray, order: str = "sxyz") -> np.ndarray:
     """
     Convert quaternion to rotation matrix (spatialmath-python compatible).
 
-    Optimized implementation using direct matrix computation to avoid Pinocchio Quaternion overhead.
+    Uses native embodiK/Pinocchio conversion (no SciPy dependency).
 
     Args:
         quaternion: Quaternion as array
@@ -308,32 +304,26 @@ def q2r(quaternion: np.ndarray, order: str = "sxyz") -> np.ndarray:
     if quaternion.shape != (4,):
         raise ValueError(f"Expected 4-element quaternion, got shape {quaternion.shape}")
 
+    # Normalize quaternion
+    norm = float(np.linalg.norm(quaternion))
+    if norm < 1e-12:
+        return np.eye(3, dtype=float)
+    qn = quaternion / norm
+
     if order == "sxyz" or order == "wxyz":
         # Scalar first: [w, x, y, z]
-        w, x, y, z = quaternion[0], quaternion[1], quaternion[2], quaternion[3]
+        R = _native.quaternion_wxyz_to_matrix(
+            float(qn[0]), float(qn[1]), float(qn[2]), float(qn[3])
+        )
     elif order == "xyzs" or order == "xyzw":
         # Scalar last: [x, y, z, w]
-        x, y, z, w = quaternion[0], quaternion[1], quaternion[2], quaternion[3]
+        R = _native.quaternion_xyzw_to_matrix(
+            float(qn[0]), float(qn[1]), float(qn[2]), float(qn[3])
+        )
     else:
         raise ValueError(f"Unknown quaternion order: {order}. Use 'sxyz' or 'xyzs'")
 
-    # Normalize quaternion
-    norm = np.sqrt(w * w + x * x + y * y + z * z)
-    if norm < 1e-12:
-        return np.eye(3, dtype=float)
-    w, x, y, z = w / norm, x / norm, y / norm, z / norm
-
-    # Direct rotation matrix computation (faster than Pinocchio Quaternion object creation)
-    # Using standard quaternion to rotation matrix formula
-    R = np.array(
-        [
-            [1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y)],
-            [2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x)],
-            [2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)],
-        ],
-        dtype=float,
-    )
-    return R
+    return np.array(R)
 
 
 def Rt(R: Optional[np.ndarray] = None, t: Optional[np.ndarray] = None) -> Any:
