@@ -325,6 +325,82 @@ class TestVelocityAccelerationLimits:
             solver.clear_tasks()
             solver.clear_com_constraint()
 
+    def test_outside_polygon_blocks_further_outward_motion(self, robot, solver):
+        """If CoM starts outside, CoM constraint should reduce outward command."""
+        # Shifted polygon: requires x >= 0.05, while nominal CoM x is near 0.
+        shifted_square = np.array([[0.05, -0.3], [0.30, -0.3], [0.30, 0.3], [0.05, 0.3]])
+        task = solver.add_frame_task("ee", "end_effector")
+        ee_pose = robot.get_frame_pose("end_effector")
+        # Command EE in -x direction, which tends to push CoM further outside.
+        task.set_target_pose(ee_pose.translation + np.array([-0.1, 0.0, 0.0]), ee_pose.rotation)
+        task.weight = 1.0
+
+        q0 = np.zeros(robot.nq)
+        robot.update_configuration(q0)
+
+        # Baseline without CoM constraint.
+        free_result = solver.solve_velocity(q0)
+        assert free_result.status == embodik.SolverStatus.SUCCESS
+        dq_free = np.asarray(free_result.joint_velocities)
+
+        # Re-run with CoM constraint active.
+        solver.configure_com_constraint(
+            shifted_square, margin=0.0, com_vel_max=0.4, com_acc_max=0.1, use_acceleration_limits=True
+        )
+        constrained_result = solver.solve_velocity(q0)
+        assert constrained_result.status == embodik.SolverStatus.SUCCESS
+        dq_constrained = np.asarray(constrained_result.joint_velocities)
+
+        # For this robot, +dq[1] increases CoM x.  The constrained solution should
+        # be less outward (i.e., larger joint2 velocity) than unconstrained.
+        assert dq_constrained[1] > dq_free[1], (
+            f"Expected CoM constraint to reduce outward motion: "
+            f"dq_free[1]={dq_free[1]:.6f}, dq_constrained[1]={dq_constrained[1]:.6f}"
+        )
+
+        solver.clear_tasks()
+        solver.clear_com_constraint()
+
+    def test_outside_polygon_rollout_beats_unconstrained(self, robot, solver):
+        """Across rollout, constrained CoM should violate less than unconstrained."""
+        shifted_square = np.array([[0.05, -0.3], [0.30, -0.3], [0.30, 0.3], [0.05, 0.3]])
+        x_min = 0.05
+
+        task = solver.add_frame_task("ee", "end_effector")
+        ee_pose = robot.get_frame_pose("end_effector")
+        # Persistent outward pull (-x) that tends to worsen x-violation.
+        task.set_target_pose(ee_pose.translation + np.array([-0.1, 0.0, 0.0]), ee_pose.rotation)
+        task.weight = 1.0
+
+        def rollout(apply_constraint: bool, steps: int = 25) -> float:
+            q = np.zeros(robot.nq)
+            robot.update_configuration(q)
+            if apply_constraint:
+                solver.configure_com_constraint(
+                    shifted_square, margin=0.0, com_vel_max=0.4, com_acc_max=0.1, use_acceleration_limits=True
+                )
+            else:
+                solver.clear_com_constraint()
+
+            for _ in range(steps):
+                res = solver.solve_velocity(q)
+                assert res.status == embodik.SolverStatus.SUCCESS
+                dq = np.asarray(res.joint_velocities)
+                q = q + dq * solver.dt
+                robot.update_configuration(q)
+
+            return max(0.0, x_min - robot.get_com_position()[0])
+
+        violation_free = rollout(apply_constraint=False)
+        violation_constrained = rollout(apply_constraint=True)
+        assert violation_constrained <= violation_free + 1e-9, (
+            f"Expected constrained rollout to have less/equal violation: "
+            f"free={violation_free:.6f}, constrained={violation_constrained:.6f}"
+        )
+
+        solver.clear_tasks()
+        solver.clear_com_constraint()
+
 
 # ===========================================================================
 # Phase 3.5 – Frame transform
