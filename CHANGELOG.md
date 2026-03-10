@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.6] - 2026-03-10
+
+### Added
+- **Guided solver debugging helper**: `embodik.get_solver_status_hint(status, status_message=None)` returns actionable troubleshooting guidance per solver status and appends backend details when available.
+- **`SolverResult.status_message`** is now exposed to Python bindings for explicit failure diagnostics.
+- **Explicit solver status coverage in Python**: new enum values exported (`SHAPE_MISMATCH`, `EMPTY_PROBLEM`, `CONSTRAINT_BOUNDS_MISMATCH`, `NON_FINITE_INPUT`) for clearer handling in downstream code.
+- New regression test for status hint helper and updated invalid-input tests to validate explicit status categories.
+
+### Changed
+- Constraint robustness logic is streamlined via shared internal helpers for half-space bound shaping and violated-row task projection, and applied consistently across collision, CoM, and relative-pose constraints.
+- Solver pre-processing now sanitizes non-finite values and inconsistent per-row bounds before backend solve, reducing NaN-driven ambiguous failures.
+- Input-validation failures in the backend now return explicit status categories with descriptive messages instead of lumping all failures into generic `INVALID_INPUT`.
+
 ## [0.12.5] - 2026-03-10
 
 ### Changed

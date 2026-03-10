@@ -26,6 +26,7 @@
 
 #include <Eigen/Core>
 #include <optional>
+#include <string>
 #include <vector>
 
 namespace embodik {
@@ -33,7 +34,11 @@ namespace embodik {
 enum class SolverStatus {
   kSuccess = 0,
   kInvalidInput = 1,
-  kNumericalError = 2
+  kNumericalError = 2,
+  kShapeMismatch = 3,
+  kEmptyProblem = 4,
+  kConstraintBoundsMismatch = 5,
+  kNonFiniteInput = 6
 };
 
 struct BasicSolverConfig {
@@ -54,6 +59,7 @@ struct SolverResult {
   double final_error = 0.0;        // ||J dq - v|| for velocity IK
   std::vector<double> task_scales; // for full velocity IK
   std::vector<double> task_errors; // Individual task errors
+  std::string status_message;      // Human-readable diagnostic for failures
 };
 
 // Extended result for velocity-level solving
