@@ -49,6 +49,7 @@ def test_import_and_metadata():
     assert eik.SolverStatus.SUCCESS.value == 0
     assert eik.SolverStatus.INVALID_INPUT.value == 1
     assert eik.SolverStatus.NUMERICAL_ERROR.value == 2
+    assert eik.SolverStatus.INFEASIBLE.value == 7
 
 
 def test_pose_error_norm():
@@ -176,6 +177,47 @@ def test_solver_status_hint_helper():
     )
     assert "Shape mismatch" in msg
     assert "goal size does not match jacobian rows" in msg
+    infeasible_msg = eik.get_solver_status_hint(
+        eik.SolverStatus.INFEASIBLE, "primary task scale collapsed to zero"
+    )
+    assert "no feasible solution" in infeasible_msg
+    assert "primary task scale collapsed to zero" in infeasible_msg
+
+
+def test_solve_velocity_propagates_backend_status_message(tmp_path):
+    """High-level solve_velocity should surface actionable status messages."""
+    urdf_path = _create_minimal_collision_urdf(tmp_path)
+    robot = eik.RobotModel(str(urdf_path), floating_base=False)
+    solver = eik.KinematicsSolver(robot)
+    joint_task = solver.add_joint_task("joint_task", "joint1", target_value=2.0)
+    joint_task.priority = 0
+    joint_task.weight = 1.0
+
+    q0 = np.array([1.57], dtype=float)  # at upper joint limit
+
+    result = solver.solve_velocity(q0, apply_limits=True)
+    assert result.status == eik.SolverStatus.INFEASIBLE
+    assert "primary task scale collapsed" in result.status_message
+
+
+def test_position_ik_nonconvergence_reports_infeasible(tmp_path):
+    """Position IK should classify clean non-convergence as INFEASIBLE."""
+    urdf_path = _create_minimal_collision_urdf(tmp_path)
+    robot = eik.RobotModel(str(urdf_path), floating_base=False)
+    solver = eik.KinematicsSolver(robot)
+
+    seed_q = np.zeros(robot.nq, dtype=float)
+    target_pose = np.eye(4, dtype=float)
+    target_pose[0, 3] = 10.0  # intentionally unreachable for this tiny 1-DOF arm
+
+    opts = eik.PositionIKOptions()
+    opts.max_iterations = 3
+    opts.stagnation_iterations = 2
+    opts.stagnation_tolerance = 1e-9
+
+    result = solver.solve_position(seed_q, target_pose, "link1", opts)
+    assert result.status == eik.SolverStatus.INFEASIBLE
+    assert "did not reach tolerance" in result.status_message
 
 
 # =============================================================================

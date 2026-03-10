@@ -49,6 +49,11 @@ struct HalfspaceBoundResult {
   Eigen::ArrayXi violated_rows;
 };
 
+struct ClassifiedOutcome {
+  SolverStatus status;
+  std::string status_message;
+};
+
 static HalfspaceBoundResult compute_halfspace_velocity_bounds(
     const Eigen::VectorXd &slack, double dt, double vel_max, double acc_max,
     bool use_acceleration_limits, double proximity_threshold, double slack_eps,
@@ -152,6 +157,53 @@ static void sanitize_solver_inputs(std::vector<Eigen::VectorXd> &goals,
       c_upper(r) = mid;
     }
   }
+}
+
+static ClassifiedOutcome classify_velocity_outcome(
+    SolverStatus backend_status, const std::string &backend_status_message,
+    const std::vector<double> &task_scales, double primary_goal_norm) {
+  if (backend_status != SolverStatus::kSuccess) {
+    return {backend_status, backend_status_message};
+  }
+
+  constexpr double kGoalNormEps = 1e-9;
+  constexpr double kScaleEps = 1e-9;
+  if (primary_goal_norm > kGoalNormEps && !task_scales.empty() &&
+      std::abs(task_scales[0]) <= kScaleEps) {
+    return {SolverStatus::kInfeasible,
+            "primary task scale collapsed to zero under active constraints"};
+  }
+
+  return {SolverStatus::kSuccess, backend_status_message};
+}
+
+static ClassifiedOutcome classify_position_outcome(
+    SolverStatus current_status, const std::string &current_status_message,
+    bool converged_or_within_tolerance, bool stagnation_abort,
+    bool max_iterations_reached, double position_error,
+    double orientation_error) {
+  if (current_status != SolverStatus::kSuccess) {
+    return {current_status, current_status_message};
+  }
+
+  if (converged_or_within_tolerance) {
+    return {SolverStatus::kSuccess, current_status_message};
+  }
+
+  if (stagnation_abort || max_iterations_reached) {
+    return {SolverStatus::kInfeasible,
+            "position IK did not reach tolerance (likely infeasible under "
+            "active constraints): final_position_error=" +
+                std::to_string(position_error) +
+                ", final_orientation_error=" +
+                std::to_string(orientation_error)};
+  }
+
+  return {SolverStatus::kNumericalError,
+          current_status_message.empty()
+              ? "position IK terminated without convergence due to numerical "
+                "instability"
+              : current_status_message};
 }
 } // namespace
 
@@ -1960,9 +2012,13 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
   // Call the backend solver
   auto backend_result = computeMultiObjectiveVelocitySolutionEigen(
       goals, jacobians, C, c_lower, c_upper, config);
+  const double primary_goal_norm = goals.empty() ? 0.0 : goals[0].norm();
 
   // Create velocity-specific result
-  result.status = backend_result.status;
+  const auto classified_velocity = classify_velocity_outcome(
+      backend_result.status, backend_result.status_message,
+      backend_result.task_scales, primary_goal_norm);
+  result.status = classified_velocity.status;
   result.solution = backend_result.solution;
   result.computation_time_ms = backend_result.computation_time_ms;
   result.solver_computation_time_ms = backend_result.computation_time_ms;
@@ -1970,6 +2026,7 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
   result.final_error = backend_result.final_error;
   result.task_scales = backend_result.task_scales;
   result.task_errors = backend_result.task_errors;
+  result.status_message = classified_velocity.status_message;
   result.limits_applied = apply_limits;
 
   // Convert solution to Eigen vector
@@ -2029,6 +2086,7 @@ PositionIKResult KinematicsSolver::solve_position(
     const std::string &frame_name, const PositionIKOptions &options) {
 
   PositionIKResult result;
+  result.status = SolverStatus::kSuccess;
   std::vector<double> position_trace;
   std::vector<double> orientation_trace;
   position_trace.reserve(options.max_iterations);
@@ -2087,6 +2145,7 @@ PositionIKResult KinematicsSolver::solve_position(
   // Iterative solver loop
   int iter = 0;
   bool converged = false;
+  bool stagnation_abort = false;
 
   while (iter < options.max_iterations && !converged) {
     // Update task with current robot state
@@ -2124,7 +2183,7 @@ PositionIKResult KinematicsSolver::solve_position(
                     << stagnation_iters << " iterations; aborting."
                     << std::endl;
         }
-        result.status = SolverStatus::kNumericalError;
+        stagnation_abort = true;
         break;
       }
     }
@@ -2242,6 +2301,7 @@ PositionIKResult KinematicsSolver::solve_position(
 
     if (vel_result.status != SolverStatus::kSuccess) {
       result.status = vel_result.status;
+      result.status_message = vel_result.status_message;
       if (position_ik_debug_) {
         std::cout << "[embodiK][IKDebug] velocity solver failure at iter "
                   << iter << " status=" << static_cast<int>(vel_result.status)
@@ -2279,15 +2339,14 @@ PositionIKResult KinematicsSolver::solve_position(
   const bool within_tolerance =
       (result.position_error <= options.position_tolerance) &&
       (result.orientation_error <= options.orientation_tolerance);
-
-  if (converged || within_tolerance) {
-    result.status = SolverStatus::kSuccess;
-  } else if (result.status == SolverStatus::kInvalidInput ||
-             result.status == SolverStatus::kSuccess) {
-    // If the solver stopped for any other reason (max iterations, stagnation),
-    // report numerical error.
-    result.status = SolverStatus::kNumericalError;
-  }
+  const bool max_iterations_reached =
+      (!converged) && (iter >= options.max_iterations);
+  const auto classified_position = classify_position_outcome(
+      result.status, result.status_message, converged || within_tolerance,
+      stagnation_abort, max_iterations_reached, result.position_error,
+      result.orientation_error);
+  result.status = classified_position.status;
+  result.status_message = classified_position.status_message;
 
   if (position_ik_debug_) {
     std::cout << "[embodiK][IKDebug] solve_position finished with status="

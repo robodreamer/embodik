@@ -38,7 +38,8 @@ enum class SolverStatus {
   kShapeMismatch = 3,
   kEmptyProblem = 4,
   kConstraintBoundsMismatch = 5,
-  kNonFiniteInput = 6
+  kNonFiniteInput = 6,
+  kInfeasible = 7
 };
 
 struct BasicSolverConfig {
