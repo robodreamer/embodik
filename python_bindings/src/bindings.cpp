@@ -24,6 +24,7 @@
 
 #include <nanobind/eigen/dense.h>
 #include <nanobind/nanobind.h>
+#include <nanobind/stl/string.h>
 #include <nanobind/stl/vector.h>
 
 #include <embodik/ik_baseline.hpp>
@@ -47,7 +48,12 @@ NB_MODULE(_embodik_impl, m) {
                                "Status codes for embodiK baseline")
       .value("SUCCESS", eik::SolverStatus::kSuccess)
       .value("INVALID_INPUT", eik::SolverStatus::kInvalidInput)
-      .value("NUMERICAL_ERROR", eik::SolverStatus::kNumericalError);
+      .value("NUMERICAL_ERROR", eik::SolverStatus::kNumericalError)
+      .value("SHAPE_MISMATCH", eik::SolverStatus::kShapeMismatch)
+      .value("EMPTY_PROBLEM", eik::SolverStatus::kEmptyProblem)
+      .value("CONSTRAINT_BOUNDS_MISMATCH",
+             eik::SolverStatus::kConstraintBoundsMismatch)
+      .value("NON_FINITE_INPUT", eik::SolverStatus::kNonFiniteInput);
 
   // Types
   nb::class_<eik::BasicSolverConfig>(m, "BasicSolverConfig",
@@ -72,7 +78,8 @@ NB_MODULE(_embodik_impl, m) {
       .def_ro("iterations", &eik::SolverResult::iterations)
       .def_ro("final_error", &eik::SolverResult::final_error)
       .def_ro("task_scales", &eik::SolverResult::task_scales)
-      .def_ro("task_errors", &eik::SolverResult::task_errors);
+      .def_ro("task_errors", &eik::SolverResult::task_errors)
+      .def_ro("status_message", &eik::SolverResult::status_message);
 
   nb::class_<eik::VelocitySolverResult, eik::SolverResult>(
       m, "VelocitySolverResult", "Extended result for velocity-level solving")

@@ -184,16 +184,22 @@ inline SolverResult computeMultiObjectiveVelocitySolution(
            1000.0;
   };
 
+  auto fail = [&](SolverStatus status, const char *msg) {
+    SolverResult out{};
+    out.status = status;
+    out.computation_time_ms = get_elapsed_ms();
+    out.status_message = msg;
+    return out;
+  };
+
   // Validate input dimensions
   if (target_velocities.size() != task_jacobians.size())
-    return SolverResult{
-        {}, SolverStatus::kInvalidInput, get_elapsed_ms(), 0, 0.0, {}, {}};
+    return fail(SolverStatus::kShapeMismatch,
+                "goals/jacobians size mismatch in multi-objective input");
   if (constraint_matrix.empty())
-    return SolverResult{
-        {}, SolverStatus::kInvalidInput, get_elapsed_ms(), 0, 0.0, {}, {}};
+    return fail(SolverStatus::kEmptyProblem, "constraint matrix is empty");
   if (target_velocities.empty())
-    return SolverResult{
-        {}, SolverStatus::kInvalidInput, get_elapsed_ms(), 0, 0.0, {}, {}};
+    return fail(SolverStatus::kEmptyProblem, "no objectives provided");
 
   const size_t num_dof = constraint_matrix[0].size();
   const size_t objective_count = target_velocities.size();
@@ -202,19 +208,19 @@ inline SolverResult computeMultiObjectiveVelocitySolution(
   for (size_t obj_idx = 0; obj_idx < objective_count; ++obj_idx) {
     if (task_jacobians[obj_idx].empty() ||
         task_jacobians[obj_idx][0].size() != num_dof) {
-      return SolverResult{
-          {}, SolverStatus::kInvalidInput, get_elapsed_ms(), 0, 0.0, {}, {}};
+      return fail(SolverStatus::kShapeMismatch,
+                  "jacobian has invalid or mismatched width");
     }
     if (target_velocities[obj_idx].size() != task_jacobians[obj_idx].size()) {
-      return SolverResult{
-          {}, SolverStatus::kInvalidInput, get_elapsed_ms(), 0, 0.0, {}, {}};
+      return fail(SolverStatus::kShapeMismatch,
+                  "goal size does not match jacobian rows");
     }
   }
 
   if (constraint_matrix.size() != min_bounds.size() ||
       constraint_matrix.size() != max_bounds.size()) {
-    return SolverResult{
-        {}, SolverStatus::kInvalidInput, get_elapsed_ms(), 0, 0.0, {}, {}};
+    return fail(SolverStatus::kConstraintBoundsMismatch,
+                "constraint row count must match lower/upper bounds sizes");
   }
 
   // Transform input data to Eigen format for numerical computation
@@ -235,8 +241,8 @@ inline SolverResult computeMultiObjectiveVelocitySolution(
     Eigen::MatrixXd jacobian_matrix(jacobian.size(), num_dof);
     for (size_t row = 0; row < jacobian.size(); ++row) {
       if (jacobian[row].size() != num_dof)
-        return SolverResult{
-            {}, SolverStatus::kInvalidInput, get_elapsed_ms(), 0, 0.0, {}, {}};
+        return fail(SolverStatus::kShapeMismatch,
+                    "inconsistent jacobian row width");
       for (size_t col = 0; col < num_dof; ++col) {
         jacobian_matrix(static_cast<Eigen::Index>(row),
                         static_cast<Eigen::Index>(col)) = jacobian[row][col];
@@ -251,8 +257,8 @@ inline SolverResult computeMultiObjectiveVelocitySolution(
   Eigen::MatrixXd eigen_constraints(constraint_matrix.size(), num_dof);
   for (size_t row = 0; row < constraint_matrix.size(); ++row) {
     if (constraint_matrix[row].size() != num_dof)
-      return SolverResult{
-          {}, SolverStatus::kInvalidInput, get_elapsed_ms(), 0, 0.0, {}, {}};
+      return fail(SolverStatus::kShapeMismatch,
+                  "inconsistent constraint row width");
     for (size_t col = 0; col < num_dof; ++col) {
       eigen_constraints(static_cast<Eigen::Index>(row),
                         static_cast<Eigen::Index>(col)) =
@@ -292,21 +298,27 @@ inline SolverResult computeMultiObjectiveVelocitySolutionEigen(
            1000.0;
   };
 
+  auto fail = [&](SolverStatus status, const char *msg) {
+    SolverResult out{};
+    out.status = status;
+    out.computation_time_ms = get_elapsed_ms();
+    out.status_message = msg;
+    return out;
+  };
+
   // Validate input consistency
   if (objective_targets.size() != objective_jacobians.size())
-    return SolverResult{
-        {}, SolverStatus::kInvalidInput, get_elapsed_ms(), 0, 0.0, {}, {}};
+    return fail(SolverStatus::kShapeMismatch,
+                "goals/jacobians size mismatch in Eigen input");
   if (constraint_coefficients.cols() == 0 ||
       constraint_coefficients.rows() == 0)
-    return SolverResult{
-        {}, SolverStatus::kInvalidInput, get_elapsed_ms(), 0, 0.0, {}, {}};
+    return fail(SolverStatus::kEmptyProblem, "empty constraint matrix");
   if (min_bounds.size() != constraint_coefficients.rows() ||
       max_bounds.size() != constraint_coefficients.rows())
-    return SolverResult{
-        {}, SolverStatus::kInvalidInput, get_elapsed_ms(), 0, 0.0, {}, {}};
+    return fail(SolverStatus::kConstraintBoundsMismatch,
+                "constraint rows must match lower/upper bounds");
   if (objective_targets.empty())
-    return SolverResult{
-        {}, SolverStatus::kInvalidInput, get_elapsed_ms(), 0, 0.0, {}, {}};
+    return fail(SolverStatus::kEmptyProblem, "no objectives provided");
 
   // Extract system dimensions
   const auto degrees_of_freedom = constraint_coefficients.cols();
@@ -321,8 +333,8 @@ inline SolverResult computeMultiObjectiveVelocitySolutionEigen(
     if (objective_jacobians[obj_idx].cols() != degrees_of_freedom ||
         objective_jacobians[obj_idx].rows() !=
             objective_targets[obj_idx].rows()) {
-      return SolverResult{
-          {}, SolverStatus::kInvalidInput, get_elapsed_ms(), 0, 0.0, {}, {}};
+      return fail(SolverStatus::kShapeMismatch,
+                  "objective Jacobian dimension mismatch");
     }
   }
 
@@ -686,7 +698,7 @@ inline SolverResult computeMultiObjectiveVelocitySolutionEigen(
   }
 
   if (objective_scaling_factors.hasNaN() || velocity_solution.hasNaN()) {
-    solver_status = SolverStatus::kInvalidInput;
+    solver_status = SolverStatus::kNonFiniteInput;
     objective_scaling_factors.setZero();
     velocity_solution.setZero();
   }
@@ -717,7 +729,14 @@ inline SolverResult computeMultiObjectiveVelocitySolutionEigen(
           num_objectives), // number of objectives processed
       0.0,                 // error metric computed externally if required
       std::move(applied_scales),
-      {} // task_errors
+      {}, // task_errors
+      (solver_status == SolverStatus::kSuccess)
+          ? ""
+          : (solver_status == SolverStatus::kNumericalError
+                 ? "numerical constraint violation beyond epsilon after solve"
+                 : (solver_status == SolverStatus::kNonFiniteInput
+                        ? "non-finite values detected in solver state"
+                        : "solver failed with input/status error"))
   };
 }
 

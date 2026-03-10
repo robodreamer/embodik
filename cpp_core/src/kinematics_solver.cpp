@@ -42,6 +42,117 @@ constexpr double kCollisionStuckRecoverySpeed = 0.10;
 constexpr double kMinBoundFraction = 0.10;
 // Margin (rad) below which we do NOT inject headroom toward a limit
 constexpr double kMarginThreshold = 0.01;
+
+struct HalfspaceBoundResult {
+  Eigen::VectorXd lower;
+  Eigen::VectorXd upper;
+  Eigen::ArrayXi violated_rows;
+};
+
+static HalfspaceBoundResult compute_halfspace_velocity_bounds(
+    const Eigen::VectorXd &slack, double dt, double vel_max, double acc_max,
+    bool use_acceleration_limits, double proximity_threshold, double slack_eps,
+    double recovery_scale, double min_recovery_speed) {
+  const int n = static_cast<int>(slack.size());
+  HalfspaceBoundResult out;
+  out.lower.resize(n);
+  out.upper.resize(n);
+  out.violated_rows = Eigen::ArrayXi::Zero(n);
+
+  const double dt_safe = std::max(dt, 1e-6);
+  for (int i = 0; i < n; ++i) {
+    const double m = slack(i);
+    const double m_clamped = std::max(0.0, m);
+
+    double ub = vel_max;
+    if (use_acceleration_limits) {
+      ub = std::min(ub, std::sqrt(2.0 * acc_max * m_clamped));
+    }
+    if (m < proximity_threshold) {
+      ub = std::min(ub, m_clamped / dt_safe);
+    }
+
+    if (m < -slack_eps) {
+      out.violated_rows(i) = 1;
+      const double violation = -m - slack_eps;
+      const double desired = violation / dt_safe;
+      const double recovery_speed = std::min(
+          vel_max, std::max(min_recovery_speed, desired * recovery_scale));
+      ub = -recovery_speed;
+    }
+
+    out.lower(i) = -vel_max;
+    out.upper(i) = ub;
+  }
+  return out;
+}
+
+static void project_task_jacobians_away_from_violated_rows(
+    std::vector<Eigen::MatrixXd> &task_jacobians,
+    const Eigen::MatrixXd &constraint_jacobian,
+    const Eigen::ArrayXi &violated_rows, bool outward_is_positive_projection) {
+  for (int k = 0; k < static_cast<int>(constraint_jacobian.rows()); ++k) {
+    if (k >= violated_rows.size() || violated_rows(k) == 0) {
+      continue;
+    }
+    Eigen::RowVectorXd n_row = constraint_jacobian.row(k);
+    const double nn = n_row.squaredNorm();
+    if (nn <= 1e-12) {
+      continue;
+    }
+    n_row /= std::sqrt(nn);
+    for (auto &jac : task_jacobians) {
+      for (int r = 0; r < static_cast<int>(jac.rows()); ++r) {
+        const double proj = jac.row(r).dot(n_row);
+        const bool is_outward =
+            outward_is_positive_projection ? (proj > 0.0) : (proj < 0.0);
+        if (is_outward) {
+          jac.row(r) -= proj * n_row;
+        }
+      }
+    }
+  }
+}
+
+static void sanitize_solver_inputs(std::vector<Eigen::VectorXd> &goals,
+                                   std::vector<Eigen::MatrixXd> &jacobians,
+                                   Eigen::MatrixXd &C, Eigen::VectorXd &c_lower,
+                                   Eigen::VectorXd &c_upper) {
+  for (auto &g : goals) {
+    for (int i = 0; i < static_cast<int>(g.size()); ++i) {
+      if (!std::isfinite(g(i))) {
+        g(i) = 0.0;
+      }
+    }
+  }
+  for (auto &J : jacobians) {
+    for (int r = 0; r < static_cast<int>(J.rows()); ++r) {
+      for (int c = 0; c < static_cast<int>(J.cols()); ++c) {
+        if (!std::isfinite(J(r, c))) {
+          J(r, c) = 0.0;
+        }
+      }
+    }
+  }
+  for (int r = 0; r < static_cast<int>(C.rows()); ++r) {
+    for (int c = 0; c < static_cast<int>(C.cols()); ++c) {
+      if (!std::isfinite(C(r, c))) {
+        C(r, c) = 0.0;
+      }
+    }
+    if (!std::isfinite(c_lower(r))) {
+      c_lower(r) = -1e10;
+    }
+    if (!std::isfinite(c_upper(r))) {
+      c_upper(r) = 1e10;
+    }
+    if (c_lower(r) > c_upper(r)) {
+      const double mid = 0.5 * (c_lower(r) + c_upper(r));
+      c_lower(r) = mid;
+      c_upper(r) = mid;
+    }
+  }
+}
 } // namespace
 
 KinematicsSolver::KinematicsSolver(std::shared_ptr<RobotModel> robot)
@@ -235,6 +346,7 @@ KinematicsSolver::compute_relative_pose_constraint() {
   result.jacobian.resize(num_active, robot_->nv());
   result.lower_bounds.resize(num_active);
   result.upper_bounds.resize(num_active);
+  result.violated_rows = Eigen::ArrayXi::Zero(num_active);
 
   int row = 0;
   for (int i = 0; i < 6; ++i) {
@@ -243,8 +355,14 @@ KinematicsSolver::compute_relative_pose_constraint() {
       // Velocity bounds to keep within positional bounds
       double slack_lower = rel_state(i) - cfg.lower_bounds(i);
       double slack_upper = cfg.upper_bounds(i) - rel_state(i);
-      result.lower_bounds(row) = -std::max(slack_lower / dt_, 0.0);
-      result.upper_bounds(row) = std::max(slack_upper / dt_, 0.0);
+      const double dt_safe = std::max(dt_, 1e-6);
+      const double lower_clamped = std::max(0.0, slack_lower);
+      const double upper_clamped = std::max(0.0, slack_upper);
+      result.lower_bounds(row) = -lower_clamped / dt_safe;
+      result.upper_bounds(row) = upper_clamped / dt_safe;
+      if (slack_lower < -1e-4 || slack_upper < -1e-4) {
+        result.violated_rows(row) = 1;
+      }
       row++;
     }
   }
@@ -724,52 +842,17 @@ KinematicsSolver::compute_com_constraint() {
   // (slack < 0 but > -eps), slack_c = 0 produces upper = 0: the solver
   // stops outward motion without commanding a recovery kick that would
   // cause chattering.
-  Eigen::VectorXd lower(n_hp), upper(n_hp);
-  Eigen::ArrayXi violated_rows = Eigen::ArrayXi::Zero(n_hp);
-
-  for (int i = 0; i < n_hp; ++i) {
-    const double m = slack(i);
-    const double m_clamped = std::max(0.0, m);
-
-    // Start with the velocity cap (always active)
-    double ub = vel_max;
-
-    // Acceleration bound (always active): smoothly reduce approach speed
-    // as the CoM gets closer to the boundary.
-    if (cfg.use_acceleration_limits) {
-      ub = std::min(ub, std::sqrt(2.0 * acc_max * m_clamped));
-    }
-
-    // Position-based limit (near boundary only): prevents overshooting
-    // the boundary in a single time step.
-    if (m < prox) {
-      ub = std::min(ub, m_clamped / dt_);
-    }
-
-    upper(i) = ub;
-
-    // Outside recovery (collision-style):
-    // If the CoM is significantly outside this half-plane, enforce a minimum
-    // inward speed (negative upper bound on outward-normal velocity) so the
-    // QP actively escapes violation instead of settling at dq=0.
-    if (m < -kSlackEps) {
-      violated_rows(i) = 1;
-      const double violation = -m - kSlackEps;
-      const double desired = violation / std::max(dt_, 1e-6);
-      const double recovery_speed = std::min(
-          vel_max,
-          std::max(kComMinRecoverySpeed, desired * kComRecoveryScale));
-      upper(i) = -recovery_speed;
-    }
-
-    lower(i) = -vel_max;
-  }
+  const auto com_bounds =
+      compute_halfspace_velocity_bounds(slack, dt_, vel_max, acc_max,
+                                        cfg.use_acceleration_limits, prox,
+                                        kSlackEps, kComRecoveryScale,
+                                        kComMinRecoverySpeed);
 
   ComConstraintResult result;
   result.jacobian = J_all;
-  result.lower_bounds = lower;
-  result.upper_bounds = upper;
-  result.violated_rows = violated_rows;
+  result.lower_bounds = com_bounds.lower;
+  result.upper_bounds = com_bounds.upper;
+  result.violated_rows = com_bounds.violated_rows;
   return result;
 }
 
@@ -1375,6 +1458,8 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
   if (current_q.size() > 0) {
     if (current_q.size() != robot_->nq()) {
       result.status = SolverStatus::kInvalidInput;
+      result.status_message =
+          "current_q size does not match robot nq in solve_velocity";
       return result;
     }
     if (timing) {
@@ -1590,26 +1675,15 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
   // the entire task down to satisfy the inequality.
   if (apply_limits && collision_constraint_result.has_value()) {
     const auto &coll = collision_constraint_result.value();
-    for (int k = 0; k < static_cast<int>(coll.jacobian.rows()); ++k) {
-      if (coll.lower_bounds(k) > 0.0) {
-        // This pair is violated: remove its approach direction from tasks.
-        Eigen::RowVectorXd n_row = coll.jacobian.row(k);
-        const double nn = n_row.squaredNorm();
-        if (nn > 1e-12) {
-          n_row /= std::sqrt(nn);
-          for (auto &jac : jacobians) {
-            for (int r = 0; r < static_cast<int>(jac.rows()); ++r) {
-              const double proj = jac.row(r).dot(n_row);
-              if (proj < 0.0) {
-                // Approach component: remove it. Tangential and escape
-                // directions (proj >= 0) are left unchanged.
-                jac.row(r) -= proj * n_row;
-              }
-            }
-          }
-        }
+    Eigen::ArrayXi violated = Eigen::ArrayXi::Zero(coll.jacobian.rows());
+    for (int i = 0; i < static_cast<int>(coll.jacobian.rows()); ++i) {
+      if (coll.lower_bounds(i) > 0.0) {
+        violated(i) = 1;
       }
     }
+    project_task_jacobians_away_from_violated_rows(
+        jacobians, coll.jacobian, violated,
+        /*outward_is_positive_projection=*/false);
   }
 
   // CoM support-polygon constraint
@@ -1628,26 +1702,9 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
   // keeps tangential/inward motion available instead of globally scaling tasks.
   if (apply_limits && com_constraint_result.has_value()) {
     const auto &com = com_constraint_result.value();
-    for (int k = 0; k < static_cast<int>(com.jacobian.rows()); ++k) {
-      if (k >= com.violated_rows.size() || com.violated_rows(k) == 0) {
-        continue;
-      }
-      Eigen::RowVectorXd n_row = com.jacobian.row(k);
-      const double nn = n_row.squaredNorm();
-      if (nn <= 1e-12) {
-        continue;
-      }
-      n_row /= std::sqrt(nn);
-      for (auto &jac : jacobians) {
-        for (int r = 0; r < static_cast<int>(jac.rows()); ++r) {
-          const double proj = jac.row(r).dot(n_row);
-          if (proj > 0.0) {
-            // Outward component: remove it, keep tangential/inward.
-            jac.row(r) -= proj * n_row;
-          }
-        }
-      }
-    }
+    project_task_jacobians_away_from_violated_rows(
+        jacobians, com.jacobian, com.violated_rows,
+        /*outward_is_positive_projection=*/true);
   }
 
   // Relative pose constraint
@@ -1660,6 +1717,12 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
   if (rel_pose_constraint_result.has_value() && !excluded_union.empty()) {
     for (int idx : excluded_union)
       rel_pose_constraint_result->jacobian.col(idx).setZero();
+  }
+  if (apply_limits && rel_pose_constraint_result.has_value()) {
+    const auto &rpc = rel_pose_constraint_result.value();
+    project_task_jacobians_away_from_violated_rows(
+        jacobians, rpc.jacobian, rpc.violated_rows,
+        /*outward_is_positive_projection=*/true);
   }
 
   // Build constraint matrix
@@ -1882,6 +1945,8 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
     result.constraint_setup_time_ms = get_elapsed_ms(*t_constraint_start);
   }
 
+  sanitize_solver_inputs(goals, jacobians, C, c_lower, c_upper);
+
   // Configure solver
   VelocitySolverConfig config;
   config.epsilon = constraint_tolerance_;
@@ -1974,6 +2039,8 @@ PositionIKResult KinematicsSolver::solve_position(
   // Validate input
   if (seed_q.size() != robot_->nq()) {
     result.status = SolverStatus::kInvalidInput;
+    result.status_message =
+        "seed_q size does not match robot nq in solve_position";
     return result;
   }
 
