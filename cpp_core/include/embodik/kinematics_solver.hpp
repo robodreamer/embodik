@@ -654,6 +654,7 @@ private:
     Eigen::MatrixXd jacobian;      // (num_active_axes x nv)
     Eigen::VectorXd lower_bounds;
     Eigen::VectorXd upper_bounds;
+    Eigen::ArrayXi violated_rows;  // 1 where row is outside lower/upper bounds
   };
 
   std::optional<RelativePoseConstraintConfig> relative_pose_constraint_;

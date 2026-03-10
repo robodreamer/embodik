@@ -153,7 +153,8 @@ def test_invalid_inputs():
         np.array([0], dtype=np.float64),
         np.array([1], dtype=np.float64),
     )
-    assert result.status == eik.SolverStatus.INVALID_INPUT
+    assert result.status == eik.SolverStatus.EMPTY_PROBLEM
+    assert "no objectives" in result.status_message
 
     # Mismatched dimensions - goal dimension doesn't match Jacobian rows
     goals = [np.array([1.0, 2.0])]  # 2D goal
@@ -164,7 +165,17 @@ def test_invalid_inputs():
 
     result = eik.computeMultiObjectiveVelocitySolutionEigen(goals, jacobians, C, lower, upper)
     # This should be caught by dimension validation
-    assert result.status == eik.SolverStatus.INVALID_INPUT
+    assert result.status == eik.SolverStatus.SHAPE_MISMATCH
+    assert "dimension mismatch" in result.status_message
+
+
+def test_solver_status_hint_helper():
+    """Status hint helper should return actionable guidance text."""
+    msg = eik.get_solver_status_hint(
+        eik.SolverStatus.SHAPE_MISMATCH, "goal size does not match jacobian rows"
+    )
+    assert "Shape mismatch" in msg
+    assert "goal size does not match jacobian rows" in msg
 
 
 # =============================================================================

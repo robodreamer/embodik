@@ -99,6 +99,53 @@ try:
 except ImportError:
     BatchSolveResult = None
 
+
+def get_solver_status_hint(status, status_message: str | None = None) -> str:
+    """Return an actionable debugging hint for a solver status.
+
+    Parameters
+    ----------
+    status:
+        SolverStatus enum value returned by embodiK solvers.
+    status_message:
+        Optional backend diagnostic string (e.g. result.status_message).
+    """
+    status_name = getattr(status, "name", str(status))
+    hints = {
+        "SUCCESS": "Solve succeeded.",
+        "INVALID_INPUT": (
+            "Invalid input provided. Verify dimensions and finite numeric values "
+            "for goals, Jacobians, constraints, and bounds."
+        ),
+        "NUMERICAL_ERROR": (
+            "Numerical issue during solve. Try reducing task aggressiveness/weights, "
+            "increasing damping, or loosening conflicting constraints."
+        ),
+        "SHAPE_MISMATCH": (
+            "Shape mismatch detected. Check that each goal length matches Jacobian rows, "
+            "all Jacobians share the same number of columns (nv), and constraints are (m x nv)."
+        ),
+        "EMPTY_PROBLEM": (
+            "Empty problem setup. Provide at least one objective and a non-empty "
+            "constraint matrix with matching bounds."
+        ),
+        "CONSTRAINT_BOUNDS_MISMATCH": (
+            "Constraint/bounds mismatch. Ensure lower/upper bounds lengths equal "
+            "the number of rows in the constraint matrix."
+        ),
+        "NON_FINITE_INPUT": (
+            "Non-finite values reached the solver. Check for NaN/Inf in task targets, "
+            "Jacobians, constraints, and state updates."
+        ),
+    }
+    base = hints.get(
+        status_name,
+        "Unknown solver status. Inspect result fields and input dimensions.",
+    )
+    if status_message:
+        return f"{base} Details: {status_message}"
+    return base
+
 __all__ = [
     # C++ classes (when available)
     "RobotModel",
@@ -113,6 +160,7 @@ __all__ = [
     "VelocitySolverResult",
     "PositionIKOptions",
     "PositionIKResult",
+    "get_solver_status_hint",
     # Python utilities
     "get_pose_error_vector",
     "r2q",

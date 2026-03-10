@@ -201,3 +201,54 @@ class TestRelativePoseConstraint:
             result = solver.solve_velocity(q)
             q = q + np.array(result.joint_velocities) * solver.dt
             robot.update_configuration(q)
+
+    def test_outside_relative_bound_rollout_beats_unconstrained(self, dual_arm_solver):
+        """Relative constraint should reduce violation trend and avoid invalid input."""
+        solver, robot, q0 = dual_arm_solver
+
+        # Build a persistent left-arm task that tends to increase relative x.
+        left_task = solver.add_frame_task("left_outward", "left_ee")
+        left_task.weight = 10.0
+        left_pose = robot.get_frame_pose("left_ee")
+        left_task.set_target_pose(
+            left_pose.translation + np.array([0.06, 0.0, 0.0]), left_pose.rotation
+        )
+
+        rel0 = get_relative_position(robot, "left_ee", "right_ee")
+        x_min = rel0[0] + 0.01  # initial state starts outside this lower bound
+        lower = np.array([x_min, -10.0, -10.0, -10.0, -10.0, -10.0])
+        upper = np.array([x_min + 0.04, 10.0, 10.0, 10.0, 10.0, 10.0])
+        mask = np.array([1, 0, 0, 0, 0, 0], dtype=np.float64)
+
+        def rollout(apply_constraint: bool, steps: int = 120):
+            q = q0.copy()
+            robot.update_configuration(q)
+            if apply_constraint:
+                solver.configure_relative_pose_constraint(
+                    "left_ee", "right_ee", lower, upper, mask
+                )
+            else:
+                solver.clear_relative_pose_constraint()
+
+            invalid_input_count = 0
+            for _ in range(steps):
+                result = solver.solve_velocity(q)
+                if result.status == embodik.SolverStatus.INVALID_INPUT:
+                    invalid_input_count += 1
+                assert result.status != embodik.SolverStatus.INVALID_INPUT
+                q = q + np.array(result.joint_velocities) * solver.dt
+                robot.update_configuration(q)
+
+            rel = get_relative_position(robot, "left_ee", "right_ee")
+            violation = max(0.0, x_min - rel[0])
+            return violation, invalid_input_count
+
+        violation_free, invalid_free = rollout(apply_constraint=False)
+        violation_constrained, invalid_constrained = rollout(apply_constraint=True)
+
+        assert invalid_free == 0
+        assert invalid_constrained == 0
+        assert violation_constrained <= violation_free + 1e-6, (
+            f"Expected constrained relative rollout to reduce violation: "
+            f"free={violation_free:.6f}, constrained={violation_constrained:.6f}"
+        )
