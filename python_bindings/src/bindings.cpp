@@ -53,7 +53,8 @@ NB_MODULE(_embodik_impl, m) {
       .value("EMPTY_PROBLEM", eik::SolverStatus::kEmptyProblem)
       .value("CONSTRAINT_BOUNDS_MISMATCH",
              eik::SolverStatus::kConstraintBoundsMismatch)
-      .value("NON_FINITE_INPUT", eik::SolverStatus::kNonFiniteInput);
+      .value("NON_FINITE_INPUT", eik::SolverStatus::kNonFiniteInput)
+      .value("INFEASIBLE", eik::SolverStatus::kInfeasible);
 
   // Types
   nb::class_<eik::BasicSolverConfig>(m, "BasicSolverConfig",
