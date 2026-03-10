@@ -137,6 +137,11 @@ def get_solver_status_hint(status, status_message: str | None = None) -> str:
             "Non-finite values reached the solver. Check for NaN/Inf in task targets, "
             "Jacobians, constraints, and state updates."
         ),
+        "INFEASIBLE": (
+            "Solver stayed numerically stable, but no feasible solution satisfies "
+            "the active goals and constraints together. Relax conflicting constraints, "
+            "reduce target magnitudes, or adjust task priorities/weights."
+        ),
     }
     base = hints.get(
         status_name,

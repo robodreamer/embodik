@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.0] - 2026-03-10
+
+### Added
+- New public solver outcome `INFEASIBLE` across C++/Python status enums and stubs to distinguish clean infeasibility from numerical failures.
+- Explicit high-level status-message coverage for infeasible outcomes in velocity and position solving, including position-IK non-convergence classification.
+- Regression tests for status exposure, infeasibility hinting, and high-level infeasible/non-convergence behavior.
+
+### Changed
+- High-level `KinematicsSolver` now classifies numerically stable but unachievable outcomes as `INFEASIBLE` instead of overloading `NUMERICAL_ERROR`.
+- `solve_velocity()` now preserves and surfaces backend `status_message` details to downstream callers.
+- CoM rollout tests now accept `INFEASIBLE` as a valid constrained-solve outcome while preserving behavioral assertions.
+
 ## [0.12.6] - 2026-03-10
 
 ### Added
