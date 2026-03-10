@@ -52,6 +52,7 @@ warp-lang = ">=1.0.0"
 [tasks]
 # Patch Qhull CMake config before building (workaround for conda-forge qhull package)
 patch-qhull = "python scripts/patch_qhull_cmake.py"
+clean-dist = "bash -lc 'shopt -s nullglob; rm -f dist/*.tar.gz dist/*.whl'"
 # Development install with automatic rebuild on import (2025 best practice)
 install = { cmd = "pip install -e . --no-build-isolation", depends-on = [
     "patch-qhull",
@@ -82,9 +83,9 @@ format = "black python/ test/ && isort python/ test/"
 docs-build = { cmd = "python -W ignore::DeprecationWarning:hppfcl -m mkdocs build", depends-on = ["install"] }
 docs-serve = "mkdocs serve"
 # Build distributions
-build-wheel = { cmd = "python -m build --wheel", depends-on = ["patch-qhull"] }
-build-sdist = { cmd = "python -m build --sdist", depends-on = ["patch-qhull"] }
-build-dist = { cmd = "python -m build", depends-on = ["patch-qhull"] }
+build-wheel = { cmd = "python -m build --wheel", depends-on = ["clean-dist", "patch-qhull"] }
+build-sdist = { cmd = "python -m build --sdist", depends-on = ["clean-dist", "patch-qhull"] }
+build-dist = { cmd = "python -m build", depends-on = ["clean-dist", "patch-qhull"] }
 # Setup PyPI credentials (run once to create ~/.pypirc)
 setup-pypirc = "bash scripts/setup_pypirc.sh"
 # Upload to PyPI (requires credentials configured in ~/.pypirc)
