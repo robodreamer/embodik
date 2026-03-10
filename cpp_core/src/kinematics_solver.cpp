@@ -498,19 +498,32 @@ static void polygon_to_halfplanes(const std::vector<Eigen::Vector2d> &hull,
   const int n = static_cast<int>(hull.size());
   A.resize(n, 2);
   b.resize(n);
+  Eigen::Vector2d centroid = Eigen::Vector2d::Zero();
+  for (const auto &v : hull)
+    centroid += v;
+  centroid /= static_cast<double>(n);
+
   for (int i = 0; i < n; ++i) {
     const Eigen::Vector2d &v0 = hull[i];
     const Eigen::Vector2d &v1 = hull[(i + 1) % n];
     Eigen::Vector2d edge = v1 - v0;
-    // Outward normal (CCW hull: right side is outside)
+    // Candidate outward normal (CCW hull: right side is outside).
     Eigen::Vector2d normal(edge.y(), -edge.x());
     const double len = normal.norm();
     if (len < 1e-12)
       normal = Eigen::Vector2d(1.0, 0.0);
     else
       normal /= len;
+
+    double bi = normal.dot(v0);
+    // Robust orientation guard: enforce that polygon centroid lies in the
+    // feasible half-space A*x <= b (inside polygon), regardless of winding.
+    if (normal.dot(centroid) > bi) {
+      normal = -normal;
+      bi = -bi;
+    }
     A.row(i) = normal.transpose();
-    b(i) = normal.dot(v0);
+    b(i) = bi;
   }
 }
 
@@ -690,6 +703,8 @@ KinematicsSolver::compute_com_constraint() {
   // frames.  Matches the kMarginEpsilon pattern in
   // calculate_velocity_box_constraint().
   constexpr double kSlackEps = 1e-4; // 0.1 mm
+  constexpr double kComRecoveryScale = 0.2;
+  constexpr double kComMinRecoverySpeed = 0.01;
 
   // All half-plane rows always participate so that vel_max and acceleration
   // limits are enforced everywhere (matching the Spot Flex IK pattern).
@@ -710,6 +725,7 @@ KinematicsSolver::compute_com_constraint() {
   // stops outward motion without commanding a recovery kick that would
   // cause chattering.
   Eigen::VectorXd lower(n_hp), upper(n_hp);
+  Eigen::ArrayXi violated_rows = Eigen::ArrayXi::Zero(n_hp);
 
   for (int i = 0; i < n_hp; ++i) {
     const double m = slack(i);
@@ -732,13 +748,18 @@ KinematicsSolver::compute_com_constraint() {
 
     upper(i) = ub;
 
-    // Lower bound: allow full velocity away from boundary, but if the
-    // CoM is significantly outside (slack < -eps) also let the solver
-    // push it back inward without over-restricting.
+    // Outside recovery (collision-style):
+    // If the CoM is significantly outside this half-plane, enforce a minimum
+    // inward speed (negative upper bound on outward-normal velocity) so the
+    // QP actively escapes violation instead of settling at dq=0.
     if (m < -kSlackEps) {
-      // Outside by more than epsilon: relax the upper bound so the QP
-      // can push the CoM back toward the interior.
-      upper(i) = vel_max;
+      violated_rows(i) = 1;
+      const double violation = -m - kSlackEps;
+      const double desired = violation / std::max(dt_, 1e-6);
+      const double recovery_speed = std::min(
+          vel_max,
+          std::max(kComMinRecoverySpeed, desired * kComRecoveryScale));
+      upper(i) = -recovery_speed;
     }
 
     lower(i) = -vel_max;
@@ -748,6 +769,7 @@ KinematicsSolver::compute_com_constraint() {
   result.jacobian = J_all;
   result.lower_bounds = lower;
   result.upper_bounds = upper;
+  result.violated_rows = violated_rows;
   return result;
 }
 
@@ -1598,6 +1620,34 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
   if (com_constraint_result.has_value() && !excluded_union.empty()) {
     for (int idx : excluded_union)
       com_constraint_result->jacobian.col(idx).setZero();
+  }
+
+  // Task normal projection for violated CoM rows:
+  // when outside a half-plane, remove task components that increase outward
+  // velocity along that half-plane normal. This mirrors collision behavior and
+  // keeps tangential/inward motion available instead of globally scaling tasks.
+  if (apply_limits && com_constraint_result.has_value()) {
+    const auto &com = com_constraint_result.value();
+    for (int k = 0; k < static_cast<int>(com.jacobian.rows()); ++k) {
+      if (k >= com.violated_rows.size() || com.violated_rows(k) == 0) {
+        continue;
+      }
+      Eigen::RowVectorXd n_row = com.jacobian.row(k);
+      const double nn = n_row.squaredNorm();
+      if (nn <= 1e-12) {
+        continue;
+      }
+      n_row /= std::sqrt(nn);
+      for (auto &jac : jacobians) {
+        for (int r = 0; r < static_cast<int>(jac.rows()); ++r) {
+          const double proj = jac.row(r).dot(n_row);
+          if (proj > 0.0) {
+            // Outward component: remove it, keep tangential/inward.
+            jac.row(r) -= proj * n_row;
+          }
+        }
+      }
+    }
   }
 
   // Relative pose constraint

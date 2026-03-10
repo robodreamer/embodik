@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.5] - 2026-03-10
+
+### Changed
+- CoM support-polygon constraints now apply collision-style violation handling: when outside a half-plane, task Jacobians are projected to remove outward motion components while preserving tangential/inward directions.
+- CoM constraint bounds now include active outside recovery behavior with minimum inward recovery speed and proportional scaling, improving escape behavior when starting in violation.
+- CoM half-plane construction now includes a centroid-side orientation guard so feasibility is robust to polygon winding/orientation.
+
+### Added
+- New CoM regression tests covering outside-violation behavior:
+  - single-step suppression of further outward motion while outside, and
+  - multi-step constrained-vs-unconstrained rollout comparison.
+
 ## [0.12.4] - 2026-03-06
 
 ### Changed

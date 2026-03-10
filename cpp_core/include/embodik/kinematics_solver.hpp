@@ -634,6 +634,7 @@ private:
     Eigen::MatrixXd jacobian;      // (#half-planes x nv)
     Eigen::VectorXd lower_bounds;
     Eigen::VectorXd upper_bounds;
+    Eigen::ArrayXi violated_rows;  // 1 where row slack is outside (< -eps)
   };
 
   std::optional<ComConstraintConfig> com_constraint_;
