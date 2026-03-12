@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.2] - 2026-03-12
+
+### Added
+- Collision-boundary jitter guardrails for adaptive relaxation: new regression tests compare `SCALE` vs `MIN_ERROR` near active collision-distance limits using both distance-stddev and sign-flip metrics.
+
+### Changed
+- Near-boundary collision handling now applies a small violation dead-zone just below `min_distance` to reduce numerical chatter while preserving recovery behavior for real violations.
+
 ## [0.13.1] - 2026-03-12
 
 ### Added
