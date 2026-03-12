@@ -184,11 +184,15 @@ def main(args: argparse.Namespace) -> None:
     frame_task = solver.add_frame_task("ee_task", target_link)
     frame_task.priority = 0
     frame_task.weight = 1.0
+    frame_task.solve_mode = embodik.TaskSolveMode.SCALE
+    frame_task.allow_min_error_fallback = False
     frame_task.set_target_velocity(np.zeros(6))
 
     posture_task = solver.add_posture_task("posture")
     posture_task.priority = 1
     posture_task.weight = 0.01
+    posture_task.solve_mode = embodik.TaskSolveMode.MIN_ERROR
+    posture_task.allow_min_error_fallback = False
     posture_task.set_target_configuration(q_default)
 
     # ------------------------------------------------------------------
@@ -241,6 +245,16 @@ def main(args: argparse.Namespace) -> None:
         rot_gain = server.gui.add_slider("Rotation Gain", min=10, max=100, initial_value=60, step=5)
         max_lin_step = server.gui.add_slider("Max Linear Step (m/s)", min=0.1, max=1.0, initial_value=0.5, step=0.05)
         max_ang_step = server.gui.add_slider("Max Angular Step (rad/s)", min=0.1, max=1.0, initial_value=0.5, step=0.05)
+        ee_mode_dropdown = server.gui.add_dropdown(
+            "EE Solve Mode",
+            options=("SCALE", "MIN_ERROR"),
+            initial_value="SCALE",
+        )
+        ee_fallback_checkbox = server.gui.add_checkbox(
+            "Allow SCALE fallback to MIN_ERROR",
+            initial_value=False,
+        )
+        solve_diag = server.gui.add_text("Solve Diagnostic", initial_value="mode=SCALE, fb=False, scale=1.000")
         reset_btn = server.gui.add_button("Reset Arm")
 
     # ------------------------------------------------------------------
@@ -414,9 +428,31 @@ def main(args: argparse.Namespace) -> None:
         )
 
         frame_task.weight = 1.0
+        frame_task.solve_mode = (
+            embodik.TaskSolveMode.MIN_ERROR
+            if ee_mode_dropdown.value == "MIN_ERROR"
+            else embodik.TaskSolveMode.SCALE
+        )
+        frame_task.allow_min_error_fallback = bool(ee_fallback_checkbox.value)
         frame_task.set_target_velocity(target_velocity)
 
         result = solver.solve_velocity(q_current, apply_limits=True)
+        effective_mode = (
+            result.task_modes_effective[0].name
+            if len(result.task_modes_effective) > 0
+            else "SCALE"
+        )
+        used_fallback = (
+            bool(result.task_used_fallback[0])
+            if len(result.task_used_fallback) > 0
+            else False
+        )
+        scale_value = (
+            float(result.task_scales[0])
+            if len(result.task_scales) > 0
+            else 1.0
+        )
+        solve_diag.value = f"mode={effective_mode}, fb={used_fallback}, scale={scale_value:.3f}"
 
         if result.status == embodik.SolverStatus.SUCCESS:
             dq = result.joint_velocities * solver.dt

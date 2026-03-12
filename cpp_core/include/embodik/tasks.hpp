@@ -11,9 +11,10 @@
 #pragma once
 
 #include <Eigen/Dense>
+#include <embodik/types.hpp>
 #include <memory>
-#include <string>
 #include <optional>
+#include <string>
 
 namespace embodik {
 
@@ -149,12 +150,24 @@ public:
     void setPriority(int priority) { priority_ = priority; }
     void setWeight(double weight) { weight_ = weight; }
     void setActive(bool active) { active_ = active; }
+    TaskSolveMode getSolveMode() const { return solve_mode_; }
+    void setSolveMode(TaskSolveMode mode) { solve_mode_ = mode; }
+    bool getAllowMinErrorFallback() const { return allow_min_error_fallback_; }
+    void setAllowMinErrorFallback(bool allow) { allow_min_error_fallback_ = allow; }
+    TaskSolveMode getLastEffectiveMode() const { return last_effective_mode_; }
+    void setLastEffectiveMode(TaskSolveMode mode) { last_effective_mode_ = mode; }
+    bool getUsedMinErrorFallback() const { return used_min_error_fallback_; }
+    void setUsedMinErrorFallback(bool used) { used_min_error_fallback_ = used; }
 
 protected:
     std::string name_;
     int priority_;
     double weight_;
     bool active_ = true;
+    TaskSolveMode solve_mode_ = TaskSolveMode::kScale;
+    bool allow_min_error_fallback_ = false;
+    TaskSolveMode last_effective_mode_ = TaskSolveMode::kScale;
+    bool used_min_error_fallback_ = false;
     mutable std::optional<Eigen::VectorXd> target_velocity_;  // Direct velocity specification
     std::vector<int> excluded_joint_indices_;  // Velocity space indices to exclude from Jacobian
 };

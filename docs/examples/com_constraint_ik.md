@@ -23,6 +23,21 @@ solver.configure_com_constraint(
 )
 ```
 
+You can test adaptive relaxation behavior in the same demo:
+
+```python
+frame_task.solve_mode = embodik.TaskSolveMode.SCALE
+frame_task.allow_min_error_fallback = True
+posture_task.solve_mode = embodik.TaskSolveMode.MIN_ERROR
+```
+
+During runtime, inspect:
+
+```python
+result = solver.solve_velocity(q_current, apply_limits=True)
+print(result.task_modes_effective[0], result.task_used_fallback[0], result.task_scales[0])
+```
+
 ## Run
 
 ```bash

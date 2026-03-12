@@ -27,6 +27,10 @@ void bind_tasks(nb::module_ &m) {
       .value("POSTURE", TaskType::POSTURE)
       .value("JOINT", TaskType::JOINT);
 
+  nb::enum_<TaskSolveMode>(m, "TaskSolveMode")
+      .value("SCALE", TaskSolveMode::kScale)
+      .value("MIN_ERROR", TaskSolveMode::kMinError);
+
   // Base Task class (abstract, so we don't expose constructor)
   nb::class_<Task>(m, "Task")
       .def("update", &Task::update, nb::arg("model"),
@@ -49,6 +53,15 @@ void bind_tasks(nb::module_ &m) {
                    "Task weight/gain")
       .def_prop_rw("active", &Task::isActive, &Task::setActive,
                    "Whether task is active")
+      .def_prop_rw("solve_mode", &Task::getSolveMode, &Task::setSolveMode,
+                   "Task solve mode (SCALE or MIN_ERROR)")
+      .def_prop_rw("allow_min_error_fallback", &Task::getAllowMinErrorFallback,
+                   &Task::setAllowMinErrorFallback,
+                   "Allow SCALE mode to fallback to MIN_ERROR when scale collapses")
+      .def_prop_ro("last_effective_mode", &Task::getLastEffectiveMode,
+                   "Effective mode used by the last solve")
+      .def_prop_ro("used_min_error_fallback", &Task::getUsedMinErrorFallback,
+                   "Whether fallback was used in the last solve")
       .def("set_excluded_joint_indices", &Task::set_excluded_joint_indices,
            nb::arg("excluded_indices"),
            "Set excluded joint indices (velocity space indices to exclude from "

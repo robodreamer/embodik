@@ -80,6 +80,10 @@ def test_multi_task_api():
     # Solution should be close to goal for identity Jacobian
     assert math.isclose(result.solution[0], 1.0, rel_tol=1e-2, abs_tol=1e-2)
     assert math.isclose(result.solution[1], -2.0, rel_tol=1e-2, abs_tol=1e-2)
+    assert len(result.task_modes_effective) == 1
+    assert len(result.task_used_fallback) == 1
+    assert result.task_modes_effective[0] == eik.TaskSolveMode.SCALE
+    assert result.task_used_fallback[0] is False
 
 
 def test_eigen_first_multi_task():
@@ -363,6 +367,21 @@ def test_split_tasks_bypass_single_scale_limitation():
     assert solution[1] > 0.0
     assert result.task_scales[0] == pytest.approx(0.0, abs=SCALE_EPSILON)
     assert result.task_scales[1] > 0.0
+
+
+def test_min_error_mode_marks_effective_mode_and_task_errors():
+    """MIN_ERROR mode should populate diagnostics and residual task error."""
+    goals = [np.array([1.0])]
+    jacobians = [np.array([[1.0, 0.0]])]
+    C = np.eye(2)
+    lower = np.array([0.0, -1.0])
+    upper = np.array([0.0, 1.0])  # First joint blocked
+
+    result = eik.computeMultiObjectiveVelocitySolutionEigen(goals, jacobians, C, lower, upper)
+    assert result.status == eik.SolverStatus.SUCCESS
+    assert len(result.task_errors) == 1
+    assert len(result.task_modes_effective) == 1
+    assert len(result.task_used_fallback) == 1
 
 
 def test_multi_task_prioritization():
