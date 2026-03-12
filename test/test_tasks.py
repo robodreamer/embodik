@@ -345,7 +345,7 @@ class TestTasks:
         """Task solve mode defaults and setters should round-trip."""
         task = embodik.FrameTask("mode_task", robot_model, "end_effector")
         assert task.solve_mode == embodik.TaskSolveMode.SCALE
-        assert task.allow_min_error_fallback is False
+        assert task.allow_min_error_fallback is True
 
         task.solve_mode = embodik.TaskSolveMode.MIN_ERROR
         task.allow_min_error_fallback = True

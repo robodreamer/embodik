@@ -343,14 +343,14 @@ class embodiKBackend:
         self.frame_task.priority = 0
         self.frame_task.weight = 0.0
         self.frame_task.solve_mode = embodik.TaskSolveMode.SCALE
-        self.frame_task.allow_min_error_fallback = False
+        self.frame_task.allow_min_error_fallback = True
         self.frame_task.set_target_velocity(self._zero_velocity)
 
         self.nullspace_task = self.solver.add_posture_task("posture_task")
         self.nullspace_task.priority = 1
         self.nullspace_task.weight = 0.0
         self.nullspace_task.solve_mode = embodik.TaskSolveMode.MIN_ERROR
-        self.nullspace_task.allow_min_error_fallback = False
+        self.nullspace_task.allow_min_error_fallback = True
         self.nullspace_task.set_target_configuration(self.q.copy())
         self.nullspace_task.set_controlled_joint_indices([])
 
