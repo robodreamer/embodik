@@ -165,7 +165,7 @@ protected:
     double weight_;
     bool active_ = true;
     TaskSolveMode solve_mode_ = TaskSolveMode::kScale;
-    bool allow_min_error_fallback_ = false;
+    bool allow_min_error_fallback_ = true;
     TaskSolveMode last_effective_mode_ = TaskSolveMode::kScale;
     bool used_min_error_fallback_ = false;
     mutable std::optional<Eigen::VectorXd> target_velocity_;  // Direct velocity specification

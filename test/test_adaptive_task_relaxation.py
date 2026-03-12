@@ -52,7 +52,7 @@ def test_task_mode_defaults_and_roundtrip():
     try:
         task = solver.add_frame_task("ee", "ee", eik.TaskType.FRAME_POSE)
         assert task.solve_mode == eik.TaskSolveMode.SCALE
-        assert task.allow_min_error_fallback is False
+        assert task.allow_min_error_fallback is True
 
         task.solve_mode = eik.TaskSolveMode.MIN_ERROR
         task.allow_min_error_fallback = True

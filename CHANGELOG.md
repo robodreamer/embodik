@@ -9,14 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - Regression coverage for adaptive task relaxation on Panda, including `MIN_ERROR` progress checks with and without nullspace posture bias.
+- Adaptive relaxation is now enabled by default for `SCALE` tasks via automatic fallback to `MIN_ERROR` when scale collapses.
 
 ### Changed
 - Refined clamped `MIN_ERROR` active-set behavior to preserve hierarchical projector updates and improve constrained progress when saturation evolves.
 - Kept the release focused by dropping temporary scripted trace/debug tooling from examples.
 
 ### Fixed
-- Fixed a `MIN_ERROR` loop-control path that could skip objective projector updates and degrade lower-priority task behavior.
-- Fixed `MIN_ERROR` termination fallback handling to avoid pathological stagnation/oscillation in constrained scenarios.
+- Resolved a `MIN_ERROR` loop-control path that could skip objective projector updates and degrade lower-priority task behavior.
+- Resolved `MIN_ERROR` termination fallback handling to avoid pathological stagnation/oscillation in constrained scenarios.
 
 ## [0.13.0] - 2026-03-10
 
