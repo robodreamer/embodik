@@ -185,14 +185,14 @@ def main(args: argparse.Namespace) -> None:
     frame_task.priority = 0
     frame_task.weight = 1.0
     frame_task.solve_mode = embodik.TaskSolveMode.SCALE
-    frame_task.allow_min_error_fallback = False
+    frame_task.allow_min_error_fallback = True
     frame_task.set_target_velocity(np.zeros(6))
 
     posture_task = solver.add_posture_task("posture")
     posture_task.priority = 1
     posture_task.weight = 0.01
     posture_task.solve_mode = embodik.TaskSolveMode.MIN_ERROR
-    posture_task.allow_min_error_fallback = False
+    posture_task.allow_min_error_fallback = True
     posture_task.set_target_configuration(q_default)
 
     # ------------------------------------------------------------------

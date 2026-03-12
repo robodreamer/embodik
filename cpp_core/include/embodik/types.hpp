@@ -106,7 +106,7 @@ struct VelocitySolverConfig {
 struct ObjectiveSolveConfig {
   int priority = 0;
   TaskSolveMode solve_mode = TaskSolveMode::kScale;
-  bool allow_min_error_fallback = false;
+  bool allow_min_error_fallback = true;
 };
 
 // Position IK options
