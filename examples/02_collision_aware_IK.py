@@ -291,6 +291,9 @@ class embodiKResult:
     position_error: float
     rotation_error: float
     elapsed_ms: float
+    primary_mode: str = "SCALE"
+    primary_fallback: bool = False
+    primary_scale: float = 1.0
 
 
 class embodiKBackend:
@@ -339,11 +342,15 @@ class embodiKBackend:
         self.frame_task = self.solver.add_frame_task("ee_task", self.cfg.target_link)
         self.frame_task.priority = 0
         self.frame_task.weight = 0.0
+        self.frame_task.solve_mode = embodik.TaskSolveMode.SCALE
+        self.frame_task.allow_min_error_fallback = False
         self.frame_task.set_target_velocity(self._zero_velocity)
 
         self.nullspace_task = self.solver.add_posture_task("posture_task")
         self.nullspace_task.priority = 1
         self.nullspace_task.weight = 0.0
+        self.nullspace_task.solve_mode = embodik.TaskSolveMode.MIN_ERROR
+        self.nullspace_task.allow_min_error_fallback = False
         self.nullspace_task.set_target_configuration(self.q.copy())
         self.nullspace_task.set_controlled_joint_indices([])
 
@@ -370,7 +377,15 @@ class embodiKBackend:
         nullspace_bias: np.ndarray,
         nullspace_gain: float,
         nullspace_enabled: bool,
+        ee_mode: str = "SCALE",
+        ee_fallback: bool = False,
     ) -> embodiKResult:
+        self.frame_task.solve_mode = (
+            embodik.TaskSolveMode.MIN_ERROR
+            if ee_mode == "MIN_ERROR"
+            else embodik.TaskSolveMode.SCALE
+        )
+        self.frame_task.allow_min_error_fallback = bool(ee_fallback)
         self.frame_task.weight = 0.0
         current = self.get_pose()
         pose_error = compute_pose_error(current, target)
@@ -416,6 +431,21 @@ class embodiKBackend:
             position_error=float(np.linalg.norm(final_error[:3])),
             rotation_error=float(np.linalg.norm(final_error[3:])),
             elapsed_ms=elapsed_ms,
+            primary_mode=(
+                result.task_modes_effective[0].name
+                if len(result.task_modes_effective) > 0
+                else "SCALE"
+            ),
+            primary_fallback=(
+                bool(result.task_used_fallback[0])
+                if len(result.task_used_fallback) > 0
+                else False
+            ),
+            primary_scale=(
+                float(result.task_scales[0])
+                if len(result.task_scales) > 0
+                else 1.0
+            ),
         )
 
     def reset(self) -> pin.SE3:
@@ -521,6 +551,15 @@ def run_gui(cfg: RobotConfig, args: argparse.Namespace) -> None:
             "Enable Self-Collision",
             initial_value=False,
             disabled=not hasattr(backend, "enable_self_collision"),
+        )
+        ee_mode_dropdown = server.gui.add_dropdown(
+            "EE Solve Mode",
+            options=("SCALE", "MIN_ERROR"),
+            initial_value="SCALE",
+        )
+        ee_fallback_checkbox = server.gui.add_checkbox(
+            "Allow SCALE fallback to MIN_ERROR",
+            initial_value=False,
         )
         collision_debug_checkbox = server.gui.add_checkbox(
             "Show Collision Debug",
@@ -1009,12 +1048,15 @@ def run_gui(cfg: RobotConfig, args: argparse.Namespace) -> None:
                 nullspace_bias,
                 nullspace_gain.value,
                 nullspace_enabled_checkbox.value,
+                ee_mode=ee_mode_dropdown.value,
+                ee_fallback=ee_fallback_checkbox.value,
             )
             q_current = result.joints
             solver_elapsed_ms = result.elapsed_ms
             status_handle.value = (
                 f"Status: embodiK {result.status} | "
-                f"pos={result.position_error*1e3:.2f} mm, rot={result.rotation_error:.4f} rad"
+                f"pos={result.position_error*1e3:.2f} mm, rot={result.rotation_error:.4f} rad | "
+                f"mode={result.primary_mode}, fb={result.primary_fallback}, scale={result.primary_scale:.3f}"
             )
 
             for slider, value in zip(joint_sliders, q_current):

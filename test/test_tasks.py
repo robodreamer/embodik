@@ -341,6 +341,17 @@ class TestTasks:
         velocity = task.get_velocity()
         assert np.allclose(velocity, -2.0 * error)
 
+    def test_task_solve_mode_properties(self, robot_model):
+        """Task solve mode defaults and setters should round-trip."""
+        task = embodik.FrameTask("mode_task", robot_model, "end_effector")
+        assert task.solve_mode == embodik.TaskSolveMode.SCALE
+        assert task.allow_min_error_fallback is False
+
+        task.solve_mode = embodik.TaskSolveMode.MIN_ERROR
+        task.allow_min_error_fallback = True
+        assert task.solve_mode == embodik.TaskSolveMode.MIN_ERROR
+        assert task.allow_min_error_fallback is True
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

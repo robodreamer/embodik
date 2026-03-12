@@ -161,15 +161,23 @@ static void sanitize_solver_inputs(std::vector<Eigen::VectorXd> &goals,
 
 static ClassifiedOutcome classify_velocity_outcome(
     SolverStatus backend_status, const std::string &backend_status_message,
-    const std::vector<double> &task_scales, double primary_goal_norm) {
+    const std::vector<double> &task_scales, double primary_goal_norm,
+    const std::vector<TaskSolveMode> &task_modes_effective,
+    const std::vector<bool> &task_used_fallback) {
   if (backend_status != SolverStatus::kSuccess) {
     return {backend_status, backend_status_message};
   }
 
   constexpr double kGoalNormEps = 1e-9;
   constexpr double kScaleEps = 1e-9;
+  const bool primary_is_min_error =
+      !task_modes_effective.empty() &&
+      task_modes_effective[0] == TaskSolveMode::kMinError;
+  const bool primary_used_fallback =
+      !task_used_fallback.empty() && task_used_fallback[0];
   if (primary_goal_norm > kGoalNormEps && !task_scales.empty() &&
-      std::abs(task_scales[0]) <= kScaleEps) {
+      std::abs(task_scales[0]) <= kScaleEps && !primary_is_min_error &&
+      !primary_used_fallback) {
     return {SolverStatus::kInfeasible,
             "primary task scale collapsed to zero under active constraints"};
   }
@@ -1554,38 +1562,71 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
   // Collect active tasks: group by priority for order-invariant behavior.
   std::vector<Eigen::VectorXd> goals;
   std::vector<Eigen::MatrixXd> jacobians;
+  std::vector<ObjectiveSolveConfig> objective_configs;
+  std::vector<std::shared_ptr<Task>> objective_tasks;
   std::unordered_set<int> excluded_union;
 
   int current_priority = std::numeric_limits<int>::min();
+  std::vector<std::shared_ptr<Task>> group_tasks;
   std::vector<Eigen::VectorXd> group_goals;
   std::vector<Eigen::MatrixXd> group_jacobians;
+  group_tasks.reserve(tasks_.size());
   group_goals.reserve(tasks_.size());
   group_jacobians.reserve(tasks_.size());
 
   auto flush_group = [&]() {
-    if (group_goals.empty()) {
+    if (group_tasks.empty()) {
       return;
     }
-    int total_rows = 0;
-    for (const auto &g : group_goals) {
-      total_rows += static_cast<int>(g.rows());
-    }
-    Eigen::VectorXd combined_goal(total_rows);
-    Eigen::MatrixXd combined_jac(total_rows, robot_->nv());
-    combined_goal.setZero();
-    combined_jac.setZero();
-    int offset = 0;
-    for (size_t i = 0; i < group_goals.size(); ++i) {
-      const auto &g = group_goals[i];
-      const auto &J = group_jacobians[i];
-      if (g.rows() > 0) {
-        combined_goal.segment(offset, g.rows()) = g;
-        combined_jac.block(offset, 0, J.rows(), robot_->nv()) = J;
-        offset += static_cast<int>(g.rows());
+
+    bool all_scale_no_fallback = true;
+    for (const auto &task : group_tasks) {
+      if (task->getSolveMode() != TaskSolveMode::kScale ||
+          task->getAllowMinErrorFallback()) {
+        all_scale_no_fallback = false;
+        break;
       }
     }
-    goals.push_back(std::move(combined_goal));
-    jacobians.push_back(std::move(combined_jac));
+
+    if (all_scale_no_fallback) {
+      int total_rows = 0;
+      for (const auto &g : group_goals) {
+        total_rows += static_cast<int>(g.rows());
+      }
+      Eigen::VectorXd combined_goal(total_rows);
+      Eigen::MatrixXd combined_jac(total_rows, robot_->nv());
+      combined_goal.setZero();
+      combined_jac.setZero();
+      int offset = 0;
+      for (size_t i = 0; i < group_goals.size(); ++i) {
+        const auto &g = group_goals[i];
+        const auto &J = group_jacobians[i];
+        if (g.rows() > 0) {
+          combined_goal.segment(offset, g.rows()) = g;
+          combined_jac.block(offset, 0, J.rows(), robot_->nv()) = J;
+          offset += static_cast<int>(g.rows());
+        }
+      }
+      goals.push_back(std::move(combined_goal));
+      jacobians.push_back(std::move(combined_jac));
+      objective_configs.push_back(
+          ObjectiveSolveConfig{current_priority, TaskSolveMode::kScale, false});
+      objective_tasks.push_back(nullptr);
+    } else {
+      for (size_t i = 0; i < group_tasks.size(); ++i) {
+        const auto &task = group_tasks[i];
+        goals.push_back(group_goals[i]);
+        jacobians.push_back(group_jacobians[i]);
+        objective_configs.push_back(ObjectiveSolveConfig{
+            task->getPriority(),
+            task->getSolveMode(),
+            task->getAllowMinErrorFallback(),
+        });
+        objective_tasks.push_back(task);
+      }
+    }
+
+    group_tasks.clear();
     group_goals.clear();
     group_jacobians.clear();
   };
@@ -1599,13 +1640,16 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
         excluded_union.insert(idx);
       }
     }
+
     const int prio = task->getPriority();
-    if (group_goals.empty()) {
+    if (group_tasks.empty()) {
       current_priority = prio;
     } else if (prio != current_priority) {
       flush_group();
       current_priority = prio;
     }
+
+    group_tasks.push_back(task);
     group_goals.push_back(task->getVelocity());
     group_jacobians.push_back(task->getJacobian());
   }
@@ -1670,22 +1714,14 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
           barrier_goal[j] = barrier_vel[idx];
           barrier_jac(j, idx) = 1.0;
         }
-        if (goals.size() >= 2) {
-          Eigen::VectorXd &existing_goal = goals[1];
-          Eigen::MatrixXd &existing_jac = jacobians[1];
-          const int existing_rows = static_cast<int>(existing_goal.rows());
-          Eigen::VectorXd combined(existing_rows + k);
-          combined.head(existing_rows) = existing_goal;
-          combined.tail(k) = barrier_goal;
-          Eigen::MatrixXd combined_jac(existing_rows + k, nv);
-          combined_jac.topRows(existing_rows) = existing_jac;
-          combined_jac.bottomRows(k) = barrier_jac;
-          existing_goal = std::move(combined);
-          existing_jac = std::move(combined_jac);
-        } else {
-          goals.push_back(std::move(barrier_goal));
-          jacobians.push_back(std::move(barrier_jac));
-        }
+        goals.push_back(std::move(barrier_goal));
+        jacobians.push_back(std::move(barrier_jac));
+        objective_configs.push_back(ObjectiveSolveConfig{
+            1,
+            TaskSolveMode::kMinError,
+            false,
+        });
+        objective_tasks.push_back(nullptr);
       }
     }
   }
@@ -2011,13 +2047,14 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
 
   // Call the backend solver
   auto backend_result = computeMultiObjectiveVelocitySolutionEigen(
-      goals, jacobians, C, c_lower, c_upper, config);
+      goals, jacobians, C, c_lower, c_upper, config, objective_configs);
   const double primary_goal_norm = goals.empty() ? 0.0 : goals[0].norm();
 
   // Create velocity-specific result
   const auto classified_velocity = classify_velocity_outcome(
       backend_result.status, backend_result.status_message,
-      backend_result.task_scales, primary_goal_norm);
+      backend_result.task_scales, primary_goal_norm,
+      backend_result.task_modes_effective, backend_result.task_used_fallback);
   result.status = classified_velocity.status;
   result.solution = backend_result.solution;
   result.computation_time_ms = backend_result.computation_time_ms;
@@ -2026,8 +2063,20 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
   result.final_error = backend_result.final_error;
   result.task_scales = backend_result.task_scales;
   result.task_errors = backend_result.task_errors;
+  result.task_modes_effective = backend_result.task_modes_effective;
+  result.task_used_fallback = backend_result.task_used_fallback;
   result.status_message = classified_velocity.status_message;
   result.limits_applied = apply_limits;
+
+  for (size_t i = 0; i < objective_tasks.size() &&
+                     i < result.task_modes_effective.size() &&
+                     i < result.task_used_fallback.size();
+       ++i) {
+    if (objective_tasks[i]) {
+      objective_tasks[i]->setLastEffectiveMode(result.task_modes_effective[i]);
+      objective_tasks[i]->setUsedMinErrorFallback(result.task_used_fallback[i]);
+    }
+  }
 
   // Convert solution to Eigen vector
   if (!result.solution.empty()) {
@@ -2123,6 +2172,8 @@ PositionIKResult KinematicsSolver::solve_position(
     posture_task->setTargetConfiguration(options.nullspace_bias.value());
     posture_task->setWeight(options.nullspace_gain);
     posture_task->setPriority(1); // Lower priority than main task
+    posture_task->setSolveMode(TaskSolveMode::kMinError);
+    posture_task->setAllowMinErrorFallback(false);
     if (!options.excluded_joint_indices.empty()) {
       posture_task->set_excluded_joint_indices(options.excluded_joint_indices);
     }
@@ -2191,6 +2242,7 @@ PositionIKResult KinematicsSolver::solve_position(
     // Prepare tasks for solving
     std::vector<Eigen::VectorXd> goals;
     std::vector<Eigen::MatrixXd> jacobians;
+    std::vector<ObjectiveSolveConfig> objective_configs;
 
     // Primary task: end-effector position/orientation
     Eigen::VectorXd v_desired = frame_task->getVelocity();
@@ -2214,12 +2266,16 @@ PositionIKResult KinematicsSolver::solve_position(
 
     goals.push_back(v_desired);
     jacobians.push_back(frame_task->getJacobian());
+    objective_configs.push_back(
+        ObjectiveSolveConfig{0, TaskSolveMode::kScale, false});
 
     // Secondary task: nullspace bias (if provided)
     if (posture_task) {
       posture_task->update(*robot_);
       goals.push_back(posture_task->getVelocity());
       jacobians.push_back(posture_task->getJacobian());
+      objective_configs.push_back(
+          ObjectiveSolveConfig{1, TaskSolveMode::kMinError, false});
     }
 
     // Compute collision constraint if enabled
@@ -2297,7 +2353,7 @@ PositionIKResult KinematicsSolver::solve_position(
 
     // Call the backend solver
     auto vel_result = computeMultiObjectiveVelocitySolutionEigen(
-        goals, jacobians, C, c_lower, c_upper, config);
+        goals, jacobians, C, c_lower, c_upper, config, objective_configs);
 
     if (vel_result.status != SolverStatus::kSuccess) {
       result.status = vel_result.status;

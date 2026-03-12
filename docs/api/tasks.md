@@ -71,6 +71,38 @@ tasks = [
 result = solver.solve_multi_task_ik(tasks=tasks, initial_q=q0)
 ```
 
+## Task Solve Modes
+
+Each task can be solved in one of two modes:
+
+- `TaskSolveMode.SCALE` (default): classic SNS/eSNS behavior that preserves task
+  direction with a scale factor in `[0, 1]`.
+- `TaskSolveMode.MIN_ERROR`: clamped minimum-error behavior that computes the
+  best feasible residual motion under active constraints.
+
+You can also enable automatic fallback from `SCALE` to `MIN_ERROR` when scale
+collapses:
+
+```python
+task = solver.add_frame_task("ee", "panda_hand", embodik.TaskType.FRAME_POSE)
+task.solve_mode = embodik.TaskSolveMode.SCALE
+task.allow_min_error_fallback = True
+```
+
+After `solve_velocity()`, inspect effective diagnostics:
+
+```python
+result = solver.solve_velocity(q)
+print(result.task_modes_effective)
+print(result.task_used_fallback)
+```
+
+Notes:
+
+- User-created tasks default to `SCALE`.
+- Internal nullspace-bias posture tasks used by `solve_position()` run in
+  `MIN_ERROR` mode.
+
 ## API Reference
 
 ::: embodik.FrameTask

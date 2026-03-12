@@ -80,6 +80,8 @@ NB_MODULE(_embodik_impl, m) {
       .def_ro("final_error", &eik::SolverResult::final_error)
       .def_ro("task_scales", &eik::SolverResult::task_scales)
       .def_ro("task_errors", &eik::SolverResult::task_errors)
+      .def_ro("task_modes_effective", &eik::SolverResult::task_modes_effective)
+      .def_ro("task_used_fallback", &eik::SolverResult::task_used_fallback)
       .def_ro("status_message", &eik::SolverResult::status_message);
 
   nb::class_<eik::VelocitySolverResult, eik::SolverResult>(
