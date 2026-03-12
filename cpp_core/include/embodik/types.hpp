@@ -31,6 +31,11 @@
 
 namespace embodik {
 
+enum class TaskSolveMode {
+  kScale = 0,
+  kMinError = 1,
+};
+
 enum class SolverStatus {
   kSuccess = 0,
   kInvalidInput = 1,
@@ -60,6 +65,9 @@ struct SolverResult {
   double final_error = 0.0;        // ||J dq - v|| for velocity IK
   std::vector<double> task_scales; // for full velocity IK
   std::vector<double> task_errors; // Individual task errors
+  std::vector<TaskSolveMode>
+      task_modes_effective; // Effective mode used per task
+  std::vector<bool> task_used_fallback; // True when SCALE fell back to MIN_ERROR
   std::string status_message;      // Human-readable diagnostic for failures
 };
 
@@ -93,6 +101,12 @@ struct VelocitySolverConfig {
   double magnitude_limit = 1e10;
   unsigned int stall_detection_count = 2;
   RegularizedInverseConfig regularization_config{};
+};
+
+struct ObjectiveSolveConfig {
+  int priority = 0;
+  TaskSolveMode solve_mode = TaskSolveMode::kScale;
+  bool allow_min_error_fallback = false;
 };
 
 // Position IK options

@@ -28,10 +28,13 @@ solver.set_damping(0.1)
 frame_task = solver.add_frame_task("ee_task", target_link)
 frame_task.priority = 0
 frame_task.weight = 1.0
+frame_task.solve_mode = embodik.TaskSolveMode.SCALE
+frame_task.allow_min_error_fallback = True  # optional hybrid fallback
 
 posture_task = solver.add_posture_task("posture")
 posture_task.priority = 1
 posture_task.weight = 0.01
+posture_task.solve_mode = embodik.TaskSolveMode.MIN_ERROR
 posture_task.set_target_configuration(q_default)
 
 # 3. Configure collision constraint (self-collision avoidance)
@@ -79,6 +82,12 @@ for _ in range(500):
 debug = solver.get_last_collision_debug()
 if debug is not None:
     print(f"Closest pair: {debug.link_a} — {debug.link_b}, distance={debug.distance:.4f}")
+
+# Hybrid diagnostics
+if result.task_modes_effective:
+    print("EE effective mode:", result.task_modes_effective[0].name)
+if result.task_used_fallback:
+    print("EE used fallback:", result.task_used_fallback[0])
 ```
 
 ## Explanation
