@@ -1002,6 +1002,128 @@ def test_collision_constraint_recovery_produces_motion(tmp_path):
         )
 
 
+def _run_collision_boundary_jitter_rollout(
+    robot: eik.RobotModel,
+    solver: eik.KinematicsSolver,
+    solve_mode: eik.TaskSolveMode,
+    steps: int = 160,
+) -> tuple[float, int]:
+    """Run near-boundary rollout and return (tail_stddev, sign_flip_count)."""
+    q = np.zeros(robot.nq, dtype=float)
+    robot.update_configuration(q)
+    initial_debug = solver.evaluate_collision_debug(q)
+    if initial_debug is None:
+        pytest.skip("Collision debug unavailable for jitter rollout.")
+
+    # Set the threshold very close to the current distance so the boundary
+    # remains active during the rollout and jitter is observable.
+    solver.configure_collision_constraint(
+        min_distance=float(initial_debug.distance) + 1e-5,
+        max_constraints=1,
+    )
+    solver.clear_tasks()
+
+    frame_task = solver.add_frame_task(
+        "ee_boundary", "link1", eik.TaskType.FRAME_POSITION
+    )
+    frame_task.priority = 0
+    frame_task.weight = 1.0
+    frame_task.solve_mode = solve_mode
+    frame_task.allow_min_error_fallback = True
+
+    ee_pos = np.array(robot.get_frame_pose("link1").translation)
+    frame_task.set_target_position(ee_pos + np.array([0.0, 0.10, 0.0], dtype=float))
+
+    distances = []
+    normal_velocity_signs = []
+    for _ in range(steps):
+        result = solver.solve_velocity(q, apply_limits=True)
+        if result.status not in (eik.SolverStatus.SUCCESS, eik.SolverStatus.INFEASIBLE):
+            pytest.skip(f"Unexpected solver status in jitter rollout: {result.status}")
+        dbg = solver.get_last_collision_debug()
+        if dbg is not None:
+            distances.append(float(dbg.distance))
+            # Use first-joint velocity sign as a stable proxy for boundary
+            # response direction in this deterministic regression setup.
+            dq = np.array(result.joint_velocities, dtype=float)
+            s = int(np.sign(dq[0])) if abs(dq[0]) > 1e-7 else 0
+            normal_velocity_signs.append(s)
+        else:
+            normal_velocity_signs.append(0)
+        dq = np.array(result.joint_velocities, dtype=float)
+        q = q + dq * solver.dt
+        q_lower, q_upper = robot.get_joint_limits()
+        q = np.clip(q, q_lower, q_upper)
+        robot.update_configuration(q)
+
+    if len(distances) < 40:
+        pytest.skip("Insufficient collision distance samples for jitter analysis.")
+    tail = np.array(distances[len(distances) // 2 :], dtype=float)
+    tail_signs = normal_velocity_signs[len(normal_velocity_signs) // 2 :]
+    sign_flips = 0
+    prev = 0
+    for s in tail_signs:
+        if s == 0:
+            continue
+        if prev != 0 and s != prev:
+            sign_flips += 1
+        prev = s
+    return float(np.std(tail)), int(sign_flips)
+
+
+def test_min_error_collision_boundary_jitter_not_worse_than_scale(tmp_path):
+    """MIN_ERROR near collision boundary should not chatter significantly more."""
+    urdf_path = _create_three_link_collision_urdf(tmp_path)
+    robot = eik.RobotModel(str(urdf_path), floating_base=False)
+    solver = eik.KinematicsSolver(robot)
+    solver.dt = 0.01
+    if not hasattr(solver, "configure_collision_constraint"):
+        pytest.skip("Collision constraint API not available.")
+
+    try:
+        std_scale, _ = _run_collision_boundary_jitter_rollout(
+            robot, solver, eik.TaskSolveMode.SCALE
+        )
+        std_min_error, _ = _run_collision_boundary_jitter_rollout(
+            robot, solver, eik.TaskSolveMode.MIN_ERROR
+        )
+    except RuntimeError as exc:
+        pytest.skip(f"Collision support unavailable: {exc}")
+
+    # Guardrail: MIN_ERROR is allowed to be slightly noisier, but should stay
+    # in the same jitter band as SCALE near active collision boundary.
+    assert std_min_error <= std_scale * 1.25 + 1e-8, (
+        f"Boundary jitter regressed for MIN_ERROR: "
+        f"std_min_error={std_min_error:.3e}, std_scale={std_scale:.3e}"
+    )
+
+
+def test_min_error_collision_boundary_sign_flips_not_worse_than_scale(tmp_path):
+    """MIN_ERROR boundary sign-flip jitter should stay near SCALE behavior."""
+    urdf_path = _create_three_link_collision_urdf(tmp_path)
+    robot = eik.RobotModel(str(urdf_path), floating_base=False)
+    solver = eik.KinematicsSolver(robot)
+    solver.dt = 0.01
+    if not hasattr(solver, "configure_collision_constraint"):
+        pytest.skip("Collision constraint API not available.")
+
+    try:
+        _, flips_scale = _run_collision_boundary_jitter_rollout(
+            robot, solver, eik.TaskSolveMode.SCALE
+        )
+        _, flips_min_error = _run_collision_boundary_jitter_rollout(
+            robot, solver, eik.TaskSolveMode.MIN_ERROR
+        )
+    except RuntimeError as exc:
+        pytest.skip(f"Collision support unavailable: {exc}")
+
+    # Allow modest increase, but guard against significant extra chattering.
+    assert flips_min_error <= flips_scale + 15, (
+        f"Boundary sign flips regressed for MIN_ERROR: "
+        f"flips_min_error={flips_min_error}, flips_scale={flips_scale}"
+    )
+
+
 def test_collision_constraint_max_constraints_invalid_clamped(tmp_path):
     """max_constraints <= 0 is clamped to 1 without error."""
     urdf_path = _create_minimal_collision_urdf(tmp_path)
