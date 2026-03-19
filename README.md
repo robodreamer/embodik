@@ -55,6 +55,8 @@ python -c "import embodik; print(embodik.__version__, embodik.RobotModel)"
 
 macOS Apple Silicon note:
 - Install Xcode command-line tools first: `xcode-select --install`
+- Install Eigen (required by CMake `find_package(Eigen3)`): `brew install eigen`
+- Before `pip install`, set `export Eigen3_DIR="$(brew --prefix eigen)/share/eigen3/cmake"` (the PyPI `pin` wheel may not ship Eigen’s CMake package).
 - The same `pin` + `CMAKE_PREFIX_PATH` flow above works on `macosx_arm64`.
 
 ### Option B: Robotics Environment (Existing Pinocchio/ROS)
@@ -97,6 +99,7 @@ python 01_basic_ik_simple.py --robot panda
 |-------|-------|-----|
 | `ImportError: libboost_*.so...` | `LD_LIBRARY_PATH` points to local Pinocchio | `unset LD_LIBRARY_PATH` |
 | `ImportError: Library not loaded: @rpath/...` | `DYLD_LIBRARY_PATH` points to a conflicting local Pinocchio/Boost on macOS | `unset DYLD_LIBRARY_PATH` |
+| `Could not find Eigen3` / `Eigen3Config.cmake` (macOS) | Eigen not installed or `Eigen3_DIR` unset | `brew install eigen` then `export Eigen3_DIR="$(brew --prefix eigen)/share/eigen3/cmake"` |
 | `CMake cannot find pinocchio` | Build can't find Pinocchio config | Set `CMAKE_PREFIX_PATH` (see above) |
 | `Cannot import scikit_build_core` | Missing build deps with `--no-build-isolation` | `pip install scikit-build-core nanobind cmake ninja` |
 

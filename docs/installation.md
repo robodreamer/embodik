@@ -32,7 +32,9 @@ python -c "import embodik; print(embodik.__version__, embodik.RobotModel)"
 
 macOS Apple Silicon note:
 - Install Xcode command-line tools first: `xcode-select --install`
-- Then follow the exact same install flow shown above (`pin` + `CMAKE_PREFIX_PATH`).
+- Install Eigen: `brew install eigen` — EmbodiK’s CMake calls `find_package(Eigen3)`, which is not always provided by the `pin` wheel alone.
+- Before installing embodik, run: `export Eigen3_DIR="$(brew --prefix eigen)/share/eigen3/cmake"`
+- Then follow the same install flow as above (`pin` + `CMAKE_PREFIX_PATH`).
 
 ## Option B: Robotics Environment (Existing Pinocchio/ROS/Boost)
 
