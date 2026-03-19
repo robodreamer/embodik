@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.1] - 2026-03-19
+
+### Added
+- **`PositionStepOptions`**: optional task-space speed caps `max_linear_speed` and `max_angular_speed` (≤0 = unlimited); applied inside `solve_position_step` after gain × pose error.
+- **`KinematicsSolver::clear_all_target_velocities()`** — clears direct `target_velocity` on every registered task; exposed in Python bindings.
+- **Tests**: `test/test_position_step_speed_limits.py` — stale-velocity cleanup after stepping IK and linear speed-cap behavior.
+
+### Changed
+- **`solve_position_step`**: after each call, clear direct velocities on **all** registered tasks (single-task path uses the same global cleanup as multi-task). Prevents stale `setTargetVelocity` / stepping leftovers from affecting the next `solve_velocity` or frame.
+
+### Docs
+- **`Task::getVelocity()`** — note that direct-velocity magnitude is **not** scaled by `weight_`; use `weight = 0`, `active = false`, or `clearTargetVelocity()` to drop contribution.
+
 ## [0.14.0] - 2026-03-19
 
 ### Added

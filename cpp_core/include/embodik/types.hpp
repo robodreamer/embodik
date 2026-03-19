@@ -145,6 +145,9 @@ struct PositionStepOptions {
   double orientation_gain = 1.0; // Multiplier on the angular error → velocity
   int max_steps = 1;             // Number of velocity-IK iterations
   double dt = -1.0;              // Integration timestep per step (≤0 → solver.dt)
+  // Optional task-space speed caps (0 or negative = unlimited).
+  double max_linear_speed = 0.0;  // m/s cap on ||v_linear||
+  double max_angular_speed = 0.0; // rad/s cap on ||v_angular||
 };
 
 // Per-task target for multi-task solve_position_step().
