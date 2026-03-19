@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- **`clear_collision_constraint()`**: also resets active collision pair indices, stuck-detection counters, per-pair last-distance caches, and recovery homotopy state (`collision_effective_min_distance_`) so disabling collision does not leave stale internal state.
+- **Recovery mode exit (collision health)**: when `max_constraints > 1`, recovery now requires **every** active collision QP row (same entries as `get_last_collision_debug_list()`) to be at or above `min_distance`, not inference from the closest pair alone.
+
+### Removed
+- Dead locals in `solve_velocity` recovery bookkeeping (`collision_unhealthy` / `joint_unhealthy` / `unhealthy`) that were never read.
+
+### Docs
+- Header comments for internal recovery behavior (trigger, `goals[0]` / first merged priority-0 block, diagnostics via `status_message`) and expanded `clear_collision_constraint()` documentation.
+
 ## [0.14.3] - 2026-03-19
 
 ### Added
