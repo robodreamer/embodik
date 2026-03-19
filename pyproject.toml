@@ -130,8 +130,12 @@ build-verbosity = 1
 
 [tool.cibuildwheel.linux]
 archs = ["x86_64", "aarch64"]
+before-all = "dnf install -y eigen3-devel"
 repair-wheel-command = "auditwheel repair -w {dest_dir} {wheel}"
 
 [tool.cibuildwheel.macos]
 archs = ["arm64"]
+before-all = "brew install eigen"
+# GHA macos-14 arm64 Homebrew prefix (Eigen is header-only; guides CMake find_package)
+environment = { Eigen3_DIR = "/opt/homebrew/opt/eigen/share/eigen3/cmake" }
 repair-wheel-command = "delocate-wheel --wheel-dir {dest_dir} -v {wheel}"
