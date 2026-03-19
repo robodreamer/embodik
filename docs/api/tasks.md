@@ -80,8 +80,8 @@ Each task can be solved in one of two modes:
 - `TaskSolveMode.MIN_ERROR`: clamped minimum-error behavior that computes the
   best feasible residual motion under active constraints.
 
-Automatic fallback from `SCALE` to `MIN_ERROR` when scale collapses is enabled
-by default for `SCALE` tasks:
+Automatic fallback from `SCALE` to `MIN_ERROR` when scale collapses is
+**disabled by default** for `SCALE` tasks. Enable it explicitly when needed:
 
 ```python
 task = solver.add_frame_task("ee", "panda_hand", embodik.TaskType.FRAME_POSE)
@@ -100,7 +100,7 @@ print(result.task_used_fallback)
 Notes:
 
 - User-created tasks default to `SCALE`.
-- User-created tasks default to `allow_min_error_fallback = True`.
+- User-created tasks default to `allow_min_error_fallback = False`.
 - Internal nullspace-bias posture tasks used by `solve_position()` run in
   `MIN_ERROR` mode.
 

@@ -33,8 +33,6 @@ import numpy as np
 import embodik
 from embodik import r2q, q2r, Rt
 from embodik import create_robot_visualizer
-from embodik.utils import compute_pose_error, limit_task_velocity
-
 from utils.robot_models import load_robot_presets, resolve_robot_configuration
 
 logging.basicConfig(
@@ -185,14 +183,13 @@ def main(args: argparse.Namespace) -> None:
     frame_task.priority = 0
     frame_task.weight = 1.0
     frame_task.solve_mode = embodik.TaskSolveMode.SCALE
-    frame_task.allow_min_error_fallback = True
-    frame_task.set_target_velocity(np.zeros(6))
+    frame_task.allow_min_error_fallback = False
 
     posture_task = solver.add_posture_task("posture")
     posture_task.priority = 1
     posture_task.weight = 0.01
     posture_task.solve_mode = embodik.TaskSolveMode.MIN_ERROR
-    posture_task.allow_min_error_fallback = True
+    posture_task.allow_min_error_fallback = False
     posture_task.set_target_configuration(q_default)
 
     # ------------------------------------------------------------------
@@ -241,10 +238,9 @@ def main(args: argparse.Namespace) -> None:
 
     with server.gui.add_folder("IK Controls"):
         timing_handle = server.gui.add_number("Elapsed (ms)", 0.001, disabled=True)
-        pos_gain = server.gui.add_slider("Position Gain", min=10, max=100, initial_value=60, step=5)
-        rot_gain = server.gui.add_slider("Rotation Gain", min=10, max=100, initial_value=60, step=5)
-        max_lin_step = server.gui.add_slider("Max Linear Step (m/s)", min=0.1, max=1.0, initial_value=0.5, step=0.05)
-        max_ang_step = server.gui.add_slider("Max Angular Step (rad/s)", min=0.1, max=1.0, initial_value=0.5, step=0.05)
+        pos_gain = server.gui.add_slider("Position Gain", min=0.1, max=200, initial_value=10.0, step=1.0)
+        rot_gain = server.gui.add_slider("Orientation Gain", min=0.1, max=200, initial_value=10.0, step=1.0)
+        iterations_slider = server.gui.add_slider("IK Iterations", min=1, max=20, initial_value=1, step=1)
         ee_mode_dropdown = server.gui.add_dropdown(
             "EE Solve Mode",
             options=("SCALE", "MIN_ERROR"),
@@ -365,6 +361,8 @@ def main(args: argparse.Namespace) -> None:
     logger.info(f"Initial CoM XY: {robot.get_com_position()[:2].round(4)}")
     logger.info("=" * 60)
 
+    step_opts = embodik.PositionStepOptions()
+
     while True:
         start_t = time.time()
 
@@ -410,33 +408,17 @@ def main(args: argparse.Namespace) -> None:
         target_rotation = q2r(np.array(ik_target.wxyz))
         target_pose = Rt(R=target_rotation, t=target_position)
 
-        current_ee_pose = robot.get_frame_pose(target_link)
-        pose_error = compute_pose_error(current_ee_pose, target_pose)
-
-        if np.linalg.norm(pose_error) < 5e-4:
-            time.sleep(1e-3)
-            continue
-
-        target_velocity = np.concatenate([
-            pos_gain.value * pose_error[:3],
-            rot_gain.value * pose_error[3:],
-        ])
-        target_velocity = limit_task_velocity(
-            target_velocity,
-            max_linear_step=max_lin_step.value,
-            max_angular_step=max_ang_step.value,
-        )
-
-        frame_task.weight = 1.0
         frame_task.solve_mode = (
             embodik.TaskSolveMode.MIN_ERROR
             if ee_mode_dropdown.value == "MIN_ERROR"
             else embodik.TaskSolveMode.SCALE
         )
         frame_task.allow_min_error_fallback = bool(ee_fallback_checkbox.value)
-        frame_task.set_target_velocity(target_velocity)
 
-        result = solver.solve_velocity(q_current, apply_limits=True)
+        step_opts.position_gain = pos_gain.value
+        step_opts.orientation_gain = rot_gain.value
+        step_opts.max_steps = int(iterations_slider.value)
+        result = solver.solve_position_step(q_current, target_pose, "ee_task", step_opts)
         effective_mode = (
             result.task_modes_effective[0].name
             if len(result.task_modes_effective) > 0
@@ -454,9 +436,12 @@ def main(args: argparse.Namespace) -> None:
         )
         solve_diag.value = f"mode={effective_mode}, fb={used_fallback}, scale={scale_value:.3f}"
 
-        if result.status == embodik.SolverStatus.SUCCESS:
-            dq = result.joint_velocities * solver.dt
-            q_current = np.clip(q_current + dq, q_lower, q_upper)
+        if result.status in (
+            embodik.SolverStatus.SUCCESS,
+            embodik.SolverStatus.INFEASIBLE,
+            embodik.SolverStatus.NUMERICAL_ERROR,
+        ):
+            q_current = np.clip(np.array(result.q_solution), q_lower, q_upper)
             robot.update_configuration(q_current)
             viz.display(q_current)
         else:
