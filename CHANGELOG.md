@@ -19,6 +19,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Release automation**: tag-based PyPI upload moved to the wheels workflow; `release.yml` is manual (`workflow_dispatch`) for GitHub release only.
 - **`scripts/upload_pypi.sh`**: comments updated for sdist-only script vs cibuildwheel artifacts.
 
+### Fixed
+- **CI / wheels**: `find_package(Eigen3)` failures — macOS job installs Eigen via Homebrew and sets `Eigen3_DIR`; `cibuildwheel` Linux runs `dnf install -y eigen3-devel`; macOS wheel builds set `Eigen3_DIR` for Apple Silicon Homebrew. Docs updated for local macOS pip installs.
+
 ## [0.14.1] - 2026-03-19
 
 ### Added
