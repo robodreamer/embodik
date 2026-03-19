@@ -150,6 +150,11 @@ public:
   void clear_tasks();
 
   /**
+   * @brief Clear direct target velocities on all registered tasks.
+   */
+  void clear_all_target_velocities();
+
+  /**
    * @brief Get task by name
    * @param name Task name
    * @return Task pointer or nullptr if not found

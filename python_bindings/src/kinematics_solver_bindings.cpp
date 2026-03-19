@@ -127,6 +127,9 @@ void bind_kinematics_solver(nb::module_ &m) {
            "Remove a task by name")
 
       .def("clear_tasks", &KinematicsSolver::clear_tasks, "Remove all tasks")
+      .def("clear_all_target_velocities",
+           &KinematicsSolver::clear_all_target_velocities,
+           "Clear direct target velocities on all registered tasks.")
 
       .def("get_task", &KinematicsSolver::get_task, nb::arg("name"),
            "Get a task by name")

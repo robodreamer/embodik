@@ -108,6 +108,9 @@ public:
      */
     virtual Eigen::VectorXd getVelocity() const {
         if (target_velocity_.has_value()) {
+            // Direct velocity mode (e.g. solve_position_step): magnitude is not
+            // scaled by weight_; use weight_=0 or clearTargetVelocity() to drop
+            // a task from contributing via this path.
             return target_velocity_.value();
         }
         // Drive the task toward the target using proportional feedback.
