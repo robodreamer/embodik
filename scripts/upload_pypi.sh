@@ -1,9 +1,9 @@
 #!/bin/bash
 # Wrapper script for uploading to PyPI with credentials from ~/.pypirc
 #
-# NOTE: PyPI rejects linux_x86_64 wheels (requires manylinux).
-# For now, we upload only source distributions. Users will build from source
-# or we'll add manylinux wheel builds via cibuildwheel in the future.
+# NOTE: Local linux_x86_64 wheels are rejected by PyPI (requires manylinux).
+# This script still uploads only the sdist. For wheel publishing, use the
+# cibuildwheel GitHub workflow artifacts (manylinux + macOS arm64).
 
 set -e
 
@@ -36,7 +36,7 @@ if [ -f "$HOME/.pypirc" ]; then
         twine upload --repository testpypi --config-file "$HOME/.pypirc" "$CURRENT_SDIST"
     else
         echo "Uploading source distribution to PyPI..."
-        echo "(Note: linux_x86_64 wheels are rejected; use cibuildwheel for manylinux wheels)"
+        echo "(Note: this script uploads only sdist; use cibuildwheel workflow artifacts for wheels)"
         twine upload --config-file "$HOME/.pypirc" "$CURRENT_SDIST"
     fi
 else

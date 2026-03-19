@@ -28,6 +28,32 @@ jobs:
         run: pixi run lint
         continue-on-error: true
 
+  test-macos-arm64:
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build and install package (venv + pip)
+        run: |
+          python -m venv .venv
+          source .venv/bin/activate
+          python -m pip install --upgrade pip
+          pip install pin scikit-build-core nanobind cmake ninja pytest
+          export CMAKE_PREFIX_PATH="$(python -c "import pinocchio, pathlib; print(pathlib.Path(pinocchio.__file__).resolve().parents[4])")"
+          pip install --no-build-isolation -e .
+
+      - name: Run tests
+        run: |
+          source .venv/bin/activate
+          pytest test/
+
   docs:
     runs-on: ubuntu-latest
     steps:

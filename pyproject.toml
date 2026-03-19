@@ -8,7 +8,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "embodik"
-version = "0.14.1"
+version = "0.14.2"
 description = "High-performance inverse kinematics solver optimized for cross-embodiment VLA/AI applications"
 authors = [{ name = "Andy Park", email = "andypark.purdue@gmail.com" }]
 readme = "README.md"
@@ -121,3 +121,17 @@ markers = [
     "benchmark: marks tests as benchmarks (deselect with '-m \"not benchmark\"')",
 ]
 filterwarnings = ["ignore::DeprecationWarning:hppfcl"]
+
+[tool.cibuildwheel]
+build = "cp3{10,11,12}-*"
+skip = ["*-musllinux_*", "*-win32", "*-win_amd64", "*-manylinux_i686"]
+test-command = "python -c \"import embodik; print(embodik.__version__)\""
+build-verbosity = 1
+
+[tool.cibuildwheel.linux]
+archs = ["x86_64", "aarch64"]
+repair-wheel-command = "auditwheel repair -w {dest_dir} {wheel}"
+
+[tool.cibuildwheel.macos]
+archs = ["arm64"]
+repair-wheel-command = "delocate-wheel --wheel-dir {dest_dir} -v {wheel}"
