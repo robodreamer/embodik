@@ -411,6 +411,10 @@ public:
 
   /**
    * @brief Disable collision avoidance constraints.
+   *
+   * Clears internal collision state as well (active pair indices, stuck
+   * counters, per-pair last distances, and recovery homotopy margins) so a
+   * later re-enable does not inherit stale solver-side data.
    */
   void clear_collision_constraint();
 
@@ -684,6 +688,15 @@ private:
   std::unordered_map<std::size_t, double> collision_stuck_last_distances_;
   // Recovery homotopy state (per pair) for effective collision margins.
   std::unordered_map<std::size_t, double> collision_effective_min_distance_;
+
+  // ---- Internal velocity-solver recovery (not whole-stack / WBC recovery) ----
+  // Trigger: sustained kNumericalError/kInfeasible together with near-zero ||dq||.
+  // While active: scale goals[0] (first merged priority-0 block), switch it to
+  // MIN_ERROR, inject a rollback posture task; collision rows use homotopy on
+  // effective min distance. Exit: repeated healthy solves (all active collision
+  // rows >= min_distance when constraints are on, joint margin, non-tiny dq).
+  // Not exposed in the public API; status_message may contain "recovery mode"
+  // substrings for diagnostics.
 
   struct RecoveryHistoryEntry {
     Eigen::VectorXd q;
