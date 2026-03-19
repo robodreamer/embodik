@@ -44,7 +44,6 @@ except ImportError:
 
 import embodik
 from embodik import Rt
-from embodik.utils import compute_pose_error, limit_task_velocity
 
 from utils.dual_iiwa_urdf import (
     build_dual_iiwa_urdf,
@@ -81,8 +80,6 @@ DEFAULT_SOLVER_DT = 0.01
 DEFAULT_POS_GAIN = 10.0
 DEFAULT_ROT_GAIN = 10.0
 DEFAULT_NULLSPACE_GAIN_EXP = -2.0   # 10^-2 = 0.01
-MAX_LINEAR_STEP = 0.5
-MAX_ANGULAR_STEP = 0.5
 DEFAULT_DAMPING = 0.1
 DEFAULT_TOLERANCE = 0.1
 
@@ -218,20 +215,28 @@ def main():
     abs_task = solver.add_absolute_frame_task("absolute", LEFT_FRAME, RIGHT_FRAME, 0.5)
     abs_task.weight = 1.0
     abs_task.priority = 0
+    abs_task.solve_mode = embodik.TaskSolveMode.SCALE
+    abs_task.allow_min_error_fallback = False
 
     rel_task = solver.add_relative_frame_task("relative", LEFT_FRAME, RIGHT_FRAME)
     rel_task.weight = 1.0
     rel_task.priority = 0
+    rel_task.solve_mode = embodik.TaskSolveMode.SCALE
+    rel_task.allow_min_error_fallback = False
 
     # Single-arm frame tasks for Orthogonal mode (two independent EE pose controls)
     left_ee_task = solver.add_frame_task("left_ee", LEFT_FRAME)
     left_ee_task.weight = 1.0
     left_ee_task.priority = 0
+    left_ee_task.solve_mode = embodik.TaskSolveMode.SCALE
+    left_ee_task.allow_min_error_fallback = False
     left_ee_task.active = False
 
     right_ee_task = solver.add_frame_task("right_ee", RIGHT_FRAME)
     right_ee_task.weight = 1.0
     right_ee_task.priority = 0
+    right_ee_task.solve_mode = embodik.TaskSolveMode.SCALE
+    right_ee_task.allow_min_error_fallback = False
     right_ee_task.active = False
 
     posture = solver.add_posture_task("posture")
@@ -367,11 +372,17 @@ def main():
         rot_gain_slider = server.gui.add_slider(
             "Rotation Gain (Ko)", min=0.5, max=50.0, step=0.5, initial_value=DEFAULT_ROT_GAIN
         )
-        max_lin_slider = server.gui.add_slider(
-            "Max Linear Step", min=0.01, max=2.0, step=0.01, initial_value=MAX_LINEAR_STEP
+        iterations_slider = server.gui.add_slider(
+            "IK Iterations", min=1, max=50, step=1, initial_value=1
         )
-        max_ang_slider = server.gui.add_slider(
-            "Max Angular Step", min=0.01, max=2.0, step=0.01, initial_value=MAX_ANGULAR_STEP
+        ee_mode_dropdown = server.gui.add_dropdown(
+            "EE Solve Mode",
+            options=("SCALE", "MIN_ERROR"),
+            initial_value="SCALE",
+        )
+        ee_fallback_checkbox = server.gui.add_checkbox(
+            "Allow SCALE fallback to MIN_ERROR",
+            initial_value=False,
         )
         damping_slider = server.gui.add_slider(
             "Damping", min=0.01, max=1.0, step=0.01, initial_value=DEFAULT_DAMPING
@@ -583,6 +594,8 @@ def main():
     print("  Blue marker  = absolute frame (object midpoint); in Orthogonal = left EE")
     print("  Green marker = relative frame (right arm grasp); in Orthogonal = right EE")
 
+    step_opts = embodik.PositionStepOptions()
+
     while True:
         try:
             # --- Update tasks with current robot state first ---
@@ -672,6 +685,21 @@ def main():
                 right_ee_task.active = False
                 abs_task.active = True
                 rel_task.active = ects_cfg.coordinated
+
+            ee_mode = (
+                embodik.TaskSolveMode.MIN_ERROR
+                if ee_mode_dropdown.value == "MIN_ERROR"
+                else embodik.TaskSolveMode.SCALE
+            )
+            ee_fallback = bool(ee_fallback_checkbox.value)
+            abs_task.solve_mode = ee_mode
+            rel_task.solve_mode = ee_mode
+            left_ee_task.solve_mode = ee_mode
+            right_ee_task.solve_mode = ee_mode
+            abs_task.allow_min_error_fallback = ee_fallback
+            rel_task.allow_min_error_fallback = ee_fallback
+            left_ee_task.allow_min_error_fallback = ee_fallback
+            right_ee_task.allow_min_error_fallback = ee_fallback
 
             if mode_changed:
                 _mode_change_requested = False
@@ -814,59 +842,29 @@ def main():
                 else:
                     Kp = pos_gain_slider.value
                     Ko = rot_gain_slider.value
-                    lin_lim = max_lin_slider.value
-                    ang_lim = max_ang_slider.value
+                    step_opts.max_steps = int(iterations_slider.value)
 
                     if is_orthogonal:
-                        # Orthogonal: two independent EE pose controls (marker 1 → left EE, marker 2 → right EE)
-                        target_left = Rt(
+                        # Orthogonal: two independent EE pose targets.
+                        target_left_pose = Rt(
                             R=_mat_from_wxyz(np.array(object_handle.wxyz)),
                             t=np.array(object_handle.position),
                         )
-                        current_left = Rt(
-                            R=left_ee_task.current_orientation,
-                            t=left_ee_task.current_position,
-                        )
-                        left_error = compute_pose_error(current_left, target_left)
-                        left_vel = np.concatenate([
-                            Kp * left_error[:3],
-                            Ko * left_error[3:],
-                        ])
-                        left_vel = limit_task_velocity(left_vel, lin_lim, ang_lim)
-                        left_ee_task.set_target_velocity(left_vel)
-
-                        target_right = Rt(
+                        target_right_pose = Rt(
                             R=_mat_from_wxyz(np.array(grasp_handle.wxyz)),
                             t=np.array(grasp_handle.position),
                         )
-                        current_right = Rt(
-                            R=right_ee_task.current_orientation,
-                            t=right_ee_task.current_position,
-                        )
-                        right_error = compute_pose_error(current_right, target_right)
-                        right_vel = np.concatenate([
-                            Kp * right_error[:3],
-                            Ko * right_error[3:],
-                        ])
-                        right_vel = limit_task_velocity(right_vel, lin_lim, ang_lim)
-                        right_ee_task.set_target_velocity(right_vel)
+
+                        targets = [
+                            embodik.TaskTarget.from_se3("left_ee", target_left_pose, Kp, Ko),
+                            embodik.TaskTarget.from_se3("right_ee", target_right_pose, Kp, Ko),
+                        ]
+                        rel_error_vec = np.zeros(6)
                     else:
-                        # ECTS: absolute task from object marker, relative from grasp
+                        # ECTS: absolute task from object marker, relative task from grasp target.
                         marker_pos = np.array(object_handle.position)
                         marker_R = _mat_from_wxyz(np.array(object_handle.wxyz))
-                        target_abs = Rt(R=marker_R, t=marker_pos)
-
-                        current_abs = Rt(
-                            R=abs_task.current_orientation,
-                            t=abs_task.current_position,
-                        )
-                        abs_error = compute_pose_error(current_abs, target_abs)
-                        abs_vel = np.concatenate([
-                            Kp * abs_error[:3],
-                            Ko * abs_error[3:],
-                        ])
-                        abs_vel = limit_task_velocity(abs_vel, lin_lim, ang_lim)
-                        abs_task.set_target_velocity(abs_vel)
+                        target_abs_pose = Rt(R=marker_R, t=marker_pos)
 
                         # Relative task: detect grasp handle drag, maintain stored target
                         curr_grasp_pos = np.array(grasp_handle.position)
@@ -881,26 +879,23 @@ def main():
                             _prev_grasp_pos = curr_grasp_pos.copy()
                             _prev_grasp_wxyz = curr_grasp_wxyz.copy()
 
-                        target_rel = Rt(R=_rel_target_ori, t=_rel_target_pos)
-                        current_rel = Rt(
-                            R=rel_task.current_orientation,
-                            t=rel_task.current_position,
-                        )
-                        rel_error_vec = compute_pose_error(current_rel, target_rel)
-                        rel_vel = np.concatenate([
-                            Kp * rel_error_vec[:3],
-                            Ko * rel_error_vec[3:],
-                        ])
-                        rel_vel = limit_task_velocity(rel_vel, lin_lim, ang_lim)
-                        rel_task.set_target_velocity(rel_vel)
+                        target_rel_pose = Rt(R=_rel_target_ori, t=_rel_target_pos)
+
+                        targets = [
+                            embodik.TaskTarget.from_se3("absolute", target_abs_pose, Kp, Ko),
+                            embodik.TaskTarget.from_se3("relative", target_rel_pose, Kp, Ko),
+                        ]
 
                     # --- Solve ---
                     t0 = time.perf_counter()
-                    result = solver.solve_velocity(q)
+                    result = solver.solve_position_step(q, targets, step_opts)
                     solver_elapsed_ms = (time.perf_counter() - t0) * 1000.0
 
-                    q = q + np.array(result.joint_velocities) * solver.dt
+                    q = np.array(result.q_solution)
                     robot.update_configuration(q)
+                    rel_task.update(robot)
+                    rel_error_vec[:3] = rel_task.current_position - _rel_target_pos
+                    rel_error_vec[3:] = 0.0
 
                     status_text.value = str(result.status)
                     for i, idx in enumerate(arm_indices):

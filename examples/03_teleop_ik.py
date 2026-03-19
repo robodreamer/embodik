@@ -54,7 +54,6 @@ from viser.extras import ViserUrdf
 
 import embodik
 from robot_descriptions.loaders.yourdfpy import load_robot_description
-from embodik.utils import compute_pose_error, limit_task_velocity
 from embodik import r2q, q2r, Rt
 from utils.robot_models import load_robot_presets
 
@@ -108,8 +107,6 @@ DEFAULT_SOLVER_DT = 0.01
 DEFAULT_POS_GAIN = 1e2
 DEFAULT_ROT_GAIN = 1e2
 DEFAULT_NULLSPACE_GAIN = 1e-3
-MAX_LINEAR_STEP = 2.0
-MAX_ANGULAR_STEP = 2.0
 
 # Scale factor for translational changes (from TRACKING_CAMERA_INPUT_DEVICE_CONFIG)
 DEFAULT_SCALE_FACTOR = 1.5
@@ -442,19 +439,17 @@ class TeleopIKBackend:
         # Initial pose
         self.initial_pose = self.get_pose()
 
-        # Frame task for IK
-        self._zero_velocity = np.zeros(6, dtype=float)
         self.frame_task = self.solver.add_frame_task("ee_task", self.cfg.target_link)
         self.frame_task.priority = 0
-        self.frame_task.weight = 0.0
-        self.frame_task.set_target_velocity(self._zero_velocity)
+        self.frame_task.weight = 1.0
 
-        # Nullspace task
         self.nullspace_task = self.solver.add_posture_task("posture_task")
         self.nullspace_task.priority = 1
         self.nullspace_task.weight = 0.0
         self.nullspace_task.set_target_configuration(self.q.copy())
         self.nullspace_task.set_controlled_joint_indices([])
+
+        self._step_opts = embodik.PositionStepOptions()
 
     def get_pose(self) -> pin.SE3:
         """Get current end-effector pose."""
@@ -475,46 +470,44 @@ class TeleopIKBackend:
         pos_gain: float = DEFAULT_POS_GAIN,
         rot_gain: float = DEFAULT_ROT_GAIN,
         nullspace_gain: float = DEFAULT_NULLSPACE_GAIN,
+        ee_mode: str = "SCALE",
+        ee_fallback: bool = False,
+        max_steps: int = 1,
     ) -> IKResult:
         """Solve one IK step toward target pose."""
-        current = self.get_pose()
-        pose_error = compute_pose_error(current, target)
-
-        target_velocity = np.concatenate([pos_gain * pose_error[:3], rot_gain * pose_error[3:]])
-        target_velocity = limit_task_velocity(target_velocity, MAX_LINEAR_STEP, MAX_ANGULAR_STEP)
-
-        position_error = float(np.linalg.norm(pose_error[:3]))
-        rotation_error = float(np.linalg.norm(pose_error[3:]))
-
-        if position_error < 1e-4 and rotation_error < 1e-3:
-            self.frame_task.weight = 0.0
-            self.frame_task.set_target_velocity(self._zero_velocity)
-        else:
-            self.frame_task.weight = 1.0
-            self.frame_task.set_target_velocity(target_velocity)
-
-        # Nullspace bias toward default
+        self.frame_task.solve_mode = (
+            embodik.TaskSolveMode.MIN_ERROR
+            if ee_mode == "MIN_ERROR"
+            else embodik.TaskSolveMode.SCALE
+        )
+        self.frame_task.allow_min_error_fallback = bool(ee_fallback)
         self.nullspace_task.set_controlled_joint_indices(list(range(self.arm_dofs)))
         self.nullspace_task.set_target_configuration(self.default_full)
         self.nullspace_task.weight = nullspace_gain
 
+        self._step_opts.position_gain = pos_gain
+        self._step_opts.orientation_gain = rot_gain
+        self._step_opts.max_steps = max_steps
+
         ik_start = time.perf_counter()
-        result = self.solver.solve_velocity(self.q, apply_limits=True)
+        result = self.solver.solve_position_step(
+            self.q, target, "ee_task", self._step_opts
+        )
         elapsed_ms = (time.perf_counter() - ik_start) * 1000.0
 
-        if result.status == embodik.SolverStatus.SUCCESS:
-            dq = np.array(result.joint_velocities) * self.solver.dt
-            self.q = np.clip(self.q + dq, self.lower, self.upper)
+        if result.status in (
+            embodik.SolverStatus.SUCCESS,
+            embodik.SolverStatus.INFEASIBLE,
+            embodik.SolverStatus.NUMERICAL_ERROR,
+        ):
+            self.q = np.clip(np.array(result.q_solution), self.lower, self.upper)
             self.robot.update_configuration(self.q)
-
-        updated_pose = self.get_pose()
-        final_error = compute_pose_error(updated_pose, target)
 
         return IKResult(
             joints=self.get_q(),
             status=result.status.name,
-            position_error=float(np.linalg.norm(final_error[:3])),
-            rotation_error=float(np.linalg.norm(final_error[3:])),
+            position_error=float(result.position_error),
+            rotation_error=float(result.orientation_error),
             elapsed_ms=elapsed_ms,
         )
 
@@ -598,8 +591,18 @@ def run_teleop(cfg: RobotConfig, args: argparse.Namespace) -> None:
 
     with server.gui.add_folder("Teleop Controls"):
         scale_slider = server.gui.add_slider("Position Scale", min=0.5, max=3.0, initial_value=args.scale, step=0.1)
-        pos_gain = server.gui.add_slider("Position Gain", min=10.0, max=200.0, initial_value=DEFAULT_POS_GAIN, step=10.0)
-        rot_gain = server.gui.add_slider("Rotation Gain", min=10.0, max=200.0, initial_value=DEFAULT_ROT_GAIN, step=10.0)
+        pos_gain = server.gui.add_slider("Position Gain", min=0.1, max=200.0, initial_value=DEFAULT_POS_GAIN, step=0.1)
+        rot_gain = server.gui.add_slider("Orientation Gain", min=0.1, max=200.0, initial_value=DEFAULT_ROT_GAIN, step=0.1)
+        iterations_slider = server.gui.add_slider("IK Iterations", min=1, max=20, initial_value=1, step=1)
+        ee_mode_dropdown = server.gui.add_dropdown(
+            "EE Solve Mode",
+            options=("SCALE", "MIN_ERROR"),
+            initial_value="SCALE",
+        )
+        ee_fallback_checkbox = server.gui.add_checkbox(
+            "Allow SCALE fallback to MIN_ERROR",
+            initial_value=False,
+        )
         manual_mode = server.gui.add_checkbox("Manual Mode (use transform controls)", initial_value=not controller_connected)
         reset_button = server.gui.add_button("Reset Robot & Controller")
 
@@ -777,6 +780,9 @@ def run_teleop(cfg: RobotConfig, args: argparse.Namespace) -> None:
                     goal_pose,
                     pos_gain=pos_gain.value,
                     rot_gain=rot_gain.value,
+                    ee_mode=ee_mode_dropdown.value,
+                    ee_fallback=ee_fallback_checkbox.value,
+                    max_steps=int(iterations_slider.value),
                 )
 
                 # Update visualization

@@ -22,7 +22,6 @@ from viser.extras import ViserUrdf
 
 import embodik
 from robot_descriptions.loaders.yourdfpy import load_robot_description
-from embodik.utils import compute_pose_error, limit_task_velocity
 from embodik import r2q, q2r, Rt
 from utils.robot_models import load_robot_presets
 
@@ -41,9 +40,9 @@ except ImportError:
 # -----------------------------------------------------------------------------
 
 DEFAULT_SOLVER_DT = 0.01
-DEFAULT_POS_GAIN = 1e2
-DEFAULT_ROT_GAIN = 1e2
-DEFAULT_NULLSPACE_GAIN = 1e-3
+DEFAULT_POS_GAIN = 10.0
+DEFAULT_ROT_GAIN = 10.0
+DEFAULT_NULLSPACE_GAIN = 1e-2
 MAX_LINEAR_STEP = 2.0
 MAX_ANGULAR_STEP = 2.0
 DEFAULT_COLLISION_GAIN = 1.0
@@ -338,21 +337,21 @@ class embodiKBackend:
         self.upper = upper.astype(float)
         self.initial_pose = self.get_pose()
 
-        self._zero_velocity = np.zeros(6, dtype=float)
         self.frame_task = self.solver.add_frame_task("ee_task", self.cfg.target_link)
         self.frame_task.priority = 0
-        self.frame_task.weight = 0.0
+        self.frame_task.weight = 1.0
         self.frame_task.solve_mode = embodik.TaskSolveMode.SCALE
-        self.frame_task.allow_min_error_fallback = True
-        self.frame_task.set_target_velocity(self._zero_velocity)
+        self.frame_task.allow_min_error_fallback = False
 
         self.nullspace_task = self.solver.add_posture_task("posture_task")
         self.nullspace_task.priority = 1
         self.nullspace_task.weight = 0.0
         self.nullspace_task.solve_mode = embodik.TaskSolveMode.MIN_ERROR
-        self.nullspace_task.allow_min_error_fallback = True
+        self.nullspace_task.allow_min_error_fallback = False
         self.nullspace_task.set_target_configuration(self.q.copy())
         self.nullspace_task.set_controlled_joint_indices([])
+
+        self._step_opts = embodik.PositionStepOptions()
 
     def get_joint_limits(self) -> tuple[np.ndarray, np.ndarray]:
         return self.lower[: self.arm_dofs], self.upper[: self.arm_dofs]
@@ -379,6 +378,7 @@ class embodiKBackend:
         nullspace_enabled: bool,
         ee_mode: str = "SCALE",
         ee_fallback: bool = False,
+        max_steps: int = 1,
     ) -> embodiKResult:
         self.frame_task.solve_mode = (
             embodik.TaskSolveMode.MIN_ERROR
@@ -386,50 +386,42 @@ class embodiKBackend:
             else embodik.TaskSolveMode.SCALE
         )
         self.frame_task.allow_min_error_fallback = bool(ee_fallback)
-        self.frame_task.weight = 0.0
-        current = self.get_pose()
-        pose_error = compute_pose_error(current, target)
 
-        target_velocity = np.concatenate([pos_gain * pose_error[:3], rot_gain * pose_error[3:]])
-        target_velocity = limit_task_velocity(target_velocity, MAX_LINEAR_STEP, MAX_ANGULAR_STEP)
-
-        position_error = float(np.linalg.norm(pose_error[:3]))
-        rotation_error = float(np.linalg.norm(pose_error[3:]))
-
-        if position_error < 1e-4 and rotation_error < 1e-3:
-            self.frame_task.weight = 0.0
-            self.frame_task.set_target_velocity(self._zero_velocity)
-        else:
-            self.frame_task.weight = 1.0
-            self.frame_task.set_target_velocity(target_velocity)
-
+        # Nullspace task
         if nullspace_enabled and active_indices and nullspace_gain > 0.0:
             bias_full = self.q.copy()
             for idx in active_indices:
                 bias_full[idx] = nullspace_bias[idx]
-            self.nullspace_task.set_controlled_joint_indices(active_indices)
             self.nullspace_task.set_target_configuration(bias_full)
+            self.nullspace_task.set_controlled_joint_indices(active_indices)
             self.nullspace_task.weight = nullspace_gain
         else:
-            self.nullspace_task.set_controlled_joint_indices([])
             self.nullspace_task.weight = 0.0
+            self.nullspace_task.set_controlled_joint_indices([])
+
+        self._step_opts.position_gain = pos_gain
+        self._step_opts.orientation_gain = rot_gain
+        self._step_opts.max_steps = max_steps
 
         ik_start = time.perf_counter()
-        result = self.solver.solve_velocity(self.q, apply_limits=True)
+        result = self.solver.solve_position_step(
+            self.q, target, "ee_task", self._step_opts
+        )
         elapsed_ms = (time.perf_counter() - ik_start) * 1000.0
-        if result.status == embodik.SolverStatus.SUCCESS:
-            dq = np.array(result.joint_velocities) * self.solver.dt
-            self.q = np.clip(self.q + dq, self.lower, self.upper)
-            self.robot.update_configuration(self.q)
 
-        updated_pose = self.get_pose()
-        final_error = compute_pose_error(updated_pose, target)
+        if result.status in (
+            embodik.SolverStatus.SUCCESS,
+            embodik.SolverStatus.INFEASIBLE,
+            embodik.SolverStatus.NUMERICAL_ERROR,
+        ):
+            self.q = np.clip(np.array(result.q_solution), self.lower, self.upper)
+            self.robot.update_configuration(self.q)
 
         return embodiKResult(
             joints=self.get_q(),
             status=result.status.name,
-            position_error=float(np.linalg.norm(final_error[:3])),
-            rotation_error=float(np.linalg.norm(final_error[3:])),
+            position_error=float(result.position_error),
+            rotation_error=float(result.orientation_error),
             elapsed_ms=elapsed_ms,
             primary_mode=(
                 result.task_modes_effective[0].name
@@ -543,9 +535,10 @@ def run_gui(cfg: RobotConfig, args: argparse.Namespace) -> None:
 
     with server.gui.add_folder("IK Controls"):
         timing_handle = server.gui.add_number("Elapsed (ms)", 0.001, disabled=True)
-        pos_gain = server.gui.add_slider("Position Gain", min=5.0, max=1e3, initial_value=DEFAULT_POS_GAIN, step=10.0)
-        rot_gain = server.gui.add_slider("Rotation Gain", min=5.0, max=1e3, initial_value=DEFAULT_ROT_GAIN, step=10.0)
-        nullspace_enabled_checkbox = server.gui.add_checkbox("Enable Nullspace Bias", initial_value=True)
+        pos_gain = server.gui.add_slider("Position Gain", min=0.1, max=200.0, initial_value=DEFAULT_POS_GAIN, step=0.1)
+        rot_gain = server.gui.add_slider("Orientation Gain", min=0.1, max=200.0, initial_value=DEFAULT_ROT_GAIN, step=0.1)
+        iterations_slider = server.gui.add_slider("IK Iterations", min=1, max=20, initial_value=1, step=1)
+        nullspace_enabled_checkbox = server.gui.add_checkbox("Enable Nullspace Bias", initial_value=False)
         nullspace_gain = server.gui.add_slider("Nullspace Gain", min=0.0, max=2.0, initial_value=DEFAULT_NULLSPACE_GAIN, step=0.05)
         self_collision_checkbox = server.gui.add_checkbox(
             "Enable Self-Collision",
@@ -1050,6 +1043,7 @@ def run_gui(cfg: RobotConfig, args: argparse.Namespace) -> None:
                 nullspace_enabled_checkbox.value,
                 ee_mode=ee_mode_dropdown.value,
                 ee_fallback=ee_fallback_checkbox.value,
+                max_steps=int(iterations_slider.value),
             )
             q_current = result.joints
             solver_elapsed_ms = result.elapsed_ms
@@ -1072,7 +1066,7 @@ def run_gui(cfg: RobotConfig, args: argparse.Namespace) -> None:
         # Optional performance reporting (CLI-controlled)
         iteration_count += 1
         if args.perf_log != "off" and args.perf_every > 0 and iteration_count % args.perf_every == 0:
-            # Note: solve_step currently measures wall time around solve_velocity().
+            # Note: solve_step currently measures wall time around single-step position IK.
             # If C++ timing breakdown is enabled, fetch it from an extra solve call
             # would be intrusive; instead we show the wall-time here and rely on
             # collision_debug/self_collision toggles for deeper analysis.

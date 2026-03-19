@@ -18,6 +18,7 @@ import tempfile
 
 import embodik
 from embodik import EmbodikVisualizer, InteractiveVisualizer
+from utils.pose_utils import PoseUtils
 
 
 def create_test_urdf():
@@ -116,13 +117,11 @@ def basic_visualization_example():
         print("\n3. Adding IK targets...")
 
         # Target 1: End effector position
-        target_pose = np.eye(4)
-        target_pose[:3, 3] = [0.15, 0.1, 0.3]
+        target_pose = PoseUtils.make_pose_matrix(translation=[0.15, 0.1, 0.3])
         viz.add_target_marker("ee_target", target_pose, color=(0, 1, 0))
 
         # Target 2: Another target
-        target_pose2 = np.eye(4)
-        target_pose2[:3, 3] = [-0.1, 0.15, 0.25]
+        target_pose2 = PoseUtils.make_pose_matrix(translation=[-0.1, 0.15, 0.25])
         viz.add_target_marker("secondary_target", target_pose2, color=(1, 0, 0))
 
         # 5. Animate the robot
@@ -189,9 +188,10 @@ def interactive_visualization_example():
         # 4. Add interactive target for end-effector
         print("\n3. Adding interactive target...")
         initial_ee_pose = robot.get_frame_pose("end_effector")
-        initial_pose = np.eye(4)
-        initial_pose[:3, :3] = initial_ee_pose.rotation
-        initial_pose[:3, 3] = initial_ee_pose.translation
+        initial_pose = PoseUtils.make_pose_matrix(
+            rotation=initial_ee_pose.rotation,
+            translation=initial_ee_pose.translation,
+        )
 
         # Add callback to print target position
         def target_callback(pose):

@@ -12,10 +12,6 @@ import numpy as np
 import pinocchio as pin
 
 import embodik
-from embodik.utils import (
-    compute_pose_error,
-    limit_task_velocity,
-)
 from embodik import r2q, q2r, Rt
 from embodik import RobotVisualizer, create_robot_visualizer
 
@@ -123,11 +119,9 @@ def main(args: argparse.Namespace):
         wxyz=initial_wxyz,  # Use actual end-effector orientation
     )
 
-    zero_velocity = np.zeros(6, dtype=float)
     frame_task = solver.add_frame_task("ee_task", target_link_name)
     frame_task.priority = 0
-    frame_task.weight = 0.0
-    frame_task.set_target_velocity(zero_velocity)
+    frame_task.weight = 1.0
 
     nullspace_task = solver.add_posture_task("nullspace_bias_task")
     nullspace_task.priority = 1
@@ -137,13 +131,20 @@ def main(args: argparse.Namespace):
     # GUI elements
     with server.gui.add_folder("IK Controls"):
         timing_handle = server.gui.add_number("Elapsed (ms)", 0.001, disabled=True)
-        pos_gain = server.gui.add_slider("Position Gain", min=10, max=100, initial_value=60, step=5)
-        rot_gain = server.gui.add_slider("Rotation Gain", min=10, max=100, initial_value=60, step=5)
+        task_weight = server.gui.add_slider("Task Weight", min=0.1, max=100, initial_value=1.0, step=0.1)
+        pos_gain_slider = server.gui.add_slider("Position Gain", min=0.1, max=200, initial_value=10.0, step=0.1)
+        rot_gain_slider = server.gui.add_slider("Orientation Gain", min=0.1, max=200, initial_value=10.0, step=0.1)
+        iterations_slider = server.gui.add_slider("IK Iterations", min=1, max=20, initial_value=1, step=1)
+        ee_mode_dropdown = server.gui.add_dropdown(
+            "EE Solve Mode",
+            options=("SCALE", "MIN_ERROR"),
+            initial_value="SCALE",
+        )
+        ee_fallback_checkbox = server.gui.add_checkbox(
+            "Allow SCALE fallback to MIN_ERROR",
+            initial_value=False,
+        )
         damping_slider = server.gui.add_slider("Solver Damping", min=0.01, max=1.0, initial_value=0.1, step=0.01)
-
-        # Step size limits
-        max_linear_step = server.gui.add_slider("Max Linear Step (m/s)", min=0.1, max=1.0, initial_value=0.5, step=0.01)
-        max_angular_step = server.gui.add_slider("Max Angular Step (rad/s)", min=0.1, max=1.0, initial_value=0.5, step=0.01)
 
         # C++ barrier task controls (solver-level, priority-1 nullspace)
         enable_barrier = server.gui.add_checkbox("Enable Barrier Task", initial_value=False)
@@ -330,8 +331,8 @@ def main(args: argparse.Namespace):
     logger.info("Debug logging disabled by default - enable in Debug Options (rate-based logging)")
     logger.info("="*60)
 
-    # Initialize debug timing
     last_debug_time = 0.0
+    step_opts = embodik.PositionStepOptions()
 
     while True:
         # Check if manual control is enabled
@@ -360,69 +361,28 @@ def main(args: argparse.Namespace):
             time.sleep(solver.dt)
             continue
 
-        # Get target pose as SE3
+        # Build target pose from interactive control
         target_position = np.array(ik_target.position)
         target_wxyz = np.array(ik_target.wxyz)
         target_rotation = q2r(target_wxyz)
         target_pose = Rt(R=target_rotation, t=target_position)
 
-        # Get current end-effector pose (already a Pinocchio SE3)
-        current_ee_pose = robot.get_frame_pose(target_link_name)
-        current_pose = current_ee_pose  # Already SE3, no need to wrap
-
-        # Compute pose error
-        # position error = goal - current, rotation error = log(R_goal @ R_current^T)
-        pose_error = compute_pose_error(current_pose, target_pose)
-        frame_task.weight = 0.0
-
-        # Calculate error magnitudes
-        position_error = np.linalg.norm(pose_error[:3])
-        rotation_error = np.linalg.norm(pose_error[3:])
-
-        # Skip if already at target
-        if np.linalg.norm(pose_error) < 0.0005:  # Within 0.5mm
-            continue
-
         # Check if it's time to log debug info
         current_time = time.time()
-        debug_interval = 1.0 / debug_rate.value  # Convert Hz to seconds
+        debug_interval = 1.0 / debug_rate.value
         should_log_debug = enable_debug.value and (current_time - last_debug_time) >= debug_interval
 
-        if should_log_debug:
-            logger.info(f"\n--- Debug Info (t={current_time:.2f}s) ---")
-            logger.info(f"Target position: [{target_position[0]:.3f}, {target_position[1]:.3f}, {target_position[2]:.3f}]")
-            logger.info(f"Current position: [{current_ee_pose.translation[0]:.3f}, {current_ee_pose.translation[1]:.3f}, {current_ee_pose.translation[2]:.3f}]")
-            logger.info(f"Position error: {position_error:.4f} m")
-            logger.info(f"Rotation error: {rotation_error:.4f} rad")
-
-        # Setup velocity IK
         start_time = time.time()
-        frame_task.weight = 0.0
 
-        # Set target velocity as scaled error (velocity IK)
-        # Apply gains directly to the pose error
-        target_velocity = np.concatenate([
-            pos_gain.value * pose_error[:3],  # Position error with gain
-            rot_gain.value * pose_error[3:]   # Rotation error with gain
-        ])
-
-        # Limit the velocity to prevent large jumps
-        target_velocity = limit_task_velocity(
-            target_velocity,
-            max_linear_step=max_linear_step.value,
-            max_angular_step=max_angular_step.value,
-            enable_debug=enable_debug.value and should_log_debug,
-            debug_logger=logger
+        frame_task.weight = task_weight.value
+        frame_task.solve_mode = (
+            embodik.TaskSolveMode.MIN_ERROR
+            if ee_mode_dropdown.value == "MIN_ERROR"
+            else embodik.TaskSolveMode.SCALE
         )
+        frame_task.allow_min_error_fallback = bool(ee_fallback_checkbox.value)
 
-        frame_task.weight = 1.0
-        frame_task.set_target_velocity(target_velocity)
-
-        if should_log_debug:
-            logger.info(f"Target velocity: linear=[{target_velocity[0]:.3f}, {target_velocity[1]:.3f}, {target_velocity[2]:.3f}], "
-                       f"angular=[{target_velocity[3]:.3f}, {target_velocity[4]:.3f}, {target_velocity[5]:.3f}]")
-
-        # Add nullspace/posture task if enabled
+        # Update nullspace task
         if enable_nullspace.value:
             selected_joint_indices = [
                 idx for idx, checkbox in nullspace_joint_checkboxes.items() if checkbox.value
@@ -431,16 +391,6 @@ def main(args: argparse.Namespace):
                 nullspace_task.set_controlled_joint_indices(selected_joint_indices)
                 nullspace_task.set_target_configuration(nullspace_bias)
                 nullspace_task.weight = nullspace_gain.value
-
-                if should_log_debug:
-                    ns_error_selected = np.array(
-                        [nullspace_bias[i] - q_current[i] for i in selected_joint_indices]
-                    )
-                    logger.info(
-                        f"Nullspace task: weight={nullspace_gain.value:.2f}, "
-                        f"joints={selected_joint_indices}, "
-                        f"error_norm={np.linalg.norm(ns_error_selected):.4f}"
-                    )
             else:
                 nullspace_task.weight = 0.0
                 nullspace_task.set_controlled_joint_indices([])
@@ -448,8 +398,10 @@ def main(args: argparse.Namespace):
             nullspace_task.weight = 0.0
             nullspace_task.set_controlled_joint_indices([])
 
-        # Solve for joint velocities
-        result = solver.solve_velocity(q_current, apply_limits=True)
+        step_opts.position_gain = pos_gain_slider.value
+        step_opts.orientation_gain = rot_gain_slider.value
+        step_opts.max_steps = int(iterations_slider.value)
+        result = solver.solve_position_step(q_current, target_pose, "ee_task", step_opts)
 
         # Log solver results (debug)
         if should_log_debug:
@@ -484,17 +436,12 @@ def main(args: argparse.Namespace):
                 if hasattr(result, 'task_errors') and result.task_errors:
                     logger.info(f"Task errors: [{', '.join(f'{e:.4f}' for e in result.task_errors)}]")
 
-        if result.status == embodik.SolverStatus.SUCCESS:
-            # Get joint velocities (barrier task is handled internally by solver)
-            joint_velocities = result.joint_velocities.copy()
-
-            # Integrate velocities
-            dq = joint_velocities * solver.dt
-            q_current = q_current + dq
-
-            # Ensure we stay within limits
-            q_current = np.clip(q_current, q_lower, q_upper)
-
+        if result.status in (
+            embodik.SolverStatus.SUCCESS,
+            embodik.SolverStatus.INFEASIBLE,
+            embodik.SolverStatus.NUMERICAL_ERROR,
+        ):
+            q_current = np.clip(result.q_solution.copy(), q_lower, q_upper)
             robot.update_configuration(q_current)
 
             # Update visualization
@@ -518,19 +465,9 @@ def main(args: argparse.Namespace):
             if enable_debug.value or result.status == embodik.SolverStatus.NUMERICAL_ERROR:
                 logger.warning(f"Solver failed with status: {result.status}")
                 if result.status == embodik.SolverStatus.NUMERICAL_ERROR:
-                    logger.warning("  NUMERICAL_ERROR can occur when:")
-                    logger.warning("  1. Task contribution magnitude exceeds 1e10 (extreme velocities)")
-                    logger.warning("  2. Maximum iterations (20) reached without convergence")
-                    logger.warning("  3. Final solution violates constraints despite scaling")
-                    logger.warning(f"  Current position error: {position_error:.4f} m")
-                    logger.warning(f"  Current rotation error: {rotation_error:.4f} rad")
-                    logger.warning(f"  Gains: pos={pos_gain.value}, rot={rot_gain.value}")
-
-                    # Show requested velocities
-                    if 'target_velocity' in locals():
-                        logger.warning(f"  Requested velocity norm: {np.linalg.norm(target_velocity):.3f}")
-                        logger.warning(f"  Linear velocity: {np.linalg.norm(target_velocity[:3]):.3f} m/s")
-                        logger.warning(f"  Angular velocity: {np.linalg.norm(target_velocity[3:]):.3f} rad/s")
+                    logger.warning(f"  Position error: {result.position_error:.4f} m")
+                    logger.warning(f"  Orientation error: {result.orientation_error:.4f} rad")
+                    logger.warning(f"  Task weight: {task_weight.value}")
 
                     try:
                         J = robot.get_frame_jacobian(target_link_name)
