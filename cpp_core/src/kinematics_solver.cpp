@@ -9,6 +9,7 @@
 #include <cmath>
 #include <iostream>
 #include <limits>
+#include <string>
 #include <pinocchio/algorithm/geometry.hpp>
 #include <stdexcept>
 #include <unordered_set>
@@ -20,6 +21,7 @@
 
 #include <embodik/ik_baseline.hpp>
 #include <embodik/kinematics_solver.hpp>
+#include <embodik/tasks.hpp>
 
 namespace embodik {
 
@@ -234,6 +236,131 @@ static void clamp_spatial_velocity_components(Eigen::MatrixBase<Derived> &vel,
       vel.tail(3) *= (max_angular_speed / angular_norm);
     }
   }
+}
+
+static bool validate_nv_index_list(const std::vector<int> &indices, int nv,
+                                   const std::string &field_name,
+                                   std::string *out_message) {
+  for (int idx : indices) {
+    if (idx < 0 || idx >= nv) {
+      if (out_message != nullptr) {
+        *out_message =
+            field_name + " must list valid nv indices in [0, " +
+            std::to_string(std::max(0, nv - 1)) + "]; got " + std::to_string(idx);
+      }
+      return false;
+    }
+  }
+  return true;
+}
+
+static bool validate_position_step_joint_index_options(
+    const PositionStepOptions &options, int nv, std::string *err) {
+  if (!validate_nv_index_list(options.excluded_joint_indices, nv,
+                              "excluded_joint_indices", err)) {
+    return false;
+  }
+  if (!validate_nv_index_list(options.locked_joint_indices, nv,
+                              "locked_joint_indices", err)) {
+    return false;
+  }
+  if (!validate_nv_index_list(options.integration_zero_velocity_indices, nv,
+                              "integration_zero_velocity_indices", err)) {
+    return false;
+  }
+  return true;
+}
+
+static void apply_integration_velocity_mask(Eigen::VectorXd &joint_velocities,
+                                            const std::vector<int> &indices) {
+  for (int idx : indices) {
+    joint_velocities[idx] = 0.0;
+  }
+}
+
+/// Merges extra exclusions into tasks for the duration of the scope, then
+/// restores previous exclusions (solve_position_step parity with solve_position).
+class ScopedMergedTaskExclusions {
+  std::vector<std::pair<std::shared_ptr<Task>, std::vector<int>>> saved_;
+
+public:
+  ScopedMergedTaskExclusions(
+      const std::vector<int> &extra,
+      const std::vector<std::shared_ptr<Task>> &tasks_to_patch) {
+    if (extra.empty()) {
+      return;
+    }
+    std::unordered_set<int> extra_set(extra.begin(), extra.end());
+    saved_.reserve(tasks_to_patch.size());
+    for (const auto &t : tasks_to_patch) {
+      if (!t) {
+        continue;
+      }
+      saved_.emplace_back(t, t->get_excluded_joint_indices());
+      const auto &prev = saved_.back().second;
+      std::unordered_set<int> merged(prev.begin(), prev.end());
+      merged.insert(extra_set.begin(), extra_set.end());
+      std::vector<int> merged_vec(merged.begin(), merged.end());
+      std::sort(merged_vec.begin(), merged_vec.end());
+      t->set_excluded_joint_indices(merged_vec);
+    }
+  }
+
+  ~ScopedMergedTaskExclusions() {
+    for (auto &p : saved_) {
+      p.first->set_excluded_joint_indices(std::move(p.second));
+    }
+  }
+
+  ScopedMergedTaskExclusions(const ScopedMergedTaskExclusions &) = delete;
+  ScopedMergedTaskExclusions &
+  operator=(const ScopedMergedTaskExclusions &) = delete;
+};
+
+static std::vector<std::shared_ptr<Task>>
+collect_frame_and_posture_tasks_for_step_options(
+    const std::shared_ptr<FrameTask> &frame_task,
+    const std::vector<std::shared_ptr<Task>> &all_tasks) {
+  std::vector<std::shared_ptr<Task>> out;
+  std::unordered_set<Task *> seen;
+  auto add = [&](const std::shared_ptr<Task> &t) {
+    if (!t || seen.count(t.get()) != 0u) {
+      return;
+    }
+    seen.insert(t.get());
+    out.push_back(t);
+  };
+  add(std::static_pointer_cast<Task>(frame_task));
+  for (const auto &t : all_tasks) {
+    if (t && dynamic_cast<PostureTask *>(t.get()) != nullptr) {
+      add(t);
+    }
+  }
+  return out;
+}
+
+static std::vector<std::shared_ptr<Task>>
+collect_multi_pose_and_posture_tasks_for_step_options(
+    const std::vector<std::shared_ptr<Task>> &pose_tasks,
+    const std::vector<std::shared_ptr<Task>> &all_tasks) {
+  std::vector<std::shared_ptr<Task>> out;
+  std::unordered_set<Task *> seen;
+  auto add = [&](const std::shared_ptr<Task> &t) {
+    if (!t || seen.count(t.get()) != 0u) {
+      return;
+    }
+    seen.insert(t.get());
+    out.push_back(t);
+  };
+  for (const auto &t : pose_tasks) {
+    add(t);
+  }
+  for (const auto &t : all_tasks) {
+    if (t && dynamic_cast<PostureTask *>(t.get()) != nullptr) {
+      add(t);
+    }
+  }
+  return out;
 }
 
 static ClassifiedOutcome classify_position_outcome(
@@ -1603,6 +1730,15 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
   };
 
   VelocitySolverResult result;
+  struct ClearPendingVelocityLocks {
+    KinematicsSolver *solver;
+    ~ClearPendingVelocityLocks() {
+      if (solver != nullptr) {
+        solver->pending_velocity_lock_indices_.clear();
+      }
+    }
+  } clear_pending_locks{this};
+  (void)clear_pending_locks;
   // Timing fields default to 0.0; only populate when timing is enabled.
   const Eigen::VectorXd q_eval =
       (current_q.size() > 0) ? current_q : robot_->get_current_configuration();
@@ -1748,6 +1884,12 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
   }
   flush_group();
 
+  for (int idx : pending_velocity_lock_indices_) {
+    if (idx >= 0 && idx < robot_->nv()) {
+      excluded_union.insert(idx);
+    }
+  }
+
   if (recovery_state_.active && !goals.empty()) {
     // During recovery, reduce primary EE pull and allow min-error adaptation.
     goals[0] *= kRecoveryPrimaryTaskScale;
@@ -1864,6 +2006,20 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
             false,
         });
         objective_tasks.push_back(nullptr);
+      }
+    }
+  }
+
+  if (!pending_velocity_lock_indices_.empty()) {
+    const int nv_lock = robot_->nv();
+    for (int idx : pending_velocity_lock_indices_) {
+      if (idx < 0 || idx >= nv_lock) {
+        continue;
+      }
+      for (auto &J : jacobians) {
+        if (J.cols() == nv_lock && J.rows() > 0) {
+          J.col(idx).setZero();
+        }
       }
     }
   }
@@ -2006,6 +2162,12 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
     c_lower.segment(constraint_idx, robot_->nv()).setConstant(-1e10);
     c_upper.segment(constraint_idx, robot_->nv()).setConstant(1e10);
   }
+  for (int idx : pending_velocity_lock_indices_) {
+    if (idx >= 0 && idx < robot_->nv()) {
+      c_lower(constraint_idx + idx) = 0.0;
+      c_upper(constraint_idx + idx) = 0.0;
+    }
+  }
   constraint_idx += robot_->nv();
 
   // Position-based velocity constraints
@@ -2139,6 +2301,12 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
 
         c_lower(constraint_idx + i) = lower_limit;
         c_upper(constraint_idx + i) = upper_limit;
+      }
+    }
+    for (int idx : pending_velocity_lock_indices_) {
+      if (idx >= 0 && idx < robot_->nv()) {
+        c_lower(constraint_idx + idx) = 0.0;
+        c_upper(constraint_idx + idx) = 0.0;
       }
     }
     constraint_idx += robot_->nv();
@@ -2640,6 +2808,16 @@ PositionIKResult KinematicsSolver::solve_position_step(
     return result;
   }
 
+  {
+    std::string opt_err;
+    if (!validate_position_step_joint_index_options(
+            options, static_cast<int>(robot_->nv()), &opt_err)) {
+      result.status = SolverStatus::kInvalidInput;
+      result.status_message = std::move(opt_err);
+      return result;
+    }
+  }
+
   auto it = task_map_.find(frame_task_name);
   if (it == task_map_.end() || !it->second) {
     result.status = SolverStatus::kInvalidInput;
@@ -2661,6 +2839,12 @@ PositionIKResult KinematicsSolver::solve_position_step(
   Eigen::VectorXd q = current_q;
   robot_->update_configuration(q);
 
+  std::vector<std::shared_ptr<Task>> step_exclusion_targets;
+  if (!options.excluded_joint_indices.empty()) {
+    step_exclusion_targets = collect_frame_and_posture_tasks_for_step_options(
+        frame_task, tasks_);
+  }
+
   VelocitySolverResult last_vel_result;
   bool have_vel_result = false;
   const int steps = std::max(1, options.max_steps);
@@ -2675,14 +2859,29 @@ PositionIKResult KinematicsSolver::solve_position_step(
                                       options.max_angular_speed);
     frame_task->setTargetVelocity(vel);
 
-    auto vel_result = solve_velocity(q, true);
+    pending_velocity_lock_indices_ = options.locked_joint_indices;
+    VelocitySolverResult vel_out;
+    if (!step_exclusion_targets.empty()) {
+      ScopedMergedTaskExclusions merge_guard(options.excluded_joint_indices,
+                                             step_exclusion_targets);
+      vel_out = solve_velocity(q, true);
+    } else {
+      vel_out = solve_velocity(q, true);
+    }
     have_vel_result = true;
-    last_vel_result = std::move(vel_result);
+    last_vel_result = std::move(vel_out);
 
     if (last_vel_result.status != SolverStatus::kSuccess &&
         last_vel_result.status != SolverStatus::kInfeasible &&
         last_vel_result.status != SolverStatus::kNumericalError) {
       break;
+    }
+
+    if (!options.integration_zero_velocity_indices.empty() &&
+        last_vel_result.joint_velocities.size() == robot_->nv()) {
+      apply_integration_velocity_mask(
+          last_vel_result.joint_velocities,
+          options.integration_zero_velocity_indices);
     }
 
     q = pinocchio::integrate(robot_->model(), q,
@@ -2727,6 +2926,16 @@ PositionIKResult KinematicsSolver::solve_position_step(
     return result;
   }
 
+  {
+    std::string opt_err;
+    if (!validate_position_step_joint_index_options(
+            options, static_cast<int>(robot_->nv()), &opt_err)) {
+      result.status = SolverStatus::kInvalidInput;
+      result.status_message = std::move(opt_err);
+      return result;
+    }
+  }
+
   enum class PoseTaskKind { kFrame, kAbsolute, kRelative };
 
   struct ResolvedTask {
@@ -2762,6 +2971,18 @@ PositionIKResult KinematicsSolver::solve_position_step(
 
   Eigen::VectorXd q = current_q;
   robot_->update_configuration(q);
+
+  std::vector<std::shared_ptr<Task>> pose_only;
+  pose_only.reserve(resolved.size());
+  for (const auto &rt : resolved) {
+    pose_only.push_back(rt.task);
+  }
+  std::vector<std::shared_ptr<Task>> step_exclusion_targets;
+  if (!options.excluded_joint_indices.empty()) {
+    step_exclusion_targets =
+        collect_multi_pose_and_posture_tasks_for_step_options(pose_only,
+                                                                tasks_);
+  }
 
   VelocitySolverResult last_vel_result;
   bool have_vel_result = false;
@@ -2815,15 +3036,30 @@ PositionIKResult KinematicsSolver::solve_position_step(
       break;
     }
 
-    auto vel_result = solve_velocity(q, true);
+    pending_velocity_lock_indices_ = options.locked_joint_indices;
+    VelocitySolverResult vel_out;
+    if (!step_exclusion_targets.empty()) {
+      ScopedMergedTaskExclusions merge_guard(options.excluded_joint_indices,
+                                             step_exclusion_targets);
+      vel_out = solve_velocity(q, true);
+    } else {
+      vel_out = solve_velocity(q, true);
+    }
     have_vel_result = true;
-    last_vel_result = std::move(vel_result);
+    last_vel_result = std::move(vel_out);
     ++steps_used;
 
     if (last_vel_result.status != SolverStatus::kSuccess &&
         last_vel_result.status != SolverStatus::kInfeasible &&
         last_vel_result.status != SolverStatus::kNumericalError) {
       break;
+    }
+
+    if (!options.integration_zero_velocity_indices.empty() &&
+        last_vel_result.joint_velocities.size() == robot_->nv()) {
+      apply_integration_velocity_mask(
+          last_vel_result.joint_velocities,
+          options.integration_zero_velocity_indices);
     }
 
     q = pinocchio::integrate(robot_->model(), q,

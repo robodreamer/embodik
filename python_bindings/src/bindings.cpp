@@ -147,7 +147,10 @@ NB_MODULE(_embodik_impl, m) {
           "List of joint indices for nullspace control (empty = all joints)")
       .def_rw("excluded_joint_indices",
               &eik::PositionIKOptions::excluded_joint_indices,
-              "Joint indices to exclude from position IK updates")
+              "Nv-indices excluded from the temporary frame and nullspace "
+              "posture tasks in solve_position (same convention as "
+              "Task.set_excluded_joint_indices and "
+              "PositionStepOptions.excluded_joint_indices)")
       .def_rw("max_linear_step", &eik::PositionIKOptions::max_linear_step,
               "Maximum linear step per iteration (meters)")
       .def_rw("max_angular_step", &eik::PositionIKOptions::max_angular_step,
@@ -164,7 +167,10 @@ NB_MODULE(_embodik_impl, m) {
 
   nb::class_<eik::PositionStepOptions>(
       m, "PositionStepOptions",
-      "Options for solve_position_step() — gains, step count, timestep")
+      "Options for solve_position_step(): gains, timestep, and optional joint "
+      "controls. Field names match PositionIKOptions where applicable "
+      "(excluded_joint_indices uses the same nv convention as "
+      "PositionIKOptions and Task.set_excluded_joint_indices).")
       .def(nb::init<>())
       .def_rw("position_gain", &eik::PositionStepOptions::position_gain,
               "Multiplier on the linear pose error (default 1.0)")
@@ -177,7 +183,22 @@ NB_MODULE(_embodik_impl, m) {
       .def_rw("max_linear_speed", &eik::PositionStepOptions::max_linear_speed,
               "Maximum linear speed magnitude in solve_position_step (m/s); <=0 means unlimited")
       .def_rw("max_angular_speed", &eik::PositionStepOptions::max_angular_speed,
-              "Maximum angular speed magnitude in solve_position_step (rad/s); <=0 means unlimited");
+              "Maximum angular speed magnitude in solve_position_step (rad/s); <=0 means unlimited")
+      .def_rw("excluded_joint_indices",
+              &eik::PositionStepOptions::excluded_joint_indices,
+              "Same role as PositionIKOptions.excluded_joint_indices: merged "
+              "into exclusions on the driven pose task(s) and all PostureTasks "
+              "for each inner solve_velocity (restored after the step).")
+      .def_rw("locked_joint_indices",
+              &eik::PositionStepOptions::locked_joint_indices,
+              "Nv-indices forced to v=0 inside the velocity QP (bounds + "
+              "zeroed Jacobian columns). Preferred for consistent diagnostics. "
+              "Out-of-range → InvalidInput.")
+      .def_rw("integration_zero_velocity_indices",
+              &eik::PositionStepOptions::integration_zero_velocity_indices,
+              "Nv-indices zeroed on joint_velocities after each inner "
+              "solve_velocity and before integrate (legacy post-QP mask). "
+              "Out-of-range → InvalidInput.");
 
   nb::class_<eik::TaskTarget>(
       m, "TaskTarget",

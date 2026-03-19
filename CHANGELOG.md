@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.3] - 2026-03-19
+
+### Added
+- **`PositionStepOptions`** (aligned with **`PositionIKOptions`** naming where applicable):
+  - **`excluded_joint_indices`**: same meaning as `PositionIKOptions::excluded_joint_indices` — merged into exclusions on the driven pose task(s) and every `PostureTask` for each inner `solve_velocity`, then restored (parity with how `solve_position` applies exclusions to its frame + nullspace tasks).
+  - **`locked_joint_indices`**: `nv`-indices constrained to **v = 0** in the velocity QP (tight bounds on the identity rows + Jacobian column zeroing on objectives and inequality constraints). Cleared automatically at the end of each `solve_velocity`.
+  - **`integration_zero_velocity_indices`**: after each inner `solve_velocity`, listed `nv` components are zeroed on the joint velocity **before** `pinocchio::integrate` (legacy post-QP mask; QP may still have assigned non-zero velocity there).
+- **Tests**: `test/test_position_step_joint_options.py`.
+
 ## [0.14.2] - 2026-03-19
 
 ### Added
