@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.2] - 2026-03-19
+
+### Added
+- **macOS Apple Silicon (Pixi)**: `osx-arm64` in `pixi.toml` workspace platforms; lockfile regenerated for multi-platform solve.
+- **CI**: `macos-14` job builds with venv + pip (`pin` + `CMAKE_PREFIX_PATH`) and runs `pytest`.
+- **Wheels workflow**: `cibuildwheel` on `ubuntu-latest` (manylinux x86_64/aarch64) and `macos-14` (arm64) with `auditwheel` / `delocate-wheel` repair; sdist artifact; on version tags, publish combined artifacts to PyPI and create a GitHub release (`generate_release_notes`).
+
+### Changed
+- **Nanobind stubgen (CMake)**: use `DYLD_LIBRARY_PATH` on Apple when running stub generation; include `DYLD_LIBRARY_PATH` segments in library search paths.
+- **`embodik-sanitize-env`**: on macOS, sanitize `DYLD_LIBRARY_PATH` instead of `LD_LIBRARY_PATH`.
+- **Docs**: README and `docs/installation.md` — Apple Silicon notes, `DYLD_LIBRARY_PATH` / `@rpath` troubleshooting, unset both loader vars in “existing Pinocchio” flow.
+- **Release automation**: tag-based PyPI upload moved to the wheels workflow; `release.yml` is manual (`workflow_dispatch`) for GitHub release only.
+- **`scripts/upload_pypi.sh`**: comments updated for sdist-only script vs cibuildwheel artifacts.
+
 ## [0.14.1] - 2026-03-19
 
 ### Added
