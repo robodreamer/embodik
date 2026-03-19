@@ -215,6 +215,27 @@ static ClassifiedOutcome classify_velocity_outcome(
   return {SolverStatus::kSuccess, backend_status_message};
 }
 
+template <typename Derived>
+static void clamp_spatial_velocity_components(Eigen::MatrixBase<Derived> &vel,
+                                              double max_linear_speed,
+                                              double max_angular_speed) {
+  if (vel.size() < 6) {
+    return;
+  }
+  if (max_linear_speed > 0.0) {
+    const double linear_norm = vel.head(3).norm();
+    if (linear_norm > max_linear_speed && linear_norm > 1e-12) {
+      vel.head(3) *= (max_linear_speed / linear_norm);
+    }
+  }
+  if (max_angular_speed > 0.0) {
+    const double angular_norm = vel.tail(3).norm();
+    if (angular_norm > max_angular_speed && angular_norm > 1e-12) {
+      vel.tail(3) *= (max_angular_speed / angular_norm);
+    }
+  }
+}
+
 static ClassifiedOutcome classify_position_outcome(
     SolverStatus current_status, const std::string &current_status_message,
     bool converged_or_within_tolerance, bool stagnation_abort,
@@ -474,6 +495,14 @@ void KinematicsSolver::remove_task(const std::string &name) {
 void KinematicsSolver::clear_tasks() {
   tasks_.clear();
   task_map_.clear();
+}
+
+void KinematicsSolver::clear_all_target_velocities() {
+  for (auto &task : tasks_) {
+    if (task) {
+      task->clearTargetVelocity();
+    }
+  }
 }
 
 std::shared_ptr<Task> KinematicsSolver::get_task(const std::string &name) {
@@ -2642,6 +2671,8 @@ PositionIKResult KinematicsSolver::solve_position_step(
     const Eigen::VectorXd &error = frame_task->getError();
     vel.head<3>() = options.position_gain * error.head<3>();
     vel.tail<3>() = options.orientation_gain * error.tail<3>();
+    clamp_spatial_velocity_components(vel, options.max_linear_speed,
+                                      options.max_angular_speed);
     frame_task->setTargetVelocity(vel);
 
     auto vel_result = solve_velocity(q, true);
@@ -2659,7 +2690,7 @@ PositionIKResult KinematicsSolver::solve_position_step(
     robot_->update_configuration(q);
   }
 
-  frame_task->clearTargetVelocity();
+  clear_all_target_velocities();
 
   result.q_solution = q;
   result.achieved_pose = robot_->get_frame_pose(frame_task->getFrameName());
@@ -2773,6 +2804,8 @@ PositionIKResult KinematicsSolver::solve_position_step(
       }
       vel.head<3>() = target.position_gain * error.head<3>();
       vel.tail<3>() = target.orientation_gain * error.tail<3>();
+      clamp_spatial_velocity_components(vel, options.max_linear_speed,
+                                        options.max_angular_speed);
       rt.task->setTargetVelocity(vel);
     }
 
@@ -2798,8 +2831,16 @@ PositionIKResult KinematicsSolver::solve_position_step(
     robot_->update_configuration(q);
   }
 
+  std::unordered_set<Task *> resolved_tasks;
+  resolved_tasks.reserve(resolved.size());
   for (const auto &rt : resolved) {
+    resolved_tasks.insert(rt.task.get());
     rt.task->clearTargetVelocity();
+  }
+  for (auto &task : tasks_) {
+    if (task && resolved_tasks.find(task.get()) == resolved_tasks.end()) {
+      task->clearTargetVelocity();
+    }
   }
 
   result.q_solution = q;
