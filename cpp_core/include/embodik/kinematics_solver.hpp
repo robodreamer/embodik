@@ -584,6 +584,10 @@ private:
   std::optional<Eigen::Vector3d> base_orientation_lower_;
   std::optional<Eigen::Vector3d> base_orientation_upper_;
 
+  /// Set by solve_position_step before each inner solve_velocity(); cleared at
+  /// end of solve_velocity(). Enforces v_i = 0 in the QP for listed nv-indices.
+  std::vector<int> pending_velocity_lock_indices_;
+
   // Sort tasks by priority
   void sort_tasks_by_priority();
 
@@ -751,7 +755,10 @@ public:
    * @param current_q      Current joint configuration
    * @param target_pose    Target SE3 pose (4×4 homogeneous matrix)
    * @param frame_task_name Name of the registered FrameTask to drive
-   * @param options        Gains, step count, timestep
+   * @param options        Gains, step count, timestep, speed caps, and optional
+   *                       excluded_joint_indices / locked_joint_indices /
+   *                       integration_zero_velocity_indices (see
+   *                       PositionStepOptions)
    * @return PositionIKResult with q_solution and velocity-level diagnostics
    */
   PositionIKResult
@@ -773,7 +780,8 @@ public:
    *
    * @param current_q Current joint configuration
    * @param targets List of task target descriptors
-   * @param options Step count/timestep configuration (per-target gains are used)
+   * @param options Step count/timestep, speed caps, joint-index options;
+   *                per-target gains are taken from each TaskTarget
    * @return PositionIKResult with q_solution and velocity-level diagnostics
    */
   PositionIKResult
