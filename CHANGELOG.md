@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.14.0] - 2026-03-17
+## [0.14.0] - 2026-03-19
 
 ### Added
 - **Stepping position IK** — `KinematicsSolver::solve_position_step(...)`: interactive / per-frame position IK that **does not** swap or create temporary tasks. It sets the target on a registered pose task, **computes pose error internally**, maps it to a task-space velocity using **separate linear/angular gains** (`PositionStepOptions`, independent of task **weight**), runs `solve_velocity()` up to `max_steps` with optional per-step integration (`dt` ≤ 0 uses `solver.dt`). Because it goes through `solve_velocity()`, the same collision and limit machinery applies each sub-step.
@@ -28,6 +28,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Docs
 - `docs/api/tasks.md` — document default `allow_min_error_fallback` for user-created tasks.
+
+### Note (test suite)
+- Full `pixi run test` on this date: **247 passed**, **7 skipped**, **3 failed** (known debt, not introduced by the stepping-IK API itself):
+  - `test_joint6_drift_bug`: `test_x_positive_drive_causes_j6_drift`, `test_y_positive_drive_causes_j6_drift` — joint-6 drift exceeds the current tight threshold for pure ±X/±Y EE drives.
+  - `test_panda_narrowed_limits`: `TestStrategyComparison.test_strategy_a_vs_baseline[X]` — strategy A reverse-path stall count vs baseline.
 
 ## [0.13.2] - 2026-03-12
 
