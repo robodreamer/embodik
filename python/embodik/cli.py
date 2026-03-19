@@ -1,7 +1,7 @@
 """Small CLI utilities for embodik.
 
 Currently provides:
-- `embodik-sanitize-env`: help users avoid LD_LIBRARY_PATH conflicts between
+- `embodik-sanitize-env`: help users avoid loader-path conflicts between
   pip-installed `pin` wheels and locally-built Pinocchio installs.
 - `embodik-examples`: locate or copy example scripts for pip-installed users.
 """
@@ -67,8 +67,8 @@ def sanitize_env(argv: Optional[List[str]] = None) -> int:
         prog="embodik-sanitize-env",
         description=(
             "Sanitize environment variables that commonly break pip-installed Pinocchio (`pin`).\n\n"
-            "Typical symptom: `ImportError: libboost_*.so...` unless you `unset LD_LIBRARY_PATH`.\n"
-            "Cause: LD_LIBRARY_PATH points at a local Pinocchio install (e.g. pinocchio/install-fcl/lib),\n"
+            "Typical symptom: ImportError from incompatible boost/pinocchio shared libraries.\n"
+            "Cause: loader search paths point at a local Pinocchio install (e.g. pinocchio/install-fcl/lib),\n"
             "which overrides the pip wheel's bundled shared libraries.\n\n"
             "Recommended usage:\n"
             '  eval "$(embodik-sanitize-env --shell)"\n'
@@ -83,14 +83,14 @@ def sanitize_env(argv: Optional[List[str]] = None) -> int:
     parser.add_argument(
         "--unset-all",
         action="store_true",
-        help="Unset LD_LIBRARY_PATH entirely (more aggressive, but simplest).",
+        help="Unset the active loader path variable entirely (more aggressive, but simplest).",
     )
     parser.add_argument(
         "--remove",
         action="append",
         default=[],
         help=(
-            "Substring to remove from LD_LIBRARY_PATH entries. Can be repeated. "
+            "Substring to remove from loader path entries. Can be repeated. "
             f"Default: {', '.join(_DEFAULT_REMOVE_SUBSTRINGS)}"
         ),
     )
@@ -98,18 +98,19 @@ def sanitize_env(argv: Optional[List[str]] = None) -> int:
         "--unset-if-empty",
         action="store_true",
         default=True,
-        help="If LD_LIBRARY_PATH becomes empty after removal, unset it (default: true).",
+        help="If the loader path becomes empty after removal, unset it (default: true).",
     )
     parser.add_argument(
         "--keep-if-empty",
         dest="unset_if_empty",
         action="store_false",
-        help="If LD_LIBRARY_PATH becomes empty after removal, keep it set to empty string.",
+        help="If the loader path becomes empty after removal, keep it set to empty string.",
     )
 
     args = parser.parse_args(argv)
 
-    current = os.environ.get("LD_LIBRARY_PATH", "")
+    lib_path_var = "DYLD_LIBRARY_PATH" if sys.platform == "darwin" else "LD_LIBRARY_PATH"
+    current = os.environ.get(lib_path_var, "")
     remove_substrings = args.remove or _DEFAULT_REMOVE_SUBSTRINGS
 
     if args.unset_all:
@@ -122,15 +123,15 @@ def sanitize_env(argv: Optional[List[str]] = None) -> int:
     if args.shell:
         # Emit shell code only. Keep it minimal and safe to eval.
         if result.sanitized is None:
-            print("unset LD_LIBRARY_PATH")
+            print(f"unset {lib_path_var}")
         else:
             # Quote safely for shell
-            print(f"export LD_LIBRARY_PATH={shlex.quote(result.sanitized)}")
+            print(f"export {lib_path_var}={shlex.quote(result.sanitized)}")
         return 0
 
     # Human-readable output
     print("### embodik-sanitize-env")
-    print(f"- LD_LIBRARY_PATH (original): {result.original!r}")
+    print(f"- {lib_path_var} (original): {result.original!r}")
     if result.removed:
         print("- Removed entries:")
         for p in result.removed:
@@ -139,9 +140,9 @@ def sanitize_env(argv: Optional[List[str]] = None) -> int:
         print("- Removed entries: (none)")
 
     if result.sanitized is None:
-        print("- LD_LIBRARY_PATH (sanitized): (unset)")
+        print(f"- {lib_path_var} (sanitized): (unset)")
     else:
-        print(f"- LD_LIBRARY_PATH (sanitized): {result.sanitized!r}")
+        print(f"- {lib_path_var} (sanitized): {result.sanitized!r}")
 
     print("")
     print("To apply in your current shell:")

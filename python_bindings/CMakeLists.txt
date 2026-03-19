@@ -50,7 +50,8 @@ set_target_properties(_embodik_impl PROPERTIES
 
 # Generate Python type stubs (non-fatal - stub generation may fail if dependencies aren't available)
 # The module will work fine without .pyi files - they're just for IDE autocomplete
-# Note: We need to set LD_LIBRARY_PATH to find shared libraries (boost, pinocchio, embodik_core, etc.)
+# Note: We need to set dynamic-loader search paths to find shared libraries
+# (boost, pinocchio, embodik_core, etc.) for stub generation.
 # Collect library directories at configure time
 set(STUBGEN_LIB_PATHS "")
 
@@ -61,6 +62,9 @@ if(DEFINED ENV{CONDA_PREFIX})
 endif()
 if(DEFINED ENV{LD_LIBRARY_PATH})
     list(APPEND STUBGEN_LIB_PATHS "$ENV{LD_LIBRARY_PATH}")
+endif()
+if(DEFINED ENV{DYLD_LIBRARY_PATH})
+    list(APPEND STUBGEN_LIB_PATHS "$ENV{DYLD_LIBRARY_PATH}")
 endif()
 
 # Try to get pinocchio library directory
@@ -84,11 +88,19 @@ endif()
 # Convert to colon-separated string
 string(REPLACE ";" ":" STUBGEN_LIB_PATH_STR "${STUBGEN_LIB_PATHS}")
 
+if(APPLE)
+    set(STUBGEN_LOADER_ENV
+        "DYLD_LIBRARY_PATH=\"$<TARGET_FILE_DIR:embodik_core>:$<TARGET_FILE_DIR:_embodik_impl>:${STUBGEN_LIB_PATH_STR}:$$DYLD_LIBRARY_PATH\"")
+else()
+    set(STUBGEN_LOADER_ENV
+        "LD_LIBRARY_PATH=\"$<TARGET_FILE_DIR:embodik_core>:$<TARGET_FILE_DIR:_embodik_impl>:${STUBGEN_LIB_PATH_STR}:$$LD_LIBRARY_PATH\"")
+endif()
+
 # Create stub generation command with proper library paths
 # Use generator expressions for build-time directories
 add_custom_command(
     TARGET _embodik_impl POST_BUILD
-    COMMAND sh -c "LD_LIBRARY_PATH=\"$<TARGET_FILE_DIR:embodik_core>:$<TARGET_FILE_DIR:_embodik_impl>:${STUBGEN_LIB_PATH_STR}:$$LD_LIBRARY_PATH\" PYTHONPATH=\"${CMAKE_SOURCE_DIR}/python:$$PYTHONPATH\" ${Python_EXECUTABLE} -m nanobind.stubgen -q -i \"$<TARGET_FILE_DIR:_embodik_impl>\" -M py.typed -m _embodik_impl -o \"$<TARGET_FILE_DIR:_embodik_impl>/__init__.pyi\" && touch \"$<TARGET_FILE_DIR:_embodik_impl>/py.typed\" || echo 'Stub generation skipped (dependencies may be missing)'"
+    COMMAND sh -c "${STUBGEN_LOADER_ENV} PYTHONPATH=\"${CMAKE_SOURCE_DIR}/python:$$PYTHONPATH\" ${Python_EXECUTABLE} -m nanobind.stubgen -q -i \"$<TARGET_FILE_DIR:_embodik_impl>\" -M py.typed -m _embodik_impl -o \"$<TARGET_FILE_DIR:_embodik_impl>/__init__.pyi\" && touch \"$<TARGET_FILE_DIR:_embodik_impl>/py.typed\" || echo 'Stub generation skipped (dependencies may be missing)'"
     COMMENT "Generating Python type stubs (non-fatal)"
     VERBATIM
 )

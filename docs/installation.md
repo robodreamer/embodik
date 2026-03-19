@@ -30,6 +30,10 @@ pip install --no-build-isolation embodik
 python -c "import embodik; print(embodik.__version__, embodik.RobotModel)"
 ```
 
+macOS Apple Silicon note:
+- Install Xcode command-line tools first: `xcode-select --install`
+- Then follow the exact same install flow shown above (`pin` + `CMAKE_PREFIX_PATH`).
+
 ## Option B: Robotics Environment (Existing Pinocchio/ROS/Boost)
 
 If you have Pinocchio, Boost, or ROS installed locally (e.g., from source builds, conda, or system packages),
@@ -43,7 +47,7 @@ source .venv/bin/activate
 pip install -U pip
 
 # CRITICAL: Clear local Pinocchio/Boost paths
-unset LD_LIBRARY_PATH CMAKE_PREFIX_PATH pinocchio_DIR
+unset LD_LIBRARY_PATH DYLD_LIBRARY_PATH CMAKE_PREFIX_PATH pinocchio_DIR
 
 # Install build dependencies and Pinocchio from PyPI
 pip install pin scikit-build-core nanobind cmake ninja
@@ -79,6 +83,14 @@ This error means `LD_LIBRARY_PATH` points to a locally-built Pinocchio/Boost tha
 
 ```bash
 unset LD_LIBRARY_PATH
+```
+
+### `ImportError: Library not loaded: @rpath/...` (macOS)
+
+This usually means `DYLD_LIBRARY_PATH` is pointing to a conflicting local Pinocchio/Boost install. Fix:
+
+```bash
+unset DYLD_LIBRARY_PATH
 ```
 
 ### `CMake cannot find pinocchio`
