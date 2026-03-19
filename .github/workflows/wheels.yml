@@ -88,6 +88,8 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist/
+          # sdist may already be on PyPI from `pixi run upload-pypi`; still upload wheels.
+          skip-existing: true
 
   github-release:
     name: Create GitHub Release
