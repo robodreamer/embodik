@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.0] - 2026-03-17
+
+### Added
+- **Stepping position IK** — `KinematicsSolver::solve_position_step(...)`: interactive / per-frame position IK that **does not** swap or create temporary tasks. It sets the target on a registered pose task, **computes pose error internally**, maps it to a task-space velocity using **separate linear/angular gains** (`PositionStepOptions`, independent of task **weight**), runs `solve_velocity()` up to `max_steps` with optional per-step integration (`dt` ≤ 0 uses `solver.dt`). Because it goes through `solve_velocity()`, the same collision and limit machinery applies each sub-step.
+- **Multi-task stepping IK** — overload `solve_position_step(current_q, std::vector<TaskTarget>, options)` for **one coordinated** velocity solve per sub-step across multiple targets. Supports registered **`FrameTask`**, **`AbsoluteFrameTask`**, and **`RelativeFrameTask`** (by task name); each `TaskTarget` carries its own 4×4 pose and gains.
+- **`PositionStepOptions`**: `position_gain`, `orientation_gain`, `max_steps`, `dt`.
+- **`TaskTarget`**: `task_name`, `target_pose`, `position_gain`, `orientation_gain`.
+- **Python bindings**: `TaskTarget` and `PositionStepOptions`; `TaskTarget.from_se3(...)`; `solve_position_step` overload accepting **`embodik.Rt` / Pinocchio SE3** for the single-task path (in addition to 4×4 `ndarray`).
+- **`FrameTask::getFrameName()`** — public accessor for the controlled frame id.
+- **Solver recovery state machine** (velocity / stepping paths): ring buffer of recent solve snapshots; **stuck trigger** on sustained `NUMERICAL_ERROR` with near-zero `||dq||`; **rollback** toward the best recent feasible configuration; **recovery mode** that softens primary EE-style objectives and biases toward collision clearance and limit margin; **per-pair collision margin homotopy** (`collision_effective_min_distance_`) to ease out of persistent margin violations; healthy exit counters before returning to normal.
+- **Examples**: `examples/utils/pose_utils.py` (`PoseUtils.make_pose_matrix`); Viser examples **01, 02, 03, 08, 09** updated to use `solve_position_step`, aligned default sliders (task weight / gains / iterations), and shared **EE solve mode** + **allow SCALE→MIN_ERROR fallback** controls where applicable.
+- **Tests**: `pytest-benchmark` for `solve_position_step` vs a low-level reference loop; stepping API + `Rt`/SE3 overload coverage (`test_adaptive_task_relaxation.py`); default `allow_min_error_fallback` round-trip (`test_tasks.py`); collision recovery / cold-start / deadlock rollouts (`test_embodik.py`).
+
+### Changed
+- **Default task behavior**: `Task::allow_min_error_fallback` now defaults to **`false`**. Code that depended on automatic **SCALE → MIN_ERROR** fallback without setting the flag must opt in with `allow_min_error_fallback = True` (matches interactive examples and coordinated IK expectations).
+- **`solve_position_step` performance**: O(1) task lookup via `task_map_`, single `setTargetPose` instead of split setters (one cache invalidate), fixed-size 6D velocity buffer in hot loops, `std::move` merge of `VelocitySolverResult` into `PositionIKResult`, multi-task path resolves dynamic task types once per call (not every sub-step).
+- **Examples / scripts**: reuse a single `PositionStepOptions` instance in tight loops where practical; `visualization_example.py` uses `PoseUtils`.
+
+### Fixed
+- Clearer invalid-input messages for stepping IK (unknown task name, non-`FrameTask` name in single-task API, unsupported task type in multi-task list).
+
+### Docs
+- `docs/api/tasks.md` — document default `allow_min_error_fallback` for user-created tasks.
+
 ## [0.13.2] - 2026-03-12
 
 ### Added

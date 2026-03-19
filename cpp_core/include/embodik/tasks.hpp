@@ -165,7 +165,7 @@ protected:
     double weight_;
     bool active_ = true;
     TaskSolveMode solve_mode_ = TaskSolveMode::kScale;
-    bool allow_min_error_fallback_ = true;
+    bool allow_min_error_fallback_ = false;
     TaskSolveMode last_effective_mode_ = TaskSolveMode::kScale;
     bool used_min_error_fallback_ = false;
     mutable std::optional<Eigen::VectorXd> target_velocity_;  // Direct velocity specification
@@ -269,6 +269,7 @@ public:
     TaskType getType() const override { return task_type_; }
 
     // Getters for current state
+    const std::string& getFrameName() const { return frame_name_; }
     const Eigen::Vector3d& getCurrentPosition() const { return current_position_; }
     const Eigen::Matrix3d& getCurrentOrientation() const { return current_orientation_; }
 

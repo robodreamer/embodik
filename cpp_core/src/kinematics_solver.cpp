@@ -12,6 +12,7 @@
 #include <pinocchio/algorithm/geometry.hpp>
 #include <stdexcept>
 #include <unordered_set>
+#include <utility>
 #ifdef PINOCCHIO_WITH_HPP_FCL
 #include <pinocchio/collision/distance.hpp>
 #endif
@@ -38,6 +39,17 @@ constexpr double kCollisionStuckDqNormEps = 1e-6;
 constexpr int kCollisionStuckCountThreshold = 10;
 // Minimum recovery speed when the stuck condition is active (non-penetrating).
 constexpr double kCollisionStuckRecoverySpeed = 0.10;
+constexpr int kRecoveryErrorTriggerTicks = 15;
+constexpr int kRecoveryNearZeroTriggerTicks = 12;
+constexpr double kRecoveryNearZeroDqEps = 5e-6;
+constexpr double kRecoveryJointLimitMarginTrigger = 5e-5;
+constexpr double kRecoveryJointLimitMarginHealthy = 3e-4;
+constexpr int kRecoveryHealthyExitTicks = 10;
+constexpr std::size_t kRecoveryHistorySize = 40;
+constexpr double kRecoveryPrimaryTaskScale = 0.25;
+constexpr double kRecoveryRollbackPostureGain = 0.15;
+constexpr double kRecoveryCollisionBuffer = 5e-4;
+constexpr double kRecoveryHomotopyRampStep = 5e-4;
 
 // Velocity box constraint: minimum fraction of vel_limit when inside limits
 constexpr double kMinBoundFraction = 0.10;
@@ -158,6 +170,23 @@ static void sanitize_solver_inputs(std::vector<Eigen::VectorXd> &goals,
       c_upper(r) = mid;
     }
   }
+}
+
+static double compute_min_joint_limit_margin(const RobotModel &robot,
+                                             const Eigen::VectorXd &q_current) {
+  auto [q_min, q_max] = robot.get_joint_limits();
+  const int n = std::min({static_cast<int>(q_current.size()),
+                          static_cast<int>(q_min.size()),
+                          static_cast<int>(q_max.size())});
+  double min_margin = std::numeric_limits<double>::infinity();
+  for (int i = 0; i < n; ++i) {
+    if (!std::isfinite(q_min[i]) || !std::isfinite(q_max[i])) {
+      continue;
+    }
+    min_margin = std::min(min_margin, q_current[i] - q_min[i]);
+    min_margin = std::min(min_margin, q_max[i] - q_current[i]);
+  }
+  return min_margin;
 }
 
 static ClassifiedOutcome classify_velocity_outcome(
@@ -1200,12 +1229,27 @@ KinematicsSolver::compute_collision_constraint() {
   auto compute_bounds_for_pair = [&](std::size_t pair_idx,
                                      double signed_distance,
                                      bool *stuck_out) -> std::pair<double, double> {
+    const double target_min_distance = config.min_distance;
+    double effective_min_distance = target_min_distance;
+    if (recovery_state_.active) {
+      auto it = collision_effective_min_distance_.find(pair_idx);
+      if (it == collision_effective_min_distance_.end()) {
+        const double seeded = signed_distance + kRecoveryCollisionBuffer;
+        it = collision_effective_min_distance_.emplace(pair_idx, seeded).first;
+      }
+      it->second = std::min(target_min_distance,
+                            std::max(it->second, signed_distance));
+      effective_min_distance = it->second;
+    } else {
+      collision_effective_min_distance_.erase(pair_idx);
+    }
+
     // Detect stuck: non-penetrating but significantly inside min_distance for
     // multiple consecutive cycles AND the previous dq was near-zero.
     bool stuck_active = false;
     const bool deep_non_penetration =
         (signed_distance >= 0.0) &&
-        (signed_distance < (config.min_distance - kCollisionStuckBand));
+        (signed_distance < (effective_min_distance - kCollisionStuckBand));
     const bool dq_small = (last_solution_dq_norm_ < kCollisionStuckDqNormEps);
     if (deep_non_penetration && dq_small) {
       int &counter = collision_stuck_counters_[pair_idx];
@@ -1228,13 +1272,14 @@ KinematicsSolver::compute_collision_constraint() {
     // - inside deadband (min <= d < min+deadband): no-approach (lb=0)
     // - violated (d < min): continuous recovery ramp without discrete tiers
     double lower_bound = 0.0;
-    if (signed_distance >= (config.min_distance + kCollisionRepulsionDeadband)) {
+    if (signed_distance >= (effective_min_distance + kCollisionRepulsionDeadband)) {
       lower_bound =
-          (config.min_distance + config.tolerance - signed_distance) / dt;
-    } else if (signed_distance >= config.min_distance) {
+          (effective_min_distance + config.tolerance - signed_distance) / dt;
+    } else if (signed_distance >= effective_min_distance) {
       lower_bound = 0.0;
     } else {
-      if (signed_distance >= (config.min_distance - kCollisionViolationDeadband)) {
+      if (signed_distance >=
+          (effective_min_distance - kCollisionViolationDeadband)) {
         // Small violation dead-zone to reduce chatter at the active boundary.
         lower_bound = 0.0;
         const double upper_bound =
@@ -1248,7 +1293,7 @@ KinematicsSolver::compute_collision_constraint() {
       // uniformly provides a meaningful push at all violation depths while
       // remaining capped for stability.
       const double desired =
-          (config.min_distance + config.tolerance - signed_distance) / dt;
+          (effective_min_distance + config.tolerance - signed_distance) / dt;
       if (signed_distance >= 0.0) {
         // Non-penetrating: proportional recovery, capped.
         lower_bound = std::min(kCollisionMaxSeparationSpeedNonPenetration,
@@ -1263,12 +1308,21 @@ KinematicsSolver::compute_collision_constraint() {
     // Stuck override: ensure a floor that can actually produce motion.
     if (stuck_active && signed_distance >= 0.0) {
       const double desired =
-          (config.min_distance + config.tolerance - signed_distance) / dt;
+          (effective_min_distance + config.tolerance - signed_distance) / dt;
       lower_bound = std::max(
           lower_bound,
           std::min(kCollisionMaxSeparationSpeedNonPenetration,
                    std::max(kCollisionStuckRecoverySpeed,
                             desired * kCollisionRecoveryScale)));
+    }
+
+    if (recovery_state_.active) {
+      auto it = collision_effective_min_distance_.find(pair_idx);
+      if (it != collision_effective_min_distance_.end()) {
+        it->second = std::min(target_min_distance,
+                              std::max(it->second, signed_distance) +
+                                  kRecoveryHomotopyRampStep);
+      }
     }
 
     const double upper_bound =
@@ -1521,6 +1575,8 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
 
   VelocitySolverResult result;
   // Timing fields default to 0.0; only populate when timing is enabled.
+  const Eigen::VectorXd q_eval =
+      (current_q.size() > 0) ? current_q : robot_->get_current_configuration();
 
   // Use provided configuration or robot's current
   if (current_q.size() > 0) {
@@ -1662,6 +1718,55 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
     group_jacobians.push_back(task->getJacobian());
   }
   flush_group();
+
+  if (recovery_state_.active && !goals.empty()) {
+    // During recovery, reduce primary EE pull and allow min-error adaptation.
+    goals[0] *= kRecoveryPrimaryTaskScale;
+    if (!objective_configs.empty()) {
+      objective_configs[0].solve_mode = TaskSolveMode::kMinError;
+      objective_configs[0].allow_min_error_fallback = true;
+    }
+    // Use the best buffered feasible state as a posture bias to walk out of
+    // deadlock without requiring an abrupt external state reset.
+    if (recovery_state_.has_rollback_target &&
+        recovery_state_.rollback_target_q.size() == robot_->nq()) {
+      const int nv = robot_->nv();
+      Eigen::VectorXd posture_goal =
+          Eigen::VectorXd::Zero(nv);
+      const int n = std::min(nv, static_cast<int>(q_eval.size()));
+      for (int i = 0; i < n; ++i) {
+        posture_goal(i) =
+            (recovery_state_.rollback_target_q(i) - q_eval(i)) /
+            std::max(dt_, 1e-6);
+      }
+      posture_goal *= kRecoveryRollbackPostureGain;
+      goals.push_back(posture_goal);
+      jacobians.push_back(Eigen::MatrixXd::Identity(nv, nv));
+      objective_configs.push_back(
+          ObjectiveSolveConfig{1, TaskSolveMode::kMinError, false});
+      objective_tasks.push_back(nullptr);
+    } else {
+      auto [q_min, q_max] = robot_->get_joint_limits();
+      const int nv = robot_->nv();
+      Eigen::VectorXd posture_goal = Eigen::VectorXd::Zero(nv);
+      const int n = std::min({nv, static_cast<int>(q_eval.size()),
+                              static_cast<int>(q_min.size()),
+                              static_cast<int>(q_max.size())});
+      for (int i = 0; i < n; ++i) {
+        if (!std::isfinite(q_min[i]) || !std::isfinite(q_max[i])) {
+          continue;
+        }
+        const double mid = 0.5 * (q_min[i] + q_max[i]);
+        posture_goal(i) = (mid - q_eval(i)) / std::max(dt_, 1e-6);
+      }
+      posture_goal *= kRecoveryRollbackPostureGain;
+      goals.push_back(posture_goal);
+      jacobians.push_back(Eigen::MatrixXd::Identity(nv, nv));
+      objective_configs.push_back(
+          ObjectiveSolveConfig{1, TaskSolveMode::kMinError, false});
+      objective_tasks.push_back(nullptr);
+    }
+  }
 
   // Build velocity-to-configuration index mapping (needed by barrier task
   // and position-based velocity constraints).
@@ -2135,6 +2240,95 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
     last_solution_dq_norm_ = 0.0;
   }
 
+  // Recovery-state update logic.
+  const double dq_norm = last_solution_dq_norm_;
+  const bool has_error_status =
+      (result.status == SolverStatus::kNumericalError ||
+       result.status == SolverStatus::kInfeasible);
+  const bool near_zero_dq = dq_norm < kRecoveryNearZeroDqEps;
+  const double min_joint_limit_margin = compute_min_joint_limit_margin(*robot_, q_eval);
+  const double collision_distance =
+      collision_constraint_result.has_value()
+          ? collision_constraint_result->distance
+          : std::numeric_limits<double>::infinity();
+  const bool collision_unhealthy =
+      collision_constraint_.has_value() && collision_constraint_->enabled &&
+      std::isfinite(collision_distance) &&
+      collision_distance < collision_constraint_->min_distance;
+  const bool joint_unhealthy =
+      std::isfinite(min_joint_limit_margin) &&
+      min_joint_limit_margin < kRecoveryJointLimitMarginTrigger;
+  const bool unhealthy = collision_unhealthy || joint_unhealthy;
+
+  recovery_state_.error_streak = has_error_status ? (recovery_state_.error_streak + 1) : 0;
+  recovery_state_.near_zero_dq_streak =
+      near_zero_dq ? (recovery_state_.near_zero_dq_streak + 1) : 0;
+
+  const bool trigger_recovery =
+      !recovery_state_.active &&
+      recovery_state_.error_streak >= kRecoveryErrorTriggerTicks &&
+      recovery_state_.near_zero_dq_streak >= kRecoveryNearZeroTriggerTicks;
+  if (trigger_recovery) {
+    recovery_state_.active = true;
+    recovery_state_.healthy_streak = 0;
+    if (!recovery_state_.history.empty()) {
+      // Prefer the most recent healthiest sample.
+      const auto best_it = std::max_element(
+          recovery_state_.history.begin(), recovery_state_.history.end(),
+          [](const RecoveryHistoryEntry &a, const RecoveryHistoryEntry &b) {
+            const double sa =
+                (std::isfinite(a.collision_distance) ? a.collision_distance : -1e9) +
+                (std::isfinite(a.joint_limit_margin) ? a.joint_limit_margin : -1e9);
+            const double sb =
+                (std::isfinite(b.collision_distance) ? b.collision_distance : -1e9) +
+                (std::isfinite(b.joint_limit_margin) ? b.joint_limit_margin : -1e9);
+            return sa < sb;
+          });
+      if (best_it != recovery_state_.history.end()) {
+        recovery_state_.rollback_target_q = best_it->q;
+        recovery_state_.has_rollback_target = true;
+      }
+    }
+    result.status_message +=
+        " | recovery mode activated after repeated stalled errors";
+  }
+
+  const bool healthy_collision =
+      !collision_constraint_.has_value() || !collision_constraint_->enabled ||
+      !std::isfinite(collision_distance) ||
+      collision_distance >= collision_constraint_->min_distance;
+  const bool healthy_limits =
+      !std::isfinite(min_joint_limit_margin) ||
+      min_joint_limit_margin >= kRecoveryJointLimitMarginHealthy;
+  if (recovery_state_.active) {
+    if (!has_error_status && !near_zero_dq && healthy_collision && healthy_limits) {
+      recovery_state_.healthy_streak += 1;
+    } else {
+      recovery_state_.healthy_streak = 0;
+    }
+    if (recovery_state_.healthy_streak >= kRecoveryHealthyExitTicks) {
+      recovery_state_.active = false;
+      recovery_state_.healthy_streak = 0;
+      collision_effective_min_distance_.clear();
+      result.status_message += " | recovery mode exited";
+    }
+  } else {
+    collision_effective_min_distance_.clear();
+  }
+
+  if (result.status == SolverStatus::kSuccess) {
+    RecoveryHistoryEntry entry;
+    entry.q = q_eval;
+    entry.dq = result.joint_velocities;
+    entry.collision_distance = collision_distance;
+    entry.joint_limit_margin = min_joint_limit_margin;
+    entry.status = result.status;
+    recovery_state_.history.push_back(std::move(entry));
+    while (recovery_state_.history.size() > kRecoveryHistorySize) {
+      recovery_state_.history.pop_front();
+    }
+  }
+
   return result;
 }
 
@@ -2151,7 +2345,6 @@ PositionIKResult KinematicsSolver::solve_position(
   double prev_combined_error = std::numeric_limits<double>::infinity();
   int stagnation_iters = 0;
 
-  // Validate input
   if (seed_q.size() != robot_->nq()) {
     result.status = SolverStatus::kInvalidInput;
     result.status_message =
@@ -2159,27 +2352,23 @@ PositionIKResult KinematicsSolver::solve_position(
     return result;
   }
 
-  // Create frame task (using the proper constructor)
   auto frame_task = std::make_shared<FrameTask>(
       "position_ik_task", robot_, frame_name, TaskType::FRAME_POSE);
   if (!options.excluded_joint_indices.empty()) {
     frame_task->set_excluded_joint_indices(options.excluded_joint_indices);
   }
 
-  // Create nullspace task if bias is provided
   std::shared_ptr<PostureTask> posture_task = nullptr;
   if (options.nullspace_bias.has_value()) {
-    // Create posture task with specific joints if provided
     if (!options.nullspace_active_joints.empty()) {
       posture_task = std::make_shared<PostureTask>(
           "nullspace_task", robot_, options.nullspace_active_joints);
     } else {
       posture_task = std::make_shared<PostureTask>("nullspace_task", robot_);
     }
-
     posture_task->setTargetConfiguration(options.nullspace_bias.value());
     posture_task->setWeight(options.nullspace_gain);
-    posture_task->setPriority(1); // Lower priority than main task
+    posture_task->setPriority(1);
     posture_task->setSolveMode(TaskSolveMode::kMinError);
     posture_task->setAllowMinErrorFallback(false);
     if (!options.excluded_joint_indices.empty()) {
@@ -2187,30 +2376,27 @@ PositionIKResult KinematicsSolver::solve_position(
     }
   }
 
-  // Set robot to seed configuration
   Eigen::VectorXd q_current = seed_q;
   robot_->update_configuration(q_current);
 
-  // Extract position and orientation from target pose
   Eigen::Vector3d target_position = target_pose.block<3, 1>(0, 3);
   Eigen::Matrix3d target_rotation = target_pose.block<3, 3>(0, 0);
 
-  // Set task targets
   frame_task->setTargetPosition(target_position);
   frame_task->setTargetOrientation(target_rotation);
-  frame_task->setWeight(10.0); // High weight for position IK
-  frame_task->setPriority(0);  // Highest priority
+  frame_task->setWeight(10.0);
+  frame_task->setPriority(0);
+  frame_task->setSolveMode(options.primary_solve_mode);
+  frame_task->setAllowMinErrorFallback(
+      options.primary_allow_min_error_fallback);
 
-  // Iterative solver loop
   int iter = 0;
   bool converged = false;
   bool stagnation_abort = false;
 
   while (iter < options.max_iterations && !converged) {
-    // Update task with current robot state
     frame_task->update(*robot_);
 
-    // Get current error
     Eigen::VectorXd error = frame_task->getError();
     double pos_error = error.head(3).norm();
     double ori_error = error.tail(3).norm();
@@ -2223,7 +2409,6 @@ PositionIKResult KinematicsSolver::solve_position(
                 << std::endl;
     }
 
-    // Check convergence
     if (pos_error < options.position_tolerance &&
         ori_error < options.orientation_tolerance) {
       converged = true;
@@ -2247,15 +2432,16 @@ PositionIKResult KinematicsSolver::solve_position(
       }
     }
 
-    // Prepare tasks for solving
     std::vector<Eigen::VectorXd> goals;
     std::vector<Eigen::MatrixXd> jacobians;
     std::vector<ObjectiveSolveConfig> objective_configs;
 
-    // Primary task: end-effector position/orientation
     Eigen::VectorXd v_desired = frame_task->getVelocity();
+    if (v_desired.size() >= 6) {
+      v_desired.head(3) *= options.position_gain;
+      v_desired.tail(3) *= options.orientation_gain;
+    }
 
-    // Apply step size limits if needed
     if (options.max_linear_step > 0 || options.max_angular_step > 0) {
       double linear_vel = v_desired.head(3).norm();
       double angular_vel = v_desired.tail(3).norm();
@@ -2275,9 +2461,9 @@ PositionIKResult KinematicsSolver::solve_position(
     goals.push_back(v_desired);
     jacobians.push_back(frame_task->getJacobian());
     objective_configs.push_back(
-        ObjectiveSolveConfig{0, TaskSolveMode::kScale, false});
+        ObjectiveSolveConfig{0, options.primary_solve_mode,
+                             options.primary_allow_min_error_fallback});
 
-    // Secondary task: nullspace bias (if provided)
     if (posture_task) {
       posture_task->update(*robot_);
       goals.push_back(posture_task->getVelocity());
@@ -2286,7 +2472,6 @@ PositionIKResult KinematicsSolver::solve_position(
           ObjectiveSolveConfig{1, TaskSolveMode::kMinError, false});
     }
 
-    // Compute collision constraint if enabled
     std::optional<CollisionConstraintResult> collision_constraint_result =
         std::nullopt;
     if (collision_constraint_.has_value() && collision_constraint_->enabled) {
@@ -2301,7 +2486,6 @@ PositionIKResult KinematicsSolver::solve_position(
       }
     }
 
-    // Build constraint matrices for velocity limits + collision
     int num_constraints = robot_->nv();
     if (collision_constraint_result.has_value()) {
       num_constraints +=
@@ -2309,22 +2493,21 @@ PositionIKResult KinematicsSolver::solve_position(
     }
 
     Eigen::MatrixXd C = Eigen::MatrixXd::Zero(num_constraints, robot_->nv());
-    Eigen::VectorXd c_lower = Eigen::VectorXd::Constant(num_constraints, -1e10);
-    Eigen::VectorXd c_upper = Eigen::VectorXd::Constant(num_constraints, 1e10);
+    Eigen::VectorXd c_lower =
+        Eigen::VectorXd::Constant(num_constraints, -1e10);
+    Eigen::VectorXd c_upper =
+        Eigen::VectorXd::Constant(num_constraints, 1e10);
 
-    // Joint velocity constraints (identity block)
     C.block(0, 0, robot_->nv(), robot_->nv()) =
         Eigen::MatrixXd::Identity(robot_->nv(), robot_->nv());
 
     if (use_position_limits_ || use_velocity_limits_) {
-      // Apply velocity and position-based limits
       auto vel_limits = robot_->get_velocity_limits();
       auto accel_limits = robot_->get_acceleration_limits();
       auto [q_min, q_max] = robot_->get_joint_limits();
 
       for (int i = 0; i < robot_->nv(); ++i) {
-        double lower_margin =
-            q_current[i] - q_min[i] - 0.02; // Use small margin
+        double lower_margin = q_current[i] - q_min[i] - 0.02;
         double upper_margin = q_max[i] - q_current[i] - 0.02;
 
         auto [lower_limit, upper_limit] = calculate_velocity_box_constraint(
@@ -2336,7 +2519,6 @@ PositionIKResult KinematicsSolver::solve_position(
       }
     }
 
-    // Add collision constraint rows if enabled
     if (collision_constraint_result.has_value()) {
       int collision_rows =
           static_cast<int>(collision_constraint_result->jacobian.rows());
@@ -2349,7 +2531,6 @@ PositionIKResult KinematicsSolver::solve_position(
           collision_constraint_result->upper_bounds;
     }
 
-    // Prepare solver configuration
     VelocitySolverConfig config;
     config.epsilon = constraint_tolerance_;
     config.precision_threshold = tight_tolerance_;
@@ -2359,7 +2540,6 @@ PositionIKResult KinematicsSolver::solve_position(
     config.regularization_config.epsilon = solver_tolerance_;
     config.regularization_config.regularization_factor = damping_;
 
-    // Call the backend solver
     auto vel_result = computeMultiObjectiveVelocitySolutionEigen(
         goals, jacobians, C, c_lower, c_upper, config, objective_configs);
 
@@ -2374,24 +2554,18 @@ PositionIKResult KinematicsSolver::solve_position(
       break;
     }
 
-    // Integrate velocities using Lie-group-aware integration
-    // (handles quaternion/SO3 joints correctly for floating-base robots)
     Eigen::VectorXd dq = Eigen::Map<const Eigen::VectorXd>(
         vel_result.solution.data(), vel_result.solution.size());
     q_current =
         pinocchio::integrate(robot_->model(), q_current, options.dt * dq);
-
-    // Update robot configuration
     robot_->update_configuration(q_current);
 
     iter++;
   }
 
-  // Fill result
   result.q_solution = q_current;
   result.achieved_pose = robot_->get_frame_pose(frame_name);
 
-  // Calculate final errors
   frame_task->update(*robot_);
   Eigen::VectorXd final_error = frame_task->getError();
   result.position_error = final_error.head(3).norm();
@@ -2417,6 +2591,246 @@ PositionIKResult KinematicsSolver::solve_position(
               << static_cast<int>(result.status) << " iterations=" << iter
               << " final_pos_err=" << result.position_error
               << " final_ori_err=" << result.orientation_error << std::endl;
+  }
+
+  return result;
+}
+
+PositionIKResult KinematicsSolver::solve_position_step(
+    const Eigen::VectorXd &current_q, const Eigen::Matrix4d &target_pose,
+    const std::string &frame_task_name,
+    const PositionStepOptions &options) {
+
+  PositionIKResult result;
+  const double step_dt = (options.dt > 0.0) ? options.dt : dt_;
+
+  if (current_q.size() != robot_->nq()) {
+    result.status = SolverStatus::kInvalidInput;
+    result.status_message =
+        "current_q size does not match robot nq in solve_position_step";
+    return result;
+  }
+
+  auto it = task_map_.find(frame_task_name);
+  if (it == task_map_.end() || !it->second) {
+    result.status = SolverStatus::kInvalidInput;
+    result.status_message = "no task named '" + frame_task_name +
+                            "' registered on this solver";
+    return result;
+  }
+  auto frame_task = std::dynamic_pointer_cast<FrameTask>(it->second);
+  if (!frame_task) {
+    result.status = SolverStatus::kInvalidInput;
+    result.status_message = "task '" + frame_task_name +
+                            "' is not a FrameTask";
+    return result;
+  }
+
+  frame_task->setTargetPose(target_pose.block<3, 1>(0, 3),
+                            target_pose.block<3, 3>(0, 0));
+
+  Eigen::VectorXd q = current_q;
+  robot_->update_configuration(q);
+
+  VelocitySolverResult last_vel_result;
+  bool have_vel_result = false;
+  const int steps = std::max(1, options.max_steps);
+  Eigen::VectorXd vel(6);
+
+  for (int step = 0; step < steps; ++step) {
+    frame_task->update(*robot_);
+    const Eigen::VectorXd &error = frame_task->getError();
+    vel.head<3>() = options.position_gain * error.head<3>();
+    vel.tail<3>() = options.orientation_gain * error.tail<3>();
+    frame_task->setTargetVelocity(vel);
+
+    auto vel_result = solve_velocity(q, true);
+    have_vel_result = true;
+    last_vel_result = std::move(vel_result);
+
+    if (last_vel_result.status != SolverStatus::kSuccess &&
+        last_vel_result.status != SolverStatus::kInfeasible &&
+        last_vel_result.status != SolverStatus::kNumericalError) {
+      break;
+    }
+
+    q = pinocchio::integrate(robot_->model(), q,
+                             step_dt * last_vel_result.joint_velocities);
+    robot_->update_configuration(q);
+  }
+
+  frame_task->clearTargetVelocity();
+
+  result.q_solution = q;
+  result.achieved_pose = robot_->get_frame_pose(frame_task->getFrameName());
+  result.iterations_used = steps;
+
+  frame_task->update(*robot_);
+  const Eigen::VectorXd &final_error = frame_task->getError();
+  result.position_error = final_error.head<3>().norm();
+  result.orientation_error = final_error.tail<3>().norm();
+
+  if (have_vel_result) {
+    static_cast<VelocitySolverResult &>(result) = std::move(last_vel_result);
+  }
+
+  return result;
+}
+
+PositionIKResult KinematicsSolver::solve_position_step(
+    const Eigen::VectorXd &current_q, const std::vector<TaskTarget> &targets,
+    const PositionStepOptions &options) {
+
+  PositionIKResult result;
+  const double step_dt = (options.dt > 0.0) ? options.dt : dt_;
+
+  if (current_q.size() != robot_->nq()) {
+    result.status = SolverStatus::kInvalidInput;
+    result.status_message =
+        "current_q size does not match robot nq in solve_position_step";
+    return result;
+  }
+  if (targets.empty()) {
+    result.status = SolverStatus::kInvalidInput;
+    result.status_message = "targets must be non-empty in solve_position_step";
+    return result;
+  }
+
+  enum class PoseTaskKind { kFrame, kAbsolute, kRelative };
+
+  struct ResolvedTask {
+    std::shared_ptr<Task> task;
+    PoseTaskKind kind;
+  };
+
+  const size_t n_targets = targets.size();
+  std::vector<ResolvedTask> resolved;
+  resolved.reserve(n_targets);
+  for (const auto &target : targets) {
+    auto it = task_map_.find(target.task_name);
+    if (it == task_map_.end() || !it->second) {
+      result.status = SolverStatus::kInvalidInput;
+      result.status_message = "no task named '" + target.task_name +
+                              "' registered on this solver";
+      return result;
+    }
+    const auto &task = it->second;
+    if (std::dynamic_pointer_cast<FrameTask>(task)) {
+      resolved.push_back({task, PoseTaskKind::kFrame});
+    } else if (std::dynamic_pointer_cast<AbsoluteFrameTask>(task)) {
+      resolved.push_back({task, PoseTaskKind::kAbsolute});
+    } else if (std::dynamic_pointer_cast<RelativeFrameTask>(task)) {
+      resolved.push_back({task, PoseTaskKind::kRelative});
+    } else {
+      result.status = SolverStatus::kInvalidInput;
+      result.status_message = "task '" + target.task_name +
+                              "' is not a supported pose task type";
+      return result;
+    }
+  }
+
+  Eigen::VectorXd q = current_q;
+  robot_->update_configuration(q);
+
+  VelocitySolverResult last_vel_result;
+  bool have_vel_result = false;
+  const int steps = std::max(1, options.max_steps);
+  int steps_used = 0;
+  Eigen::Matrix<double, 6, 1> vel;
+
+  for (int step = 0; step < steps; ++step) {
+    bool task_apply_failed = false;
+    std::string task_apply_error;
+    for (size_t i = 0; i < n_targets; ++i) {
+      const auto &target = targets[i];
+      const auto &rt = resolved[i];
+
+      switch (rt.kind) {
+      case PoseTaskKind::kFrame:
+        static_cast<FrameTask *>(rt.task.get())
+            ->setTargetPose(target.target_pose.block<3, 1>(0, 3),
+                            target.target_pose.block<3, 3>(0, 0));
+        break;
+      case PoseTaskKind::kAbsolute:
+        static_cast<AbsoluteFrameTask *>(rt.task.get())
+            ->setTargetPose(target.target_pose.block<3, 1>(0, 3),
+                            target.target_pose.block<3, 3>(0, 0));
+        break;
+      case PoseTaskKind::kRelative:
+        static_cast<RelativeFrameTask *>(rt.task.get())
+            ->setTargetPose(target.target_pose.block<3, 1>(0, 3),
+                            target.target_pose.block<3, 3>(0, 0));
+        break;
+      }
+
+      rt.task->update(*robot_);
+      const Eigen::VectorXd &error = rt.task->getError();
+      if (error.size() < 6) {
+        task_apply_failed = true;
+        task_apply_error =
+            "task '" + target.task_name + "' has invalid pose error dimension";
+        break;
+      }
+      vel.head<3>() = target.position_gain * error.head<3>();
+      vel.tail<3>() = target.orientation_gain * error.tail<3>();
+      rt.task->setTargetVelocity(vel);
+    }
+
+    if (task_apply_failed) {
+      result.status = SolverStatus::kInvalidInput;
+      result.status_message = task_apply_error;
+      break;
+    }
+
+    auto vel_result = solve_velocity(q, true);
+    have_vel_result = true;
+    last_vel_result = std::move(vel_result);
+    ++steps_used;
+
+    if (last_vel_result.status != SolverStatus::kSuccess &&
+        last_vel_result.status != SolverStatus::kInfeasible &&
+        last_vel_result.status != SolverStatus::kNumericalError) {
+      break;
+    }
+
+    q = pinocchio::integrate(robot_->model(), q,
+                             step_dt * last_vel_result.joint_velocities);
+    robot_->update_configuration(q);
+  }
+
+  for (const auto &rt : resolved) {
+    rt.task->clearTargetVelocity();
+  }
+
+  result.q_solution = q;
+  result.iterations_used = steps_used;
+
+  const auto &primary = resolved.front();
+  primary.task->update(*robot_);
+  const Eigen::VectorXd &final_error = primary.task->getError();
+  if (final_error.size() >= 6) {
+    result.position_error = final_error.head<3>().norm();
+    result.orientation_error = final_error.tail<3>().norm();
+  }
+
+  if (primary.kind == PoseTaskKind::kFrame) {
+    result.achieved_pose = robot_->get_frame_pose(
+        static_cast<FrameTask *>(primary.task.get())->getFrameName());
+  } else {
+    result.achieved_pose = targets.front().target_pose;
+  }
+
+  if (have_vel_result) {
+    auto saved_status = result.status;
+    auto saved_msg = std::move(result.status_message);
+    static_cast<VelocitySolverResult &>(result) = std::move(last_vel_result);
+    if (saved_status == SolverStatus::kInvalidInput && !saved_msg.empty()) {
+      result.status = saved_status;
+      result.status_message = std::move(saved_msg);
+    }
+  } else if (result.status_message.empty()) {
+    result.status = SolverStatus::kInvalidInput;
+    result.status_message = "no solve step executed in solve_position_step";
   }
 
   return result;

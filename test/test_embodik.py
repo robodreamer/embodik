@@ -1002,6 +1002,128 @@ def test_collision_constraint_recovery_produces_motion(tmp_path):
         )
 
 
+def test_collision_recovery_cold_start_rollout_improves_distance(tmp_path):
+    """Cold-start from violation should show rollout-level collision progress."""
+    urdf_path = _create_three_link_collision_urdf(tmp_path)
+    robot = eik.RobotModel(str(urdf_path), floating_base=False)
+    solver = eik.KinematicsSolver(robot)
+    solver.dt = 0.01
+    if not hasattr(solver, "configure_collision_constraint"):
+        pytest.skip("Collision constraint API not available.")
+
+    q = np.zeros(robot.nq, dtype=float)
+    robot.update_configuration(q)
+    initial_debug = solver.evaluate_collision_debug(q)
+    if initial_debug is None:
+        pytest.skip("Collision debug unavailable.")
+
+    # Force a meaningful violation from the initial state.
+    min_distance = float(initial_debug.distance) + 0.01
+    try:
+        solver.configure_collision_constraint(min_distance=min_distance, max_constraints=1)
+    except RuntimeError as exc:
+        pytest.skip(f"Collision support unavailable: {exc}")
+
+    solver.clear_tasks()
+    posture = solver.add_posture_task("posture_cold_start")
+    posture.priority = 0
+    posture.weight = 1.0
+    posture.set_target_configuration(np.array([1.1, -1.1], dtype=float))
+    posture.solve_mode = eik.TaskSolveMode.SCALE
+    posture.allow_min_error_fallback = True
+
+    distances = []
+    dq_norms = []
+    recovery_seen = False
+    for _ in range(120):
+        result = solver.solve_velocity(q, apply_limits=True)
+        if result.status not in (
+            eik.SolverStatus.SUCCESS,
+            eik.SolverStatus.INFEASIBLE,
+            eik.SolverStatus.NUMERICAL_ERROR,
+        ):
+            pytest.skip(f"Unexpected status in cold-start rollout: {result.status}")
+        dbg = solver.get_last_collision_debug()
+        if dbg is not None:
+            distances.append(float(dbg.distance))
+        if "recovery mode activated" in result.status_message:
+            recovery_seen = True
+        dq = np.array(result.joint_velocities, dtype=float)
+        dq_norms.append(float(np.linalg.norm(dq)))
+        q = q + dq * solver.dt
+        q_lower, q_upper = robot.get_joint_limits()
+        q = np.clip(q, q_lower, q_upper)
+        robot.update_configuration(q)
+
+    if len(distances) < 20:
+        pytest.skip("Insufficient collision debug samples in cold-start rollout.")
+    # Regression guard: recovery should either activate or produce visible motion,
+    # and distance should not degrade significantly across the rollout.
+    assert recovery_seen or max(dq_norms) > 1e-5
+    assert distances[-1] >= distances[0] - 1e-3, (
+        f"Cold-start rollout regressed collision distance too much: "
+        f"start={distances[0]:.6f}, end={distances[-1]:.6f}"
+    )
+
+
+def test_collision_joint_limit_deadlock_rollout_triggers_recovery(tmp_path):
+    """Interactive deadlock signature should activate recovery and regain motion."""
+    urdf_path = _create_minimal_collision_urdf(tmp_path)
+    robot = eik.RobotModel(str(urdf_path), floating_base=False)
+    solver = eik.KinematicsSolver(robot)
+    solver.dt = 0.01
+    if not hasattr(solver, "configure_collision_constraint"):
+        pytest.skip("Collision constraint API not available.")
+
+    q = np.array([1.56998], dtype=float)  # very near upper limit for deliberate saturation
+    robot.update_configuration(q)
+    initial_debug = solver.evaluate_collision_debug(q)
+    if initial_debug is None:
+        pytest.skip("Collision debug unavailable.")
+
+    try:
+        solver.configure_collision_constraint(
+            min_distance=float(initial_debug.distance) + 0.01, max_constraints=1
+        )
+    except RuntimeError as exc:
+        pytest.skip(f"Collision support unavailable: {exc}")
+
+    solver.clear_tasks()
+    ee_task = solver.add_frame_task("ee_deadlock", "link1", eik.TaskType.FRAME_POSITION)
+    ee_task.priority = 0
+    ee_task.weight = 1.0
+    ee_task.solve_mode = eik.TaskSolveMode.SCALE
+    ee_task.allow_min_error_fallback = False
+    ee_pos = np.array(robot.get_frame_pose("link1").translation, dtype=float)
+    ee_task.set_target_position(ee_pos + np.array([0.0, 0.25, 0.0], dtype=float))
+
+    statuses = []
+    dq_norms = []
+    recovery_seen = False
+    for _ in range(220):
+        result = solver.solve_velocity(q, apply_limits=True)
+        statuses.append(result.status)
+        dq = np.array(result.joint_velocities, dtype=float)
+        dq_norms.append(float(np.linalg.norm(dq)))
+        if "recovery mode activated" in result.status_message:
+            recovery_seen = True
+        q = q + dq * solver.dt
+        q_lower, q_upper = robot.get_joint_limits()
+        q = np.clip(q, q_lower, q_upper)
+        robot.update_configuration(q)
+
+    long_stall_count = sum(
+        1
+        for s, n in zip(statuses, dq_norms)
+        if s == eik.SolverStatus.NUMERICAL_ERROR and n < 1e-6
+    )
+    assert recovery_seen, "Expected deadlock rollout to activate solver recovery mode."
+    assert long_stall_count < 140, (
+        "Deadlock rollout remained numerically stalled for too many ticks "
+        f"(count={long_stall_count})."
+    )
+
+
 def _run_collision_boundary_jitter_rollout(
     robot: eik.RobotModel,
     solver: eik.KinematicsSolver,

@@ -19,6 +19,16 @@ namespace nb = nanobind;
 using namespace embodik;
 
 void bind_kinematics_solver(nb::module_ &m) {
+  const auto solve_position_step_single =
+      static_cast<PositionIKResult (KinematicsSolver::*)(
+          const Eigen::VectorXd &, const Eigen::Matrix4d &,
+          const std::string &, const PositionStepOptions &)>(
+          &KinematicsSolver::solve_position_step);
+  const auto solve_position_step_multi =
+      static_cast<PositionIKResult (KinematicsSolver::*)(
+          const Eigen::VectorXd &, const std::vector<TaskTarget> &,
+          const PositionStepOptions &)>(&KinematicsSolver::solve_position_step);
+
   nb::class_<KinematicsSolver::CollisionDebugInfo>(m, "CollisionDebugInfo")
       .def_prop_ro("object_a",
                    [](const KinematicsSolver::CollisionDebugInfo &self) {
@@ -164,6 +174,42 @@ void bind_kinematics_solver(nb::module_ &m) {
            nb::arg("seed_q"), nb::arg("target_pose"), nb::arg("frame_name"),
            nb::arg("options") = PositionIKOptions(),
            "Solve position-level IK to reach target pose")
+
+      .def("solve_position_step", solve_position_step_single,
+           nb::arg("current_q"), nb::arg("target_pose"),
+           nb::arg("frame_task_name"),
+           nb::arg("options") = PositionStepOptions(),
+           "Stepping position IK using the solver's registered tasks. "
+           "Sets the target pose on the named FrameTask, computes pose "
+           "error internally, scales it by position_gain / "
+           "orientation_gain, calls solve_velocity() up to max_steps "
+           "times, integrating after each step. The task weight is left "
+           "untouched. Unlike solve_position(), this does not create "
+           "temporary tasks. The recovery state machine (stuck detection, "
+           "collision homotopy, etc.) is automatically exercised.")
+      .def(
+          "solve_position_step",
+          [](KinematicsSolver &self, const Eigen::VectorXd &current_q,
+             const pinocchio::SE3 &target_pose,
+             const std::string &frame_task_name,
+             const PositionStepOptions &options) {
+            return self.solve_position_step(current_q,
+                                            target_pose.toHomogeneousMatrix(),
+                                            frame_task_name, options);
+          },
+          nb::arg("current_q"), nb::arg("target_pose"),
+          nb::arg("frame_task_name"),
+          nb::arg("options") = PositionStepOptions(),
+          "Stepping position IK overload that accepts SE3/Rt directly. "
+          "Equivalent to passing target_pose.homogeneous().")
+      .def("solve_position_step", solve_position_step_multi,
+           nb::arg("current_q"), nb::arg("targets"),
+           nb::arg("options") = PositionStepOptions(),
+           "Stepping position IK for multiple registered pose tasks. "
+           "Each TaskTarget carries task_name, target_pose, and per-task "
+           "position/orientation gains. For each step, all task target "
+           "velocities are computed from pose errors, then solve_velocity() "
+           "is called once to preserve coordinated multi-task behavior.")
 
       .def("solve_position_in_tcp", &KinematicsSolver::solve_position_in_tcp,
            nb::arg("seed_q"), nb::arg("relative_target"), nb::arg("frame_name"),

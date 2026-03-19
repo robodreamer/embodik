@@ -29,6 +29,7 @@
 
 #include <embodik/ik_baseline.hpp>
 #include <embodik/types.hpp>
+#include <pinocchio/spatial/se3.hpp>
 
 namespace nb = nanobind;
 namespace eik = embodik;
@@ -150,7 +151,54 @@ NB_MODULE(_embodik_impl, m) {
       .def_rw("max_linear_step", &eik::PositionIKOptions::max_linear_step,
               "Maximum linear step per iteration (meters)")
       .def_rw("max_angular_step", &eik::PositionIKOptions::max_angular_step,
-              "Maximum angular step per iteration (radians)");
+              "Maximum angular step per iteration (radians)")
+      .def_rw("position_gain", &eik::PositionIKOptions::position_gain,
+              "Linear error gain used by position IK")
+      .def_rw("orientation_gain", &eik::PositionIKOptions::orientation_gain,
+              "Angular error gain used by position IK")
+      .def_rw("primary_solve_mode", &eik::PositionIKOptions::primary_solve_mode,
+              "Primary end-effector solve mode used by position IK")
+      .def_rw("primary_allow_min_error_fallback",
+              &eik::PositionIKOptions::primary_allow_min_error_fallback,
+              "Allow SCALE primary task to fall back to MIN_ERROR in position IK");
+
+  nb::class_<eik::PositionStepOptions>(
+      m, "PositionStepOptions",
+      "Options for solve_position_step() — gains, step count, timestep")
+      .def(nb::init<>())
+      .def_rw("position_gain", &eik::PositionStepOptions::position_gain,
+              "Multiplier on the linear pose error (default 1.0)")
+      .def_rw("orientation_gain", &eik::PositionStepOptions::orientation_gain,
+              "Multiplier on the angular pose error (default 1.0)")
+      .def_rw("max_steps", &eik::PositionStepOptions::max_steps,
+              "Number of velocity-IK iterations per call (default 1)")
+      .def_rw("dt", &eik::PositionStepOptions::dt,
+              "Integration timestep per step; <=0 uses solver.dt (default -1)");
+
+  nb::class_<eik::TaskTarget>(
+      m, "TaskTarget",
+      "Per-task target and gains for multi-task solve_position_step()")
+      .def(nb::init<>())
+      .def(nb::init<const std::string &, const Eigen::Matrix4d &, double, double>(),
+           nb::arg("task_name"), nb::arg("target_pose"),
+           nb::arg("position_gain") = 1.0, nb::arg("orientation_gain") = 1.0)
+      .def_static(
+          "from_se3",
+          [](const std::string &task_name, const pinocchio::SE3 &target_pose,
+             double position_gain, double orientation_gain) {
+            eik::TaskTarget t;
+            t.task_name = task_name;
+            t.target_pose = target_pose.toHomogeneousMatrix();
+            t.position_gain = position_gain;
+            t.orientation_gain = orientation_gain;
+            return t;
+          },
+          nb::arg("task_name"), nb::arg("target_pose"),
+          nb::arg("position_gain") = 1.0, nb::arg("orientation_gain") = 1.0)
+      .def_rw("task_name", &eik::TaskTarget::task_name)
+      .def_rw("target_pose", &eik::TaskTarget::target_pose)
+      .def_rw("position_gain", &eik::TaskTarget::position_gain)
+      .def_rw("orientation_gain", &eik::TaskTarget::orientation_gain);
 
   nb::class_<eik::PositionIKResult, eik::VelocitySolverResult>(
       m, "PositionIKResult", "Result from position-level IK solving")

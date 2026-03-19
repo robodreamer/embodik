@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <deque>
 #include <embodik/dual_arm_ects.hpp>
 #include <embodik/robot_model.hpp>
 #include <embodik/tasks.hpp>
@@ -672,6 +673,27 @@ private:
   double last_solution_dq_norm_ = 0.0;
   std::unordered_map<std::size_t, int> collision_stuck_counters_;
   std::unordered_map<std::size_t, double> collision_stuck_last_distances_;
+  // Recovery homotopy state (per pair) for effective collision margins.
+  std::unordered_map<std::size_t, double> collision_effective_min_distance_;
+
+  struct RecoveryHistoryEntry {
+    Eigen::VectorXd q;
+    Eigen::VectorXd dq;
+    double collision_distance = std::numeric_limits<double>::infinity();
+    double joint_limit_margin = std::numeric_limits<double>::infinity();
+    SolverStatus status = SolverStatus::kInvalidInput;
+  };
+
+  struct RecoveryState {
+    bool active = false;
+    int error_streak = 0;
+    int near_zero_dq_streak = 0;
+    int healthy_streak = 0;
+    std::deque<RecoveryHistoryEntry> history;
+    Eigen::VectorXd rollback_target_q;
+    bool has_rollback_target = false;
+  };
+  RecoveryState recovery_state_;
 
   std::string canonical_pair_key(const std::string &a,
                                  const std::string &b) const;
@@ -694,6 +716,65 @@ public:
                  const Eigen::Matrix4d &target_pose,
                  const std::string &frame_name,
                  const PositionIKOptions &options = PositionIKOptions());
+
+  /**
+   * @brief Stepping position IK using the solver's registered tasks.
+   *
+   * Sets the target pose on the named FrameTask, computes pose error
+   * internally, scales the error by position_gain / orientation_gain to
+   * produce the desired velocity, calls solve_velocity() up to max_steps
+   * times, integrates after each step, and returns the result.  Because it
+   * routes through solve_velocity(), the recovery state machine (stuck
+   * detection, collision homotopy, etc.) is automatically exercised.
+   *
+   * Unlike solve_position(), this method does NOT create temporary tasks or
+   * swap the solver's task list — it uses whatever tasks the caller has
+   * already added via add_frame_task() / add_posture_task().
+   *
+   * Typical usage in an interactive loop (single step per frame):
+   * @code
+   *   auto task = solver.add_frame_task("ee", "end_effector");
+   *   PositionStepOptions opts;
+   *   opts.position_gain = 60.0;
+   *   opts.orientation_gain = 60.0;
+   *   while (running) {
+   *     auto result = solver.solve_position_step(q, target_pose, "ee", opts);
+   *     q = result.q_solution;
+   *   }
+   * @endcode
+   *
+   * @param current_q      Current joint configuration
+   * @param target_pose    Target SE3 pose (4×4 homogeneous matrix)
+   * @param frame_task_name Name of the registered FrameTask to drive
+   * @param options        Gains, step count, timestep
+   * @return PositionIKResult with q_solution and velocity-level diagnostics
+   */
+  PositionIKResult
+  solve_position_step(const Eigen::VectorXd &current_q,
+                      const Eigen::Matrix4d &target_pose,
+                      const std::string &frame_task_name,
+                      const PositionStepOptions &options = PositionStepOptions());
+
+  /**
+   * @brief Stepping position IK for multiple registered pose tasks.
+   *
+   * Each TaskTarget provides a task name, target pose, and per-task gains.
+   * For each step, target velocities are computed from each task's pose error,
+   * solve_velocity() is called once to preserve coordinated multi-task
+   * behavior, then q is integrated.
+   *
+   * Supported task types are FrameTask, AbsoluteFrameTask, and
+   * RelativeFrameTask.
+   *
+   * @param current_q Current joint configuration
+   * @param targets List of task target descriptors
+   * @param options Step count/timestep configuration (per-target gains are used)
+   * @return PositionIKResult with q_solution and velocity-level diagnostics
+   */
+  PositionIKResult
+  solve_position_step(const Eigen::VectorXd &current_q,
+                      const std::vector<TaskTarget> &targets,
+                      const PositionStepOptions &options = PositionStepOptions());
 
   /**
    * @brief TCP-relative position IK solver

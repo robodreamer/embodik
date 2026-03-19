@@ -128,9 +128,31 @@ struct PositionIKOptions {
   // Step size limits (for stability)
   double max_linear_step = 0.3;  // Max meters per iteration
   double max_angular_step = 0.3; // Max radians per iteration
+  double position_gain = 1.0;
+  double orientation_gain = 1.0;
+
+  // Primary EE objective solve behavior
+  TaskSolveMode primary_solve_mode = TaskSolveMode::kScale;
+  bool primary_allow_min_error_fallback = false;
 
   // Optional joint exclusions (e.g., lock torso joints in position IK).
   std::vector<int> excluded_joint_indices;
+};
+
+// Options for solve_position_step() — lightweight struct for interactive loops.
+struct PositionStepOptions {
+  double position_gain = 1.0;    // Multiplier on the linear error → velocity
+  double orientation_gain = 1.0; // Multiplier on the angular error → velocity
+  int max_steps = 1;             // Number of velocity-IK iterations
+  double dt = -1.0;              // Integration timestep per step (≤0 → solver.dt)
+};
+
+// Per-task target for multi-task solve_position_step().
+struct TaskTarget {
+  std::string task_name;
+  Eigen::Matrix4d target_pose = Eigen::Matrix4d::Identity();
+  double position_gain = 1.0;
+  double orientation_gain = 1.0;
 };
 
 // Position IK result
