@@ -53,6 +53,19 @@ constexpr double kRecoveryRollbackPostureGain = 0.15;
 constexpr double kRecoveryCollisionBuffer = 5e-4;
 constexpr double kRecoveryHomotopyRampStep = 5e-4;
 
+// Recovery exit: require every active collision QP row (debug list) at/above
+// min_distance. Empty list → true (no rows in the QP this step).
+static bool all_collision_debug_pairs_at_least_min(
+    const std::vector<KinematicsSolver::CollisionDebugInfo> &list,
+    double min_distance) {
+  for (const auto &info : list) {
+    if (!std::isfinite(info.distance) || info.distance < min_distance) {
+      return false;
+    }
+  }
+  return true;
+}
+
 // Velocity box constraint: minimum fraction of vel_limit when inside limits
 constexpr double kMinBoundFraction = 0.10;
 // Margin (rad) below which we do NOT inject headroom toward a limit
@@ -801,6 +814,10 @@ void KinematicsSolver::clear_collision_constraint() {
     collision_constraint_->enabled = false;
   }
   collision_allowed_pair_mask_.clear();
+  last_collision_constraint_pair_indices_.clear();
+  collision_stuck_counters_.clear();
+  collision_stuck_last_distances_.clear();
+  collision_effective_min_distance_.clear();
 }
 
 // ============================================================
@@ -1891,7 +1908,9 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
   }
 
   if (recovery_state_.active && !goals.empty()) {
-    // During recovery, reduce primary EE pull and allow min-error adaptation.
+    // During recovery, soften only the first merged priority block (goals[0] /
+    // objective_configs[0] after flush_group). Additional priority-0 groups
+    // are not scaled here — keep multi-task stacks documented/understood.
     goals[0] *= kRecoveryPrimaryTaskScale;
     if (!objective_configs.empty()) {
       objective_configs[0].solve_mode = TaskSolveMode::kMinError;
@@ -2448,14 +2467,6 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
       collision_constraint_result.has_value()
           ? collision_constraint_result->distance
           : std::numeric_limits<double>::infinity();
-  const bool collision_unhealthy =
-      collision_constraint_.has_value() && collision_constraint_->enabled &&
-      std::isfinite(collision_distance) &&
-      collision_distance < collision_constraint_->min_distance;
-  const bool joint_unhealthy =
-      std::isfinite(min_joint_limit_margin) &&
-      min_joint_limit_margin < kRecoveryJointLimitMarginTrigger;
-  const bool unhealthy = collision_unhealthy || joint_unhealthy;
 
   recovery_state_.error_streak = has_error_status ? (recovery_state_.error_streak + 1) : 0;
   recovery_state_.near_zero_dq_streak =
@@ -2490,10 +2501,14 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
         " | recovery mode activated after repeated stalled errors";
   }
 
+  // When max_constraints > 1, require every active row (same order as
+  // get_last_collision_debug_list()) to satisfy min_distance — not only the
+  // closest pair stored in collision_constraint_result.distance.
   const bool healthy_collision =
       !collision_constraint_.has_value() || !collision_constraint_->enabled ||
-      !std::isfinite(collision_distance) ||
-      collision_distance >= collision_constraint_->min_distance;
+      !collision_constraint_result.has_value() ||
+      all_collision_debug_pairs_at_least_min(last_collision_debug_list_,
+                                            collision_constraint_->min_distance);
   const bool healthy_limits =
       !std::isfinite(min_joint_limit_margin) ||
       min_joint_limit_margin >= kRecoveryJointLimitMarginHealthy;
