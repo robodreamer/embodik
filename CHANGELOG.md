@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.4] - 2026-03-20
+
+### Added
+- **`pull-away` stall regression test**: added dual-EE body-stall coverage that reproduces a stall-then-reverse-target sequence and asserts quick motion recovery when end-effector goals move away from collision.
+
+### Changed
+- **Stall detection now treats `kNumericalError` + near-zero `dq` as stuck**: extends handler triggering beyond `kInfeasible` so sustained capped-iteration failures still progress through recovery logic.
+- **Iteration-cap probing under fallback**: during fallback cycles, the solver now allows uncapped probe steps at cycle boundaries to detect newly feasible motion sooner when constraints are being relieved.
+
+### Fixed
+- **Collision margin clamp removed for runtime tuning**: `set_collision_min_distance()` now accepts negative values, enabling deep-penetration escape strategies that require temporary sub-zero margins.
+- **Deep-penetration stall escape path**: on repeated stalls while interpenetrating, the handler drops effective collision margin below current penetration and exits fallback so motion can resume instead of remaining locked with high compute cost.
+- **Margin restoration stability after escape**: restoration is bounded by live collision-distance ceilings to avoid immediately reintroducing infeasible collision rows during recovery.
+
 ## [0.15.3] - 2026-03-20
 
 ### Changed

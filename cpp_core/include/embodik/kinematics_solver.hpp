@@ -744,6 +744,10 @@ private:
     int consecutive_stall_steps = 0;
     bool fallback_active = false;
     int healthy_steps = 0;
+    /// True when the most recent solve was stuck (non-success with near-zero
+    /// motion).  Used to decide whether the iteration cap should apply on the
+    /// *next* call — avoids capping quality solves after the user pulls away.
+    bool last_step_was_stuck = false;
     // Cumulative stats
     int total_stall_steps = 0;
     int total_relaxation_steps = 0;
