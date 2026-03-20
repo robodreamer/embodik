@@ -698,7 +698,7 @@ bool KinematicsSolver::set_collision_min_distance(double min_distance) {
   if (!collision_constraint_.has_value() || !collision_constraint_->enabled) {
     return false;
   }
-  collision_constraint_->min_distance = std::max(0.0, min_distance);
+  collision_constraint_->min_distance = min_distance;
   return true;
 }
 
@@ -743,6 +743,7 @@ void KinematicsSolver::enable_stall_handler(double nominal_min_distance) {
   stall_state_.consecutive_stall_steps = 0;
   stall_state_.fallback_active = false;
   stall_state_.healthy_steps = 0;
+  stall_state_.last_step_was_stuck = false;
 }
 
 void KinematicsSolver::disable_stall_handler() {
@@ -754,6 +755,7 @@ void KinematicsSolver::disable_stall_handler() {
     stall_state_.current_min_distance = stall_state_.nominal_min_distance;
     stall_state_.consecutive_stall_steps = 0;
     stall_state_.healthy_steps = 0;
+    stall_state_.last_step_was_stuck = false;
   }
   stall_config_.enabled = false;
 }
@@ -816,9 +818,15 @@ void KinematicsSolver::stall_handler_update(VelocitySolverResult &result) {
   auto &st = stall_state_;
 
   const double dq_norm = result.joint_velocities.norm();
-  const bool is_stall =
-      (dq_norm < cfg.dq_stall_eps) &&
-      result.status == SolverStatus::kInfeasible;
+
+  // Any non-success status (kInfeasible, kNumericalError) with near-zero
+  // motion counts as a stall.  kNumericalError commonly appears when the
+  // iteration cap truncates a deeply infeasible solve.
+  const bool solver_stuck = (result.status != SolverStatus::kSuccess);
+  const bool is_stall = (dq_norm < cfg.dq_stall_eps) && solver_stuck;
+  const bool solver_healthy = (result.status == SolverStatus::kSuccess);
+
+  st.last_step_was_stuck = is_stall;
 
   if (is_stall) {
     st.consecutive_stall_steps++;
@@ -864,8 +872,27 @@ void KinematicsSolver::stall_handler_update(VelocitySolverResult &result) {
   const double floor_min =
       st.nominal_min_distance * cfg.floor_fraction;
 
-  // --- Stall threshold reached: relax margin + activate fallback ---
+  const bool in_penetration = collision_dist < 0.0;
+
+  // --- Stall threshold reached ---
   if (st.consecutive_stall_steps >= cfg.stall_threshold) {
+    if (in_penetration) {
+      // Deep penetration escape: the collision QP rows create infeasibility
+      // that blocks ALL motion.  Set min_distance well below the actual
+      // penetration depth to effectively disable the collision constraint,
+      // then let the gradual restoration ramp it back to nominal.
+      const double escape_margin =
+          collision_dist - cfg.collision_proximity_band;
+      st.current_min_distance = escape_margin;
+      set_collision_min_distance(escape_margin);
+      if (st.fallback_active) {
+        stall_handler_set_fallback(false);
+      }
+      st.consecutive_stall_steps = 0;
+      st.healthy_steps = 0;
+      return;
+    }
+    // Normal case: relax margin gradually + activate MIN_ERROR fallback.
     if (collision_is_bottleneck && st.current_min_distance > floor_min) {
       const double drop = cfg.relax_drop_fraction * st.nominal_min_distance;
       const double new_min =
@@ -878,7 +905,20 @@ void KinematicsSolver::stall_handler_update(VelocitySolverResult &result) {
     st.consecutive_stall_steps = 0;
   }
 
-  // --- Restoration: sustained healthy motion while fallback is active ---
+  // --- Fast-path restoration when collision is clearly safe ---
+  // If the solver finds a feasible solution AND the closest collision pair
+  // is well above nominal margin, snap everything back immediately.
+  if (st.fallback_active && solver_healthy &&
+      collision_dist > st.nominal_min_distance + cfg.collision_proximity_band) {
+    st.current_min_distance = st.nominal_min_distance;
+    set_collision_min_distance(st.nominal_min_distance);
+    stall_handler_set_fallback(false);
+    st.consecutive_stall_steps = 0;
+    st.healthy_steps = 0;
+    return;
+  }
+
+  // --- Gradual restoration: fallback active, sustained healthy motion ---
   if (st.fallback_active && !is_stall) {
     const double healthy_threshold =
         cfg.dq_stall_eps * cfg.healthy_motion_multiplier;
@@ -889,7 +929,6 @@ void KinematicsSolver::stall_handler_update(VelocitySolverResult &result) {
     }
 
     if (st.healthy_steps >= cfg.healthy_steps_to_clear) {
-      // Gradually restore margin.
       if (st.current_min_distance < st.nominal_min_distance) {
         const double new_min = std::min(
             st.nominal_min_distance,
@@ -898,12 +937,35 @@ void KinematicsSolver::stall_handler_update(VelocitySolverResult &result) {
         st.current_min_distance = new_min;
         set_collision_min_distance(new_min);
       }
-      // Disable fallback only once margin is fully restored.
       if (st.current_min_distance >= st.nominal_min_distance) {
         stall_handler_set_fallback(false);
         st.healthy_steps = 0;
         st.consecutive_stall_steps = 0;
       }
+    }
+  }
+
+  // --- Penetration-escape margin ramp-up ---
+  // After a deep-penetration escape, fallback is off but min_distance is
+  // deeply negative.  When the solver produces healthy motion, ramp the
+  // margin back toward nominal.  The ceiling is set just below the current
+  // collision distance so the margin never exceeds the actual clearance
+  // (which would re-create the infeasible QP).
+  if (!st.fallback_active && solver_healthy &&
+      st.current_min_distance < st.nominal_min_distance - kStallDistanceTolerance) {
+    const double gap = st.nominal_min_distance - st.current_min_distance;
+    const double step = std::max(cfg.restore_rate * st.nominal_min_distance,
+                                 cfg.relax_drop_fraction * gap);
+    double ceiling = st.nominal_min_distance;
+    if (std::isfinite(collision_dist)) {
+      ceiling = std::min(ceiling,
+                         collision_dist - cfg.collision_proximity_band);
+    }
+    const double new_min = std::min(ceiling,
+                                    st.current_min_distance + step);
+    if (new_min > st.current_min_distance) {
+      st.current_min_distance = new_min;
+      set_collision_min_distance(new_min);
     }
   }
 }
@@ -2397,10 +2459,14 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
   config.regularization_config.epsilon = solver_tolerance_;
   config.regularization_config.regularization_factor = damping_;
 
-  // When the stall handler has activated fallback, cap the SNS iteration
-  // count.  MIN_ERROR mode saturates constraints one-by-one and can take many
-  // iterations on complex robots; capping avoids per-step computation spikes.
-  if (stall_config_.enabled && stall_state_.fallback_active) {
+  // Cap SNS iterations when the stall handler is in fallback.  However, on
+  // the first step of each stall-detection cycle (counter == 0 after a
+  // threshold reset), allow full iterations as a probe: if the problem has
+  // become feasible (user pulled targets away), the solver needs full
+  // iterations to find motion.  If it's still stuck, the result will be
+  // near-zero dq regardless, and we resume capping on subsequent steps.
+  if (stall_config_.enabled && stall_state_.fallback_active &&
+      stall_state_.consecutive_stall_steps > 0) {
     config.iteration_limit =
         std::min(config.iteration_limit, stall_config_.fallback_iteration_limit);
   }
