@@ -711,13 +711,31 @@ private:
   // ---- Stall handler ----
   struct StallHandlerConfig {
     bool enabled = false;
+    /// Consecutive stall steps before triggering fallback + margin relaxation.
     int stall_threshold = 5;
+    /// Joint-velocity norm below which a step counts as "no motion".
     double dq_stall_eps = 1e-5;
+    /// Fraction of nominal margin dropped per relaxation step (legacy; see
+    /// relax_drop_fraction for the current aggressive mode).
     double relax_rate = 0.03;
+    /// Fraction of nominal margin to restore per healthy batch.
     double restore_rate = 0.005;
+    /// Minimum collision margin as a fraction of nominal (hard floor).
     double floor_fraction = 0.3;
+    /// Distance band around current margin that qualifies collision as bottleneck.
     double collision_proximity_band = 0.02;
-    int healthy_steps_to_clear = 3;
+    /// Sustained healthy steps needed before beginning margin restoration.
+    int healthy_steps_to_clear = 10;
+    /// Fraction of nominal margin dropped each time the stall threshold fires.
+    double relax_drop_fraction = 0.10;
+    /// Multiplier on dq_stall_eps to define "meaningful motion" for healthy
+    /// step counting.
+    double healthy_motion_multiplier = 100.0;
+    /// Maximum SNS iterations when fallback is active (caps computation time).
+    unsigned int fallback_iteration_limit = 5;
+    /// Minimum task weight to consider a task "active" (avoids floating-point
+    /// noise from counting as active).
+    double task_active_weight_eps = 1e-6;
   };
 
   struct StallHandlerState {

@@ -723,12 +723,16 @@ void KinematicsSolver::clear_collision_constraint() {
 // Stall handler
 // ============================================================
 
+// Tolerance for floating-point distance comparisons in stall handler logic.
+constexpr double kStallDistanceTolerance = 1e-8;
+
 void KinematicsSolver::enable_stall_handler(double nominal_min_distance) {
   const double nom = std::max(0.0, nominal_min_distance);
   if (stall_config_.enabled) {
     // Already running — update nominal if it changed but preserve
     // accumulated stall counters so detection works across calls.
-    if (std::abs(nom - stall_state_.nominal_min_distance) > 1e-8) {
+    if (std::abs(nom - stall_state_.nominal_min_distance) >
+        kStallDistanceTolerance) {
       stall_state_.nominal_min_distance = nom;
     }
     return;
@@ -746,10 +750,7 @@ void KinematicsSolver::disable_stall_handler() {
     if (stall_state_.fallback_active) {
       stall_handler_set_fallback(false);
     }
-    if (stall_state_.current_min_distance <
-        stall_state_.nominal_min_distance - 1e-8) {
-      set_collision_min_distance(stall_state_.nominal_min_distance);
-    }
+    set_collision_min_distance(stall_state_.nominal_min_distance);
     stall_state_.current_min_distance = stall_state_.nominal_min_distance;
     stall_state_.consecutive_stall_steps = 0;
     stall_state_.healthy_steps = 0;
@@ -776,7 +777,7 @@ void KinematicsSolver::configure_stall_handler(int stall_threshold,
 bool KinematicsSolver::stall_handler_is_relaxed() const {
   return stall_config_.enabled &&
          stall_state_.current_min_distance <
-             stall_state_.nominal_min_distance - 1e-8;
+             stall_state_.nominal_min_distance - kStallDistanceTolerance;
 }
 
 bool KinematicsSolver::stall_handler_is_fallback_active() const {
@@ -811,30 +812,43 @@ void KinematicsSolver::stall_handler_update(VelocitySolverResult &result) {
     return;
   }
 
+  const auto &cfg = stall_config_;
+  auto &st = stall_state_;
+
   const double dq_norm = result.joint_velocities.norm();
-
-  // Use a more generous threshold when fallback is already active because
-  // MIN_ERROR can produce small but non-zero velocities even in a deeply
-  // stuck configuration.
-  const double effective_eps = stall_state_.fallback_active
-                                   ? stall_config_.dq_stall_eps * 100.0
-                                   : stall_config_.dq_stall_eps;
-
-  // Stall = (a) explicitly infeasible with near-zero motion, OR
-  //         (b) fallback already active but solver still produces near-zero
-  //             motion (MIN_ERROR returns kSuccess even when stuck).
   const bool is_stall =
-      (dq_norm < effective_eps) &&
-      (result.status == SolverStatus::kInfeasible ||
-       (result.status == SolverStatus::kSuccess &&
-        stall_state_.fallback_active));
+      (dq_norm < cfg.dq_stall_eps) &&
+      result.status == SolverStatus::kInfeasible;
 
   if (is_stall) {
-    stall_state_.consecutive_stall_steps++;
-    stall_state_.total_stall_steps++;
-    stall_state_.healthy_steps = 0;
-  } else {
-    stall_state_.consecutive_stall_steps = 0;
+    st.consecutive_stall_steps++;
+    st.total_stall_steps++;
+    st.healthy_steps = 0;
+  } else if (!st.fallback_active) {
+    st.consecutive_stall_steps = 0;
+  }
+  // When fallback is active, brief motion bursts from margin relaxation
+  // should NOT reset the stall counter — they re-stall immediately.
+
+  // If all priority-0 tasks have near-zero weight, restore everything
+  // immediately to prevent config jumps when the user disables one EE.
+  if (st.fallback_active) {
+    bool any_primary_active = false;
+    for (const auto &task : tasks_) {
+      if (task && task->getPriority() == 0 &&
+          task->getWeight() > cfg.task_active_weight_eps) {
+        any_primary_active = true;
+        break;
+      }
+    }
+    if (!any_primary_active) {
+      st.current_min_distance = st.nominal_min_distance;
+      set_collision_min_distance(st.nominal_min_distance);
+      stall_handler_set_fallback(false);
+      st.consecutive_stall_steps = 0;
+      st.healthy_steps = 0;
+      return;
+    }
   }
 
   // Determine if collision is the bottleneck.
@@ -845,86 +859,52 @@ void KinematicsSolver::stall_handler_update(VelocitySolverResult &result) {
   }
   const bool collision_is_bottleneck =
       collision_dist <
-      stall_state_.current_min_distance + stall_config_.collision_proximity_band;
-
-  // If all priority-0 tasks have near-zero weight, restore collision margin
-  // immediately.  This prevents config jumps when a user disables one EE
-  // while the handler is in relaxed mode.
-  if (stall_state_.fallback_active) {
-    bool any_primary_active = false;
-    for (const auto &task : tasks_) {
-      if (task && task->getPriority() == 0 && task->getWeight() > 1e-6) {
-        any_primary_active = true;
-        break;
-      }
-    }
-    if (!any_primary_active) {
-      if (stall_state_.current_min_distance <
-          stall_state_.nominal_min_distance - 1e-8) {
-        stall_state_.current_min_distance = stall_state_.nominal_min_distance;
-        set_collision_min_distance(stall_state_.nominal_min_distance);
-      }
-      stall_handler_set_fallback(false);
-      stall_state_.consecutive_stall_steps = 0;
-      stall_state_.healthy_steps = 0;
-      return;
-    }
-  }
+      st.current_min_distance + cfg.collision_proximity_band;
 
   const double floor_min =
-      std::max(0.005, stall_state_.nominal_min_distance *
-                          stall_config_.floor_fraction);
+      st.nominal_min_distance * cfg.floor_fraction;
 
-  if (stall_state_.consecutive_stall_steps >= stall_config_.stall_threshold) {
-    // Relax collision margin if collision-bounded.
-    if (collision_is_bottleneck) {
-      const double new_min = std::max(
-          floor_min,
-          stall_state_.current_min_distance -
-              stall_config_.relax_rate * stall_state_.nominal_min_distance);
-      if (std::abs(new_min - stall_state_.current_min_distance) > 1e-8) {
-        stall_state_.current_min_distance = new_min;
-        set_collision_min_distance(new_min);
-      }
-      stall_state_.total_relaxation_steps++;
+  // --- Stall threshold reached: relax margin + activate fallback ---
+  if (st.consecutive_stall_steps >= cfg.stall_threshold) {
+    if (collision_is_bottleneck && st.current_min_distance > floor_min) {
+      const double drop = cfg.relax_drop_fraction * st.nominal_min_distance;
+      const double new_min =
+          std::max(floor_min, st.current_min_distance - drop);
+      st.current_min_distance = new_min;
+      set_collision_min_distance(new_min);
+      st.total_relaxation_steps++;
     }
-    // Enable MIN_ERROR fallback on primary tasks.
     stall_handler_set_fallback(true);
-  } else if (!is_stall) {
-    // Restore collision margin gradually.
-    if (stall_state_.current_min_distance <
-        stall_state_.nominal_min_distance - 1e-8) {
-      const double new_min = std::min(
-          stall_state_.nominal_min_distance,
-          stall_state_.current_min_distance +
-              stall_config_.restore_rate * stall_state_.nominal_min_distance);
-      if (std::abs(new_min - stall_state_.current_min_distance) > 1e-8) {
-        stall_state_.current_min_distance = new_min;
+    st.consecutive_stall_steps = 0;
+  }
+
+  // --- Restoration: sustained healthy motion while fallback is active ---
+  if (st.fallback_active && !is_stall) {
+    const double healthy_threshold =
+        cfg.dq_stall_eps * cfg.healthy_motion_multiplier;
+    if (dq_norm > healthy_threshold) {
+      st.healthy_steps++;
+    } else {
+      st.healthy_steps = 0;
+    }
+
+    if (st.healthy_steps >= cfg.healthy_steps_to_clear) {
+      // Gradually restore margin.
+      if (st.current_min_distance < st.nominal_min_distance) {
+        const double new_min = std::min(
+            st.nominal_min_distance,
+            st.current_min_distance +
+                cfg.restore_rate * st.nominal_min_distance);
+        st.current_min_distance = new_min;
         set_collision_min_distance(new_min);
       }
-    }
-    // Deactivate fallback only after sustained meaningful motion AND the
-    // collision margin has been fully restored to nominal.  Deactivating
-    // while the margin is still relaxed causes immediate re-stalling.
-    if (stall_state_.fallback_active) {
-      const double healthy_dq_threshold = effective_eps * 10.0;
-      if (dq_norm > healthy_dq_threshold) {
-        stall_state_.healthy_steps++;
-      } else {
-        stall_state_.healthy_steps = 0;
-      }
-      const bool margin_restored =
-          stall_state_.current_min_distance >=
-          stall_state_.nominal_min_distance - 1e-8;
-      if (stall_state_.healthy_steps >=
-              stall_config_.healthy_steps_to_clear &&
-          margin_restored) {
+      // Disable fallback only once margin is fully restored.
+      if (st.current_min_distance >= st.nominal_min_distance) {
         stall_handler_set_fallback(false);
-        stall_state_.healthy_steps = 0;
+        st.healthy_steps = 0;
+        st.consecutive_stall_steps = 0;
       }
     }
-  } else {
-    stall_state_.healthy_steps = 0;
   }
 }
 
@@ -2417,14 +2397,12 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
   config.regularization_config.epsilon = solver_tolerance_;
   config.regularization_config.regularization_factor = damping_;
 
-  // When the stall handler is in active fallback and the problem is known to
-  // be deeply infeasible, cap the SNS iteration count.  MIN_ERROR mode
-  // saturates constraints one-by-one and can take many iterations on complex
-  // robots; capping avoids the computation time spike since the solution will
-  // be near-zero motion regardless.
-  if (stall_config_.enabled && stall_state_.fallback_active &&
-      stall_state_.consecutive_stall_steps >= stall_config_.stall_threshold) {
-    config.iteration_limit = std::min(config.iteration_limit, 5u);
+  // When the stall handler has activated fallback, cap the SNS iteration
+  // count.  MIN_ERROR mode saturates constraints one-by-one and can take many
+  // iterations on complex robots; capping avoids per-step computation spikes.
+  if (stall_config_.enabled && stall_state_.fallback_active) {
+    config.iteration_limit =
+        std::min(config.iteration_limit, stall_config_.fallback_iteration_limit);
   }
 
   // Call the backend solver
