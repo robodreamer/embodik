@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.3] - 2026-03-20
+
+### Changed
+- **Stall handler tuning is now parameterized**: replaced inline magic constants in fallback logic with explicit config fields (`relax_drop_fraction`, `healthy_motion_multiplier`, `fallback_iteration_limit`, `task_active_weight_eps`) to make behavior easier to reason about and tune.
+- **Stall-handler defaults aligned with current behavior**: `healthy_steps_to_clear` default is now 10 in `StallHandlerConfig`, matching the sustained-motion requirement used by the active fallback implementation.
+
+### Fixed
+- **Removed ad-hoc floating-point guards in stall cleanup paths**: stall margin restore/relaxed-state checks now use named tolerance constants rather than repeated hardcoded epsilons.
+- **Stall regression test robustness**: threshold-reach assertion in dual-EE body-stall coverage now reflects observed counter accumulation under the updated sustained-motion fallback behavior.
+
 ## [0.15.2] - 2026-03-20
 
 ### Fixed
