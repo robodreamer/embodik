@@ -151,21 +151,27 @@ struct PositionStepOptions {
   // Optional task-space speed caps (0 or negative = unlimited).
   double max_linear_speed = 0.0;  // m/s cap on ||v_linear||
   double max_angular_speed = 0.0; // rad/s cap on ||v_angular||
-  /// Same meaning as PositionIKOptions::excluded_joint_indices: for each inner
-  /// solve_velocity(), these nv-indices are merged into the exclusions of the
-  /// driven pose task(s) and of every PostureTask on the solver (saved/restored
-  /// after the call). Other task types are unchanged. Empty = no effect.
+  /// Same intent as PositionIKOptions::excluded_joint_indices: treat these
+  /// nv-indices as inactive in solve_position_step without mutating registered
+  /// task exclusion lists. Internally this maps to zero-velocity locks during
+  /// each inner solve_velocity() call. Empty = no effect.
   std::vector<int> excluded_joint_indices;
   /// Enforce v_i = 0 in the velocity QP for these nv-indices (tight bounds +
   /// zero Jacobian columns on all objectives and inequality Jacobians). Empty =
-  /// no effect. Preferred when diagnostics must match integration. Any index
-  /// outside [0, nv) yields kInvalidInput at solve_position_step entry.
+  /// no effect. **Warning:** this alters the stacked QP (not equivalent to
+  /// post-QP velocity masking) and can reroute motion onto other joints; for
+  /// interactive ``solve_position_step`` loops, prefer
+  /// ``integration_zero_velocity_indices`` unless you need reported
+  /// ``joint_velocities`` to match the integrated step. Any index outside [0,
+  /// nv) yields kInvalidInput at solve_position_step entry.
   std::vector<int> locked_joint_indices;
   /// After each inner solve_velocity(), set joint_velocities[i]=0 for these
   /// nv-indices before pinocchio::integrate (legacy “zero dq then integrate”).
   /// The QP may still assign non-zero velocity there. If an index is also in
   /// locked_joint_indices, the QP already yields zero; this pass is redundant.
-  /// Any index outside [0, nv) yields kInvalidInput at entry.
+  /// **Typical choice** for teleop / marker IK: use this field alone (leave
+  /// ``locked_joint_indices`` empty) to match legacy mask-then-integrate
+  /// behavior. Any index outside [0, nv) yields kInvalidInput at entry.
   std::vector<int> integration_zero_velocity_indices;
 };
 
