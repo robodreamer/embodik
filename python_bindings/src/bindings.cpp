@@ -163,7 +163,13 @@ NB_MODULE(_embodik_impl, m) {
               "Primary end-effector solve mode used by position IK")
       .def_rw("primary_allow_min_error_fallback",
               &eik::PositionIKOptions::primary_allow_min_error_fallback,
-              "Allow SCALE primary task to fall back to MIN_ERROR in position IK");
+              "Allow SCALE primary task to fall back to MIN_ERROR in position IK")
+      .def_rw("stall_recovery",
+              &eik::PositionIKOptions::stall_recovery,
+              "When True, enable automatic stall recovery. Detects "
+              "consecutive INFEASIBLE steps with near-zero velocities and "
+              "temporarily relaxes collision margins / enables MIN_ERROR "
+              "fallback. Default False.");
 
   nb::class_<eik::PositionStepOptions>(
       m, "PositionStepOptions",
@@ -198,7 +204,13 @@ NB_MODULE(_embodik_impl, m) {
               &eik::PositionStepOptions::integration_zero_velocity_indices,
               "Nv-indices zeroed on joint_velocities after each inner "
               "solve_velocity and before integrate (legacy post-QP mask). "
-              "Out-of-range → InvalidInput.");
+              "Out-of-range → InvalidInput.")
+      .def_rw("stall_recovery",
+              &eik::PositionStepOptions::stall_recovery,
+              "When True, enable automatic stall recovery. Detects "
+              "consecutive INFEASIBLE steps with near-zero velocities and "
+              "temporarily relaxes collision margins / enables MIN_ERROR "
+              "fallback. Default False.");
 
   nb::class_<eik::TaskTarget>(
       m, "TaskTarget",

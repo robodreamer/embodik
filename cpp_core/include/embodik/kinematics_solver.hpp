@@ -10,7 +10,6 @@
 
 #include <algorithm>
 #include <cstdint>
-#include <deque>
 #include <embodik/dual_arm_ects.hpp>
 #include <embodik/robot_model.hpp>
 #include <embodik/tasks.hpp>
@@ -167,11 +166,15 @@ public:
    * current if empty)
    * @param apply_limits If true, apply velocity and position-based velocity
    * limits
+   * @param stall_recovery When true, enable automatic stall recovery for
+   *        this call. See PositionStepOptions::stall_recovery for details.
+   *        No-op if the stall handler is already enabled.
    * @return Velocity solver result with joint velocities and saturation info
    */
   VelocitySolverResult
   solve_velocity(const Eigen::VectorXd &current_q = Eigen::VectorXd(),
-                 bool apply_limits = true);
+                 bool apply_limits = true,
+                 bool stall_recovery = false);
 
   /**
    * @brief Enable/disable detailed timing breakdown fields in
@@ -329,6 +332,11 @@ public:
     return enable_saturation_exit_behavior_;
   }
 
+  /// @deprecated Recovery state machine has been removed. These methods are
+  /// retained as no-ops for API backward compatibility.
+  void set_solver_recovery_enabled(bool /*enable*/) {}
+  bool solver_recovery_enabled() const { return false; }
+
   /**
    * @brief Enable a joint-limit barrier gradient task (priority 1, nullspace).
    *
@@ -410,6 +418,24 @@ public:
       double min_distance = 0.05);
 
   /**
+   * @brief Update only the min_distance of an already-configured collision
+   *        constraint without rebuilding pair masks.
+   *
+   * Much cheaper than calling configure_collision_constraint() each tick.
+   * No-op if no collision constraint has been configured yet.
+   *
+   * @param min_distance  New minimum separation distance (clamped to >= 0).
+   * @return true if the distance was updated, false if no constraint exists.
+   */
+  bool set_collision_min_distance(double min_distance);
+
+  /**
+   * @brief Read the current collision min_distance.
+   * @return Current min_distance, or -1 if no collision constraint is active.
+   */
+  double get_collision_min_distance() const;
+
+  /**
    * @brief Disable collision avoidance constraints.
    *
    * Clears internal collision state as well (active pair indices, stuck
@@ -417,6 +443,63 @@ public:
    * later re-enable does not inherit stale solver-side data.
    */
   void clear_collision_constraint();
+
+  // ========== Stall Handler ==========
+
+  /**
+   * @brief Enable the automatic stall handler.
+   *
+   * When enabled, the solver detects consecutive INFEASIBLE steps with
+   * near-zero dq and applies two recovery mechanisms:
+   *
+   * 1. **Collision margin relaxation** — if the stall is collision-bounded,
+   *    temporarily reduce the collision min_distance.
+   * 2. **MIN_ERROR fallback** — temporarily enable allow_min_error_fallback
+   *    on all priority-0 tasks so the solver finds the least-infeasible
+   *    direction.
+   *
+   * Both mechanisms deactivate gradually once motion resumes.
+   *
+   * @param nominal_min_distance  The original user-intended collision
+   *        min_distance. The handler relaxes below this during stalls
+   *        and restores back to it afterward.
+   */
+  void enable_stall_handler(double nominal_min_distance);
+
+  /// Disable the stall handler and restore nominal parameters.
+  void disable_stall_handler();
+
+  /// @return true if the stall handler is enabled.
+  bool stall_handler_enabled() const;
+
+  /**
+   * @brief Configure stall handler tuning parameters.
+   *
+   * Only call after enable_stall_handler(). All parameters have sensible
+   * defaults for interactive loops at 50–200 Hz.
+   *
+   * @param stall_threshold  Consecutive infeasible steps to trigger (default 5)
+   * @param relax_rate       Per-step reduction of min_distance as fraction of nominal (default 0.03)
+   * @param restore_rate     Per-step restoration of min_distance as fraction of nominal (default 0.005)
+   * @param floor_fraction   Minimum min_distance as fraction of nominal (default 0.3)
+   */
+  void configure_stall_handler(int stall_threshold = 5,
+                                double relax_rate = 0.03,
+                                double restore_rate = 0.005,
+                                double floor_fraction = 0.3,
+                                int healthy_steps_to_clear = 3);
+
+  /// @return true if the stall handler has currently relaxed collision margin.
+  bool stall_handler_is_relaxed() const;
+
+  /// @return true if the MIN_ERROR fallback is currently active.
+  bool stall_handler_is_fallback_active() const;
+
+  /// @return current effective collision min_distance (may be < nominal if relaxed).
+  double stall_handler_current_min_distance() const;
+
+  /// @return number of consecutive stall steps in the current streak.
+  int stall_handler_consecutive_stall_steps() const;
 
   /**
    * @brief Configure a CoM support-polygon constraint (inequality).
@@ -625,6 +708,36 @@ private:
     Eigen::Vector3d point_b_world = Eigen::Vector3d::Zero();
   };
 
+  // ---- Stall handler ----
+  struct StallHandlerConfig {
+    bool enabled = false;
+    int stall_threshold = 5;
+    double dq_stall_eps = 1e-5;
+    double relax_rate = 0.03;
+    double restore_rate = 0.005;
+    double floor_fraction = 0.3;
+    double collision_proximity_band = 0.02;
+    int healthy_steps_to_clear = 3;
+  };
+
+  struct StallHandlerState {
+    double nominal_min_distance = 0.0;
+    double current_min_distance = 0.0;
+    int consecutive_stall_steps = 0;
+    bool fallback_active = false;
+    int healthy_steps = 0;
+    // Cumulative stats
+    int total_stall_steps = 0;
+    int total_relaxation_steps = 0;
+    int total_fallback_activations = 0;
+  };
+
+  StallHandlerConfig stall_config_;
+  StallHandlerState stall_state_;
+
+  void stall_handler_update(VelocitySolverResult &result);
+  void stall_handler_set_fallback(bool active);
+
   // ---- CoM support-polygon constraint ----
   struct ComConstraintConfig {
     bool enabled = false;
@@ -686,37 +799,6 @@ private:
   double last_solution_dq_norm_ = 0.0;
   std::unordered_map<std::size_t, int> collision_stuck_counters_;
   std::unordered_map<std::size_t, double> collision_stuck_last_distances_;
-  // Recovery homotopy state (per pair) for effective collision margins.
-  std::unordered_map<std::size_t, double> collision_effective_min_distance_;
-
-  // ---- Internal velocity-solver recovery (not whole-stack / WBC recovery) ----
-  // Trigger: sustained kNumericalError/kInfeasible together with near-zero ||dq||.
-  // While active: scale goals[0] (first merged priority-0 block), switch it to
-  // MIN_ERROR, inject a rollback posture task; collision rows use homotopy on
-  // effective min distance. Exit: repeated healthy solves (all active collision
-  // rows >= min_distance when constraints are on, joint margin, non-tiny dq).
-  // Not exposed in the public API; status_message may contain "recovery mode"
-  // substrings for diagnostics.
-
-  struct RecoveryHistoryEntry {
-    Eigen::VectorXd q;
-    Eigen::VectorXd dq;
-    double collision_distance = std::numeric_limits<double>::infinity();
-    double joint_limit_margin = std::numeric_limits<double>::infinity();
-    SolverStatus status = SolverStatus::kInvalidInput;
-  };
-
-  struct RecoveryState {
-    bool active = false;
-    int error_streak = 0;
-    int near_zero_dq_streak = 0;
-    int healthy_streak = 0;
-    std::deque<RecoveryHistoryEntry> history;
-    Eigen::VectorXd rollback_target_q;
-    bool has_rollback_target = false;
-  };
-  RecoveryState recovery_state_;
-
   std::string canonical_pair_key(const std::string &a,
                                  const std::string &b) const;
   bool collision_pair_allowed(const std::string &a, const std::string &b) const;
