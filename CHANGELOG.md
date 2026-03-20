@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.1] - 2026-03-20
+
+### Changed
+- **`solve_position_step(..., stall_recovery=True)` lifecycle**: stall-handler state now persists across successive single-step calls so stall counters accumulate correctly in outer loops (e.g., teleop ticks with `max_steps=1`).
+- **Stall handler enabling semantics**: `enable_stall_handler()` is now idempotent and preserves accumulated recovery state when called repeatedly.
+
+### Fixed
+- **Persistent dual-EE stall handling**: fixed a reset path that prevented `consecutive_stall_steps` from reaching threshold in per-tick stepping IK loops, which blocked stall recovery from activating.
+- **Regression coverage**: added/updated stall-handler tests for persistent `solve_position_step` behavior and counter accumulation across repeated single-step calls.
+
 ### Removed
 - **Solver recovery state machine**: the internal velocity-solver recovery state machine has been removed entirely. It caused oscillation and aggressive velocity spikes without measurable benefit. `set_solver_recovery_enabled()` / `solver_recovery_enabled()` are retained as no-ops for backward compatibility.
 

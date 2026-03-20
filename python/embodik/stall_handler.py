@@ -26,12 +26,13 @@ The simplest opt-in is via the ``stall_recovery`` flag on options structs::
     # solve_velocity — handler persists across calls:
     result = solver.solve_velocity(q, apply_limits=True, stall_recovery=True)
 
-    # solve_position_step — handler auto-enables/disables per call:
+    # solve_position_step — handler persists across calls so stall counts
+    # accumulate in single-step-per-tick loops (e.g. teleop at 100 Hz):
     opts = PositionStepOptions()
     opts.stall_recovery = True
     result = solver.solve_position_step(q, target, "ee", opts)
 
-    # solve_position — handler auto-enables/disables per call:
+    # solve_position — handler auto-enables/disables within the call:
     opts = PositionIKOptions()
     opts.stall_recovery = True
     result = solver.solve_position(q, target, "panda_hand", opts)

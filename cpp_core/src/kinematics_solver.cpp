@@ -724,9 +724,18 @@ void KinematicsSolver::clear_collision_constraint() {
 // ============================================================
 
 void KinematicsSolver::enable_stall_handler(double nominal_min_distance) {
+  const double nom = std::max(0.0, nominal_min_distance);
+  if (stall_config_.enabled) {
+    // Already running — update nominal if it changed but preserve
+    // accumulated stall counters so detection works across calls.
+    if (std::abs(nom - stall_state_.nominal_min_distance) > 1e-8) {
+      stall_state_.nominal_min_distance = nom;
+    }
+    return;
+  }
   stall_config_.enabled = true;
-  stall_state_.nominal_min_distance = std::max(0.0, nominal_min_distance);
-  stall_state_.current_min_distance = stall_state_.nominal_min_distance;
+  stall_state_.nominal_min_distance = nom;
+  stall_state_.current_min_distance = nom;
   stall_state_.consecutive_stall_steps = 0;
   stall_state_.fallback_active = false;
   stall_state_.healthy_steps = 0;
@@ -2785,9 +2794,10 @@ PositionIKResult KinematicsSolver::solve_position_step(
   frame_task->setTargetPose(target_pose.block<3, 1>(0, 3),
                             target_pose.block<3, 3>(0, 0));
 
-  // Auto-enable stall handler if requested and not already on.
-  const bool auto_stall = options.stall_recovery && !stall_config_.enabled;
-  if (auto_stall) {
+  // Enable stall handler if requested. enable_stall_handler is idempotent:
+  // repeated calls preserve accumulated stall counters so detection works
+  // across successive single-step solve_position_step calls.
+  if (options.stall_recovery) {
     const double nominal =
         get_collision_min_distance() > 0.0 ? get_collision_min_distance() : 0.0;
     enable_stall_handler(nominal);
@@ -2834,10 +2844,6 @@ PositionIKResult KinematicsSolver::solve_position_step(
     q = pinocchio::integrate(robot_->model(), q,
                              step_dt * last_vel_result.joint_velocities);
     robot_->update_configuration(q);
-  }
-
-  if (auto_stall) {
-    disable_stall_handler();
   }
 
   clear_all_target_velocities();
@@ -2920,9 +2926,10 @@ PositionIKResult KinematicsSolver::solve_position_step(
     }
   }
 
-  // Auto-enable stall handler if requested and not already on.
-  const bool auto_stall = options.stall_recovery && !stall_config_.enabled;
-  if (auto_stall) {
+  // Enable stall handler if requested. enable_stall_handler is idempotent:
+  // repeated calls preserve accumulated stall counters so detection works
+  // across successive single-step solve_position_step calls.
+  if (options.stall_recovery) {
     const double nominal =
         get_collision_min_distance() > 0.0 ? get_collision_min_distance() : 0.0;
     enable_stall_handler(nominal);
@@ -3013,10 +3020,6 @@ PositionIKResult KinematicsSolver::solve_position_step(
     q = pinocchio::integrate(robot_->model(), q,
                              step_dt * last_vel_result.joint_velocities);
     robot_->update_configuration(q);
-  }
-
-  if (auto_stall) {
-    disable_stall_handler();
   }
 
   std::unordered_set<Task *> resolved_tasks;
