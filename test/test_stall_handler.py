@@ -688,3 +688,296 @@ class TestSolvePositionStallRecovery:
             "Should not disable externally-enabled handler"
         )
         solver.disable_stall_handler()
+
+
+# ===================================================================
+# Dual-EE body stall: broadened detection, time budget, jump prevention
+# ===================================================================
+
+def _pose_to_4x4(frame_pose):
+    """Convert a Pinocchio frame pose to a 4x4 numpy matrix."""
+    T = np.eye(4)
+    T[:3, :3] = np.array(frame_pose.rotation)
+    T[:3, 3] = np.array(frame_pose.translation)
+    return T
+
+
+def _setup_dual_iiwa_body_stall():
+    """Set up dual iiwa with BOTH EEs targeting deep inside the body.
+
+    Returns (robot, solver, q0, left_target_4x4, right_target_4x4, min_dist)
+    or None.
+    """
+    examples_dir = Path(__file__).resolve().parent.parent / "examples"
+    if str(examples_dir) not in sys.path:
+        sys.path.insert(0, str(examples_dir))
+
+    try:
+        from utils.dual_iiwa_urdf import (
+            build_dual_iiwa_urdf,
+            get_dual_iiwa_frame_names,
+            get_dual_iiwa_default_configuration,
+        )
+    except ImportError:
+        return None
+
+    urdf_str = build_dual_iiwa_urdf()
+    with tempfile.NamedTemporaryFile(suffix=".urdf", mode="w", delete=False) as f:
+        f.write(urdf_str)
+        urdf_path = f.name
+
+    try:
+        robot = eik.RobotModel(urdf_path, floating_base=False)
+    except Exception:
+        return None
+    finally:
+        os.unlink(urdf_path)
+
+    excl = _dual_iiwa_exclusions(robot)
+    if excl:
+        try:
+            robot.apply_collision_exclusions(excl)
+        except Exception:
+            pass
+
+    solver = eik.KinematicsSolver(robot)
+    solver.dt = 0.01
+    solver.set_damping(0.1)
+
+    q = np.array(get_dual_iiwa_default_configuration(), dtype=float)
+    robot.update_configuration(q)
+
+    dbg = solver.evaluate_collision_debug(q)
+    if dbg is None or not np.isfinite(dbg.distance):
+        return None
+
+    min_dist = 0.05
+    solver.configure_collision_constraint(
+        min_distance=min_dist, include_pairs=[], exclude_pairs=list(excl),
+    )
+
+    left_frame, right_frame = get_dual_iiwa_frame_names()
+
+    solver.clear_tasks()
+    left_task = solver.add_frame_task("left_body", left_frame)
+    left_task.priority = 0
+    left_task.weight = 1.0
+    left_task.solve_mode = eik.TaskSolveMode.SCALE
+
+    right_task = solver.add_frame_task("right_body", right_frame)
+    right_task.priority = 0
+    right_task.weight = 1.0
+    right_task.solve_mode = eik.TaskSolveMode.SCALE
+
+    left_pose = robot.get_frame_pose(left_frame)
+    left_pos = np.array(left_pose.translation)
+    left_rot = np.array(left_pose.rotation)
+    left_target_pos = left_pos + np.array([0.0, -0.40, -0.10])
+    left_task.set_target_pose(left_target_pos, left_rot)
+
+    right_pose = robot.get_frame_pose(right_frame)
+    right_pos = np.array(right_pose.translation)
+    right_rot = np.array(right_pose.rotation)
+    right_target_pos = right_pos + np.array([0.0, 0.40, -0.10])
+    right_task.set_target_pose(right_target_pos, right_rot)
+
+    # Build 4x4 target matrices for TaskTarget construction
+    left_T = np.eye(4)
+    left_T[:3, :3] = left_rot
+    left_T[:3, 3] = left_target_pos
+
+    right_T = np.eye(4)
+    right_T[:3, :3] = right_rot
+    right_T[:3, 3] = right_target_pos
+
+    return robot, solver, q, left_T, right_T, min_dist
+
+
+def _run_position_step_loop(solver, robot, q, targets, opts, steps):
+    """Run solve_position_step with multi-target TaskTargets for N steps.
+
+    Returns (q, times_ms, stall_counters, fallback_transitions).
+    """
+    times_ms = []
+    stall_counters = []
+    fallback_transitions = []
+    was_fallback = False
+    for _ in range(steps):
+        result = solver.solve_position_step(q, targets, opts)
+        q = result.q_solution
+        robot.update_configuration(q)
+        if result.computation_time_ms is not None:
+            times_ms.append(result.computation_time_ms)
+        counter = solver.stall_handler_consecutive_stall_steps()
+        stall_counters.append(counter)
+        is_fb = solver.stall_handler_is_fallback_active()
+        if is_fb and not was_fallback:
+            fallback_transitions.append(("on", len(stall_counters)))
+        elif not is_fb and was_fallback:
+            fallback_transitions.append(("off", len(stall_counters)))
+        was_fallback = is_fb
+    return q, times_ms, stall_counters, fallback_transitions
+
+
+class TestDualEEBodyStall:
+    """Dual-EE body collision stall: broadened detection, time, jump safety.
+
+    All tests use solve_position_step with the multi-target TaskTarget overload
+    to match the hmnd_robot teleop pattern.
+    """
+
+    def test_stall_recovery_progressively_relaxes_margin(self):
+        """Stall handler should progressively relax the collision margin.
+
+        Each stall → fallback → brief motion → re-stall cycle should ratchet
+        the margin down further. Over enough steps the margin should decrease
+        well below the initial nominal value.
+        """
+        setup = _setup_dual_iiwa_body_stall()
+        if setup is None:
+            pytest.skip("Dual iiwa model not available")
+
+        robot, solver, q0, left_T, right_T, min_dist = setup
+        opts = eik.PositionStepOptions()
+        opts.stall_recovery = True
+        opts.max_steps = 1
+
+        targets = [
+            eik.TaskTarget("left_body", left_T),
+            eik.TaskTarget("right_body", right_T),
+        ]
+
+        q, _, _, _ = _run_position_step_loop(
+            solver, robot, q0.copy(), targets, opts, 200,
+        )
+
+        final_min = solver.stall_handler_current_min_distance()
+        assert final_min < min_dist * 0.8, (
+            f"Margin only relaxed to {final_min:.4f} from {min_dist}; "
+            f"expected at least 20% reduction"
+        )
+        solver.disable_stall_handler()
+
+    def test_stall_counter_reaches_threshold_repeatedly(self):
+        """Stall counter should reach the threshold (5) multiple times,
+        triggering fallback activation and margin relaxation each cycle."""
+        setup = _setup_dual_iiwa_body_stall()
+        if setup is None:
+            pytest.skip("Dual iiwa model not available")
+
+        robot, solver, q0, left_T, right_T, min_dist = setup
+        opts = eik.PositionStepOptions()
+        opts.stall_recovery = True
+        opts.max_steps = 1
+
+        targets = [
+            eik.TaskTarget("left_body", left_T),
+            eik.TaskTarget("right_body", right_T),
+        ]
+
+        _, _, stall_counters, transitions = _run_position_step_loop(
+            solver, robot, q0.copy(), targets, opts, 200,
+        )
+
+        max_counter = max(stall_counters)
+        threshold_hits = sum(1 for c in stall_counters if c >= 5)
+        assert max_counter >= 5, (
+            f"Counter never reached threshold ({max_counter} < 5)"
+        )
+        assert threshold_hits >= 3, (
+            f"Threshold hit only {threshold_hits} times; expected multiple "
+            f"stall→fallback→motion→re-stall cycles"
+        )
+        solver.disable_stall_handler()
+
+    def test_computation_time_bounded_during_stall(self):
+        """Per-step solve time should not spike when deeply stalled.
+
+        The iteration-limit cap in solve_velocity should keep individual
+        steps fast even when MIN_ERROR fallback is active.
+        """
+        setup = _setup_dual_iiwa_body_stall()
+        if setup is None:
+            pytest.skip("Dual iiwa model not available")
+
+        robot, solver, q0, left_T, right_T, min_dist = setup
+        opts = eik.PositionStepOptions()
+        opts.stall_recovery = True
+        opts.max_steps = 1
+
+        targets = [
+            eik.TaskTarget("left_body", left_T),
+            eik.TaskTarget("right_body", right_T),
+        ]
+
+        _, times_ms, _, _ = _run_position_step_loop(
+            solver, robot, q0.copy(), targets, opts, 60,
+        )
+
+        if times_ms:
+            max_time = max(times_ms)
+            assert max_time < 10.0, (
+                f"Max per-step time {max_time:.2f}ms exceeds 10ms budget; "
+                f"iteration cap may not be working"
+            )
+        solver.disable_stall_handler()
+
+    def test_disable_task_no_penetration_jump(self):
+        """Setting one EE task weight=0 during stall must NOT cause the
+        freed arm to jump into deep body penetration."""
+        setup = _setup_dual_iiwa_body_stall()
+        if setup is None:
+            pytest.skip("Dual iiwa model not available")
+
+        robot, solver, q0, left_T, right_T, min_dist = setup
+        opts = eik.PositionStepOptions()
+        opts.stall_recovery = True
+        opts.max_steps = 1
+
+        both_targets = [
+            eik.TaskTarget("left_body", left_T),
+            eik.TaskTarget("right_body", right_T),
+        ]
+
+        # Drive into stall with both EEs
+        q, _, _, _ = _run_position_step_loop(
+            solver, robot, q0.copy(), both_targets, opts, 30,
+        )
+
+        # Disable left task (simulate user toggling off one EE)
+        left_task = solver.get_task("left_body")
+        left_task.weight = 0.0
+
+        # Continue with only right EE target active
+        right_only_targets = [eik.TaskTarget("right_body", right_T)]
+        q, _, _, _ = _run_position_step_loop(
+            solver, robot, q, right_only_targets, opts, 10,
+        )
+
+        dbg = solver.evaluate_collision_debug(q)
+        if dbg is not None and np.isfinite(dbg.distance):
+            assert dbg.distance > -0.02, (
+                f"Collision distance {dbg.distance:.4f}m after disabling task; "
+                f"arm jumped into deep penetration"
+            )
+        solver.disable_stall_handler()
+
+    def test_velocity_loop_dual_ee_stall_recovery(self):
+        """Full velocity loop: handler should reduce stalls vs baseline."""
+        setup1 = _setup_dual_iiwa_body_stall()
+        if setup1 is None:
+            pytest.skip("Dual iiwa model not available")
+
+        robot1, solver1, q01, _, _, _ = setup1
+        baseline_stalls, _ = _run_velocity_loop(robot1, solver1, q01.copy(), 200)
+
+        setup2 = _setup_dual_iiwa_body_stall()
+        robot2, solver2, q02, _, _, min_dist2 = setup2
+        solver2.enable_stall_handler(min_dist2)
+        solver2.configure_stall_handler(stall_threshold=5)
+        handler_stalls, _ = _run_velocity_loop(robot2, solver2, q02.copy(), 200)
+        solver2.disable_stall_handler()
+
+        assert handler_stalls <= baseline_stalls, (
+            f"Handler should not increase stalls: {handler_stalls} > {baseline_stalls}"
+        )

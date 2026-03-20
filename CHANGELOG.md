@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.2] - 2026-03-20
+
+### Fixed
+- **Broadened stall detection under MIN_ERROR fallback**: stall handler now detects stuck states when `dq ≈ 0` under active MIN_ERROR fallback (returns `kSuccess` with near-zero motion). Uses a wider velocity threshold (100× `dq_stall_eps`) when fallback is already active.
+- **Progressive margin relaxation**: fallback deactivation now requires collision margin to be fully restored to nominal before clearing, preventing rapid on/off cycling that re-triggered immediate stalls.
+- **Jump prevention on task disable**: when all priority-0 tasks have near-zero weight (e.g., user disabling one EE during stall), the handler immediately restores collision margin to nominal and deactivates fallback, preventing configuration jumps into deep penetration.
+- **Computation time bounded during deep stalls**: when the stall handler is in active fallback with sustained infeasibility, the inner SNS solver iteration limit is capped to 5, preventing per-step computation spikes from MIN_ERROR constraint-by-constraint saturation.
+- **Healthy-step gating**: fallback deactivation requires sustained *meaningful* motion (above 10× the effective stall threshold), not just any non-zero `dq`.
+
+### Added
+- **`TestDualEEBodyStall` test class**: 5 new tests covering progressive margin relaxation, repeated threshold hits, computation time budget, no-penetration-jump on task disable, and velocity-loop stall reduction — all using the multi-target `solve_position_step` pattern matching `hmnd_robot` teleop usage.
+
 ## [0.15.1] - 2026-03-20
 
 ### Changed
