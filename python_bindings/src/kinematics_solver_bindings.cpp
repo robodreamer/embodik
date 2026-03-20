@@ -138,20 +138,25 @@ void bind_kinematics_solver(nb::module_ &m) {
       .def("solve_velocity", &KinematicsSolver::solve_velocity,
            nb::arg("current_q") = Eigen::VectorXd(),
            nb::arg("apply_limits") = true,
+           nb::arg("stall_recovery") = false,
            "Solve for joint velocities without integration. Returns velocities "
-           "and identifies saturated joints.")
+           "and identifies saturated joints. When stall_recovery=True, "
+           "enables automatic stall detection and recovery (collision margin "
+           "relaxation + MIN_ERROR fallback). The handler stays active across "
+           "calls so stall counts accumulate correctly in user loops.")
       .def(
           "solve_velocity_dq",
           [](KinematicsSolver &self, const Eigen::VectorXd &current_q,
-             bool apply_limits) {
-            // Fast path: return only dq (avoids packaging the full result
-            // object when callers only need joint velocities).
-            auto r = self.solve_velocity(current_q, apply_limits);
+             bool apply_limits, bool stall_recovery) {
+            auto r = self.solve_velocity(current_q, apply_limits,
+                                         stall_recovery);
             return r.joint_velocities;
           },
           nb::arg("current_q") = Eigen::VectorXd(),
           nb::arg("apply_limits") = true,
-          "Solve for joint velocities and return only dq as a NumPy array.")
+          nb::arg("stall_recovery") = false,
+          "Solve for joint velocities and return only dq as a NumPy array. "
+          "When stall_recovery=True, enables automatic stall handler.")
 
       // Configuration
       .def("enable_velocity_limits", &KinematicsSolver::enable_velocity_limits,
@@ -261,6 +266,12 @@ void bind_kinematics_solver(nb::module_ &m) {
       .def("saturation_exit_behavior_enabled",
            &KinematicsSolver::saturation_exit_behavior_enabled,
            "Return whether saturation-exit softening is enabled.")
+      .def("set_solver_recovery_enabled",
+           &KinematicsSolver::set_solver_recovery_enabled, nb::arg("enable"),
+           "Deprecated no-op. Recovery state machine has been removed.")
+      .def("solver_recovery_enabled",
+           &KinematicsSolver::solver_recovery_enabled,
+           "Deprecated no-op. Always returns False.")
       .def("enable_position_ik_debug",
            &KinematicsSolver::enable_position_ik_debug, nb::arg("enable"),
            "Enable verbose logging for position IK iterations")
@@ -329,9 +340,53 @@ void bind_kinematics_solver(nb::module_ &m) {
           "Convenience helper to enable collision avoidance using a specific "
           "set of link pairs.")
 
+      .def("set_collision_min_distance",
+           &KinematicsSolver::set_collision_min_distance,
+           nb::arg("min_distance"),
+           "Update only the min_distance of an already-configured collision "
+           "constraint without rebuilding pair masks. Returns True if "
+           "updated, False if no constraint exists.")
+      .def("get_collision_min_distance",
+           &KinematicsSolver::get_collision_min_distance,
+           "Read the current collision min_distance. Returns -1 if no "
+           "collision constraint is active.")
       .def("clear_collision_constraint",
            &KinematicsSolver::clear_collision_constraint,
            "Disable collision avoidance constraint.")
+
+      // Stall handler
+      .def("enable_stall_handler",
+           &KinematicsSolver::enable_stall_handler,
+           nb::arg("nominal_min_distance"),
+           "Enable the automatic stall handler. Detects consecutive "
+           "INFEASIBLE steps and applies collision margin relaxation + "
+           "MIN_ERROR fallback to break out of stalls.")
+      .def("disable_stall_handler",
+           &KinematicsSolver::disable_stall_handler,
+           "Disable the stall handler and restore nominal parameters.")
+      .def("stall_handler_enabled",
+           &KinematicsSolver::stall_handler_enabled,
+           "Return True if the stall handler is enabled.")
+      .def("configure_stall_handler",
+           &KinematicsSolver::configure_stall_handler,
+           nb::arg("stall_threshold") = 5,
+           nb::arg("relax_rate") = 0.03,
+           nb::arg("restore_rate") = 0.005,
+           nb::arg("floor_fraction") = 0.3,
+           nb::arg("healthy_steps_to_clear") = 3,
+           "Configure stall handler tuning parameters.")
+      .def("stall_handler_is_relaxed",
+           &KinematicsSolver::stall_handler_is_relaxed,
+           "Return True if collision margin is currently relaxed.")
+      .def("stall_handler_is_fallback_active",
+           &KinematicsSolver::stall_handler_is_fallback_active,
+           "Return True if MIN_ERROR fallback is currently active.")
+      .def("stall_handler_current_min_distance",
+           &KinematicsSolver::stall_handler_current_min_distance,
+           "Return the current effective collision min_distance.")
+      .def("stall_handler_consecutive_stall_steps",
+           &KinematicsSolver::stall_handler_consecutive_stall_steps,
+           "Return the number of consecutive stall steps.")
 
       // CoM support-polygon constraint
       .def(

@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+- **Solver recovery state machine**: the internal velocity-solver recovery state machine has been removed entirely. It caused oscillation and aggressive velocity spikes without measurable benefit. `set_solver_recovery_enabled()` / `solver_recovery_enabled()` are retained as no-ops for backward compatibility.
+
+## [0.15.0] - 2026-03-20
+
+### Added
+- **Stall recovery opt-in for `solve_velocity`**: `KinematicsSolver::solve_velocity(..., stall_recovery=False)` and `solve_velocity_dq(..., stall_recovery=False)` now support one-flag activation of the C++ stall handler in user velocity loops.
+- **Stall recovery opt-in for position IK**: `PositionIKOptions.stall_recovery` enables the same C++ stall handling path for `solve_position(...)` with sensible defaults.
+- **Tests**: expanded stall-handler coverage for `solve_velocity`/`solve_velocity_dq` and `solve_position` flag behavior (default-off, opt-in behavior, and externally-enabled handler semantics).
+
+### Changed
+- **`solve_position` stall handling integration**: stall detection now classifies low-level velocity outcomes consistently with `solve_velocity` (including zero-scale primary-task infeasibility) before feeding the stall handler.
+
+### Fixed
+- **Stall-handler consistency across call paths**: aligned status classification and option semantics so `stall_recovery` behaves consistently across `solve_velocity`, `solve_position_step`, and `solve_position`.
+
 ## [0.14.4] - 2026-03-20
 
 ### Fixed

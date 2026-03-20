@@ -52,6 +52,9 @@ from .utils import (
 # Export transform helpers (Rotation/SO3 - native, no SciPy)
 from .transforms import Rotation, SO3
 
+# Stall detection & recovery helper
+from .stall_handler import StallHandler
+
 # Export visualization classes (optional)
 # Default to direct Viser visualization (no pip pinocchio dependency)
 _visualization_available = False
@@ -173,6 +176,7 @@ __all__ = [
     "Rt",
     "Rotation",
     "SO3",
+    "StallHandler",
     # Visualization (optional)
     "EmbodikVisualizer",
     "InteractiveVisualizer",
