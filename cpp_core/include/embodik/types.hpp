@@ -181,11 +181,13 @@ struct PositionStepOptions {
   /// ``locked_joint_indices`` empty) to match legacy mask-then-integrate
   /// behavior. Any index outside [0, nv) yields kInvalidInput at entry.
   std::vector<int> integration_zero_velocity_indices;
-  /// When true, automatically enable the solver's stall handler for this
-  /// call. The handler detects consecutive INFEASIBLE steps with near-zero
-  /// joint velocities and temporarily relaxes collision margins / enables
-  /// MIN_ERROR fallback to break out of stalls. The nominal collision
-  /// min_distance is read from the current collision constraint config.
+  /// When true, enable the solver's stall handler. The handler detects
+  /// consecutive INFEASIBLE steps with near-zero joint velocities and
+  /// temporarily relaxes collision margins / enables MIN_ERROR fallback to
+  /// break out of stalls. The handler is enabled once and persists across
+  /// successive solve_position_step calls so that stall counts accumulate
+  /// correctly in outer loops (e.g. teleop ticks with max_steps=1).
+  /// Call disable_stall_handler() explicitly to tear it down.
   /// Default false (opt-in).
   bool stall_recovery = false;
 };

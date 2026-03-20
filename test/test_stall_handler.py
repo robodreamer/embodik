@@ -428,7 +428,8 @@ class TestPositionStepStallRecovery:
     """Verify opts.stall_recovery works end-to-end through solve_position_step."""
 
     def test_stall_recovery_opt_in_no_crash(self):
-        """Calling solve_position_step with stall_recovery=True should not crash."""
+        """Calling solve_position_step with stall_recovery=True should not crash
+        and the handler should persist across calls."""
         robot, solver, task = _make_panda_solver()
 
         q = np.concatenate([_PANDA_DEFAULT_Q, _PANDA_GRIPPER_EXTRA])
@@ -447,9 +448,11 @@ class TestPositionStepStallRecovery:
             result = solver.solve_position_step(q, target, "ee", opts)
             q = result.q_solution
 
-        assert not solver.stall_handler_enabled(), (
-            "Handler should be auto-disabled after solve_position_step"
+        assert solver.stall_handler_enabled(), (
+            "Handler should persist across solve_position_step calls "
+            "so stall counts can accumulate in single-step-per-tick loops"
         )
+        solver.disable_stall_handler()
 
     def test_stall_recovery_does_not_interfere_when_off(self):
         """stall_recovery=False (default) should not enable the handler."""
@@ -489,6 +492,43 @@ class TestPositionStepStallRecovery:
         solver.solve_position_step(q, target, "ee", opts)
         assert solver.stall_handler_enabled(), (
             "Should not disable externally-enabled handler"
+        )
+
+        solver.disable_stall_handler()
+
+    def test_stall_counter_accumulates_across_single_step_calls(self):
+        """Regression: in a teleop-style loop (max_steps=1, one call per tick),
+        the stall counter must accumulate across calls so recovery triggers."""
+        setup = _setup_panda_stall()
+        if setup is None:
+            pytest.skip("Panda collision debug unavailable")
+
+        robot, solver, q, task, target_pos, min_dist = setup
+
+        opts = eik.PositionStepOptions()
+        opts.max_steps = 1
+        opts.stall_recovery = True
+        opts.position_gain = 20.0
+        opts.orientation_gain = 20.0
+
+        target = np.eye(4)
+        target[:3, 3] = target_pos
+        target[:3, :3] = np.array(
+            robot.get_frame_pose(_PANDA_EE_FRAME).rotation
+        )
+
+        stall_counts = []
+        for i in range(20):
+            result = solver.solve_position_step(q, target, "panda_stall", opts)
+            q = np.asarray(result.q_solution, dtype=float)
+            stall_counts.append(solver.stall_handler_consecutive_stall_steps())
+
+        assert solver.stall_handler_enabled(), "Handler should persist"
+
+        max_count = max(stall_counts)
+        assert max_count > 1, (
+            f"Stall counter should accumulate across single-step calls but "
+            f"max was {max_count}; counts={stall_counts}"
         )
 
         solver.disable_stall_handler()
