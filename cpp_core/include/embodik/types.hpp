@@ -138,6 +138,14 @@ struct PositionIKOptions {
   // Optional joint exclusions (e.g., lock torso joints in position IK).
   // Same nv-index convention as PositionStepOptions::excluded_joint_indices.
   std::vector<int> excluded_joint_indices;
+
+  /// When true, automatically enable the solver's stall handler for this
+  /// call. The handler detects consecutive INFEASIBLE steps with near-zero
+  /// joint velocities and temporarily relaxes collision margins / enables
+  /// MIN_ERROR fallback to break out of stalls. The nominal collision
+  /// min_distance is read from the current collision constraint config.
+  /// Default false (opt-in).
+  bool stall_recovery = false;
 };
 
 // Options for solve_position_step() — lightweight struct for interactive loops.
@@ -173,6 +181,13 @@ struct PositionStepOptions {
   /// ``locked_joint_indices`` empty) to match legacy mask-then-integrate
   /// behavior. Any index outside [0, nv) yields kInvalidInput at entry.
   std::vector<int> integration_zero_velocity_indices;
+  /// When true, automatically enable the solver's stall handler for this
+  /// call. The handler detects consecutive INFEASIBLE steps with near-zero
+  /// joint velocities and temporarily relaxes collision margins / enables
+  /// MIN_ERROR fallback to break out of stalls. The nominal collision
+  /// min_distance is read from the current collision constraint config.
+  /// Default false (opt-in).
+  bool stall_recovery = false;
 };
 
 // Per-task target for multi-task solve_position_step().

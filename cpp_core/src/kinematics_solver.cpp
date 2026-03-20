@@ -41,30 +41,6 @@ constexpr double kCollisionStuckDqNormEps = 1e-6;
 constexpr int kCollisionStuckCountThreshold = 10;
 // Minimum recovery speed when the stuck condition is active (non-penetrating).
 constexpr double kCollisionStuckRecoverySpeed = 0.10;
-constexpr int kRecoveryErrorTriggerTicks = 15;
-constexpr int kRecoveryNearZeroTriggerTicks = 12;
-constexpr double kRecoveryNearZeroDqEps = 5e-6;
-constexpr double kRecoveryJointLimitMarginTrigger = 5e-5;
-constexpr double kRecoveryJointLimitMarginHealthy = 3e-4;
-constexpr int kRecoveryHealthyExitTicks = 10;
-constexpr std::size_t kRecoveryHistorySize = 40;
-constexpr double kRecoveryPrimaryTaskScale = 0.25;
-constexpr double kRecoveryRollbackPostureGain = 0.15;
-constexpr double kRecoveryCollisionBuffer = 5e-4;
-constexpr double kRecoveryHomotopyRampStep = 5e-4;
-
-// Recovery exit: require every active collision QP row (debug list) at/above
-// min_distance. Empty list → true (no rows in the QP this step).
-static bool all_collision_debug_pairs_at_least_min(
-    const std::vector<KinematicsSolver::CollisionDebugInfo> &list,
-    double min_distance) {
-  for (const auto &info : list) {
-    if (!std::isfinite(info.distance) || info.distance < min_distance) {
-      return false;
-    }
-  }
-  return true;
-}
 
 // Velocity box constraint: minimum fraction of vel_limit when inside limits
 constexpr double kMinBoundFraction = 0.10;
@@ -187,22 +163,6 @@ static void sanitize_solver_inputs(std::vector<Eigen::VectorXd> &goals,
   }
 }
 
-static double compute_min_joint_limit_margin(const RobotModel &robot,
-                                             const Eigen::VectorXd &q_current) {
-  auto [q_min, q_max] = robot.get_joint_limits();
-  const int n = std::min({static_cast<int>(q_current.size()),
-                          static_cast<int>(q_min.size()),
-                          static_cast<int>(q_max.size())});
-  double min_margin = std::numeric_limits<double>::infinity();
-  for (int i = 0; i < n; ++i) {
-    if (!std::isfinite(q_min[i]) || !std::isfinite(q_max[i])) {
-      continue;
-    }
-    min_margin = std::min(min_margin, q_current[i] - q_min[i]);
-    min_margin = std::min(min_margin, q_max[i] - q_current[i]);
-  }
-  return min_margin;
-}
 
 static ClassifiedOutcome classify_velocity_outcome(
     SolverStatus backend_status, const std::string &backend_status_message,
@@ -734,6 +694,21 @@ void KinematicsSolver::add_collision_constraint(
 #endif
 }
 
+bool KinematicsSolver::set_collision_min_distance(double min_distance) {
+  if (!collision_constraint_.has_value() || !collision_constraint_->enabled) {
+    return false;
+  }
+  collision_constraint_->min_distance = std::max(0.0, min_distance);
+  return true;
+}
+
+double KinematicsSolver::get_collision_min_distance() const {
+  if (!collision_constraint_.has_value() || !collision_constraint_->enabled) {
+    return -1.0;
+  }
+  return collision_constraint_->min_distance;
+}
+
 void KinematicsSolver::clear_collision_constraint() {
   if (collision_constraint_.has_value()) {
     collision_constraint_->enabled = false;
@@ -742,7 +717,158 @@ void KinematicsSolver::clear_collision_constraint() {
   last_collision_constraint_pair_indices_.clear();
   collision_stuck_counters_.clear();
   collision_stuck_last_distances_.clear();
-  collision_effective_min_distance_.clear();
+}
+
+// ============================================================
+// Stall handler
+// ============================================================
+
+void KinematicsSolver::enable_stall_handler(double nominal_min_distance) {
+  stall_config_.enabled = true;
+  stall_state_.nominal_min_distance = std::max(0.0, nominal_min_distance);
+  stall_state_.current_min_distance = stall_state_.nominal_min_distance;
+  stall_state_.consecutive_stall_steps = 0;
+  stall_state_.fallback_active = false;
+  stall_state_.healthy_steps = 0;
+}
+
+void KinematicsSolver::disable_stall_handler() {
+  if (stall_config_.enabled) {
+    if (stall_state_.fallback_active) {
+      stall_handler_set_fallback(false);
+    }
+    if (stall_state_.current_min_distance <
+        stall_state_.nominal_min_distance - 1e-8) {
+      set_collision_min_distance(stall_state_.nominal_min_distance);
+    }
+    stall_state_.current_min_distance = stall_state_.nominal_min_distance;
+    stall_state_.consecutive_stall_steps = 0;
+    stall_state_.healthy_steps = 0;
+  }
+  stall_config_.enabled = false;
+}
+
+bool KinematicsSolver::stall_handler_enabled() const {
+  return stall_config_.enabled;
+}
+
+void KinematicsSolver::configure_stall_handler(int stall_threshold,
+                                                double relax_rate,
+                                                double restore_rate,
+                                                double floor_fraction,
+                                                int healthy_steps_to_clear) {
+  stall_config_.stall_threshold = std::max(1, stall_threshold);
+  stall_config_.relax_rate = std::max(0.0, relax_rate);
+  stall_config_.restore_rate = std::max(0.0, restore_rate);
+  stall_config_.floor_fraction = std::clamp(floor_fraction, 0.0, 1.0);
+  stall_config_.healthy_steps_to_clear = std::max(1, healthy_steps_to_clear);
+}
+
+bool KinematicsSolver::stall_handler_is_relaxed() const {
+  return stall_config_.enabled &&
+         stall_state_.current_min_distance <
+             stall_state_.nominal_min_distance - 1e-8;
+}
+
+bool KinematicsSolver::stall_handler_is_fallback_active() const {
+  return stall_config_.enabled && stall_state_.fallback_active;
+}
+
+double KinematicsSolver::stall_handler_current_min_distance() const {
+  return stall_state_.current_min_distance;
+}
+
+int KinematicsSolver::stall_handler_consecutive_stall_steps() const {
+  return stall_state_.consecutive_stall_steps;
+}
+
+void KinematicsSolver::stall_handler_set_fallback(bool active) {
+  if (active == stall_state_.fallback_active) {
+    return;
+  }
+  stall_state_.fallback_active = active;
+  if (active) {
+    stall_state_.total_fallback_activations++;
+  }
+  for (auto &task : tasks_) {
+    if (task && task->getPriority() == 0) {
+      task->setAllowMinErrorFallback(active);
+    }
+  }
+}
+
+void KinematicsSolver::stall_handler_update(VelocitySolverResult &result) {
+  if (!stall_config_.enabled) {
+    return;
+  }
+
+  const double dq_norm = result.joint_velocities.norm();
+  const bool is_stall =
+      (result.status == SolverStatus::kInfeasible &&
+       dq_norm < stall_config_.dq_stall_eps);
+
+  if (is_stall) {
+    stall_state_.consecutive_stall_steps++;
+    stall_state_.total_stall_steps++;
+    stall_state_.healthy_steps = 0;
+  } else {
+    stall_state_.consecutive_stall_steps = 0;
+  }
+
+  // Determine if collision is the bottleneck.
+  double collision_dist = std::numeric_limits<double>::infinity();
+  if (last_collision_debug_.has_value() &&
+      std::isfinite(last_collision_debug_->distance)) {
+    collision_dist = last_collision_debug_->distance;
+  }
+  const bool collision_is_bottleneck =
+      collision_dist <
+      stall_state_.current_min_distance + stall_config_.collision_proximity_band;
+
+  const double floor_min =
+      std::max(0.005, stall_state_.nominal_min_distance *
+                          stall_config_.floor_fraction);
+
+  if (stall_state_.consecutive_stall_steps >= stall_config_.stall_threshold) {
+    // Relax collision margin if collision-bounded.
+    if (collision_is_bottleneck) {
+      const double new_min = std::max(
+          floor_min,
+          stall_state_.current_min_distance -
+              stall_config_.relax_rate * stall_state_.nominal_min_distance);
+      if (std::abs(new_min - stall_state_.current_min_distance) > 1e-8) {
+        stall_state_.current_min_distance = new_min;
+        set_collision_min_distance(new_min);
+      }
+      stall_state_.total_relaxation_steps++;
+    }
+    // Enable MIN_ERROR fallback on primary tasks.
+    stall_handler_set_fallback(true);
+  } else if (!is_stall) {
+    // Restore collision margin gradually.
+    if (stall_state_.current_min_distance <
+        stall_state_.nominal_min_distance - 1e-8) {
+      const double new_min = std::min(
+          stall_state_.nominal_min_distance,
+          stall_state_.current_min_distance +
+              stall_config_.restore_rate * stall_state_.nominal_min_distance);
+      if (std::abs(new_min - stall_state_.current_min_distance) > 1e-8) {
+        stall_state_.current_min_distance = new_min;
+        set_collision_min_distance(new_min);
+      }
+    }
+    // Deactivate fallback after sustained healthy motion.
+    if (stall_state_.fallback_active) {
+      stall_state_.healthy_steps++;
+      if (stall_state_.healthy_steps >=
+          stall_config_.healthy_steps_to_clear) {
+        stall_handler_set_fallback(false);
+        stall_state_.healthy_steps = 0;
+      }
+    }
+  } else {
+    stall_state_.healthy_steps = 0;
+  }
 }
 
 // ============================================================
@@ -1328,19 +1454,7 @@ KinematicsSolver::compute_collision_constraint() {
                                      double signed_distance,
                                      bool *stuck_out) -> std::pair<double, double> {
     const double target_min_distance = config.min_distance;
-    double effective_min_distance = target_min_distance;
-    if (recovery_state_.active) {
-      auto it = collision_effective_min_distance_.find(pair_idx);
-      if (it == collision_effective_min_distance_.end()) {
-        const double seeded = signed_distance + kRecoveryCollisionBuffer;
-        it = collision_effective_min_distance_.emplace(pair_idx, seeded).first;
-      }
-      it->second = std::min(target_min_distance,
-                            std::max(it->second, signed_distance));
-      effective_min_distance = it->second;
-    } else {
-      collision_effective_min_distance_.erase(pair_idx);
-    }
+    const double effective_min_distance = target_min_distance;
 
     // Detect stuck: non-penetrating but significantly inside min_distance for
     // multiple consecutive cycles AND the previous dq was near-zero.
@@ -1412,15 +1526,6 @@ KinematicsSolver::compute_collision_constraint() {
           std::min(kCollisionMaxSeparationSpeedNonPenetration,
                    std::max(kCollisionStuckRecoverySpeed,
                             desired * kCollisionRecoveryScale)));
-    }
-
-    if (recovery_state_.active) {
-      auto it = collision_effective_min_distance_.find(pair_idx);
-      if (it != collision_effective_min_distance_.end()) {
-        it->second = std::min(target_min_distance,
-                              std::max(it->second, signed_distance) +
-                                  kRecoveryHomotopyRampStep);
-      }
     }
 
     const double upper_bound =
@@ -1662,7 +1767,13 @@ void KinematicsSolver::sort_tasks_by_priority() {
 
 VelocitySolverResult
 KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
-                                 bool apply_limits) {
+                                 bool apply_limits,
+                                 bool stall_recovery) {
+  if (stall_recovery && !stall_config_.enabled) {
+    const double nominal =
+        get_collision_min_distance() > 0.0 ? get_collision_min_distance() : 0.0;
+    enable_stall_handler(nominal);
+  }
   const bool timing = timing_breakdown_enabled_;
   auto get_elapsed_ms = [](auto start) {
     return std::chrono::duration_cast<std::chrono::microseconds>(
@@ -1832,56 +1943,6 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
     }
   }
 
-  if (recovery_state_.active && !goals.empty()) {
-    // During recovery, soften only the first merged priority block (goals[0] /
-    // objective_configs[0] after flush_group). Additional priority-0 groups
-    // are not scaled here — keep multi-task stacks documented/understood.
-    goals[0] *= kRecoveryPrimaryTaskScale;
-    if (!objective_configs.empty()) {
-      objective_configs[0].solve_mode = TaskSolveMode::kMinError;
-      objective_configs[0].allow_min_error_fallback = true;
-    }
-    // Use the best buffered feasible state as a posture bias to walk out of
-    // deadlock without requiring an abrupt external state reset.
-    if (recovery_state_.has_rollback_target &&
-        recovery_state_.rollback_target_q.size() == robot_->nq()) {
-      const int nv = robot_->nv();
-      Eigen::VectorXd posture_goal =
-          Eigen::VectorXd::Zero(nv);
-      const int n = std::min(nv, static_cast<int>(q_eval.size()));
-      for (int i = 0; i < n; ++i) {
-        posture_goal(i) =
-            (recovery_state_.rollback_target_q(i) - q_eval(i)) /
-            std::max(dt_, 1e-6);
-      }
-      posture_goal *= kRecoveryRollbackPostureGain;
-      goals.push_back(posture_goal);
-      jacobians.push_back(Eigen::MatrixXd::Identity(nv, nv));
-      objective_configs.push_back(
-          ObjectiveSolveConfig{1, TaskSolveMode::kMinError, false});
-      objective_tasks.push_back(nullptr);
-    } else {
-      auto [q_min, q_max] = robot_->get_joint_limits();
-      const int nv = robot_->nv();
-      Eigen::VectorXd posture_goal = Eigen::VectorXd::Zero(nv);
-      const int n = std::min({nv, static_cast<int>(q_eval.size()),
-                              static_cast<int>(q_min.size()),
-                              static_cast<int>(q_max.size())});
-      for (int i = 0; i < n; ++i) {
-        if (!std::isfinite(q_min[i]) || !std::isfinite(q_max[i])) {
-          continue;
-        }
-        const double mid = 0.5 * (q_min[i] + q_max[i]);
-        posture_goal(i) = (mid - q_eval(i)) / std::max(dt_, 1e-6);
-      }
-      posture_goal *= kRecoveryRollbackPostureGain;
-      goals.push_back(posture_goal);
-      jacobians.push_back(Eigen::MatrixXd::Identity(nv, nv));
-      objective_configs.push_back(
-          ObjectiveSolveConfig{1, TaskSolveMode::kMinError, false});
-      objective_tasks.push_back(nullptr);
-    }
-  }
 
   // Build velocity-to-configuration index mapping (needed by barrier task
   // and position-based velocity constraints).
@@ -2381,90 +2442,7 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
     last_solution_dq_norm_ = 0.0;
   }
 
-  // Recovery-state update logic.
-  const double dq_norm = last_solution_dq_norm_;
-  const bool has_error_status =
-      (result.status == SolverStatus::kNumericalError ||
-       result.status == SolverStatus::kInfeasible);
-  const bool near_zero_dq = dq_norm < kRecoveryNearZeroDqEps;
-  const double min_joint_limit_margin = compute_min_joint_limit_margin(*robot_, q_eval);
-  const double collision_distance =
-      collision_constraint_result.has_value()
-          ? collision_constraint_result->distance
-          : std::numeric_limits<double>::infinity();
-
-  recovery_state_.error_streak = has_error_status ? (recovery_state_.error_streak + 1) : 0;
-  recovery_state_.near_zero_dq_streak =
-      near_zero_dq ? (recovery_state_.near_zero_dq_streak + 1) : 0;
-
-  const bool trigger_recovery =
-      !recovery_state_.active &&
-      recovery_state_.error_streak >= kRecoveryErrorTriggerTicks &&
-      recovery_state_.near_zero_dq_streak >= kRecoveryNearZeroTriggerTicks;
-  if (trigger_recovery) {
-    recovery_state_.active = true;
-    recovery_state_.healthy_streak = 0;
-    if (!recovery_state_.history.empty()) {
-      // Prefer the most recent healthiest sample.
-      const auto best_it = std::max_element(
-          recovery_state_.history.begin(), recovery_state_.history.end(),
-          [](const RecoveryHistoryEntry &a, const RecoveryHistoryEntry &b) {
-            const double sa =
-                (std::isfinite(a.collision_distance) ? a.collision_distance : -1e9) +
-                (std::isfinite(a.joint_limit_margin) ? a.joint_limit_margin : -1e9);
-            const double sb =
-                (std::isfinite(b.collision_distance) ? b.collision_distance : -1e9) +
-                (std::isfinite(b.joint_limit_margin) ? b.joint_limit_margin : -1e9);
-            return sa < sb;
-          });
-      if (best_it != recovery_state_.history.end()) {
-        recovery_state_.rollback_target_q = best_it->q;
-        recovery_state_.has_rollback_target = true;
-      }
-    }
-    result.status_message +=
-        " | recovery mode activated after repeated stalled errors";
-  }
-
-  // When max_constraints > 1, require every active row (same order as
-  // get_last_collision_debug_list()) to satisfy min_distance — not only the
-  // closest pair stored in collision_constraint_result.distance.
-  const bool healthy_collision =
-      !collision_constraint_.has_value() || !collision_constraint_->enabled ||
-      !collision_constraint_result.has_value() ||
-      all_collision_debug_pairs_at_least_min(last_collision_debug_list_,
-                                            collision_constraint_->min_distance);
-  const bool healthy_limits =
-      !std::isfinite(min_joint_limit_margin) ||
-      min_joint_limit_margin >= kRecoveryJointLimitMarginHealthy;
-  if (recovery_state_.active) {
-    if (!has_error_status && !near_zero_dq && healthy_collision && healthy_limits) {
-      recovery_state_.healthy_streak += 1;
-    } else {
-      recovery_state_.healthy_streak = 0;
-    }
-    if (recovery_state_.healthy_streak >= kRecoveryHealthyExitTicks) {
-      recovery_state_.active = false;
-      recovery_state_.healthy_streak = 0;
-      collision_effective_min_distance_.clear();
-      result.status_message += " | recovery mode exited";
-    }
-  } else {
-    collision_effective_min_distance_.clear();
-  }
-
-  if (result.status == SolverStatus::kSuccess) {
-    RecoveryHistoryEntry entry;
-    entry.q = q_eval;
-    entry.dq = result.joint_velocities;
-    entry.collision_distance = collision_distance;
-    entry.joint_limit_margin = min_joint_limit_margin;
-    entry.status = result.status;
-    recovery_state_.history.push_back(std::move(entry));
-    while (recovery_state_.history.size() > kRecoveryHistorySize) {
-      recovery_state_.history.pop_front();
-    }
-  }
+  stall_handler_update(result);
 
   return result;
 }
@@ -2511,6 +2489,13 @@ PositionIKResult KinematicsSolver::solve_position(
     if (!options.excluded_joint_indices.empty()) {
       posture_task->set_excluded_joint_indices(options.excluded_joint_indices);
     }
+  }
+
+  const bool auto_stall = options.stall_recovery && !stall_config_.enabled;
+  if (auto_stall) {
+    const double nominal =
+        get_collision_min_distance() > 0.0 ? get_collision_min_distance() : 0.0;
+    enable_stall_handler(nominal);
   }
 
   Eigen::VectorXd q_current = seed_q;
@@ -2680,7 +2665,27 @@ PositionIKResult KinematicsSolver::solve_position(
     auto vel_result = computeMultiObjectiveVelocitySolutionEigen(
         goals, jacobians, C, c_lower, c_upper, config, objective_configs);
 
-    if (vel_result.status != SolverStatus::kSuccess) {
+    if (stall_config_.enabled) {
+      double primary_goal_norm =
+          goals.empty() ? 0.0 : goals[0].norm();
+      auto classified = classify_velocity_outcome(
+          vel_result.status, vel_result.status_message,
+          vel_result.task_scales, primary_goal_norm,
+          vel_result.task_modes_effective,
+          vel_result.task_used_fallback);
+
+      VelocitySolverResult vsr;
+      vsr.status = classified.status;
+      vsr.status_message = classified.status_message;
+      vsr.joint_velocities = Eigen::Map<const Eigen::VectorXd>(
+          vel_result.solution.data(),
+          static_cast<Eigen::Index>(vel_result.solution.size()));
+      stall_handler_update(vsr);
+    }
+
+    if (vel_result.status != SolverStatus::kSuccess &&
+        !(stall_config_.enabled &&
+          vel_result.status == SolverStatus::kInfeasible)) {
       result.status = vel_result.status;
       result.status_message = vel_result.status_message;
       if (position_ik_debug_) {
@@ -2730,6 +2735,10 @@ PositionIKResult KinematicsSolver::solve_position(
               << " final_ori_err=" << result.orientation_error << std::endl;
   }
 
+  if (auto_stall) {
+    disable_stall_handler();
+  }
+
   return result;
 }
 
@@ -2776,6 +2785,14 @@ PositionIKResult KinematicsSolver::solve_position_step(
   frame_task->setTargetPose(target_pose.block<3, 1>(0, 3),
                             target_pose.block<3, 3>(0, 0));
 
+  // Auto-enable stall handler if requested and not already on.
+  const bool auto_stall = options.stall_recovery && !stall_config_.enabled;
+  if (auto_stall) {
+    const double nominal =
+        get_collision_min_distance() > 0.0 ? get_collision_min_distance() : 0.0;
+    enable_stall_handler(nominal);
+  }
+
   Eigen::VectorXd q = current_q;
   robot_->update_configuration(q);
 
@@ -2817,6 +2834,10 @@ PositionIKResult KinematicsSolver::solve_position_step(
     q = pinocchio::integrate(robot_->model(), q,
                              step_dt * last_vel_result.joint_velocities);
     robot_->update_configuration(q);
+  }
+
+  if (auto_stall) {
+    disable_stall_handler();
   }
 
   clear_all_target_velocities();
@@ -2897,6 +2918,14 @@ PositionIKResult KinematicsSolver::solve_position_step(
                               "' is not a supported pose task type";
       return result;
     }
+  }
+
+  // Auto-enable stall handler if requested and not already on.
+  const bool auto_stall = options.stall_recovery && !stall_config_.enabled;
+  if (auto_stall) {
+    const double nominal =
+        get_collision_min_distance() > 0.0 ? get_collision_min_distance() : 0.0;
+    enable_stall_handler(nominal);
   }
 
   Eigen::VectorXd q = current_q;
@@ -2984,6 +3013,10 @@ PositionIKResult KinematicsSolver::solve_position_step(
     q = pinocchio::integrate(robot_->model(), q,
                              step_dt * last_vel_result.joint_velocities);
     robot_->update_configuration(q);
+  }
+
+  if (auto_stall) {
+    disable_stall_handler();
   }
 
   std::unordered_set<Task *> resolved_tasks;
