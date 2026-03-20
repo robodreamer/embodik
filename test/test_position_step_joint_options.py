@@ -219,8 +219,8 @@ def test_integration_mask_multi_task_path():
         os.unlink(urdf_path)
 
 
-def test_excluded_joint_indices_merged_then_restored():
-    """Per-task exclusions are merged during the step, then restored."""
+def test_excluded_joint_indices_do_not_mutate_registered_task_exclusions():
+    """solve_position_step exclusion handling must not rewrite task state."""
     urdf_path, robot, solver, ee_task, posture = _make_solver_with_posture()
     try:
         ee_task.set_excluded_joint_indices([0])
@@ -241,9 +241,41 @@ def test_excluded_joint_indices_merged_then_restored():
         res = solver.solve_position_step(q, target, "ee_task", opts)
         assert res.status == eik.SolverStatus.SUCCESS
 
-        # Merged exclusions were temporary; per-task lists restore to pre-step state.
         assert list(ee_task.get_excluded_joint_indices()) == [0]
         assert list(posture.get_excluded_joint_indices()) == [1]
+    finally:
+        os.unlink(urdf_path)
+
+
+def test_excluded_joint_indices_step_matches_solve_position_lock_behavior():
+    urdf_path, robot, solver, _, _ = _make_solver_with_posture()
+    try:
+        q = np.array([0.0, 0.0], dtype=float)
+        robot.update_configuration(q)
+        pose = robot.get_frame_pose("ee")
+        target = np.eye(4, dtype=float)
+        target[:3, :3] = np.array(pose.rotation, dtype=float)
+        target[:3, 3] = np.array(pose.translation, dtype=float)
+        target[0, 3] += 0.03
+
+        step_opts = eik.PositionStepOptions()
+        step_opts.max_steps = 1
+        step_opts.position_gain = 40.0
+        step_opts.orientation_gain = 40.0
+        step_opts.excluded_joint_indices = [1]
+        step_out = solver.solve_position_step(q, target, "ee_task", step_opts)
+        assert step_out.status == eik.SolverStatus.SUCCESS
+
+        ik_opts = eik.PositionIKOptions()
+        ik_opts.max_iterations = 1
+        ik_opts.position_gain = 40.0
+        ik_opts.orientation_gain = 40.0
+        ik_opts.excluded_joint_indices = [1]
+        ik_out = solver.solve_position(q, target, "ee", ik_opts)
+        assert ik_out.status in (eik.SolverStatus.SUCCESS, eik.SolverStatus.INFEASIBLE)
+
+        assert abs(float(np.asarray(step_out.q_solution, dtype=float)[1]) - q[1]) < 1e-9
+        assert abs(float(np.asarray(ik_out.q_solution, dtype=float)[1]) - q[1]) < 1e-9
     finally:
         os.unlink(urdf_path)
 

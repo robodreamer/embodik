@@ -291,89 +291,14 @@ static void apply_integration_velocity_mask(Eigen::VectorXd &joint_velocities,
   }
 }
 
-/// Merges extra exclusions into tasks for the duration of the scope, then
-/// restores previous exclusions (solve_position_step parity with solve_position).
-class ScopedMergedTaskExclusions {
-  std::vector<std::pair<std::shared_ptr<Task>, std::vector<int>>> saved_;
-
-public:
-  ScopedMergedTaskExclusions(
-      const std::vector<int> &extra,
-      const std::vector<std::shared_ptr<Task>> &tasks_to_patch) {
-    if (extra.empty()) {
-      return;
-    }
-    std::unordered_set<int> extra_set(extra.begin(), extra.end());
-    saved_.reserve(tasks_to_patch.size());
-    for (const auto &t : tasks_to_patch) {
-      if (!t) {
-        continue;
-      }
-      saved_.emplace_back(t, t->get_excluded_joint_indices());
-      const auto &prev = saved_.back().second;
-      std::unordered_set<int> merged(prev.begin(), prev.end());
-      merged.insert(extra_set.begin(), extra_set.end());
-      std::vector<int> merged_vec(merged.begin(), merged.end());
-      std::sort(merged_vec.begin(), merged_vec.end());
-      t->set_excluded_joint_indices(merged_vec);
-    }
-  }
-
-  ~ScopedMergedTaskExclusions() {
-    for (auto &p : saved_) {
-      p.first->set_excluded_joint_indices(std::move(p.second));
-    }
-  }
-
-  ScopedMergedTaskExclusions(const ScopedMergedTaskExclusions &) = delete;
-  ScopedMergedTaskExclusions &
-  operator=(const ScopedMergedTaskExclusions &) = delete;
-};
-
-static std::vector<std::shared_ptr<Task>>
-collect_frame_and_posture_tasks_for_step_options(
-    const std::shared_ptr<FrameTask> &frame_task,
-    const std::vector<std::shared_ptr<Task>> &all_tasks) {
-  std::vector<std::shared_ptr<Task>> out;
-  std::unordered_set<Task *> seen;
-  auto add = [&](const std::shared_ptr<Task> &t) {
-    if (!t || seen.count(t.get()) != 0u) {
-      return;
-    }
-    seen.insert(t.get());
-    out.push_back(t);
-  };
-  add(std::static_pointer_cast<Task>(frame_task));
-  for (const auto &t : all_tasks) {
-    if (t && dynamic_cast<PostureTask *>(t.get()) != nullptr) {
-      add(t);
-    }
-  }
-  return out;
-}
-
-static std::vector<std::shared_ptr<Task>>
-collect_multi_pose_and_posture_tasks_for_step_options(
-    const std::vector<std::shared_ptr<Task>> &pose_tasks,
-    const std::vector<std::shared_ptr<Task>> &all_tasks) {
-  std::vector<std::shared_ptr<Task>> out;
-  std::unordered_set<Task *> seen;
-  auto add = [&](const std::shared_ptr<Task> &t) {
-    if (!t || seen.count(t.get()) != 0u) {
-      return;
-    }
-    seen.insert(t.get());
-    out.push_back(t);
-  };
-  for (const auto &t : pose_tasks) {
-    add(t);
-  }
-  for (const auto &t : all_tasks) {
-    if (t && dynamic_cast<PostureTask *>(t.get()) != nullptr) {
-      add(t);
-    }
-  }
-  return out;
+static std::vector<int>
+build_step_locked_indices(const PositionStepOptions &options) {
+  std::vector<int> merged = options.locked_joint_indices;
+  merged.insert(merged.end(), options.excluded_joint_indices.begin(),
+                options.excluded_joint_indices.end());
+  std::sort(merged.begin(), merged.end());
+  merged.erase(std::unique(merged.begin(), merged.end()), merged.end());
+  return merged;
 }
 
 static ClassifiedOutcome classify_position_outcome(
@@ -2854,11 +2779,8 @@ PositionIKResult KinematicsSolver::solve_position_step(
   Eigen::VectorXd q = current_q;
   robot_->update_configuration(q);
 
-  std::vector<std::shared_ptr<Task>> step_exclusion_targets;
-  if (!options.excluded_joint_indices.empty()) {
-    step_exclusion_targets = collect_frame_and_posture_tasks_for_step_options(
-        frame_task, tasks_);
-  }
+  const std::vector<int> step_locked_indices =
+      build_step_locked_indices(options);
 
   VelocitySolverResult last_vel_result;
   bool have_vel_result = false;
@@ -2874,15 +2796,8 @@ PositionIKResult KinematicsSolver::solve_position_step(
                                       options.max_angular_speed);
     frame_task->setTargetVelocity(vel);
 
-    pending_velocity_lock_indices_ = options.locked_joint_indices;
-    VelocitySolverResult vel_out;
-    if (!step_exclusion_targets.empty()) {
-      ScopedMergedTaskExclusions merge_guard(options.excluded_joint_indices,
-                                             step_exclusion_targets);
-      vel_out = solve_velocity(q, true);
-    } else {
-      vel_out = solve_velocity(q, true);
-    }
+    pending_velocity_lock_indices_ = step_locked_indices;
+    VelocitySolverResult vel_out = solve_velocity(q, true);
     have_vel_result = true;
     last_vel_result = std::move(vel_out);
 
@@ -2992,12 +2907,8 @@ PositionIKResult KinematicsSolver::solve_position_step(
   for (const auto &rt : resolved) {
     pose_only.push_back(rt.task);
   }
-  std::vector<std::shared_ptr<Task>> step_exclusion_targets;
-  if (!options.excluded_joint_indices.empty()) {
-    step_exclusion_targets =
-        collect_multi_pose_and_posture_tasks_for_step_options(pose_only,
-                                                                tasks_);
-  }
+  const std::vector<int> step_locked_indices =
+      build_step_locked_indices(options);
 
   VelocitySolverResult last_vel_result;
   bool have_vel_result = false;
@@ -3051,15 +2962,8 @@ PositionIKResult KinematicsSolver::solve_position_step(
       break;
     }
 
-    pending_velocity_lock_indices_ = options.locked_joint_indices;
-    VelocitySolverResult vel_out;
-    if (!step_exclusion_targets.empty()) {
-      ScopedMergedTaskExclusions merge_guard(options.excluded_joint_indices,
-                                             step_exclusion_targets);
-      vel_out = solve_velocity(q, true);
-    } else {
-      vel_out = solve_velocity(q, true);
-    }
+    pending_velocity_lock_indices_ = step_locked_indices;
+    VelocitySolverResult vel_out = solve_velocity(q, true);
     have_vel_result = true;
     last_vel_result = std::move(vel_out);
     ++steps_used;

@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.4] - 2026-03-20
+
+### Fixed
+- **`solve_position_step(..., PositionStepOptions.excluded_joint_indices=...)`**: restored consistent behavior with the existing `solve_position` intent by avoiding temporary mutation of registered task exclusion lists during stepping IK.
+- **0.14.3 regression note**: `excluded_joint_indices` in stepping IK could cause undesirable behavior by patching registered task exclusions at runtime; this release removes that side effect.
+
+### Changed
+- **Stepping IK exclusions implementation**: `excluded_joint_indices` now uses a non-mutating per-step lock path (no scoped merge/restore of registered tasks).
+
 ### Changed
 - **`clear_collision_constraint()`**: also resets active collision pair indices, stuck-detection counters, per-pair last-distance caches, and recovery homotopy state (`collision_effective_min_distance_`) so disabling collision does not leave stale internal state.
 - **Recovery mode exit (collision health)**: when `max_constraints > 1`, recovery now requires **every** active collision QP row (same entries as `get_last_collision_debug_list()`) to be at or above `min_distance`, not inference from the closest pair alone.
@@ -16,6 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Docs
 - Header comments for internal recovery behavior (trigger, `goals[0]` / first merged priority-0 block, diagnostics via `status_message`) and expanded `clear_collision_constraint()` documentation.
+- **`PositionStepOptions`**: clarify that `locked_joint_indices` changes the QP (not the same as post-QP masking); recommend `integration_zero_velocity_indices` alone for typical interactive `solve_position_step` loops unless diagnostics require QP-consistent velocities.
 
 ## [0.14.3] - 2026-03-19
 
