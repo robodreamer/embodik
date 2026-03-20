@@ -962,6 +962,81 @@ class TestDualEEBodyStall:
             )
         solver.disable_stall_handler()
 
+    def test_pull_away_unstalls_quickly(self):
+        """After stalling into the body and then reversing EE targets outward,
+        the solver should recover quickly: motion should resume within the
+        first few recovery steps."""
+        setup = _setup_dual_iiwa_body_stall()
+        if setup is None:
+            pytest.skip("Dual iiwa model not available")
+
+        robot, solver, q0, left_T, right_T, min_dist = setup
+        opts = eik.PositionStepOptions()
+        opts.stall_recovery = True
+        opts.max_steps = 1
+
+        stall_targets = [
+            eik.TaskTarget("left_body", left_T),
+            eik.TaskTarget("right_body", right_T),
+        ]
+
+        # Phase 1: drive into stall for 20 steps
+        q, _, stall_counters, _ = _run_position_step_loop(
+            solver, robot, q0.copy(), stall_targets, opts, 20,
+        )
+
+        # The stall handler should have triggered (some steps should have
+        # produced motion via the penetration escape).
+        stall_motions = sum(1 for c in stall_counters if c == 0)
+        assert stall_motions > 0, "Stall handler never triggered during stall phase"
+
+        # Phase 2: reverse targets — move EEs outward (away from body)
+        from utils.dual_iiwa_urdf import get_dual_iiwa_frame_names
+        left_frame, right_frame = get_dual_iiwa_frame_names()
+        left_pose = robot.get_frame_pose(left_frame)
+        right_pose = robot.get_frame_pose(right_frame)
+
+        away_left_T = np.eye(4)
+        away_left_T[:3, :3] = np.array(left_pose.rotation)
+        away_left_T[:3, 3] = np.array(left_pose.translation) + [0.0, 0.30, 0.15]
+
+        away_right_T = np.eye(4)
+        away_right_T[:3, :3] = np.array(right_pose.rotation)
+        away_right_T[:3, 3] = np.array(right_pose.translation) + [0.0, -0.30, 0.15]
+
+        away_targets = [
+            eik.TaskTarget("left_body", away_left_T),
+            eik.TaskTarget("right_body", away_right_T),
+        ]
+
+        # Phase 3: run with reversed targets and track per-step dq norms
+        recovery_dq_norms = []
+        for _ in range(10):
+            result = solver.solve_position_step(q, away_targets, opts)
+            dq_norm = np.linalg.norm(result.q_solution - q)
+            q = result.q_solution
+            robot.update_configuration(q)
+            recovery_dq_norms.append(dq_norm)
+
+        # Motion should resume within the first few recovery steps.
+        # The penetration escape + ceiling-limited restoration means the
+        # solver gets full iteration budget and the collision constraint
+        # has enough slack.
+        early_motion = recovery_dq_norms[:5]
+        assert any(dq > 1e-4 for dq in early_motion), (
+            f"No meaningful motion in first 5 recovery steps: "
+            f"dq norms = {[f'{d:.6f}' for d in early_motion]}"
+        )
+
+        # Majority of recovery steps should produce meaningful motion.
+        motion_steps = sum(1 for dq in recovery_dq_norms if dq > 1e-4)
+        assert motion_steps >= 5, (
+            f"Only {motion_steps}/10 recovery steps had motion; "
+            f"expected at least 5"
+        )
+
+        solver.disable_stall_handler()
+
     def test_velocity_loop_dual_ee_stall_recovery(self):
         """Full velocity loop: handler should reduce stalls vs baseline."""
         setup1 = _setup_dual_iiwa_body_stall()
