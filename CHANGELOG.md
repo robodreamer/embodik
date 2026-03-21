@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.6] - 2026-03-21
+
+### Added
+- **Panda joint-limit regression tests**: `test_panda_position_limit_seed.py` (at-limit seed vs validation-style nudge under `solve_position_step`) and `test_panda_joint_limit_barrier_position_step.py` (barrier overhead / incremental teleop-like stepping).
+- **`scripts/benchmark_joint_limit_barrier_overhead.py`**: optional local timing comparison for barrier ON vs OFF under repeated `solve_position_step` calls.
+
+### Changed
+- **Joint-limit barrier performance**: cache the velocity→configuration index map across `solve_velocity` calls (rebuild when robot model or `nv` changes); inject barrier objectives in one pass without allocating a full `nv`-dimensional gradient vector.
+- **Named barrier/limit constants**: `KinematicsSolver` uses `static constexpr` values for barrier clamps, deadband math, numerical guards, and map sentinels instead of scattered literals.
+- **Docs**: `docs/joint_limit_saturation_exit_findings.md` table updated to match the barrier implementation.
+
 ## [0.15.5] - 2026-03-20
 
 ### Changed
