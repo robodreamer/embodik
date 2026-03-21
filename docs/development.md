@@ -72,9 +72,14 @@ pytest
 # Run specific test file
 pytest test/test_robot_model.py
 
+# Hardware-style seed recovery (joint limits + self-collision)
+pytest test/test_hardware_seed_recovery.py
+
 # Run with coverage
 pytest --cov=embodik --cov-report=html
 ```
+
+See [Recovery robustness](recovery_robustness.md) for how joint-limit recovery, collision constraints, and the stall handler interact when `q` comes from hardware.
 
 ## Code Style
 

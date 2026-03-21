@@ -67,8 +67,9 @@ def _run_tracking_trace(
     task.solve_mode = solve_mode
     task.allow_min_error_fallback = allow_fallback
 
-    start_pos = np.array(robot.get_frame_pose(_PANDA_EE_FRAME).translation)
-    start_rot = np.array(task.current_orientation)
+    ee_pose = robot.get_frame_pose(_PANDA_EE_FRAME)
+    start_pos = np.array(ee_pose.translation)
+    start_rot = np.array(ee_pose.rotation)
     target_pos = start_pos + offset
     task.set_target_pose(target_pos, start_rot)
 
