@@ -49,6 +49,7 @@ pip install embodik
 - [API Reference](api/index.md) — Complete API documentation
 - [Examples](examples/index.md) — Example code and tutorials
 - [Development Guide](development.md) — Contributing and development
+- [Recovery robustness](recovery_robustness.md) — Hardware seeds, limits, collision, stall recovery
 
 ## License
 
