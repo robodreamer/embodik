@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.15.5] - 2026-03-17
+## [0.15.5] - 2026-03-20
 
 ### Changed
 - **Simplified stall recovery strategy**: removed MIN_ERROR fallback toggling and iteration-cap coupling from the stall handler so recovery behavior is driven solely by collision-margin relaxation and restoration.
