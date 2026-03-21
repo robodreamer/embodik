@@ -110,3 +110,4 @@ nav:
       - Robot Model Usage: examples/robot_model_usage.md
       - Visualization: examples/visualization_examples.md
   - Development: development.md
+  - Recovery robustness: recovery_robustness.md
