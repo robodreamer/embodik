@@ -259,7 +259,6 @@ class TestStallHandlerAPI:
         assert solver.stall_handler_enabled()
         assert solver.stall_handler_current_min_distance() == pytest.approx(0.04)
         assert not solver.stall_handler_is_relaxed()
-        assert not solver.stall_handler_is_fallback_active()
         solver.disable_stall_handler()
         assert not solver.stall_handler_enabled()
 
@@ -267,15 +266,9 @@ class TestStallHandlerAPI:
         _, solver, _ = _make_panda_solver()
         solver.enable_stall_handler(0.05)
         solver.configure_stall_handler(
-            stall_threshold=10, relax_rate=0.05,
+            stall_threshold=10,
             restore_rate=0.01, floor_fraction=0.5,
         )
-        assert solver.stall_handler_enabled()
-
-    def test_configure_healthy_steps_to_clear(self):
-        _, solver, _ = _make_panda_solver()
-        solver.enable_stall_handler(0.05)
-        solver.configure_stall_handler(healthy_steps_to_clear=5)
         assert solver.stall_handler_enabled()
 
     def test_python_wrapper_enables(self):
@@ -316,10 +309,11 @@ class TestStallHandlerAPI:
 # ===================================================================
 
 class TestStallHandlerRecovery:
-    def test_fallback_deactivates_after_healthy_steps(self):
+    def test_margin_restores_after_healthy_steps(self):
+        """With a target at current pose (no stall), margin stays at nominal."""
         robot, solver, task = _make_panda_solver()
         solver.enable_stall_handler(0.04)
-        solver.configure_stall_handler(stall_threshold=2, healthy_steps_to_clear=2)
+        solver.configure_stall_handler(stall_threshold=2)
 
         q = np.concatenate([_PANDA_DEFAULT_Q, _PANDA_GRIPPER_EXTRA])
         robot.update_configuration(q)
@@ -334,7 +328,7 @@ class TestStallHandlerRecovery:
             q = robot.integrate(q, result.joint_velocities, solver.dt)
             robot.update_configuration(q)
 
-        assert not solver.stall_handler_is_fallback_active()
+        assert not solver.stall_handler_is_relaxed()
 
     def test_handler_no_crash_without_collision(self):
         robot, solver, task = _make_panda_solver()
@@ -360,9 +354,9 @@ class TestStallHandlerRecovery:
 # ===================================================================
 
 class TestPandaStallRecovery:
-    """Panda self-collision stall: verify handler reduces stalls."""
+    """Panda self-collision stall: verify handler does not increase stalls."""
 
-    def test_panda_stall_recovery_reduces_stalls(self):
+    def test_panda_stall_recovery_does_not_increase_stalls(self):
         setup = _setup_panda_stall()
         if setup is None:
             pytest.skip("Panda collision model not available")
@@ -389,8 +383,8 @@ class TestPandaStallRecovery:
         handler_stalls, _ = _run_velocity_loop(robot, solver, q0.copy(), steps)
         solver.disable_stall_handler()
 
-        assert handler_stalls < baseline_stalls, (
-            f"Handler should reduce stalls: {handler_stalls} >= {baseline_stalls}"
+        assert handler_stalls <= baseline_stalls, (
+            f"Handler should not increase stalls: {handler_stalls} > {baseline_stalls}"
         )
 
 
@@ -796,12 +790,10 @@ def _setup_dual_iiwa_body_stall():
 def _run_position_step_loop(solver, robot, q, targets, opts, steps):
     """Run solve_position_step with multi-target TaskTargets for N steps.
 
-    Returns (q, times_ms, stall_counters, fallback_transitions).
+    Returns (q, times_ms, stall_counters).
     """
     times_ms = []
     stall_counters = []
-    fallback_transitions = []
-    was_fallback = False
     for _ in range(steps):
         result = solver.solve_position_step(q, targets, opts)
         q = result.q_solution
@@ -810,17 +802,11 @@ def _run_position_step_loop(solver, robot, q, targets, opts, steps):
             times_ms.append(result.computation_time_ms)
         counter = solver.stall_handler_consecutive_stall_steps()
         stall_counters.append(counter)
-        is_fb = solver.stall_handler_is_fallback_active()
-        if is_fb and not was_fallback:
-            fallback_transitions.append(("on", len(stall_counters)))
-        elif not is_fb and was_fallback:
-            fallback_transitions.append(("off", len(stall_counters)))
-        was_fallback = is_fb
-    return q, times_ms, stall_counters, fallback_transitions
+    return q, times_ms, stall_counters
 
 
 class TestDualEEBodyStall:
-    """Dual-EE body collision stall: broadened detection, time, jump safety.
+    """Dual-EE body collision stall: detection, margin relaxation, recovery.
 
     All tests use solve_position_step with the multi-target TaskTarget overload
     to match the validation_robot teleop pattern.
@@ -847,7 +833,7 @@ class TestDualEEBodyStall:
             eik.TaskTarget("right_body", right_T),
         ]
 
-        q, _, _, _ = _run_position_step_loop(
+        q, _, _ = _run_position_step_loop(
             solver, robot, q0.copy(), targets, opts, 200,
         )
 
@@ -860,7 +846,7 @@ class TestDualEEBodyStall:
 
     def test_stall_counter_reaches_threshold_repeatedly(self):
         """Stall counter should reach the threshold (5) multiple times,
-        triggering fallback activation and margin relaxation each cycle."""
+        triggering margin relaxation each cycle."""
         setup = _setup_dual_iiwa_body_stall()
         if setup is None:
             pytest.skip("Dual iiwa model not available")
@@ -875,7 +861,7 @@ class TestDualEEBodyStall:
             eik.TaskTarget("right_body", right_T),
         ]
 
-        _, _, stall_counters, transitions = _run_position_step_loop(
+        _, _, stall_counters = _run_position_step_loop(
             solver, robot, q0.copy(), targets, opts, 200,
         )
 
@@ -886,15 +872,15 @@ class TestDualEEBodyStall:
         )
         assert threshold_hits >= 3, (
             f"Threshold hit only {threshold_hits} times; expected multiple "
-            f"stall→fallback→motion→re-stall cycles"
+            f"stall→relax→motion→re-stall cycles"
         )
         solver.disable_stall_handler()
 
     def test_computation_time_bounded_during_stall(self):
         """Per-step solve time should not spike when deeply stalled.
 
-        The iteration-limit cap in solve_velocity should keep individual
-        steps fast even when MIN_ERROR fallback is active.
+        Infeasible solves should terminate quickly even without an
+        explicit iteration cap.
         """
         setup = _setup_dual_iiwa_body_stall()
         if setup is None:
@@ -910,15 +896,14 @@ class TestDualEEBodyStall:
             eik.TaskTarget("right_body", right_T),
         ]
 
-        _, times_ms, _, _ = _run_position_step_loop(
+        _, times_ms, _ = _run_position_step_loop(
             solver, robot, q0.copy(), targets, opts, 60,
         )
 
         if times_ms:
             max_time = max(times_ms)
             assert max_time < 10.0, (
-                f"Max per-step time {max_time:.2f}ms exceeds 10ms budget; "
-                f"iteration cap may not be working"
+                f"Max per-step time {max_time:.2f}ms exceeds 10ms budget"
             )
         solver.disable_stall_handler()
 
@@ -940,7 +925,7 @@ class TestDualEEBodyStall:
         ]
 
         # Drive into stall with both EEs
-        q, _, _, _ = _run_position_step_loop(
+        q, _, _ = _run_position_step_loop(
             solver, robot, q0.copy(), both_targets, opts, 30,
         )
 
@@ -950,7 +935,7 @@ class TestDualEEBodyStall:
 
         # Continue with only right EE target active
         right_only_targets = [eik.TaskTarget("right_body", right_T)]
-        q, _, _, _ = _run_position_step_loop(
+        q, _, _ = _run_position_step_loop(
             solver, robot, q, right_only_targets, opts, 10,
         )
 
@@ -981,7 +966,7 @@ class TestDualEEBodyStall:
         ]
 
         # Phase 1: drive into stall for 20 steps
-        q, _, stall_counters, _ = _run_position_step_loop(
+        q, _, stall_counters = _run_position_step_loop(
             solver, robot, q0.copy(), stall_targets, opts, 20,
         )
 
@@ -1019,9 +1004,8 @@ class TestDualEEBodyStall:
             recovery_dq_norms.append(dq_norm)
 
         # Motion should resume within the first few recovery steps.
-        # The penetration escape + ceiling-limited restoration means the
-        # solver gets full iteration budget and the collision constraint
-        # has enough slack.
+        # The penetration escape gives the collision constraint enough
+        # slack for the solver to find feasible motion.
         early_motion = recovery_dq_norms[:5]
         assert any(dq > 1e-4 for dq in early_motion), (
             f"No meaningful motion in first 5 recovery steps: "

@@ -5,21 +5,17 @@ automatically on every ``solve_velocity``, ``solve_position_step``, and
 ``solve_position`` call when enabled. This Python module provides a
 convenience wrapper.
 
-When the solver returns INFEASIBLE with near-zero joint velocities for several
-consecutive steps, the robot is *stalled* — the task direction conflicts with
-collision and/or joint-limit constraints and the QP has no feasible motion.
+When the solver returns non-success (INFEASIBLE or NUMERICAL_ERROR) with
+near-zero joint velocities for several consecutive steps, the robot is
+*stalled* — the task direction conflicts with collision constraints and
+the QP has no feasible motion.
 
-Two complementary recovery mechanisms are applied:
-
-1. **Collision margin relaxation** — when the stall is collision-bounded
-   (collision distance near min_distance), temporarily reduce the collision
-   constraint so the feasibility cone opens up.
-
-2. **MIN_ERROR fallback** — temporarily enable ``allow_min_error_fallback``
-   on all priority-0 tasks so the solver finds the least-infeasible direction.
-
-Both mechanisms deactivate gradually once motion resumes, restoring the
-original constraint parameters.
+Recovery works by **collision margin relaxation**: when the stall is
+collision-bounded, temporarily reduce the collision min_distance so the
+feasibility cone opens up. When the solver starts producing healthy motion
+again, the margin is restored toward nominal with a ceiling that prevents
+it from overshooting above the actual clearance (which would re-create
+infeasibility).
 
 The simplest opt-in is via the ``stall_recovery`` flag on options structs::
 
@@ -76,8 +72,6 @@ class StallHandler:
         The user-intended collision min_distance.
     stall_threshold:
         Consecutive infeasible steps before recovery activates.
-    relax_rate:
-        Per-step reduction of min_distance as fraction of nominal.
     restore_rate:
         Per-step restoration of min_distance as fraction of nominal.
     floor_fraction:
@@ -89,7 +83,6 @@ class StallHandler:
         solver: "KinematicsSolver",
         nominal_min_distance: float,
         stall_threshold: int = 5,
-        relax_rate: float = 0.03,
         restore_rate: float = 0.005,
         floor_fraction: float = 0.3,
     ) -> None:
@@ -98,7 +91,6 @@ class StallHandler:
         solver.enable_stall_handler(nominal_min_distance)
         solver.configure_stall_handler(
             stall_threshold=stall_threshold,
-            relax_rate=relax_rate,
             restore_rate=restore_rate,
             floor_fraction=floor_fraction,
         )
@@ -110,10 +102,6 @@ class StallHandler:
     @property
     def is_relaxed(self) -> bool:
         return self._solver.stall_handler_is_relaxed()
-
-    @property
-    def is_fallback_active(self) -> bool:
-        return self._solver.stall_handler_is_fallback_active()
 
     @property
     def current_min_distance(self) -> float:

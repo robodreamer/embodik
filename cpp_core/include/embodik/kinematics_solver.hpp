@@ -479,21 +479,15 @@ public:
    * defaults for interactive loops at 50–200 Hz.
    *
    * @param stall_threshold  Consecutive infeasible steps to trigger (default 5)
-   * @param relax_rate       Per-step reduction of min_distance as fraction of nominal (default 0.03)
    * @param restore_rate     Per-step restoration of min_distance as fraction of nominal (default 0.005)
    * @param floor_fraction   Minimum min_distance as fraction of nominal (default 0.3)
    */
   void configure_stall_handler(int stall_threshold = 5,
-                                double relax_rate = 0.03,
                                 double restore_rate = 0.005,
-                                double floor_fraction = 0.3,
-                                int healthy_steps_to_clear = 3);
+                                double floor_fraction = 0.3);
 
   /// @return true if the stall handler has currently relaxed collision margin.
   bool stall_handler_is_relaxed() const;
-
-  /// @return true if the MIN_ERROR fallback is currently active.
-  bool stall_handler_is_fallback_active() const;
 
   /// @return current effective collision min_distance (may be < nominal if relaxed).
   double stall_handler_current_min_distance() const;
@@ -711,54 +705,35 @@ private:
   // ---- Stall handler ----
   struct StallHandlerConfig {
     bool enabled = false;
-    /// Consecutive stall steps before triggering fallback + margin relaxation.
+    /// Consecutive stall steps before triggering margin relaxation.
     int stall_threshold = 5;
     /// Joint-velocity norm below which a step counts as "no motion".
     double dq_stall_eps = 1e-5;
-    /// Fraction of nominal margin dropped per relaxation step (legacy; see
-    /// relax_drop_fraction for the current aggressive mode).
-    double relax_rate = 0.03;
-    /// Fraction of nominal margin to restore per healthy batch.
+    /// Fraction of nominal margin to restore per healthy step.
     double restore_rate = 0.005;
     /// Minimum collision margin as a fraction of nominal (hard floor).
     double floor_fraction = 0.3;
-    /// Distance band around current margin that qualifies collision as bottleneck.
+    /// Distance band kept between collision margin and actual collision
+    /// distance.  Used both for bottleneck detection and as headroom
+    /// during margin restoration to avoid re-creating infeasibility.
     double collision_proximity_band = 0.02;
-    /// Sustained healthy steps needed before beginning margin restoration.
-    int healthy_steps_to_clear = 10;
     /// Fraction of nominal margin dropped each time the stall threshold fires.
     double relax_drop_fraction = 0.10;
-    /// Multiplier on dq_stall_eps to define "meaningful motion" for healthy
-    /// step counting.
-    double healthy_motion_multiplier = 100.0;
-    /// Maximum SNS iterations when fallback is active (caps computation time).
-    unsigned int fallback_iteration_limit = 5;
-    /// Minimum task weight to consider a task "active" (avoids floating-point
-    /// noise from counting as active).
-    double task_active_weight_eps = 1e-6;
   };
 
   struct StallHandlerState {
     double nominal_min_distance = 0.0;
     double current_min_distance = 0.0;
     int consecutive_stall_steps = 0;
-    bool fallback_active = false;
-    int healthy_steps = 0;
-    /// True when the most recent solve was stuck (non-success with near-zero
-    /// motion).  Used to decide whether the iteration cap should apply on the
-    /// *next* call — avoids capping quality solves after the user pulls away.
-    bool last_step_was_stuck = false;
     // Cumulative stats
     int total_stall_steps = 0;
     int total_relaxation_steps = 0;
-    int total_fallback_activations = 0;
   };
 
   StallHandlerConfig stall_config_;
   StallHandlerState stall_state_;
 
   void stall_handler_update(VelocitySolverResult &result);
-  void stall_handler_set_fallback(bool active);
 
   // ---- CoM support-polygon constraint ----
   struct ComConstraintConfig {
