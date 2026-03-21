@@ -1694,7 +1694,8 @@ std::pair<double, double> KinematicsSolver::calculate_velocity_box_constraint(
 
 void KinematicsSolver::set_joint_limit_barrier_task(double barrier_margin,
                                                     double gain) {
-  barrier_margin_ = std::clamp(barrier_margin, 0.01, 0.5);
+  barrier_margin_ =
+      std::clamp(barrier_margin, kBarrierMarginClampMin, kBarrierMarginClampMax);
   barrier_gain_ = std::max(0.0, gain);
   barrier_task_enabled_ = true;
 }
@@ -1703,45 +1704,39 @@ void KinematicsSolver::clear_joint_limit_barrier_task() {
   barrier_task_enabled_ = false;
 }
 
-Eigen::VectorXd KinematicsSolver::compute_joint_limit_barrier_gradient(
-    const Eigen::VectorXd &q_current,
-    const Eigen::VectorXd &q_min,
-    const Eigen::VectorXd &q_max,
-    const std::vector<int> &velocity_to_config_index) const {
+const std::vector<int> &KinematicsSolver::velocity_to_config_index_cache() {
   const int nv = robot_->nv();
-  Eigen::VectorXd grad = Eigen::VectorXd::Zero(nv);
-
-  for (int i = 0; i < nv; ++i) {
-    const int q_idx = velocity_to_config_index[i];
-    if (q_idx < 0 || q_idx >= q_min.size() || q_idx >= q_max.size()) {
-      continue;
-    }
-    const double range = q_max[q_idx] - q_min[q_idx];
-    if (range < 1e-6 || !std::isfinite(q_min[q_idx]) ||
-        !std::isfinite(q_max[q_idx])) {
-      continue;
-    }
-    // Normalized position: 0 at center, +/-1 at limits
-    const double p = 2.0 * (q_current[q_idx] - q_min[q_idx]) / range - 1.0;
-    // Deadband: barrier is zero when |p| < (1 - 2*barrier_margin_)
-    const double deadband = 1.0 - 2.0 * barrier_margin_;
-    if (std::abs(p) < deadband) {
-      continue;
-    }
-    const double e = barrier_epsilon_;
-    const double a = 1.0 + e - p;
-    const double b = p + 1.0 + e;
-    const double ab = a * b;
-    if (ab < 1e-12) {
-      continue;
-    }
-    // d/dp [p^2 / (a*b)] = (2*p*a*b + p^2*(a - b)) / (a*b)^2
-    const double dhdp = (2.0 * p * ab + p * p * (a - b)) / (ab * ab);
-    // Chain rule: dh/dq = dh/dp * dp/dq = dh/dp * (2/range)
-    // Negative sign: gradient descent (push away from limits)
-    grad[i] = -dhdp * (2.0 / range);
+  const RobotModel *model = robot_.get();
+  if (velocity_to_config_cache_robot_ == model &&
+      velocity_to_config_cache_nv_ == nv &&
+      static_cast<int>(velocity_to_config_index_cache_.size()) == nv) {
+    return velocity_to_config_index_cache_;
   }
-  return grad;
+  velocity_to_config_index_cache_.assign(nv, kVelocityToConfigUnmapped);
+  const auto joint_names = robot_->get_joint_names();
+  for (const auto &joint_name : joint_names) {
+    const int v_idx = robot_->get_joint_velocity_index(joint_name);
+    const int v_size = robot_->get_joint_velocity_size(joint_name);
+    const int q_idx = robot_->get_joint_config_index(joint_name);
+    const int q_size = robot_->get_joint_config_size(joint_name);
+    if (v_size <= 0 || v_idx < 0 || q_idx < 0) {
+      continue;
+    }
+    if (v_size == 1 && q_size != 1) {
+      continue;
+    }
+    const int dims = std::min(v_size, q_size);
+    for (int k = 0; k < dims; ++k) {
+      const int vk = v_idx + k;
+      const int qk = q_idx + k;
+      if (vk >= 0 && vk < nv && qk >= 0 && qk < robot_->nq()) {
+        velocity_to_config_index_cache_[vk] = qk;
+      }
+    }
+  }
+  velocity_to_config_cache_robot_ = model;
+  velocity_to_config_cache_nv_ = nv;
+  return velocity_to_config_index_cache_;
 }
 
 void KinematicsSolver::sort_tasks_by_priority() {
@@ -1931,74 +1926,81 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
   }
 
 
-  // Build velocity-to-configuration index mapping (needed by barrier task
-  // and position-based velocity constraints).
-  std::vector<int> velocity_to_config_index(robot_->nv(), -1);
-  {
-    const auto joint_names = robot_->get_joint_names();
-    for (const auto &joint_name : joint_names) {
-      const int v_idx = robot_->get_joint_velocity_index(joint_name);
-      const int v_size = robot_->get_joint_velocity_size(joint_name);
-      const int q_idx = robot_->get_joint_config_index(joint_name);
-      const int q_size = robot_->get_joint_config_size(joint_name);
-      if (v_size <= 0 || v_idx < 0 || q_idx < 0) {
-        continue;
-      }
-      if (v_size == 1 && q_size != 1) {
-        continue;
-      }
-      const int dims = std::min(v_size, q_size);
-      for (int k = 0; k < dims; ++k) {
-        const int vk = v_idx + k;
-        const int qk = q_idx + k;
-        if (vk >= 0 && vk < robot_->nv() && qk >= 0 &&
-            qk < robot_->nq()) {
-          velocity_to_config_index[vk] = qk;
-        }
-      }
-    }
-  }
+  // Velocity-to-configuration index mapping (cached; used by barrier task and
+  // position-based velocity constraints).
+  const std::vector<int> &velocity_to_config_index =
+      velocity_to_config_index_cache();
 
   // Inject joint-limit barrier gradient as a priority-1 nullspace task.
-  // Only add rows for joints with non-zero gradient (near limits) to avoid
-  // expensive nv×nv identity matrix when most joints are in the deadband.
+  // Single pass: only joints outside the deadband contribute rows — no full
+  // nv-dimensional barrier vector allocation.
   if (barrier_task_enabled_ && apply_limits) {
     const int nv = robot_->nv();
     auto [q_min, q_max] = robot_->get_joint_limits();
-    Eigen::VectorXd q_current = robot_->get_current_configuration();
-    Eigen::VectorXd barrier_vel =
-        barrier_gain_ *
-        compute_joint_limit_barrier_gradient(q_current, q_min, q_max,
-                                             velocity_to_config_index);
+    const Eigen::VectorXd q_current = robot_->get_current_configuration();
+    const double deadband =
+        kJointLimitBarrierNormOffset -
+        kJointLimitBarrierNormSpan * barrier_margin_;
+    const double e = barrier_epsilon_;
 
-    if (barrier_vel.squaredNorm() >= 1e-12) {
-      // Collect indices for near-limit joints (non-zero gradient)
-      std::vector<int> active_indices;
-      active_indices.reserve(nv);
-      for (int i = 0; i < nv; ++i) {
-        if (std::abs(barrier_vel[i]) >= 1e-12) {
-          active_indices.push_back(i);
-        }
+    std::vector<int> active_indices;
+    std::vector<double> active_values;
+    active_indices.reserve(
+        static_cast<size_t>(kJointLimitBarrierActiveReserve));
+    active_values.reserve(static_cast<size_t>(kJointLimitBarrierActiveReserve));
+
+    for (int i = 0; i < nv; ++i) {
+      const int q_idx = velocity_to_config_index[i];
+      if (q_idx == kVelocityToConfigUnmapped ||
+          q_idx >= q_min.size() || q_idx >= q_max.size()) {
+        continue;
       }
-      const int k = static_cast<int>(active_indices.size());
-      if (k > 0) {
-        Eigen::VectorXd barrier_goal(k);
-        Eigen::MatrixXd barrier_jac(k, nv);
-        barrier_jac.setZero();
-        for (int j = 0; j < k; ++j) {
-          const int idx = active_indices[j];
-          barrier_goal[j] = barrier_vel[idx];
-          barrier_jac(j, idx) = 1.0;
-        }
-        goals.push_back(std::move(barrier_goal));
-        jacobians.push_back(std::move(barrier_jac));
-        objective_configs.push_back(ObjectiveSolveConfig{
-            1,
-            TaskSolveMode::kMinError,
-            false,
-        });
-        objective_tasks.push_back(nullptr);
+      const double range = q_max[q_idx] - q_min[q_idx];
+      if (range < kJointLimitBarrierMinJointRange ||
+          !std::isfinite(q_min[q_idx]) || !std::isfinite(q_max[q_idx])) {
+        continue;
       }
+      const double p =
+          kJointLimitBarrierNormSpan *
+              (q_current[q_idx] - q_min[q_idx]) / range -
+          kJointLimitBarrierNormOffset;
+      if (std::abs(p) < deadband) {
+        continue;
+      }
+      const double a = kJointLimitBarrierNormOffset + e - p;
+      const double b = p + kJointLimitBarrierNormOffset + e;
+      const double ab = a * b;
+      if (ab < kJointLimitBarrierDenomEps) {
+        continue;
+      }
+      const double dhdp =
+          (kJointLimitBarrierNormSpan * p * ab + p * p * (a - b)) / (ab * ab);
+      const double vel_comp =
+          barrier_gain_ *
+          (-dhdp * (kJointLimitBarrierNormSpan / range));
+      if (std::abs(vel_comp) >= kJointLimitBarrierVelocityEps) {
+        active_indices.push_back(i);
+        active_values.push_back(vel_comp);
+      }
+    }
+
+    const int k = static_cast<int>(active_indices.size());
+    if (k > 0) {
+      Eigen::VectorXd barrier_goal(k);
+      Eigen::MatrixXd barrier_jac(k, nv);
+      barrier_jac.setZero();
+      for (int j = 0; j < k; ++j) {
+        barrier_goal[j] = active_values[j];
+        barrier_jac(j, active_indices[j]) = 1.0;
+      }
+      goals.push_back(std::move(barrier_goal));
+      jacobians.push_back(std::move(barrier_jac));
+      objective_configs.push_back(ObjectiveSolveConfig{
+          kJointLimitBarrierObjectivePriority,
+          TaskSolveMode::kMinError,
+          false,
+      });
+      objective_tasks.push_back(nullptr);
     }
   }
 
@@ -2243,7 +2245,8 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
       // Handle joint constraints (remaining DoFs)
       for (int i = 6; i < robot_->nv(); ++i) {
         const int q_idx = velocity_to_config_index[i];
-        if (q_idx < 0 || q_idx >= q_current.size() || q_idx >= q_min.size() ||
+        if (q_idx == kVelocityToConfigUnmapped ||
+            q_idx >= q_current.size() || q_idx >= q_min.size() ||
             q_idx >= q_max.size()) {
           c_lower(constraint_idx + i) = -1e10;
           c_upper(constraint_idx + i) = 1e10;
@@ -2271,7 +2274,8 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
       // Continuous joints (nqs=2, nvs=1) require explicit index mapping.
       for (int i = 0; i < robot_->nv(); ++i) {
         const int q_idx = velocity_to_config_index[i];
-        if (q_idx < 0 || q_idx >= q_current.size() || q_idx >= q_min.size() ||
+        if (q_idx == kVelocityToConfigUnmapped ||
+            q_idx >= q_current.size() || q_idx >= q_min.size() ||
             q_idx >= q_max.size()) {
           c_lower(constraint_idx + i) = -1e10;
           c_upper(constraint_idx + i) = 1e10;
