@@ -359,8 +359,8 @@ void bind_kinematics_solver(nb::module_ &m) {
            &KinematicsSolver::enable_stall_handler,
            nb::arg("nominal_min_distance"),
            "Enable the automatic stall handler. Detects consecutive "
-           "INFEASIBLE steps and applies collision margin relaxation + "
-           "MIN_ERROR fallback to break out of stalls.")
+           "infeasible steps and applies collision margin relaxation "
+           "to break out of stalls.")
       .def("disable_stall_handler",
            &KinematicsSolver::disable_stall_handler,
            "Disable the stall handler and restore nominal parameters.")
@@ -370,17 +370,12 @@ void bind_kinematics_solver(nb::module_ &m) {
       .def("configure_stall_handler",
            &KinematicsSolver::configure_stall_handler,
            nb::arg("stall_threshold") = 5,
-           nb::arg("relax_rate") = 0.03,
            nb::arg("restore_rate") = 0.005,
            nb::arg("floor_fraction") = 0.3,
-           nb::arg("healthy_steps_to_clear") = 3,
            "Configure stall handler tuning parameters.")
       .def("stall_handler_is_relaxed",
            &KinematicsSolver::stall_handler_is_relaxed,
            "Return True if collision margin is currently relaxed.")
-      .def("stall_handler_is_fallback_active",
-           &KinematicsSolver::stall_handler_is_fallback_active,
-           "Return True if MIN_ERROR fallback is currently active.")
       .def("stall_handler_current_min_distance",
            &KinematicsSolver::stall_handler_current_min_distance,
            "Return the current effective collision min_distance.")
