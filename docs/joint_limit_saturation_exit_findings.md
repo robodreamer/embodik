@@ -220,11 +220,10 @@ barrier recovers (~0 error, ~78–111 stalls). Z: barrier reduces stalls.
 | File | Change | Purpose |
 |------|--------|---------|
 | `kinematics_solver.hpp` | `set_joint_limit_barrier_task()`, `clear_joint_limit_barrier_task()` | Enable/disable barrier gradient task |
-| `kinematics_solver.hpp` | `compute_joint_limit_barrier_gradient()` private method | Analytical barrier gradient computation |
+| `kinematics_solver.hpp` | `velocity_to_config_index_cache()` + cache members | Reuse velocity→config map across solves |
 | `kinematics_solver.hpp` | `barrier_task_enabled_`, `barrier_margin_`, `barrier_gain_`, `barrier_epsilon_` | Configuration state |
-| `kinematics_solver.cpp` | `compute_joint_limit_barrier_gradient()` implementation | O(n) per-joint gradient with deadband |
-| `kinematics_solver.cpp` | Barrier injection in `solve_velocity()` | Additive with existing priority-1 tasks |
-| `kinematics_solver.cpp` | Early `velocity_to_config_index` computation | Shared between barrier and position constraints |
+| `kinematics_solver.cpp` | Barrier injection in `solve_velocity()` | Single-pass sparse rows; no full `nv` barrier vector |
+| `kinematics_solver.cpp` | `velocity_to_config_index_cache()` | Shared between barrier and position constraints |
 | `kinematics_solver_bindings.cpp` | Bindings for barrier task API | Python access |
 | `python_bindings/__init__.pyi` | Type stubs | IDE support |
 | `python/embodik/pose_metrics.py` | General-purpose metric module | Offline analysis (not real-time) |

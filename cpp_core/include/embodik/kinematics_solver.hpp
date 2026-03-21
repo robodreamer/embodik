@@ -655,6 +655,24 @@ private:
   double barrier_margin_ = 0.3;
   double barrier_gain_ = 1.0;
   static constexpr double barrier_epsilon_ = 0.04;
+  /// Clamp bounds for ``set_joint_limit_barrier_task(barrier_margin, ...)``.
+  static constexpr double kBarrierMarginClampMin = 0.01;
+  static constexpr double kBarrierMarginClampMax = 0.5;
+  /// Skip joints whose URDF limit range is degenerate (meters/radians).
+  static constexpr double kJointLimitBarrierMinJointRange = 1e-6;
+  /// Guard denominator ``(a*b)`` in the barrier derivative near singularities.
+  static constexpr double kJointLimitBarrierDenomEps = 1e-12;
+  /// Treat computed barrier velocity contribution as zero below this threshold.
+  static constexpr double kJointLimitBarrierVelocityEps = 1e-12;
+  /// Initial ``std::vector`` reserve when collecting active barrier DoFs.
+  static constexpr int kJointLimitBarrierActiveReserve = 8;
+  /// Normalized limit coordinate: ``p = kNormSpan * fraction - kNormOffset`` ∈ [-1, 1].
+  static constexpr double kJointLimitBarrierNormSpan = 2.0;
+  static constexpr double kJointLimitBarrierNormOffset = 1.0;
+  /// Sentinel in ``velocity_to_config_index_cache_`` for unmapped velocity indices.
+  static constexpr int kVelocityToConfigUnmapped = -1;
+  /// SNS priority for the injected joint-limit barrier nullspace objective.
+  static constexpr int kJointLimitBarrierObjectivePriority = 1;
 
   // Debug/perf instrumentation (off by default)
   bool timing_breakdown_enabled_ = false;
@@ -669,15 +687,17 @@ private:
   /// end of solve_velocity(). Enforces v_i = 0 in the QP for listed nv-indices.
   std::vector<int> pending_velocity_lock_indices_;
 
+  /// Cached velocity-index → configuration-index map for the current robot
+  /// (rebuilt when the model pointer or ``nv`` changes).
+  std::vector<int> velocity_to_config_index_cache_;
+  const RobotModel *velocity_to_config_cache_robot_ = nullptr;
+  int velocity_to_config_cache_nv_ = -1;
+
   // Sort tasks by priority
   void sort_tasks_by_priority();
 
-  // Compute barrier gradient in velocity space (nv).
-  Eigen::VectorXd compute_joint_limit_barrier_gradient(
-      const Eigen::VectorXd &q_current,
-      const Eigen::VectorXd &q_min,
-      const Eigen::VectorXd &q_max,
-      const std::vector<int> &velocity_to_config_index) const;
+  /// Rebuild ``velocity_to_config_index_cache_`` if needed; return reference.
+  const std::vector<int> &velocity_to_config_index_cache();
 
   struct CollisionConstraintConfig {
     bool enabled = false;
