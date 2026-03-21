@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.5] - 2026-03-17
+
+### Changed
+- **Simplified stall recovery strategy**: removed MIN_ERROR fallback toggling and iteration-cap coupling from the stall handler so recovery behavior is driven solely by collision-margin relaxation and restoration.
+- **Stall-handler API cleanup**: reduced `configure_stall_handler()` to core parameters (`stall_threshold`, `restore_rate`, `floor_fraction`) and removed fallback-specific state/config paths.
+
+### Fixed
+- **Collision margin consistency during recovery**: unified restoration into a single ceiling-limited ramp that keeps effective `min_distance` below live collision clearance, preventing abrupt re-entry into infeasible regions.
+- **Regression coverage alignment with simplified behavior**: updated stall-handler tests and docs/stubs to validate stable pull-away recovery and no-regression behavior without fallback-dependent assertions.
+
 ## [0.15.4] - 2026-03-20
 
 ### Added
