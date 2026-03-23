@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-03-21
+
+### Added
+- **Collision-query instrumentation in solver results**: `VelocitySolverResult` now reports `collision_pairs_considered`, `collision_exact_distance_queries`, `collision_bound_culled_pairs`, and `collision_budget_exhausted` for per-step profiling.
+- **Collision performance controls in public API**: added `enable_collision_pair_cache(...)`, `set_collision_refinement_time_budget_us(...)`, and `get_collision_refinement_time_budget_us()` on `KinematicsSolver` with Python bindings.
+- **Benchmark and equivalence tools**: added `scripts/benchmark_teleop_workloads.py` and `scripts/validate_collision_cache_equivalence.py` for teleop-focused performance measurement and cache-vs-baseline correctness checks.
+
+### Changed
+- **Default collision path is optimized**: collision pair caching and conservative budgeted refinement are now enabled with tuned defaults to reduce collision overhead in teleop-style loops while preserving conservative behavior.
+- **Dual-iiwa URDF utility flexibility**: `build_dual_iiwa_urdf()` now supports optional mesh-collision replacement via `replace_mesh_collision`.
+- **Local perf artifact hygiene**: `.cursor/reports/perf_runs/*` is now ignored to keep generated profiling outputs out of git tracking by default.
+
 ## [0.15.6] - 2026-03-21
 
 ### Added
