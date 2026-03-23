@@ -90,3 +90,6 @@ site/
 
 # Robot models
 examples/robot_models*/**
+
+# Local performance tracking artifacts
+.editor/reports/perf_runs/*

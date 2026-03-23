@@ -24,6 +24,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <Eigen/Core>
 #include <optional>
 #include <string>
@@ -85,6 +86,12 @@ struct VelocitySolverResult : public SolverResult {
   double task_update_time_ms = 0.0;        // Task update (Jacobian) time
   double solver_computation_time_ms = 0.0; // Actual solver time (from backend)
   double constraint_setup_time_ms = 0.0;   // Constraint matrix setup time
+
+  // Collision query instrumentation counters
+  std::uint64_t collision_pairs_considered = 0;
+  std::uint64_t collision_exact_distance_queries = 0;
+  std::uint64_t collision_bound_culled_pairs = 0;
+  bool collision_budget_exhausted = false;
 };
 
 // Configuration for regularized matrix inversion

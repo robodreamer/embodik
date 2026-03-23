@@ -106,7 +106,19 @@ NB_MODULE(_embodik_impl, m) {
               "Time spent in core solver computation (ms)")
       .def_ro("constraint_setup_time_ms",
               &eik::VelocitySolverResult::constraint_setup_time_ms,
-              "Time spent setting up constraint matrices (ms)");
+              "Time spent setting up constraint matrices (ms)")
+      .def_ro("collision_pairs_considered",
+              &eik::VelocitySolverResult::collision_pairs_considered,
+              "Number of collision pairs considered this solve")
+      .def_ro("collision_exact_distance_queries",
+              &eik::VelocitySolverResult::collision_exact_distance_queries,
+              "Number of exact collision distance queries this solve")
+      .def_ro("collision_bound_culled_pairs",
+              &eik::VelocitySolverResult::collision_bound_culled_pairs,
+              "Number of pairs culled by conservative bounds this solve")
+      .def_ro("collision_budget_exhausted",
+              &eik::VelocitySolverResult::collision_budget_exhausted,
+              "Whether the collision refinement budget was exhausted");
 
   nb::class_<eik::PositionIKOptions>(m, "PositionIKOptions",
                                      "Options for position-level IK solving")
