@@ -145,6 +145,11 @@ def get_solver_status_hint(status, status_message: str | None = None) -> str:
             "the active goals and constraints together. Relax conflicting constraints, "
             "reduce target magnitudes, or adjust task priorities/weights."
         ),
+        "NO_PROGRESS": (
+            "Solver stopped because progress stalled near active bounds/constraints. "
+            "Try relaxing limits, reducing gains, changing the seed/reference, or "
+            "allowing larger per-step motion."
+        ),
     }
     base = hints.get(
         status_name,

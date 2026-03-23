@@ -51,7 +51,8 @@ enum class SolverStatus {
   kEmptyProblem = 4,
   kConstraintBoundsMismatch = 5,
   kNonFiniteInput = 6,
-  kInfeasible = 7
+  kInfeasible = 7,
+  kNoProgress = 8
 };
 
 struct BasicSolverConfig {
@@ -131,6 +132,13 @@ struct PositionIKOptions {
   double stagnation_tolerance =
       1e-6;                      // Minimum improvement required per iteration
   int stagnation_iterations = 5; // Max stagnant iterations before abort
+  // Stagnation classification:
+  // by default, stagnation exits are reported as kNoProgress instead of kInfeasible.
+  // Disable only for backward-compatible status semantics.
+  bool classify_stagnation_as_no_progress = true;
+  // Optional seed-referenced bound tightening:
+  // each iteration constrains dq to remain within seed_q ± v_limit*dt.
+  bool limit_change_from_seed = false;
 
   // Nullspace control
   std::optional<Eigen::VectorXd>
@@ -203,6 +211,15 @@ struct PositionStepOptions {
   /// Call disable_stall_handler() explicitly to tear it down.
   /// Default false (opt-in).
   bool stall_recovery = false;
+  // Optional seed-referenced bound tightening:
+  // each inner step constrains dq so integrated q stays within
+  // initial_current_q ± v_limit*dt.
+  bool limit_change_from_seed = false;
+  // Optional early exit when progress is below threshold for consecutive steps.
+  // Set <=0 to disable (default).
+  int no_progress_max_steps = 0;
+  double no_progress_error_tolerance = 1e-8;
+  double no_progress_dq_norm_tolerance = 1e-8;
 };
 
 // Per-task target for multi-task solve_position_step().

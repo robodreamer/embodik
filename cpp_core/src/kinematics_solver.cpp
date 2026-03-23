@@ -277,9 +277,67 @@ build_step_locked_indices(const PositionStepOptions &options) {
   return merged;
 }
 
+static void clamp_joint_velocity_solution_in_place(
+    Eigen::Ref<Eigen::VectorXd> dq, const Eigen::VectorXd &c_lower,
+    const Eigen::VectorXd &c_upper, bool include_position_rows, int nv) {
+  if (dq.size() < nv || c_lower.size() < nv || c_upper.size() < nv) {
+    return;
+  }
+  for (int i = 0; i < nv; ++i) {
+    double lower = c_lower[i];
+    double upper = c_upper[i];
+    if (include_position_rows && c_lower.size() >= 2 * nv &&
+        c_upper.size() >= 2 * nv) {
+      lower = std::max(lower, c_lower[nv + i]);
+      upper = std::min(upper, c_upper[nv + i]);
+    }
+    dq[i] = std::clamp(dq[i], lower, upper);
+  }
+}
+
+static void tighten_bounds_with_reference_corridor(
+    Eigen::VectorXd &c_lower, Eigen::VectorXd &c_upper,
+    const Eigen::VectorXd &q_reference, const Eigen::VectorXd &q_current,
+    const Eigen::VectorXd &vel_limits, double dt,
+    const std::vector<int> &velocity_to_config_index, int nv) {
+  if (dt <= 0.0 || c_lower.size() < nv || c_upper.size() < nv ||
+      q_reference.size() == 0 || q_current.size() == 0 ||
+      vel_limits.size() < nv) {
+    return;
+  }
+  for (int i = 0; i < nv; ++i) {
+    int q_idx = i;
+    if (!velocity_to_config_index.empty()) {
+      if (i >= static_cast<int>(velocity_to_config_index.size())) {
+        continue;
+      }
+      q_idx = velocity_to_config_index[i];
+      if (q_idx < 0) {
+        continue;
+      }
+    }
+    if (q_idx >= q_reference.size() || q_idx >= q_current.size()) {
+      continue;
+    }
+    const double max_delta = std::max(0.0, vel_limits[i] * dt);
+    const double corridor_lower_q = q_reference[q_idx] - max_delta;
+    const double corridor_upper_q = q_reference[q_idx] + max_delta;
+    const double corridor_lower_v = (corridor_lower_q - q_current[q_idx]) / dt;
+    const double corridor_upper_v = (corridor_upper_q - q_current[q_idx]) / dt;
+    c_lower[i] = std::max(c_lower[i], corridor_lower_v);
+    c_upper[i] = std::min(c_upper[i], corridor_upper_v);
+    if (c_lower[i] > c_upper[i]) {
+      const double mid = 0.5 * (c_lower[i] + c_upper[i]);
+      c_lower[i] = mid;
+      c_upper[i] = mid;
+    }
+  }
+}
+
 static ClassifiedOutcome classify_position_outcome(
     SolverStatus current_status, const std::string &current_status_message,
     bool converged_or_within_tolerance, bool stagnation_abort,
+    bool classify_stagnation_as_no_progress,
     bool max_iterations_reached, double position_error,
     double orientation_error) {
   if (current_status != SolverStatus::kSuccess) {
@@ -291,6 +349,14 @@ static ClassifiedOutcome classify_position_outcome(
   }
 
   if (stagnation_abort || max_iterations_reached) {
+    if (stagnation_abort && classify_stagnation_as_no_progress) {
+      return {SolverStatus::kNoProgress,
+              "position IK exited due to no progress near active bounds/"
+              "constraints: final_position_error=" +
+                  std::to_string(position_error) +
+                  ", final_orientation_error=" +
+                  std::to_string(orientation_error)};
+    }
     return {SolverStatus::kInfeasible,
             "position IK did not reach tolerance (likely infeasible under "
             "active constraints): final_position_error=" +
@@ -2706,16 +2772,8 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
     if (apply_limits && c_lower.size() >= robot_->nv()) {
       Eigen::Map<Eigen::VectorXd> dq(result.solution.data(),
                                      result.solution.size());
-      for (int i = 0; i < robot_->nv(); ++i) {
-        double lower = c_lower[i];
-        double upper = c_upper[i];
-        if (use_position_limits_ &&
-            static_cast<int>(c_lower.size()) >= 2 * robot_->nv()) {
-          lower = std::max(lower, c_lower[robot_->nv() + i]);
-          upper = std::min(upper, c_upper[robot_->nv() + i]);
-        }
-        dq[i] = std::clamp(dq[i], lower, upper);
-      }
+      clamp_joint_velocity_solution_in_place(
+          dq, c_lower, c_upper, use_position_limits_, robot_->nv());
     }
 
     result.joint_velocities = Eigen::Map<const Eigen::VectorXd>(
@@ -2805,6 +2863,8 @@ PositionIKResult KinematicsSolver::solve_position(
   }
 
   Eigen::VectorXd q_current = seed_q;
+  const Eigen::VectorXd q_reference = seed_q;
+  const auto &velocity_to_config_index = velocity_to_config_index_cache();
   robot_->update_configuration(q_current);
 
   Eigen::Vector3d target_position = target_pose.block<3, 1>(0, 3);
@@ -2945,6 +3005,11 @@ PositionIKResult KinematicsSolver::solve_position(
         c_lower[i] = lower_limit;
         c_upper[i] = upper_limit;
       }
+      if (options.limit_change_from_seed) {
+        tighten_bounds_with_reference_corridor(
+            c_lower, c_upper, q_reference, q_current, vel_limits, options.dt,
+            velocity_to_config_index, robot_->nv());
+      }
     }
 
     if (collision_constraint_result.has_value()) {
@@ -3004,6 +3069,9 @@ PositionIKResult KinematicsSolver::solve_position(
 
     Eigen::VectorXd dq = Eigen::Map<const Eigen::VectorXd>(
         vel_result.solution.data(), vel_result.solution.size());
+    clamp_joint_velocity_solution_in_place(dq, c_lower, c_upper,
+                                           /*include_position_rows=*/false,
+                                           robot_->nv());
     q_current =
         pinocchio::integrate(robot_->model(), q_current, options.dt * dq);
     robot_->update_configuration(q_current);
@@ -3029,7 +3097,8 @@ PositionIKResult KinematicsSolver::solve_position(
       (!converged) && (iter >= options.max_iterations);
   const auto classified_position = classify_position_outcome(
       result.status, result.status_message, converged || within_tolerance,
-      stagnation_abort, max_iterations_reached, result.position_error,
+      stagnation_abort, options.classify_stagnation_as_no_progress,
+      max_iterations_reached, result.position_error,
       result.orientation_error);
   result.status = classified_position.status;
   result.status_message = classified_position.status_message;
@@ -3101,7 +3170,10 @@ PositionIKResult KinematicsSolver::solve_position_step(
   }
 
   Eigen::VectorXd q = current_q;
+  const Eigen::VectorXd q_reference = current_q;
   robot_->update_configuration(q);
+  const auto &velocity_to_config_index = velocity_to_config_index_cache();
+  const Eigen::VectorXd vel_limits = robot_->get_velocity_limits();
 
   const std::vector<int> step_locked_indices =
       build_step_locked_indices(options);
@@ -3109,11 +3181,35 @@ PositionIKResult KinematicsSolver::solve_position_step(
   VelocitySolverResult last_vel_result;
   bool have_vel_result = false;
   const int steps = std::max(1, options.max_steps);
+  int steps_used = 0;
   Eigen::VectorXd vel(6);
+  double prev_combined_error = std::numeric_limits<double>::infinity();
+  int no_progress_count = 0;
+  bool no_progress_exit = false;
 
   for (int step = 0; step < steps; ++step) {
     frame_task->update(*robot_);
     const Eigen::VectorXd &error = frame_task->getError();
+    const double combined_error = error.head<3>().norm() + error.tail<3>().norm();
+    if (step > 0 && options.no_progress_max_steps > 0 && have_vel_result) {
+      const bool low_error_change =
+          std::abs(prev_combined_error - combined_error) <=
+          options.no_progress_error_tolerance;
+      const bool low_velocity =
+          last_vel_result.joint_velocities.size() == robot_->nv() &&
+          last_vel_result.joint_velocities.norm() <=
+              options.no_progress_dq_norm_tolerance;
+      if (low_error_change && low_velocity) {
+        ++no_progress_count;
+        if (no_progress_count >= options.no_progress_max_steps) {
+          no_progress_exit = true;
+          break;
+        }
+      } else {
+        no_progress_count = 0;
+      }
+    }
+    prev_combined_error = combined_error;
     vel.head<3>() = options.position_gain * error.head<3>();
     vel.tail<3>() = options.orientation_gain * error.tail<3>();
     clamp_spatial_velocity_components(vel, options.max_linear_speed,
@@ -3124,6 +3220,7 @@ PositionIKResult KinematicsSolver::solve_position_step(
     VelocitySolverResult vel_out = solve_velocity(q, true);
     have_vel_result = true;
     last_vel_result = std::move(vel_out);
+    ++steps_used;
 
     if (last_vel_result.status != SolverStatus::kSuccess &&
         last_vel_result.status != SolverStatus::kInfeasible &&
@@ -3137,6 +3234,19 @@ PositionIKResult KinematicsSolver::solve_position_step(
           last_vel_result.joint_velocities,
           options.integration_zero_velocity_indices);
     }
+    if (options.limit_change_from_seed &&
+        last_vel_result.joint_velocities.size() == robot_->nv()) {
+      Eigen::VectorXd corridor_lower =
+          Eigen::VectorXd::Constant(robot_->nv(), -1e10);
+      Eigen::VectorXd corridor_upper =
+          Eigen::VectorXd::Constant(robot_->nv(), 1e10);
+      tighten_bounds_with_reference_corridor(
+          corridor_lower, corridor_upper, q_reference, q, vel_limits, step_dt,
+          velocity_to_config_index, robot_->nv());
+      clamp_joint_velocity_solution_in_place(last_vel_result.joint_velocities,
+                                             corridor_lower, corridor_upper,
+                                             false, robot_->nv());
+    }
 
     q = pinocchio::integrate(robot_->model(), q,
                              step_dt * last_vel_result.joint_velocities);
@@ -3147,7 +3257,7 @@ PositionIKResult KinematicsSolver::solve_position_step(
 
   result.q_solution = q;
   result.achieved_pose = robot_->get_frame_pose(frame_task->getFrameName());
-  result.iterations_used = steps;
+  result.iterations_used = steps_used;
 
   frame_task->update(*robot_);
   const Eigen::VectorXd &final_error = frame_task->getError();
@@ -3155,7 +3265,18 @@ PositionIKResult KinematicsSolver::solve_position_step(
   result.orientation_error = final_error.tail<3>().norm();
 
   if (have_vel_result) {
+    if (last_vel_result.joint_velocities.size() == robot_->nv()) {
+      last_vel_result.solution.assign(last_vel_result.joint_velocities.data(),
+                                      last_vel_result.joint_velocities.data() +
+                                          last_vel_result.joint_velocities.size());
+    }
     static_cast<VelocitySolverResult &>(result) = std::move(last_vel_result);
+  }
+  if (no_progress_exit && result.status != SolverStatus::kInvalidInput) {
+    result.status = SolverStatus::kNoProgress;
+    result.status_message =
+        "solve_position_step exited due to no progress near active bounds/"
+        "constraints";
   }
 
   return result;
@@ -3233,7 +3354,10 @@ PositionIKResult KinematicsSolver::solve_position_step(
   }
 
   Eigen::VectorXd q = current_q;
+  const Eigen::VectorXd q_reference = current_q;
   robot_->update_configuration(q);
+  const auto &velocity_to_config_index = velocity_to_config_index_cache();
+  const Eigen::VectorXd vel_limits = robot_->get_velocity_limits();
 
   std::vector<std::shared_ptr<Task>> pose_only;
   pose_only.reserve(resolved.size());
@@ -3248,8 +3372,12 @@ PositionIKResult KinematicsSolver::solve_position_step(
   const int steps = std::max(1, options.max_steps);
   int steps_used = 0;
   Eigen::Matrix<double, 6, 1> vel;
+  double prev_combined_error = std::numeric_limits<double>::infinity();
+  int no_progress_count = 0;
+  bool no_progress_exit = false;
 
   for (int step = 0; step < steps; ++step) {
+    double combined_error = 0.0;
     bool task_apply_failed = false;
     std::string task_apply_error;
     for (size_t i = 0; i < n_targets; ++i) {
@@ -3282,6 +3410,7 @@ PositionIKResult KinematicsSolver::solve_position_step(
             "task '" + target.task_name + "' has invalid pose error dimension";
         break;
       }
+      combined_error += error.head<3>().norm() + error.tail<3>().norm();
       vel.head<3>() = target.position_gain * error.head<3>();
       vel.tail<3>() = target.orientation_gain * error.tail<3>();
       clamp_spatial_velocity_components(vel, options.max_linear_speed,
@@ -3294,6 +3423,25 @@ PositionIKResult KinematicsSolver::solve_position_step(
       result.status_message = task_apply_error;
       break;
     }
+    if (step > 0 && options.no_progress_max_steps > 0 && have_vel_result) {
+      const bool low_error_change =
+          std::abs(prev_combined_error - combined_error) <=
+          options.no_progress_error_tolerance;
+      const bool low_velocity =
+          last_vel_result.joint_velocities.size() == robot_->nv() &&
+          last_vel_result.joint_velocities.norm() <=
+              options.no_progress_dq_norm_tolerance;
+      if (low_error_change && low_velocity) {
+        ++no_progress_count;
+        if (no_progress_count >= options.no_progress_max_steps) {
+          no_progress_exit = true;
+          break;
+        }
+      } else {
+        no_progress_count = 0;
+      }
+    }
+    prev_combined_error = combined_error;
 
     pending_velocity_lock_indices_ = step_locked_indices;
     VelocitySolverResult vel_out = solve_velocity(q, true);
@@ -3312,6 +3460,19 @@ PositionIKResult KinematicsSolver::solve_position_step(
       apply_integration_velocity_mask(
           last_vel_result.joint_velocities,
           options.integration_zero_velocity_indices);
+    }
+    if (options.limit_change_from_seed &&
+        last_vel_result.joint_velocities.size() == robot_->nv()) {
+      Eigen::VectorXd corridor_lower =
+          Eigen::VectorXd::Constant(robot_->nv(), -1e10);
+      Eigen::VectorXd corridor_upper =
+          Eigen::VectorXd::Constant(robot_->nv(), 1e10);
+      tighten_bounds_with_reference_corridor(
+          corridor_lower, corridor_upper, q_reference, q, vel_limits, step_dt,
+          velocity_to_config_index, robot_->nv());
+      clamp_joint_velocity_solution_in_place(last_vel_result.joint_velocities,
+                                             corridor_lower, corridor_upper,
+                                             false, robot_->nv());
     }
 
     q = pinocchio::integrate(robot_->model(), q,
@@ -3350,6 +3511,11 @@ PositionIKResult KinematicsSolver::solve_position_step(
   }
 
   if (have_vel_result) {
+    if (last_vel_result.joint_velocities.size() == robot_->nv()) {
+      last_vel_result.solution.assign(last_vel_result.joint_velocities.data(),
+                                      last_vel_result.joint_velocities.data() +
+                                          last_vel_result.joint_velocities.size());
+    }
     auto saved_status = result.status;
     auto saved_msg = std::move(result.status_message);
     static_cast<VelocitySolverResult &>(result) = std::move(last_vel_result);
@@ -3360,6 +3526,12 @@ PositionIKResult KinematicsSolver::solve_position_step(
   } else if (result.status_message.empty()) {
     result.status = SolverStatus::kInvalidInput;
     result.status_message = "no solve step executed in solve_position_step";
+  }
+  if (no_progress_exit && result.status != SolverStatus::kInvalidInput) {
+    result.status = SolverStatus::kNoProgress;
+    result.status_message =
+        "solve_position_step exited due to no progress near active bounds/"
+        "constraints";
   }
 
   return result;

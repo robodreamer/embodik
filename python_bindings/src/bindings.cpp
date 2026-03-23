@@ -55,7 +55,8 @@ NB_MODULE(_embodik_impl, m) {
       .value("CONSTRAINT_BOUNDS_MISMATCH",
              eik::SolverStatus::kConstraintBoundsMismatch)
       .value("NON_FINITE_INPUT", eik::SolverStatus::kNonFiniteInput)
-      .value("INFEASIBLE", eik::SolverStatus::kInfeasible);
+      .value("INFEASIBLE", eik::SolverStatus::kInfeasible)
+      .value("NO_PROGRESS", eik::SolverStatus::kNoProgress);
 
   nb::enum_<eik::CollisionTuningMode>(
       m, "CollisionTuningMode",
@@ -142,6 +143,14 @@ NB_MODULE(_embodik_impl, m) {
       .def_rw("stagnation_iterations",
               &eik::PositionIKOptions::stagnation_iterations,
               "Number of consecutive stagnant iterations before aborting")
+      .def_rw("classify_stagnation_as_no_progress",
+              &eik::PositionIKOptions::classify_stagnation_as_no_progress,
+              "Default True. When enabled, stagnation-triggered exits return "
+              "NO_PROGRESS instead of INFEASIBLE")
+      .def_rw("limit_change_from_seed",
+              &eik::PositionIKOptions::limit_change_from_seed,
+              "When True, tighten each solve_position iteration so q stays "
+              "within seed_q ± velocity_limit*dt")
       .def_prop_rw(
           "nullspace_bias",
           [](const eik::PositionIKOptions &opt) -> nb::object {
@@ -229,7 +238,22 @@ NB_MODULE(_embodik_impl, m) {
               "When True, enable automatic stall recovery. Detects "
               "consecutive INFEASIBLE steps with near-zero velocities and "
               "temporarily relaxes collision margins / enables MIN_ERROR "
-              "fallback. Default False.");
+              "fallback. Default False.")
+      .def_rw("limit_change_from_seed",
+              &eik::PositionStepOptions::limit_change_from_seed,
+              "When True, tighten each inner step so q stays within "
+              "current_q(at entry) ± velocity_limit*dt")
+      .def_rw("no_progress_max_steps",
+              &eik::PositionStepOptions::no_progress_max_steps,
+              "Consecutive low-progress inner steps before returning "
+              "NO_PROGRESS (<=0 disables)")
+      .def_rw("no_progress_error_tolerance",
+              &eik::PositionStepOptions::no_progress_error_tolerance,
+              "Threshold on change in combined pose error used by "
+              "no-progress detection")
+      .def_rw("no_progress_dq_norm_tolerance",
+              &eik::PositionStepOptions::no_progress_dq_norm_tolerance,
+              "Threshold on ||dq|| used by no-progress detection");
 
   nb::class_<eik::TaskTarget>(
       m, "TaskTarget",

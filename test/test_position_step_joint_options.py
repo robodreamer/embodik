@@ -301,3 +301,143 @@ def test_duplicate_integration_indices_idempotent():
         assert abs(float(np.asarray(res.q_solution, dtype=float)[1]) - q[1]) < 1e-8
     finally:
         os.unlink(urdf_path)
+
+
+def test_single_step_iterations_used_reflects_executed_steps():
+    urdf_path, robot, solver, _, _ = _make_solver_with_posture()
+    try:
+        q = np.array([0.1, -0.1], dtype=float)
+        robot.update_configuration(q)
+        pose = robot.get_frame_pose("ee")
+        target = np.eye(4, dtype=float)
+        target[:3, :3] = np.array(pose.rotation, dtype=float)
+        target[:3, 3] = np.array(pose.translation, dtype=float)
+        target[0, 3] += 0.03
+
+        opts = eik.PositionStepOptions()
+        opts.max_steps = 5
+        opts.no_progress_max_steps = 1
+        opts.locked_joint_indices = [0, 1]
+        res = solver.solve_position_step(q, target, "ee_task", opts)
+        assert res.status == eik.SolverStatus.NO_PROGRESS
+        assert res.iterations_used == 1
+    finally:
+        os.unlink(urdf_path)
+
+
+def test_reference_corridor_limits_total_displacement_from_seed():
+    urdf_path = _create_two_joint_urdf(velocity_limit=0.1)
+    try:
+        robot = eik.RobotModel(urdf_path, floating_base=False)
+        solver = eik.KinematicsSolver(robot)
+        solver.dt = 0.01
+        ee_task = solver.add_frame_task("ee_task", "ee")
+        ee_task.priority = 0
+        ee_task.weight = 1.0
+        posture = solver.add_posture_task("posture")
+        posture.priority = 1
+        posture.weight = 1.0
+        posture.set_target_velocity(np.array([0.1, -0.1], dtype=float))
+
+        q = np.array([0.0, 0.0], dtype=float)
+        robot.update_configuration(q)
+        pose = robot.get_frame_pose("ee")
+        target = np.eye(4, dtype=float)
+        target[:3, :3] = np.array(pose.rotation, dtype=float)
+        target[:3, 3] = np.array(pose.translation, dtype=float)
+
+        opts_no_corridor = eik.PositionStepOptions()
+        opts_no_corridor.max_steps = 20
+        out_no_corridor = solver.solve_position_step(q, target, "ee_task", opts_no_corridor)
+
+        opts_corridor = eik.PositionStepOptions()
+        opts_corridor.max_steps = 20
+        opts_corridor.limit_change_from_seed = True
+        out_corridor = solver.solve_position_step(q, target, "ee_task", opts_corridor)
+
+        dq_total_no = np.abs(np.asarray(out_no_corridor.q_solution, dtype=float) - q)
+        dq_total_yes = np.abs(np.asarray(out_corridor.q_solution, dtype=float) - q)
+        corridor_cap = 0.1 * solver.dt + 1e-9
+        assert np.max(dq_total_yes) <= corridor_cap
+        assert np.max(dq_total_no) > np.max(dq_total_yes) + 1e-6
+    finally:
+        os.unlink(urdf_path)
+
+
+def test_step_no_progress_exit_for_locked_configuration():
+    urdf_path, robot, solver, _, _ = _make_solver_with_posture()
+    try:
+        q = np.array([0.0, 0.0], dtype=float)
+        robot.update_configuration(q)
+        pose = robot.get_frame_pose("ee")
+        target = np.eye(4, dtype=float)
+        target[:3, :3] = np.array(pose.rotation, dtype=float)
+        target[:3, 3] = np.array(pose.translation, dtype=float)
+        target[0, 3] += 0.05
+
+        opts = eik.PositionStepOptions()
+        opts.max_steps = 5
+        opts.no_progress_max_steps = 1
+        opts.no_progress_error_tolerance = 1e-12
+        opts.no_progress_dq_norm_tolerance = 1e-12
+        opts.locked_joint_indices = [0, 1]
+        result = solver.solve_position_step(q, target, "ee_task", opts)
+        assert result.status == eik.SolverStatus.NO_PROGRESS
+        assert "no progress" in result.status_message.lower()
+        assert result.iterations_used < opts.max_steps
+    finally:
+        os.unlink(urdf_path)
+
+
+def test_one_step_matches_direct_solve_velocity_update():
+    """Bounded-output update in solve_position_step should match solve_velocity."""
+    urdf_path = _create_two_joint_urdf(velocity_limit=0.5)
+    try:
+        robot = eik.RobotModel(urdf_path, floating_base=False)
+        solver = eik.KinematicsSolver(robot)
+        solver.dt = 0.01
+        task = solver.add_frame_task("ee_task", "ee")
+        task.priority = 0
+        task.weight = 1.0
+
+        q = np.array([0.2, -0.2], dtype=float)
+        robot.update_configuration(q)
+        pose = robot.get_frame_pose("ee")
+        target = np.eye(4, dtype=float)
+        target[:3, :3] = np.array(pose.rotation, dtype=float)
+        target[:3, 3] = np.array(pose.translation, dtype=float)
+        target[0, 3] += 0.05
+
+        opts = eik.PositionStepOptions()
+        opts.max_steps = 1
+        opts.dt = solver.dt
+        opts.position_gain = 30.0
+        opts.orientation_gain = 30.0
+        out_step = solver.solve_position_step(q, target, "ee_task", opts)
+        assert out_step.status in (
+            eik.SolverStatus.SUCCESS,
+            eik.SolverStatus.INFEASIBLE,
+            eik.SolverStatus.NO_PROGRESS,
+        )
+
+        robot.update_configuration(q)
+        task.set_target_pose(target[:3, 3], target[:3, :3])
+        task.update(robot)
+        err = np.asarray(task.get_error(), dtype=float)
+        vel = np.zeros(6, dtype=float)
+        vel[:3] = opts.position_gain * err[:3]
+        vel[3:] = opts.orientation_gain * err[3:]
+        task.set_target_velocity(vel)
+        out_vel = solver.solve_velocity(q, apply_limits=True)
+        task.clear_target_velocity()
+        assert out_vel.joint_velocities.shape[0] == robot.nv
+
+        dq_step = (np.asarray(out_step.q_solution, dtype=float) - q) / opts.dt
+        np.testing.assert_allclose(
+            dq_step,
+            np.asarray(out_vel.joint_velocities, dtype=float),
+            atol=1e-6,
+            rtol=0.0,
+        )
+    finally:
+        os.unlink(urdf_path)
