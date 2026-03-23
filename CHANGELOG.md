@@ -8,22 +8,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- **High-level collision tuning presets**: added `CollisionTuningMode` (`PRECISE`, `BALANCED`, `SPEED`) and `KinematicsSolver.set_collision_tuning_mode(...)` / `get_collision_tuning_mode()` so users can select collision behavior by intent instead of low-level cache/budget knobs.
-- **Python enum exposure for tuning modes**: `CollisionTuningMode` is now available in Python bindings and wired into solver bindings for direct use in scripts and apps.
-
-### Changed
-- **Interactive example controls for live collision tuning**: examples `02_collision_aware_IK.py` and `03_teleop_ik.py` now expose a Viser dropdown for `speed/balanced/precise` selection with runtime updates, while keeping low-level parameters hidden.
-- **Preset rationale documented in solver code**: clarified why `PRECISE` and `BALANCED` both disable time-budget truncation (`budget_us=0`) and why only `SPEED` uses a positive refinement budget for bounded latency.
+- None yet.
 
 ## [0.17.0] - 2026-03-23
 
 ### Added
 - **Solver status/options API expansion for position stepping**: introduced no-progress-oriented status and option surface in C++ and Python bindings so position-step callers can control and interpret bounded-step convergence behavior explicitly.
 - **Reference corridor support for position-step IK bounds**: added reference-corridor-aware bound handling to improve guidance around prior solutions and reduce drift during repeated teleop-like updates.
+- **High-level collision tuning presets**: added `CollisionTuningMode` (`PRECISE`, `BALANCED`, `SPEED`) and `KinematicsSolver.set_collision_tuning_mode(...)` / `get_collision_tuning_mode()` so users can select collision behavior by intent instead of low-level cache/budget knobs.
+- **Python enum exposure for collision tuning modes**: `CollisionTuningMode` is available in Python bindings and wired into solver bindings for direct use in scripts and applications.
 
 ### Changed
 - **Unified IK bound evaluation path**: consolidated position-step bound and stop-condition checks so joint/task limits, corridor checks, and termination semantics run through one consistent status-classification flow.
 - **Default no-progress behavior now classifies early exits explicitly**: when incremental motion fails to make meaningful progress, the solver reports a no-progress outcome by default instead of collapsing into less specific statuses.
+- **Interactive example controls for live collision tuning**: examples `02_collision_aware_IK.py` and `03_teleop_ik.py` now expose a `speed/balanced/precise` selector with runtime updates while keeping low-level cache/budget knobs hidden.
+- **Preset rationale documented in solver implementation**: clarified why `PRECISE` and `BALANCED` disable time-budget truncation (`budget_us=0`) and why only `SPEED` uses a positive refinement budget for bounded latency.
 
 ### Fixed
 - **No-progress exit semantics consistency**: aligned default no-progress classification across solver internals and bindings so callers observe stable, deterministic status reporting for stalled incremental updates.
