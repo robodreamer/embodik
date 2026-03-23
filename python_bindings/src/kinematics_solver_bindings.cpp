@@ -181,7 +181,9 @@ void bind_kinematics_solver(nb::module_ &m) {
       .def("solve_position", &KinematicsSolver::solve_position,
            nb::arg("seed_q"), nb::arg("target_pose"), nb::arg("frame_name"),
            nb::arg("options") = PositionIKOptions(),
-           "Solve position-level IK to reach target pose")
+           "Solve position-level IK to reach target pose. With "
+           "options.classify_stagnation_as_no_progress=True, stagnation exits "
+           "return SolverStatus.NO_PROGRESS.")
 
       .def("solve_position_step", solve_position_step_single,
            nb::arg("current_q"), nb::arg("target_pose"),
@@ -194,7 +196,8 @@ void bind_kinematics_solver(nb::module_ &m) {
            "times, integrating after each step. The task weight is left "
            "untouched. Unlike solve_position(), this does not create "
            "temporary tasks. The recovery state machine (stuck detection, "
-           "collision homotopy, etc.) is automatically exercised.")
+           "collision homotopy, etc.) is automatically exercised. Optional "
+           "no-progress detection can return SolverStatus.NO_PROGRESS.")
       .def(
           "solve_position_step",
           [](KinematicsSolver &self, const Eigen::VectorXd &current_q,

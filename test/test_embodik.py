@@ -49,6 +49,7 @@ def test_import_and_metadata():
     assert eik.SolverStatus.INVALID_INPUT.value == 1
     assert eik.SolverStatus.NUMERICAL_ERROR.value == 2
     assert eik.SolverStatus.INFEASIBLE.value == 7
+    assert eik.SolverStatus.NO_PROGRESS.value == 8
 
 
 def test_pose_error_norm():
@@ -185,6 +186,11 @@ def test_solver_status_hint_helper():
     )
     assert "no feasible solution" in infeasible_msg
     assert "primary task scale collapsed to zero" in infeasible_msg
+    no_progress_msg = eik.get_solver_status_hint(
+        eik.SolverStatus.NO_PROGRESS, "stalled at limits"
+    )
+    assert "progress stalled" in no_progress_msg
+    assert "stalled at limits" in no_progress_msg
 
 
 def test_solve_velocity_propagates_backend_status_message(tmp_path):
@@ -203,8 +209,8 @@ def test_solve_velocity_propagates_backend_status_message(tmp_path):
     assert "primary task scale collapsed" in result.status_message
 
 
-def test_position_ik_nonconvergence_reports_infeasible(tmp_path):
-    """Position IK should classify clean non-convergence as INFEASIBLE."""
+def test_position_ik_nonconvergence_reports_no_progress_by_default(tmp_path):
+    """Position IK should classify stagnation-style non-convergence as NO_PROGRESS by default."""
     urdf_path = _create_minimal_collision_urdf(tmp_path)
     robot = eik.RobotModel(str(urdf_path), floating_base=False)
     solver = eik.KinematicsSolver(robot)
@@ -217,6 +223,48 @@ def test_position_ik_nonconvergence_reports_infeasible(tmp_path):
     opts.max_iterations = 3
     opts.stagnation_iterations = 2
     opts.stagnation_tolerance = 1e-9
+
+    result = solver.solve_position(seed_q, target_pose, "link1", opts)
+    assert result.status == eik.SolverStatus.NO_PROGRESS
+    assert "no progress" in result.status_message.lower()
+
+
+def test_position_ik_stagnation_can_report_no_progress(tmp_path):
+    """Position IK can classify stagnation exits as NO_PROGRESS when requested."""
+    urdf_path = _create_minimal_collision_urdf(tmp_path)
+    robot = eik.RobotModel(str(urdf_path), floating_base=False)
+    solver = eik.KinematicsSolver(robot)
+
+    seed_q = np.zeros(robot.nq, dtype=float)
+    target_pose = np.eye(4, dtype=float)
+    target_pose[0, 3] = 10.0
+
+    opts = eik.PositionIKOptions()
+    opts.max_iterations = 5
+    opts.stagnation_iterations = 2
+    opts.stagnation_tolerance = 1e-9
+    opts.classify_stagnation_as_no_progress = True
+
+    result = solver.solve_position(seed_q, target_pose, "link1", opts)
+    assert result.status == eik.SolverStatus.NO_PROGRESS
+    assert "no progress" in result.status_message.lower()
+
+
+def test_position_ik_stagnation_can_be_classified_as_infeasible(tmp_path):
+    """Users can opt out of NO_PROGRESS default classification."""
+    urdf_path = _create_minimal_collision_urdf(tmp_path)
+    robot = eik.RobotModel(str(urdf_path), floating_base=False)
+    solver = eik.KinematicsSolver(robot)
+
+    seed_q = np.zeros(robot.nq, dtype=float)
+    target_pose = np.eye(4, dtype=float)
+    target_pose[0, 3] = 10.0
+
+    opts = eik.PositionIKOptions()
+    opts.max_iterations = 5
+    opts.stagnation_iterations = 2
+    opts.stagnation_tolerance = 1e-9
+    opts.classify_stagnation_as_no_progress = False
 
     result = solver.solve_position(seed_q, target_pose, "link1", opts)
     assert result.status == eik.SolverStatus.INFEASIBLE
