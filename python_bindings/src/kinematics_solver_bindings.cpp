@@ -378,6 +378,17 @@ void bind_kinematics_solver(nb::module_ &m) {
       .def("get_collision_refinement_time_budget_us",
            &KinematicsSolver::get_collision_refinement_time_budget_us,
            "Get exact collision refinement budget per solve (microseconds).")
+      .def("set_collision_tuning_mode",
+           &KinematicsSolver::set_collision_tuning_mode,
+           nb::arg("mode"),
+           "Apply high-level collision tuning preset.\n\n"
+           "Modes:\n"
+           "  PRECISE  - full exact checks (highest accuracy, highest cost)\n"
+           "  BALANCED - conservative cache cadence without time budget\n"
+           "  SPEED    - fastest teleop-oriented path")
+      .def("get_collision_tuning_mode",
+           &KinematicsSolver::get_collision_tuning_mode,
+           "Get the active high-level collision tuning preset.")
 
       // Stall handler
       .def("enable_stall_handler",

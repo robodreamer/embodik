@@ -789,6 +789,41 @@ int KinematicsSolver::get_collision_refinement_time_budget_us() const {
   return collision_refinement_time_budget_us_;
 }
 
+void KinematicsSolver::set_collision_tuning_mode(CollisionTuningMode mode) {
+  collision_tuning_mode_ = mode;
+  switch (mode) {
+  case CollisionTuningMode::kPrecise:
+    // Exact full-scan behavior: safest/most accurate, highest compute cost.
+    //
+    // Budget is intentionally disabled (0) so exact distance refinement does not
+    // stop early under time pressure.
+    enable_collision_pair_cache(false, 1, 0.0, 128);
+    set_collision_refinement_time_budget_us(0);
+    break;
+  case CollisionTuningMode::kBalanced:
+    // Conservative compromise:
+    // - keep cache enabled to skip obviously far pairs in clear space
+    // - but keep budget disabled (0), so once candidate pairs are selected we
+    //   avoid early termination and preserve higher collision-distance fidelity
+    //   than the speed preset.
+    enable_collision_pair_cache(true, 20, 0.05, 256);
+    set_collision_refinement_time_budget_us(0);
+    break;
+  case CollisionTuningMode::kSpeed:
+  default:
+    // Teleop-optimized path.
+    // A positive budget intentionally bounds worst-case per-step collision
+    // refinement cost, trading some edge-case precision for predictable latency.
+    enable_collision_pair_cache(true, 100, 0.03, 128);
+    set_collision_refinement_time_budget_us(300);
+    break;
+  }
+}
+
+CollisionTuningMode KinematicsSolver::get_collision_tuning_mode() const {
+  return collision_tuning_mode_;
+}
+
 double KinematicsSolver::get_collision_min_distance() const {
   if (!collision_constraint_.has_value() || !collision_constraint_->enabled) {
     return -1.0;

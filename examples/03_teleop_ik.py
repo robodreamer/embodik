@@ -107,6 +107,8 @@ DEFAULT_SOLVER_DT = 0.01
 DEFAULT_POS_GAIN = 1e2
 DEFAULT_ROT_GAIN = 1e2
 DEFAULT_NULLSPACE_GAIN = 1e-3
+DEFAULT_COLLISION_MIN_DISTANCE = 0.05
+COLLISION_TUNING_OPTIONS = ("speed", "balanced", "precise")
 
 # Scale factor for translational changes (from TRACKING_CAMERA_INPUT_DEVICE_CONFIG)
 DEFAULT_SCALE_FACTOR = 1.5
@@ -181,6 +183,38 @@ def ensure_ros_package_path(urdf_path: Path) -> None:
 
     if updated:
         os.environ["ROS_PACKAGE_PATH"] = ":".join(str(p) for p in paths)
+
+
+def _apply_collision_tuning_mode(
+    solver: embodik.KinematicsSolver,
+    mode_label: str,
+) -> None:
+    label = mode_label.lower()
+    if hasattr(solver, "set_collision_tuning_mode") and hasattr(embodik, "CollisionTuningMode"):
+        enum_map = {
+            "precise": embodik.CollisionTuningMode.PRECISE,
+            "balanced": embodik.CollisionTuningMode.BALANCED,
+            "speed": embodik.CollisionTuningMode.SPEED,
+        }
+        solver.set_collision_tuning_mode(enum_map.get(label, embodik.CollisionTuningMode.SPEED))
+        return
+
+    # Backward-compatible fallback for older bindings.
+    if label == "precise":
+        if hasattr(solver, "enable_collision_pair_cache"):
+            solver.enable_collision_pair_cache(False, 1, 0.0, 128)
+        if hasattr(solver, "set_collision_refinement_time_budget_us"):
+            solver.set_collision_refinement_time_budget_us(0)
+    elif label == "balanced":
+        if hasattr(solver, "enable_collision_pair_cache"):
+            solver.enable_collision_pair_cache(True, 20, 0.05, 256)
+        if hasattr(solver, "set_collision_refinement_time_budget_us"):
+            solver.set_collision_refinement_time_budget_us(0)
+    else:
+        if hasattr(solver, "enable_collision_pair_cache"):
+            solver.enable_collision_pair_cache(True, 100, 0.03, 128)
+        if hasattr(solver, "set_collision_refinement_time_budget_us"):
+            solver.set_collision_refinement_time_budget_us(300)
 
 
 # -----------------------------------------------------------------------------
@@ -407,16 +441,20 @@ class TeleopIKBackend:
         self.solver.dt = DEFAULT_SOLVER_DT
         self.solver.set_damping(0.1)
         self.solver.set_tolerance(0.1)
+        self._collision_tuning_mode = "speed"
+        _apply_collision_tuning_mode(self.solver, self._collision_tuning_mode)
 
         self.arm_dofs = len(cfg.joint_names)
         self.full_dofs = self.robot.nq
 
         # Apply collision exclusions
-        if enable_collision and cfg.collision_exclusions:
+        self._collision_exclusions = list(cfg.collision_exclusions)
+        if enable_collision and self._collision_exclusions:
             try:
-                self.robot.apply_collision_exclusions(cfg.collision_exclusions)
+                self.robot.apply_collision_exclusions(self._collision_exclusions)
             except Exception as exc:
                 print(f"Warning: failed to apply collision exclusions: {exc}")
+        self._collision_enabled = False
 
         # Initialize configuration
         self.default_arm = cfg.default_configuration.copy()
@@ -450,6 +488,8 @@ class TeleopIKBackend:
         self.nullspace_task.set_controlled_joint_indices([])
 
         self._step_opts = embodik.PositionStepOptions()
+        if enable_collision:
+            self.enable_self_collision(True)
 
     def get_pose(self) -> pin.SE3:
         """Get current end-effector pose."""
@@ -516,6 +556,37 @@ class TeleopIKBackend:
         self.q = self.default_full.copy()
         self.robot.update_configuration(self.q)
         return self.get_pose()
+
+    def enable_self_collision(
+        self, enable: bool, min_distance: float = DEFAULT_COLLISION_MIN_DISTANCE
+    ) -> None:
+        if enable and not self._collision_enabled:
+            try:
+                _apply_collision_tuning_mode(
+                    self.solver, getattr(self, "_collision_tuning_mode", "speed")
+                )
+                self.solver.configure_collision_constraint(
+                    min_distance=float(min_distance),
+                    include_pairs=[],
+                    exclude_pairs=list(self._collision_exclusions),
+                )
+                self._collision_enabled = True
+            except RuntimeError as exc:
+                print(f"[embodiK] Collision configuration failed: {exc}")
+                self._collision_enabled = False
+        elif enable and self._collision_enabled:
+            _apply_collision_tuning_mode(
+                self.solver, getattr(self, "_collision_tuning_mode", "speed")
+            )
+            if hasattr(self.solver, "set_collision_min_distance"):
+                self.solver.set_collision_min_distance(float(min_distance))
+        elif not enable and self._collision_enabled:
+            self.solver.clear_collision_constraint()
+            self._collision_enabled = False
+
+    def set_collision_tuning_mode(self, mode_label: str) -> None:
+        self._collision_tuning_mode = mode_label.lower()
+        _apply_collision_tuning_mode(self.solver, self._collision_tuning_mode)
 
 
 # -----------------------------------------------------------------------------
@@ -603,6 +674,23 @@ def run_teleop(cfg: RobotConfig, args: argparse.Namespace) -> None:
             "Allow SCALE fallback to MIN_ERROR",
             initial_value=False,
         )
+        self_collision_checkbox = server.gui.add_checkbox(
+            "Enable Self-Collision",
+            initial_value=not args.no_collision,
+        )
+        collision_tuning_dropdown = server.gui.add_dropdown(
+            "Collision Tuning",
+            options=COLLISION_TUNING_OPTIONS,
+            initial_value="speed",
+            disabled=not hasattr(backend, "set_collision_tuning_mode"),
+        )
+        collision_min_dist_slider = server.gui.add_slider(
+            "Collision Min Distance (mm)",
+            min=1,
+            max=100,
+            initial_value=int(DEFAULT_COLLISION_MIN_DISTANCE * 1000),
+            step=1,
+        )
         manual_mode = server.gui.add_checkbox("Manual Mode (use transform controls)", initial_value=not controller_connected)
         reset_button = server.gui.add_button("Reset Robot & Controller")
 
@@ -682,6 +770,41 @@ def run_teleop(cfg: RobotConfig, args: argparse.Namespace) -> None:
     @reset_button.on_click
     def _(_):
         on_reset_robot_pose()
+
+    if hasattr(backend, "set_collision_tuning_mode"):
+        backend.set_collision_tuning_mode(collision_tuning_dropdown.value)
+    if hasattr(backend, "enable_self_collision"):
+        backend.enable_self_collision(
+            self_collision_checkbox.value,
+            collision_min_dist_slider.value * 0.001,
+        )
+
+    @self_collision_checkbox.on_update
+    def _(_evt) -> None:
+        if hasattr(backend, "enable_self_collision"):
+            backend.enable_self_collision(
+                self_collision_checkbox.value,
+                collision_min_dist_slider.value * 0.001,
+            )
+
+    @collision_tuning_dropdown.on_update
+    def _(_evt) -> None:
+        if hasattr(backend, "set_collision_tuning_mode"):
+            backend.set_collision_tuning_mode(collision_tuning_dropdown.value)
+        if hasattr(backend, "enable_self_collision") and self_collision_checkbox.value:
+            backend.enable_self_collision(
+                True,
+                collision_min_dist_slider.value * 0.001,
+            )
+        status_text.value = f"Collision tuning: {collision_tuning_dropdown.value}"
+
+    @collision_min_dist_slider.on_update
+    def _(_evt) -> None:
+        if hasattr(backend, "enable_self_collision") and self_collision_checkbox.value:
+            backend.enable_self_collision(
+                True,
+                collision_min_dist_slider.value * 0.001,
+            )
 
     # Update visualization
     q_current = backend.get_q()

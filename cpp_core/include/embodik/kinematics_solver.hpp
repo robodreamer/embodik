@@ -482,6 +482,27 @@ public:
   void set_collision_refinement_time_budget_us(int budget_us);
   int get_collision_refinement_time_budget_us() const;
 
+  /**
+   * @brief Apply a high-level collision tuning preset.
+   *
+   * Presets map to conservative low-level cache/refinement parameters:
+   * - kPrecise:
+   *   Full exact checks (cache off, budget disabled).
+   *   This minimizes approximation/culling effects and is intended for
+   *   users who prioritize collision-distance fidelity over cycle time.
+   * - kBalanced:
+   *   Conservative cache cadence with budget disabled.
+   *   Cache still reduces unnecessary pair checks in clear space, but without
+   *   a time budget the solver does not early-stop exact refinement, reducing
+   *   risk of missing borderline cases compared to speed mode.
+   * - kSpeed:
+   *   Aggressive cache cadence with bounded exact-refinement budget.
+   *   This is optimized for high-rate teleop loops where bounded compute
+   *   latency is the primary objective.
+   */
+  void set_collision_tuning_mode(CollisionTuningMode mode);
+  CollisionTuningMode get_collision_tuning_mode() const;
+
   // ========== Stall Handler ==========
 
   /**
@@ -869,6 +890,7 @@ private:
   std::uint64_t last_collision_exact_distance_queries_ = 0;
   std::uint64_t last_collision_bound_culled_pairs_ = 0;
   bool last_collision_budget_exhausted_ = false;
+  CollisionTuningMode collision_tuning_mode_ = CollisionTuningMode::kSpeed;
   // Track solver stagnation near collision boundary for stronger recovery (per-pair).
   double last_solution_dq_norm_ = 0.0;
   std::unordered_map<std::size_t, int> collision_stuck_counters_;
