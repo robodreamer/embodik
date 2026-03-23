@@ -57,6 +57,13 @@ NB_MODULE(_embodik_impl, m) {
       .value("NON_FINITE_INPUT", eik::SolverStatus::kNonFiniteInput)
       .value("INFEASIBLE", eik::SolverStatus::kInfeasible);
 
+  nb::enum_<eik::CollisionTuningMode>(
+      m, "CollisionTuningMode",
+      "High-level collision tuning presets for speed/accuracy tradeoffs")
+      .value("PRECISE", eik::CollisionTuningMode::kPrecise)
+      .value("BALANCED", eik::CollisionTuningMode::kBalanced)
+      .value("SPEED", eik::CollisionTuningMode::kSpeed);
+
   // Types
   nb::class_<eik::BasicSolverConfig>(m, "BasicSolverConfig",
                                      "Basic configuration for solver")
