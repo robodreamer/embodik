@@ -9,6 +9,7 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <embodik/dual_arm_ects.hpp>
 #include <embodik/robot_model.hpp>
@@ -444,6 +445,43 @@ public:
    */
   void clear_collision_constraint();
 
+  /**
+   * @brief Enable/disable cached collision pair candidate evaluation.
+   *
+   * When enabled, collision distance queries are evaluated on a conservative
+   * candidate subset between periodic full refreshes. This can reduce
+   * computeDistance calls significantly in teleop loops where active collision
+   * pairs change slowly.
+   *
+   * Safety behavior:
+   * - Full refresh runs every @p full_refresh_interval steps.
+   * - Candidate set is seeded from previous active/near-active pairs.
+   * - Distances are never treated as configuration-invariant truths.
+   *
+   * @param enable Whether to enable candidate caching.
+   * @param full_refresh_interval Number of solve steps between mandatory
+   * full scans (>=1).
+   * @param candidate_distance_margin Extra margin (m) above min_distance for
+   * retaining near-active pairs as next-step candidates.
+   * @param max_cached_candidates Cap on cached candidate pair indices.
+   */
+  void enable_collision_pair_cache(
+      bool enable,
+      int full_refresh_interval = 20,
+      double candidate_distance_margin = 0.03,
+      int max_cached_candidates = 128);
+
+  /**
+   * @brief Set optional per-step time budget (microseconds) for exact
+   * collision distance refinement in cached-subset mode.
+   *
+   * When > 0, exact distance checks are prioritized by risk and stop once
+   * the budget is exhausted; conservative behavior is preserved for
+   * unprocessed pairs. A value <= 0 disables the budget.
+   */
+  void set_collision_refinement_time_budget_us(int budget_us);
+  int get_collision_refinement_time_budget_us() const;
+
   // ========== Stall Handler ==========
 
   /**
@@ -812,6 +850,25 @@ private:
   std::vector<std::uint8_t> collision_allowed_pair_mask_;
   // Active constraint pair indices from the previous solve step (for hysteresis).
   std::vector<std::size_t> last_collision_constraint_pair_indices_;
+  // Cached candidate indices used for conservative subset evaluation.
+  std::vector<std::size_t> collision_cached_candidate_pair_indices_;
+  // Per-pair cached state for conservative lower-bound gating.
+  std::vector<std::uint8_t> collision_pair_bound_valid_;
+  std::vector<double> collision_pair_last_signed_distance_;
+  std::vector<double> collision_pair_last_rel_translation_norm_;
+  std::vector<std::array<double, 9>> collision_pair_last_rel_rotation_;
+  bool collision_pair_cache_enabled_ = true;
+  int collision_pair_cache_refresh_interval_ = 100;
+  double collision_pair_cache_distance_margin_ = 0.03;
+  int collision_pair_cache_max_candidates_ = 128;
+  int collision_refinement_time_budget_us_ = 300;
+  bool collision_pair_cache_has_full_scan_ = false;
+  int collision_pair_cache_steps_since_refresh_ = 0;
+  // Instrumentation from the latest compute_collision_constraint() call.
+  std::uint64_t last_collision_pairs_considered_ = 0;
+  std::uint64_t last_collision_exact_distance_queries_ = 0;
+  std::uint64_t last_collision_bound_culled_pairs_ = 0;
+  bool last_collision_budget_exhausted_ = false;
   // Track solver stagnation near collision boundary for stronger recovery (per-pair).
   double last_solution_dq_norm_ = 0.0;
   std::unordered_map<std::size_t, int> collision_stuck_counters_;

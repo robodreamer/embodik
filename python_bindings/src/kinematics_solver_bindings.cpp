@@ -353,6 +353,31 @@ void bind_kinematics_solver(nb::module_ &m) {
       .def("clear_collision_constraint",
            &KinematicsSolver::clear_collision_constraint,
            "Disable collision avoidance constraint.")
+      .def("enable_collision_pair_cache",
+           &KinematicsSolver::enable_collision_pair_cache,
+           nb::arg("enable"),
+           nb::arg("full_refresh_interval") = 20,
+           nb::arg("candidate_distance_margin") = 0.03,
+           nb::arg("max_cached_candidates") = 128,
+           "Enable conservative collision pair candidate caching.\n\n"
+           "When enabled, collision distance queries are evaluated on cached\n"
+           "active/near-active candidate pairs between periodic full scans.\n"
+           "This is intended for teleop loops where active pairs evolve\n"
+           "smoothly over time.\n\n"
+           "Args:\n"
+           "  enable: Enable/disable candidate caching.\n"
+           "  full_refresh_interval: Steps between mandatory full pair scans.\n"
+           "  candidate_distance_margin: Extra margin (m) above min_distance\n"
+           "    for retaining near-active pairs in the candidate cache.\n"
+           "  max_cached_candidates: Cap on cached pair indices.")
+      .def("set_collision_refinement_time_budget_us",
+           &KinematicsSolver::set_collision_refinement_time_budget_us,
+           nb::arg("budget_us"),
+           "Set optional exact collision refinement budget per solve in "
+           "microseconds. Values <= 0 disable budgeting.")
+      .def("get_collision_refinement_time_budget_us",
+           &KinematicsSolver::get_collision_refinement_time_budget_us,
+           "Get exact collision refinement budget per solve (microseconds).")
 
       // Stall handler
       .def("enable_stall_handler",

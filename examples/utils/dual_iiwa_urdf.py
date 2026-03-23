@@ -82,7 +82,7 @@ def _prefix_iiwa_content(urdf_text: str, prefix: str) -> str:
     return result
 
 
-def build_dual_iiwa_urdf() -> str:
+def build_dual_iiwa_urdf(replace_mesh_collision: bool = True) -> str:
     """Build dual LBR iiwa 14 URDF from robot_descriptions.
 
     Returns:
@@ -124,9 +124,10 @@ def build_dual_iiwa_urdf() -> str:
 
     # Resolve mesh paths before prefixing (package://drake/... → absolute)
     iiwa_content = _resolve_drake_package_paths(iiwa_content, drake_root)
-    # Replace high-poly mesh collision shapes (links 6 & 7) with spheres.
-    # Must run BEFORE path resolution is consumed — paths are still absolute here.
-    iiwa_content = _replace_mesh_collision_with_primitives(iiwa_content)
+    # Optionally replace high-poly mesh collision shapes (links 6 & 7) with
+    # spheres for much faster distance queries.
+    if replace_mesh_collision:
+        iiwa_content = _replace_mesh_collision_with_primitives(iiwa_content)
     # Remove drake:* attributes so the composed URDF does not require xmlns:drake
     iiwa_content = _strip_drake_namespace_attributes(iiwa_content)
 
