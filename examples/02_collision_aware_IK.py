@@ -46,6 +46,7 @@ DEFAULT_NULLSPACE_GAIN = 1e-2
 MAX_LINEAR_STEP = 2.0
 MAX_ANGULAR_STEP = 2.0
 DEFAULT_COLLISION_GAIN = 1.0
+COLLISION_TUNING_OPTIONS = ("speed", "balanced", "precise")
 
 _LINK_INDEX_PATTERN = re.compile(r"link_?([0-9]+)")
 
@@ -278,6 +279,38 @@ def ensure_ros_package_path(urdf_path: Path) -> None:
         os.environ["ROS_PACKAGE_PATH"] = ":".join(str(p) for p in paths)
 
 
+def _apply_collision_tuning_mode(
+    solver: embodik.KinematicsSolver,
+    mode_label: str,
+) -> None:
+    label = mode_label.lower()
+    if hasattr(solver, "set_collision_tuning_mode") and hasattr(embodik, "CollisionTuningMode"):
+        enum_map = {
+            "precise": embodik.CollisionTuningMode.PRECISE,
+            "balanced": embodik.CollisionTuningMode.BALANCED,
+            "speed": embodik.CollisionTuningMode.SPEED,
+        }
+        solver.set_collision_tuning_mode(enum_map.get(label, embodik.CollisionTuningMode.SPEED))
+        return
+
+    # Backward-compatible fallback for older bindings.
+    if label == "precise":
+        if hasattr(solver, "enable_collision_pair_cache"):
+            solver.enable_collision_pair_cache(False, 1, 0.0, 128)
+        if hasattr(solver, "set_collision_refinement_time_budget_us"):
+            solver.set_collision_refinement_time_budget_us(0)
+    elif label == "balanced":
+        if hasattr(solver, "enable_collision_pair_cache"):
+            solver.enable_collision_pair_cache(True, 20, 0.05, 256)
+        if hasattr(solver, "set_collision_refinement_time_budget_us"):
+            solver.set_collision_refinement_time_budget_us(0)
+    else:
+        if hasattr(solver, "enable_collision_pair_cache"):
+            solver.enable_collision_pair_cache(True, 100, 0.03, 128)
+        if hasattr(solver, "set_collision_refinement_time_budget_us"):
+            solver.set_collision_refinement_time_budget_us(300)
+
+
 # -----------------------------------------------------------------------------
 # embodiK backend
 # -----------------------------------------------------------------------------
@@ -304,6 +337,8 @@ class embodiKBackend:
         self.solver.dt = DEFAULT_SOLVER_DT
         self.solver.set_damping(0.1)
         self.solver.set_tolerance(0.1)
+        self._collision_tuning_mode = "speed"
+        _apply_collision_tuning_mode(self.solver, self._collision_tuning_mode)
 
         self.arm_dofs = len(cfg.joint_names)
         self.full_dofs = self.robot.nq
@@ -451,6 +486,9 @@ class embodiKBackend:
 
         if enable and not self._collision_enabled:
             try:
+                _apply_collision_tuning_mode(
+                    self.solver, getattr(self, "_collision_tuning_mode", "speed")
+                )
                 self.solver.configure_collision_constraint(
                     min_distance=0.05,
                     include_pairs=[],
@@ -463,6 +501,10 @@ class embodiKBackend:
         elif not enable and self._collision_enabled:
             self.solver.clear_collision_constraint()
             self._collision_enabled = False
+
+    def set_collision_tuning_mode(self, mode_label: str) -> None:
+        self._collision_tuning_mode = mode_label.lower()
+        _apply_collision_tuning_mode(self.solver, self._collision_tuning_mode)
 
 
 # -----------------------------------------------------------------------------
@@ -544,6 +586,12 @@ def run_gui(cfg: RobotConfig, args: argparse.Namespace) -> None:
             "Enable Self-Collision",
             initial_value=False,
             disabled=not hasattr(backend, "enable_self_collision"),
+        )
+        collision_tuning_dropdown = server.gui.add_dropdown(
+            "Collision Tuning",
+            options=COLLISION_TUNING_OPTIONS,
+            initial_value="speed",
+            disabled=not hasattr(backend, "set_collision_tuning_mode"),
         )
         ee_mode_dropdown = server.gui.add_dropdown(
             "EE Solve Mode",
@@ -956,6 +1004,8 @@ def run_gui(cfg: RobotConfig, args: argparse.Namespace) -> None:
         update_collision_visuals()
 
     sync_from_backend(update_target=True)
+    if hasattr(backend, "set_collision_tuning_mode"):
+        backend.set_collision_tuning_mode(collision_tuning_dropdown.value)
 
     prev_manual_state = False
 
@@ -988,6 +1038,8 @@ def run_gui(cfg: RobotConfig, args: argparse.Namespace) -> None:
     @self_collision_checkbox.on_update
     def _(_evt) -> None:
         if hasattr(backend, "enable_self_collision"):
+            if hasattr(backend, "set_collision_tuning_mode"):
+                backend.set_collision_tuning_mode(collision_tuning_dropdown.value)
             backend.enable_self_collision(self_collision_checkbox.value and not self_collision_checkbox.disabled)
             solver_obj = getattr(backend, "solver", None)
             if (
@@ -1004,6 +1056,12 @@ def run_gui(cfg: RobotConfig, args: argparse.Namespace) -> None:
             if collision_line_handle is not None:
                 collision_line_handle.visible = False
         update_collision_visuals()
+
+    @collision_tuning_dropdown.on_update
+    def _(_evt) -> None:
+        if hasattr(backend, "set_collision_tuning_mode"):
+            backend.set_collision_tuning_mode(collision_tuning_dropdown.value)
+        status_handle.value = f"Status: Collision tuning set to {collision_tuning_dropdown.value}"
 
     @collision_debug_checkbox.on_update
     def _(_evt) -> None:

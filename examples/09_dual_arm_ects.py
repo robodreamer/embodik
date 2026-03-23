@@ -82,8 +82,41 @@ DEFAULT_ROT_GAIN = 10.0
 DEFAULT_NULLSPACE_GAIN_EXP = -2.0   # 10^-2 = 0.01
 DEFAULT_DAMPING = 0.1
 DEFAULT_TOLERANCE = 0.1
+COLLISION_TUNING_OPTIONS = ("speed", "balanced", "precise")
 
 ARM_JOINT_LABELS = [f"L{j}" for j in range(1, 8)] + [f"R{j}" for j in range(1, 8)]
+
+
+def _apply_collision_tuning_mode(
+    solver: "embodik.KinematicsSolver",
+    mode_label: str,
+) -> None:
+    label = mode_label.lower()
+    if hasattr(solver, "set_collision_tuning_mode") and hasattr(embodik, "CollisionTuningMode"):
+        enum_map = {
+            "precise": embodik.CollisionTuningMode.PRECISE,
+            "balanced": embodik.CollisionTuningMode.BALANCED,
+            "speed": embodik.CollisionTuningMode.SPEED,
+        }
+        solver.set_collision_tuning_mode(enum_map.get(label, embodik.CollisionTuningMode.SPEED))
+        return
+
+    # Backward-compatible fallback for older bindings.
+    if label == "precise":
+        if hasattr(solver, "enable_collision_pair_cache"):
+            solver.enable_collision_pair_cache(False, 1, 0.0, 128)
+        if hasattr(solver, "set_collision_refinement_time_budget_us"):
+            solver.set_collision_refinement_time_budget_us(0)
+    elif label == "balanced":
+        if hasattr(solver, "enable_collision_pair_cache"):
+            solver.enable_collision_pair_cache(True, 20, 0.05, 256)
+        if hasattr(solver, "set_collision_refinement_time_budget_us"):
+            solver.set_collision_refinement_time_budget_us(0)
+    else:
+        if hasattr(solver, "enable_collision_pair_cache"):
+            solver.enable_collision_pair_cache(True, 100, 0.03, 128)
+        if hasattr(solver, "set_collision_refinement_time_budget_us"):
+            solver.set_collision_refinement_time_budget_us(300)
 
 
 def _dual_iiwa_collision_exclusions(robot: "embodik.RobotModel") -> list:
@@ -202,6 +235,8 @@ def main():
     solver.dt = DEFAULT_SOLVER_DT
     solver.set_damping(DEFAULT_DAMPING)
     solver.set_tolerance(DEFAULT_TOLERANCE)
+    _collision_tuning_mode = "speed"
+    _apply_collision_tuning_mode(solver, _collision_tuning_mode)
     solver.enable_velocity_limits(True)
     solver.enable_position_limits(True)
 
@@ -420,6 +455,11 @@ def main():
         self_collision_checkbox = server.gui.add_checkbox(
             "Enable Self-Collision Avoidance", initial_value=False
         )
+        collision_tuning_dropdown = server.gui.add_dropdown(
+            "Tuning Mode",
+            options=COLLISION_TUNING_OPTIONS,
+            initial_value=_collision_tuning_mode,
+        )
         collision_min_dist_slider = server.gui.add_slider(
             "Min Distance (mm)", min=1, max=100, step=1,
             initial_value=int(COLLISION_MIN_DISTANCE * 1000),
@@ -504,6 +544,7 @@ def main():
 
     def _apply_collision_toggle() -> None:
         nonlocal _collision_enabled
+        _apply_collision_tuning_mode(solver, collision_tuning_dropdown.value)
         want = self_collision_checkbox.value
         if want and not _collision_enabled:
             try:
@@ -534,6 +575,7 @@ def main():
         # Re-apply constraint with updated distance if currently enabled
         if _collision_enabled:
             try:
+                _apply_collision_tuning_mode(solver, collision_tuning_dropdown.value)
                 solver.configure_collision_constraint(
                     min_distance=collision_min_dist_slider.value * 0.001,
                     include_pairs=[],
@@ -541,6 +583,12 @@ def main():
                 )
             except RuntimeError as exc:
                 print(f"[collision] reconfigure failed: {exc}")
+
+    @collision_tuning_dropdown.on_update
+    def _(_evt) -> None:
+        _apply_collision_tuning_mode(solver, collision_tuning_dropdown.value)
+        if _collision_enabled:
+            _apply_collision_toggle()
 
     # --- Button callbacks (fired once per click, no polling) ---
     _snap_requested = False

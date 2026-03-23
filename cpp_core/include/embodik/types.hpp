@@ -37,6 +37,12 @@ enum class TaskSolveMode {
   kMinError = 1,
 };
 
+enum class CollisionTuningMode {
+  kPrecise = 0,
+  kBalanced = 1,
+  kSpeed = 2,
+};
+
 enum class SolverStatus {
   kSuccess = 0,
   kInvalidInput = 1,

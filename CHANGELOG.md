@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **High-level collision tuning presets**: added `CollisionTuningMode` (`PRECISE`, `BALANCED`, `SPEED`) and `KinematicsSolver.set_collision_tuning_mode(...)` / `get_collision_tuning_mode()` so users can select collision behavior by intent instead of low-level cache/budget knobs.
+- **Python enum exposure for tuning modes**: `CollisionTuningMode` is now available in Python bindings and wired into solver bindings for direct use in scripts and apps.
+
+### Changed
+- **Interactive example controls for live collision tuning**: examples `02_collision_aware_IK.py` and `03_teleop_ik.py` now expose a Viser dropdown for `speed/balanced/precise` selection with runtime updates, while keeping low-level parameters hidden.
+- **Preset rationale documented in solver code**: clarified why `PRECISE` and `BALANCED` both disable time-budget truncation (`budget_us=0`) and why only `SPEED` uses a positive refinement budget for bounded latency.
+
 ## [0.16.0] - 2026-03-21
 
 ### Added
