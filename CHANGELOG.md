@@ -15,6 +15,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Interactive example controls for live collision tuning**: examples `02_collision_aware_IK.py` and `03_teleop_ik.py` now expose a Viser dropdown for `speed/balanced/precise` selection with runtime updates, while keeping low-level parameters hidden.
 - **Preset rationale documented in solver code**: clarified why `PRECISE` and `BALANCED` both disable time-budget truncation (`budget_us=0`) and why only `SPEED` uses a positive refinement budget for bounded latency.
 
+## [0.17.0] - 2026-03-23
+
+### Added
+- **Solver status/options API expansion for position stepping**: introduced no-progress-oriented status and option surface in C++ and Python bindings so position-step callers can control and interpret bounded-step convergence behavior explicitly.
+- **Reference corridor support for position-step IK bounds**: added reference-corridor-aware bound handling to improve guidance around prior solutions and reduce drift during repeated teleop-like updates.
+
+### Changed
+- **Unified IK bound evaluation path**: consolidated position-step bound and stop-condition checks so joint/task limits, corridor checks, and termination semantics run through one consistent status-classification flow.
+- **Default no-progress behavior now classifies early exits explicitly**: when incremental motion fails to make meaningful progress, the solver reports a no-progress outcome by default instead of collapsing into less specific statuses.
+
+### Fixed
+- **No-progress exit semantics consistency**: aligned default no-progress classification across solver internals and bindings so callers observe stable, deterministic status reporting for stalled incremental updates.
+
 ## [0.16.0] - 2026-03-21
 
 ### Added
