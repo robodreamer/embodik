@@ -40,10 +40,10 @@ jobs:
         with:
           python-version: "3.12"
 
-      # EmbodiK's CMake requires Eigen3Config.cmake; the PyPI `pin` wheel does not
-      # necessarily expose Eigen for find_package(Eigen3).
-      - name: Install Eigen (Homebrew)
-        run: brew install eigen
+      # EmbodiK uses find_package(Eigen3 3.3). Homebrew `eigen` may be Eigen 5.x; use eigen@3.
+      # Pinocchio CMake may require urdfdom_headers from Homebrew when using the PyPI pin wheel.
+      - name: Install Homebrew build deps
+        run: brew install eigen@3 urdfdom_headers urdfdom
 
       - name: Build and install package (venv + pip)
         run: |
@@ -51,8 +51,11 @@ jobs:
           source .venv/bin/activate
           python -m pip install --upgrade pip
           pip install pin scikit-build-core nanobind cmake ninja pytest
-          export Eigen3_DIR="$(brew --prefix eigen)/share/eigen3/cmake"
-          export CMAKE_PREFIX_PATH="$(python -c "import pinocchio, pathlib; print(pathlib.Path(pinocchio.__file__).resolve().parents[4])")"
+          export Eigen3_DIR="$(brew --prefix eigen@3)/share/eigen3/cmake"
+          export SDKROOT="$(xcrun --sdk macosx --show-sdk-path)"
+          export CXXFLAGS="-isystem ${SDKROOT}/usr/include/c++/v1 ${CXXFLAGS:-}"
+          PIN_PREFIX="$(python -c "import pinocchio, pathlib; print(pathlib.Path(pinocchio.__file__).resolve().parents[4])")"
+          export CMAKE_PREFIX_PATH="${PIN_PREFIX}:$(brew --prefix)"
           pip install --no-build-isolation -e .
 
       - name: Run tests

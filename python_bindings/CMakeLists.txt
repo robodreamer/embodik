@@ -40,13 +40,21 @@ add_custom_command(TARGET _embodik_impl POST_BUILD
     COMMENT "Copying extension module to python/embodik for editable install"
 )
 
-# Set RPATH so Python can find libembodik_core.so
-# For editable installs (inplace mode), library is in same directory as extension
-# For regular installs, library is in ./lib relative to extension (installed under the package dir)
-set_target_properties(_embodik_impl PROPERTIES
-    INSTALL_RPATH "$ORIGIN:$ORIGIN/lib"
-    BUILD_RPATH "$ORIGIN:$<TARGET_FILE_DIR:embodik_core>"
-)
+# Set RPATH so Python can find libembodik_core.{so,dylib}
+# For editable installs (inplace mode), library is next to the extension; wheels place it under lib/.
+# macOS: use @loader_path (Mach-O). Linux: $ORIGIN. CMake must get separate rpath entries, not one
+# string with a colon, or dyld treats "$ORIGIN:$ORIGIN/lib" as a single invalid path.
+if(APPLE)
+    set_target_properties(_embodik_impl PROPERTIES
+        INSTALL_RPATH "@loader_path;@loader_path/lib"
+        BUILD_RPATH "@loader_path;$<TARGET_FILE_DIR:embodik_core>"
+    )
+else()
+    set_target_properties(_embodik_impl PROPERTIES
+        INSTALL_RPATH "\$ORIGIN;\$ORIGIN/lib"
+        BUILD_RPATH "\$ORIGIN;$<TARGET_FILE_DIR:embodik_core>"
+    )
+endif()
 
 # Generate Python type stubs (non-fatal - stub generation may fail if dependencies aren't available)
 # The module will work fine without .pyi files - they're just for IDE autocomplete
