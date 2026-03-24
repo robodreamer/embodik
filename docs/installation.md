@@ -7,6 +7,96 @@ EmbodiK requires Python 3.10+ and is distributed via PyPI as a source distributi
 > is only needed at build time to locate Pinocchio's CMake config. This change resolves
 > numpy dependency conflicts when using EmbodiK with other packages.
 
+## macOS (Homebrew): pip / sdist builds
+
+### One-shot installer
+
+From a checkout of this repository (recommended):
+
+```bash
+# PyPI install into ./.venv in your current directory
+bash scripts/install_embodik_macos.sh
+
+# Prefer Python 3.12 and a specific venv path
+bash scripts/install_embodik_macos.sh --python python3.12 --venv ./.venv
+
+# Editable install from the repo (default DIR = parent of scripts/)
+bash scripts/install_embodik_macos.sh --editable
+
+# If you have ROS / a local Pinocchio on DYLD_LIBRARY_PATH or CMAKE_PREFIX_PATH
+bash scripts/install_embodik_macos.sh --clean-env
+```
+
+Run `bash scripts/install_embodik_macos.sh --help` for all options (`--skip-brew`, etc.).
+
+Without cloning, you can download the script and run it from an empty project folder (still installs **embodik from PyPI**):
+
+```bash
+curl -fsSL -O https://raw.githubusercontent.com/robodreamer/embodik/main/scripts/install_embodik_macos.sh
+bash install_embodik_macos.sh --python python3.12
+```
+
+The manual steps below are equivalent if you prefer not to use the script.
+
+---
+
+EmbodiK’s CMake uses `find_package(Eigen3 3.3 REQUIRED)`. Homebrew’s default **`eigen` formula is Eigen 5.x**, which CMake rejects (you will see “version found is not compatible with the version requested”). Use **`eigen@3`** and point CMake at it explicitly.
+
+**1. Toolchain**
+
+- Xcode command-line tools: `xcode-select --install`
+- **Python:** Prefer **3.10–3.12** (same range as [pre-built wheels](https://pypi.org/project/embodik/#files) and CI). Newer interpreters (e.g. 3.14) may work but are not validated; create the venv with `python3.12` if your default `python3` is too new.
+
+**2. Homebrew packages**
+
+```bash
+brew install eigen@3 urdfdom_headers urdfdom
+```
+
+`eigen@3` is often *keg-only*. You do **not** have to `brew link` it if you set `Eigen3_DIR` to the keg (below).
+
+Pinocchio’s CMake config may pull in **`urdfdom_headers`**; without the Homebrew packages, configure fails even when the PyPI `pin` wheel is installed.
+
+**3. Environment variables (same shell as `pip install`)**
+
+```bash
+export Eigen3_DIR="$(brew --prefix eigen@3)/share/eigen3/cmake"
+export SDKROOT="$(xcrun --sdk macosx --show-sdk-path)"
+# Command-line tools may ship an incomplete libc++; prefer the SDK’s C++ headers (fixes missing <cmath>).
+export CXXFLAGS="-isystem ${SDKROOT}/usr/include/c++/v1 ${CXXFLAGS:-}"
+
+PIN_PREFIX="$(python -c "import pinocchio, pathlib; print(pathlib.Path(pinocchio.__file__).resolve().parents[4])")"
+export CMAKE_PREFIX_PATH="${PIN_PREFIX}:$(brew --prefix)"
+```
+
+- **`Eigen3_DIR`:** must be **eigen@3**, not `brew --prefix eigen` (Eigen 5).
+- **`CMAKE_PREFIX_PATH`:** must include the **`pin` wheel prefix** (`PIN_PREFIX`) so CMake finds `pinocchio`. Append `:$(brew --prefix)` so Homebrew’s URDF CMake packages are visible. Do **not** set `CMAKE_PREFIX_PATH` to only `$(brew --prefix)` — that drops Pinocchio and breaks with “Could not find pinocchio”.
+- **`SDKROOT` / libc++:** if the compile fails with **`'cstddef' file not found`**, **`'cmath' file not found`**, or similar standard headers, set `SDKROOT` and add the SDK’s libc++ to the include path (the installer script does this automatically):
+  `export CXXFLAGS="-isystem ${SDKROOT}/usr/include/c++/v1 ${CXXFLAGS:-}"` (with `SDKROOT` set as above). If it still fails, install or select full Xcode: `sudo xcode-select -s /Applications/Xcode.app/Contents/Developer` (when Xcode is installed), or reinstall the command-line tools.
+
+**4. Optional checks**
+
+```bash
+test -f "$Eigen3_DIR/Eigen3Config.cmake" && echo "Eigen3_DIR OK"
+```
+
+**5. Editable install from a clone**
+
+```bash
+cd /path/to/embodik
+source .venv/bin/activate
+pip install -U pip
+pip install pin scikit-build-core nanobind cmake ninja
+export Eigen3_DIR="$(brew --prefix eigen@3)/share/eigen3/cmake"
+export SDKROOT="$(xcrun --sdk macosx --show-sdk-path)"
+export CXXFLAGS="-isystem ${SDKROOT}/usr/include/c++/v1 ${CXXFLAGS:-}"
+PIN_PREFIX="$(python -c "import pinocchio, pathlib; print(pathlib.Path(pinocchio.__file__).resolve().parents[4])")"
+export CMAKE_PREFIX_PATH="${PIN_PREFIX}:$(brew --prefix)"
+pip install --no-build-isolation -e .
+```
+
+If you already use a venv (e.g. under `embodik_test`), only `source` it and skip creating a new one.
+
 ## Option A: Fresh Environment (No existing Pinocchio)
 
 If you're starting fresh without any local Pinocchio or Boost installations:
@@ -20,7 +110,13 @@ pip install -U pip
 # Install build dependencies and Pinocchio
 pip install pin scikit-build-core nanobind cmake ninja
 
-# Set CMAKE_PREFIX_PATH so the build can find Pinocchio
+# macOS: see "macOS (Homebrew): pip / sdist builds" above — use eigen@3, SDKROOT, and:
+# export Eigen3_DIR="$(brew --prefix eigen@3)/share/eigen3/cmake"
+# export SDKROOT="$(xcrun --sdk macosx --show-sdk-path)"
+# PIN_PREFIX="$(python -c "import pinocchio, pathlib; print(pathlib.Path(pinocchio.__file__).resolve().parents[4])")"
+# export CMAKE_PREFIX_PATH="${PIN_PREFIX}:$(brew --prefix)"
+
+# Set CMAKE_PREFIX_PATH so the build can find Pinocchio (append :$(brew --prefix) on macOS — see above)
 export CMAKE_PREFIX_PATH=$(python -c "import pinocchio, pathlib; print(pathlib.Path(pinocchio.__file__).resolve().parents[4])")
 
 # Install embodik
@@ -29,12 +125,6 @@ pip install --no-build-isolation embodik
 # Verify (no pin import needed at runtime!)
 python -c "import embodik; print(embodik.__version__, embodik.RobotModel)"
 ```
-
-macOS Apple Silicon note:
-- Install Xcode command-line tools first: `xcode-select --install`
-- Install Eigen: `brew install eigen` — EmbodiK’s CMake calls `find_package(Eigen3)`, which is not always provided by the `pin` wheel alone.
-- Before installing embodik, run: `export Eigen3_DIR="$(brew --prefix eigen)/share/eigen3/cmake"`
-- Then follow the same install flow as above (`pin` + `CMAKE_PREFIX_PATH`).
 
 ## Option B: Robotics Environment (Existing Pinocchio/ROS/Boost)
 
@@ -54,7 +144,9 @@ unset LD_LIBRARY_PATH DYLD_LIBRARY_PATH CMAKE_PREFIX_PATH pinocchio_DIR
 # Install build dependencies and Pinocchio from PyPI
 pip install pin scikit-build-core nanobind cmake ninja
 
-# Set CMAKE_PREFIX_PATH to the PyPI pin package
+# macOS: same as Option A (eigen@3, SDKROOT, CMAKE_PREFIX_PATH pin + brew — see section above)
+
+# Set CMAKE_PREFIX_PATH to the PyPI pin package (append :$(brew --prefix) on macOS — see above)
 export CMAKE_PREFIX_PATH=$(python -c "import pinocchio, pathlib; print(pathlib.Path(pinocchio.__file__).resolve().parents[4])")
 
 # Install embodik
@@ -95,12 +187,45 @@ This usually means `DYLD_LIBRARY_PATH` is pointing to a conflicting local Pinocc
 unset DYLD_LIBRARY_PATH
 ```
 
+### `Could not find Eigen3` / version not compatible (macOS)
+
+Homebrew **`eigen`** (Eigen 5.x) does **not** satisfy EmbodiK’s `find_package(Eigen3 3.3)`. Use **`eigen@3`** and set `Eigen3_DIR` in the **same shell** as `pip install`:
+
+```bash
+brew install eigen@3
+export Eigen3_DIR="$(brew --prefix eigen@3)/share/eigen3/cmake"
+test -f "$Eigen3_DIR/Eigen3Config.cmake" && echo "Eigen3_DIR OK"
+pip install --no-build-isolation embodik   # or: pip install --no-build-isolation -e .
+```
+
+### `Could not find a package configuration file provided by "urdfdom_headers"` (macOS)
+
+Pinocchio’s CMake dependencies expect URDF CMake configs on the system. Install:
+
+```bash
+brew install urdfdom_headers urdfdom
+```
+
+Keep `CMAKE_PREFIX_PATH` as **`${PIN_PREFIX}:$(brew --prefix)`** (see [macOS (Homebrew)](#macos-homebrew-pip--sdist-builds)).
+
+### `'cstddef' file not found` / `'cmath' file not found` (macOS)
+
+The compiler is not seeing the macOS SDK standard library. Try:
+
+```bash
+export SDKROOT="$(xcrun --sdk macosx --show-sdk-path)"
+pip install --no-build-isolation embodik
+```
+
+If that is not enough, select full Xcode (when installed): `sudo xcode-select -s /Applications/Xcode.app/Contents/Developer`, or reinstall the command-line tools. Using **Python 3.12** in the venv avoids some bleeding-edge toolchain combinations.
+
 ### `CMake cannot find pinocchio`
 
 CMake needs to know where the `pin` wheel installed Pinocchio. Fix:
 
 ```bash
-export CMAKE_PREFIX_PATH=$(python -c "import pinocchio, pathlib; print(pathlib.Path(pinocchio.__file__).resolve().parents[4])")
+PIN_PREFIX="$(python -c "import pinocchio, pathlib; print(pathlib.Path(pinocchio.__file__).resolve().parents[4])")"
+export CMAKE_PREFIX_PATH="${PIN_PREFIX}:$(brew --prefix)"   # macOS; Linux: export CMAKE_PREFIX_PATH="$PIN_PREFIX"
 pip install --no-build-isolation embodik
 ```
 
@@ -175,8 +300,9 @@ sudo apt-get install -y build-essential cmake libeigen3-dev python3-dev python3-
 
 macOS (Homebrew):
 ```bash
-brew install cmake eigen python3
+brew install cmake python@3.12 eigen@3 urdfdom_headers urdfdom
 ```
+(EmbodiK’s CMake expects Eigen 3.x; Homebrew’s default `eigen` package may be Eigen 5.)
 
 **2. Install Pinocchio:**
 
@@ -535,7 +661,7 @@ If you encounter build errors:
 
 1. Ensure you have a C++17 compatible compiler (GCC 7+, Clang 5+)
 2. Check that CMake version is 3.16 or higher: `cmake --version`
-3. Verify Eigen3 is installed: `pkg-config --modversion eigen3`
+3. Verify Eigen3 for CMake: on Linux use `pkg-config --modversion eigen3` if available; on macOS with Homebrew use `test -f "$(brew --prefix eigen@3)/share/eigen3/cmake/Eigen3Config.cmake" && echo OK`
 4. If using pixi, ensure the Qhull patch was applied: `pixi run patch-qhull`
 
 ## Next Steps

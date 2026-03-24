@@ -8,7 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- None yet.
+- **`scripts/install_embodik_macos.sh`**: one-shot macOS setup (Homebrew `eigen@3` / URDF packages, venv, `SDKROOT` + SDK libc++ include workaround, `CMAKE_PREFIX_PATH` for PyPI `pin` + Homebrew, PyPI or editable `pip install`). Shipped in sdist via `MANIFEST.in`.
+
+### Changed
+- **Docs / README**: expanded macOS pip/sdist guidance (Eigen 3.x via `eigen@3`, `urdfdom_headers` / `urdfdom`, combined `CMAKE_PREFIX_PATH`, Command Line Tools libc++ / `CXXFLAGS` workaround, Python 3.10–3.12 recommendation); troubleshooting table and optional `curl` flow for the installer script.
+- **CI (`test-macos-arm64`)**: install `eigen@3` and URDF Homebrew packages; set `SDKROOT`, SDK libc++ `CXXFLAGS`, and `CMAKE_PREFIX_PATH="${PIN_PREFIX}:$(brew --prefix)"`.
+- **`cibuildwheel` (macOS)**: `brew install eigen@3` plus URDF packages; `Eigen3_DIR` under `opt/eigen@3`; `CMAKE_PREFIX_PATH=/opt/homebrew` to complement CMake’s PyPI `pin` prefix prepended in `CMakeLists.txt`.
+
+### Fixed
+- **macOS Python module load after `pip install`**: `INSTALL_RPATH` for `_embodik_impl` now uses separate Mach-O entries (`@loader_path;@loader_path/lib`) instead of one invalid `$ORIGIN:$ORIGIN/lib` string.
+- **macOS builds with Xcode CLT**: document and apply `-isystem $SDKROOT/usr/include/c++/v1` so `<cmath>` / standard C++ headers resolve when the CLT-shipped libc++ tree is incomplete.
 
 ## [0.17.0] - 2026-03-23
 
