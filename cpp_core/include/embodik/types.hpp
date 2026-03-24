@@ -238,6 +238,10 @@ struct PositionStepOptions {
   // Optional task-space speed caps (0 or negative = unlimited).
   double max_linear_speed = 0.0;  // m/s cap on ||v_linear||
   double max_angular_speed = 0.0; // rad/s cap on ||v_angular||
+  // Optional torso orientation task and torso pose bounds. Bounds are enforced
+  // in solve_position_step via additional inequality rows, consistent with
+  // solve_position semantics.
+  TorsoPoseConstraintOptions torso_constraint;
   /// Same intent as PositionIKOptions::excluded_joint_indices: treat these
   /// nv-indices as inactive in solve_position_step without mutating registered
   /// task exclusion lists. Internally this maps to zero-velocity locks during
