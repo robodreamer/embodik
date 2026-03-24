@@ -1994,7 +1994,8 @@ KinematicsSolver::compute_collision_constraint() {
 
 std::pair<double, double> KinematicsSolver::calculate_velocity_box_constraint(
     double position_margin_lower, double position_margin_upper,
-    double velocity_limit, double acceleration_limit, double dt) const {
+    double velocity_limit, double acceleration_limit, double dt,
+    double min_velocity_headroom, double headroom_activation_margin) const {
   const double raw_margin_lower = position_margin_lower;
   const double raw_margin_upper = position_margin_upper;
   const bool outside_lower = raw_margin_lower < -limit_recovery_enter_epsilon_;
@@ -2027,24 +2028,29 @@ std::pair<double, double> KinematicsSolver::calculate_velocity_box_constraint(
   double upper_limit =
       std::min({vel_from_pos_upper, velocity_limit, vel_from_accel_upper});
 
-  // When a joint is inside both limits, guarantee a minimum velocity
-  // allowance so the hierarchical (SNS) solver can find partial solutions
-  // instead of collapsing the task scale to zero.  The post-solve
-  // position clamp prevents actual limit violations, so this "softening"
-  // only affects the velocity-level QP feasibility.
-  //
-  // Only guarantee headroom in the direction AWAY from a nearby limit.
-  // kMarginThreshold prevents softening from injecting velocity toward a
-  // limit the joint is already at.
-  //
-  // Disabled by default (enable_saturation_exit_behavior_); requires more
-  // testing before enabling.
-  if (enable_saturation_exit_behavior_ && !outside_lower && !outside_upper) {
-    const double min_vel = kMinBoundFraction * velocity_limit;
-    if (lower_limit > -min_vel && raw_margin_lower > kMarginThreshold)
-      lower_limit = -min_vel;
-    if (upper_limit < min_vel && raw_margin_upper > kMarginThreshold)
-      upper_limit = min_vel;
+  // Shared velocity-box headroom policy:
+  // - explicit per-call headroom (min_velocity_headroom >= 0), or
+  // - legacy solver-level saturation-exit behavior.
+  if (!outside_lower && !outside_upper) {
+    bool apply_headroom = false;
+    double min_vel = 0.0;
+    double activation_margin = std::max(0.0, headroom_activation_margin);
+    if (min_velocity_headroom >= 0.0) {
+      apply_headroom = true;
+      min_vel = std::max(0.0, min_velocity_headroom);
+    } else if (enable_saturation_exit_behavior_) {
+      apply_headroom = true;
+      min_vel = kMinBoundFraction * velocity_limit;
+      activation_margin = kMarginThreshold;
+    }
+    if (apply_headroom && min_vel > 0.0) {
+      if (lower_limit > -min_vel && raw_margin_lower > activation_margin) {
+        lower_limit = -min_vel;
+      }
+      if (upper_limit < min_vel && raw_margin_upper > activation_margin) {
+        upper_limit = min_vel;
+      }
+    }
   }
 
   if (outside_lower) {
@@ -2953,6 +2959,20 @@ PositionIKResult KinematicsSolver::solve_position(
             "torso_constraint.pose_bound_softening_fraction must be in [0, 1]";
         return result;
       }
+      if (!std::isfinite(torso_opts.velocity_box_headroom.fraction) ||
+          torso_opts.velocity_box_headroom.fraction < 0.0 ||
+          torso_opts.velocity_box_headroom.fraction > 1.0) {
+        result.status = SolverStatus::kInvalidInput;
+        result.status_message =
+            "torso_constraint.velocity_box_headroom.fraction must be in [0, 1]";
+        return result;
+      }
+      if (!std::isfinite(torso_opts.velocity_box_headroom.activation_margin) ||
+          torso_opts.velocity_box_headroom.activation_margin < 0.0) {
+        result.status = SolverStatus::kInvalidInput;
+        result.status_message = "torso_constraint.velocity_box_headroom.activation_margin must be >= 0";
+        return result;
+      }
     }
   }
 
@@ -3195,26 +3215,24 @@ PositionIKResult KinematicsSolver::solve_position(
         if (slack_upper < 0.0 && slack_upper >= -torso_slack_eps) {
           slack_upper = 0.0;
         }
+        const bool torso_headroom_enabled =
+            torso_opts.velocity_box_headroom.enabled ||
+            torso_opts.pose_bound_softening_enabled;
+        const double torso_headroom_fraction =
+            torso_opts.velocity_box_headroom.enabled
+                ? torso_opts.velocity_box_headroom.fraction
+                : torso_opts.pose_bound_softening_fraction;
+        const double torso_headroom_activation_margin =
+            torso_opts.velocity_box_headroom.enabled
+                ? torso_opts.velocity_box_headroom.activation_margin
+                : kMarginThreshold;
         auto [lower_limit, upper_limit] = calculate_velocity_box_constraint(
             slack_lower, slack_upper, torso_opts.velocity_limits.coeff(i),
-            torso_opts.acceleration_limits.coeff(i), options.dt);
-        if (torso_opts.pose_bound_softening_enabled) {
-          const double min_vel = torso_opts.pose_bound_softening_fraction *
-                                 torso_opts.velocity_limits.coeff(i);
-          if (min_vel > 0.0) {
-            if (lower_limit > -min_vel && slack_lower > kMarginThreshold) {
-              lower_limit = -min_vel;
-            }
-            if (upper_limit < min_vel && slack_upper > kMarginThreshold) {
-              upper_limit = min_vel;
-            }
-            if (lower_limit > upper_limit) {
-              const double midpoint = 0.5 * (lower_limit + upper_limit);
-              lower_limit = midpoint;
-              upper_limit = midpoint;
-            }
-          }
-        }
+            torso_opts.acceleration_limits.coeff(i), options.dt,
+            torso_headroom_enabled
+                ? torso_headroom_fraction * torso_opts.velocity_limits.coeff(i)
+                : -1.0,
+            torso_headroom_activation_margin);
         torso_constraint_jacobian.row(row) = torso_jacobian_full.row(i);
         torso_constraint_lower(row) = lower_limit;
         torso_constraint_upper(row) = upper_limit;
