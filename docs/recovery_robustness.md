@@ -1,13 +1,13 @@
 # Recovery robustness (hardware seeds)
 
-This note maps how EmbodiK behaves when the initial configuration is slightly outside joint limits or in shallow self-collision—typical when `q` is read from encoders before constraints have “caught up.” It complements [`joint_limit_saturation_exit_findings.md`](joint_limit_saturation_exit_findings.md).
+This note maps how EmbodiK behaves when the initial configuration is slightly outside joint limits or in shallow self-collision—typical when `q` is read from encoders before constraints have “caught up.”
 
 ## Code map (where behavior lives)
 
 | Mechanism | Location | Role |
 |-----------|----------|------|
-| Joint-limit velocity box | [`cpp_core/src/kinematics_solver.cpp`](../cpp_core/src/kinematics_solver.cpp) — `calculate_velocity_box_constraint()`, `solve_velocity()` position rows | Margins from current `q` vs URDF limits (with `margin_limit = 1e-4` in `solve_velocity`). Outside a joint: recovery term pushes velocity back inside; if **both** lower and upper margins are violated, the box widens to `[-vmax, vmax]` (no unique recovery direction). |
-| Joint-limit tunables | [`cpp_core/include/embodik/kinematics_solver.hpp`](../cpp_core/include/embodik/kinematics_solver.hpp) | `set_limit_recovery_gain`, `set_limit_recovery_hysteresis`, `set_limit_exit_release_margin`, `enable_saturation_exit_behavior` (off by default). |
+| Joint-limit velocity box | [`cpp_core/src/kinematics_solver.cpp`](https://github.com/robodreamer/embodik/blob/main/cpp_core/src/kinematics_solver.cpp) — `calculate_velocity_box_constraint()`, `solve_velocity()` position rows | Margins from current `q` vs URDF limits (with `margin_limit = 1e-4` in `solve_velocity`). Outside a joint: recovery term pushes velocity back inside; if **both** lower and upper margins are violated, the box widens to `[-vmax, vmax]` (no unique recovery direction). |
+| Joint-limit tunables | [`cpp_core/include/embodik/kinematics_solver.hpp`](https://github.com/robodreamer/embodik/blob/main/cpp_core/include/embodik/kinematics_solver.hpp) | `set_limit_recovery_gain`, `set_limit_recovery_hysteresis`, `set_limit_exit_release_margin`, `enable_saturation_exit_behavior` (off by default). |
 | Joint-limit barrier task | Same `.cpp` — `set_joint_limit_barrier_task()` | Optional priority-1 gradient pushing away from limits in the nullspace. |
 | Self-collision rows | Same `.cpp` — `compute_collision_constraint()` | Separation velocity lower bound with deadbands, stronger push when penetrating (`signed_distance < 0`). |
 | Stall handler | Same `.cpp` — `enable_stall_handler()`, `stall_handler_update()` | After repeated stalls, can **lower** effective `min_distance`; for penetration, sets margin below measured depth so the QP row gains slack. |
@@ -26,7 +26,7 @@ This note maps how EmbodiK behaves when the initial configuration is slightly ou
 
 ## Regression tests
 
-See [`test/test_hardware_seed_recovery.py`](../test/test_hardware_seed_recovery.py) for:
+See [`test/test_hardware_seed_recovery.py`](https://github.com/robodreamer/embodik/blob/main/test/test_hardware_seed_recovery.py) for:
 
 - Slight joint-limit violations with `solve_velocity` and integration (recovery into `[qmin, qmax]`).
 - `solve_position_step` from a violated seed with a frame task toward the interior.
@@ -84,7 +84,7 @@ So for collision-heavy startup states, the current EmbodiK story is:
 - **with** stall recovery: better escape / task continuation, but only by temporarily
   relaxing the effective minimum distance.
 
-## Strategy comparison (baseline vs validation-style)
+## Strategy comparison (baseline vs application-layer recovery)
 
 | Approach | Pros | Cons / notes |
 |----------|------|----------------|
@@ -92,10 +92,10 @@ So for collision-heavy startup states, the current EmbodiK story is:
 | **B — Tune limits** (gain, hysteresis, release margin, optional barrier) | Addresses encoder jitter and boundary chatter; barrier adds nullspace push. | Barrier competes with other P1 tasks; tuning is robot-specific. |
 | **C — Stall / `stall_recovery`** | Automatic temporary collision margin relaxation; penetration escape path in C++. | Changes safety envelope while active; must restore to nominal margin when healthy. |
 | **D — `enable_saturation_exit_behavior`** | Extra velocity headroom near saturation for SNS feasibility (commented in C++). | Off by default; needs regression coverage before wide use (see `test_joint_limit_exit_symmetry.py`). |
-| **E — validation WBC-style outer recovery** (`validation_robot` / `validation_robots.wbc_recovery.QPRecovery`: slacks, trust region, gradient fallback, playback) | Strong “find a feasible `q` seed” story before main QP. | Separate optimizer (OSQP); not inside EmbodiK today; integrate at app layer if needed. |
-| **F — Post-recovery hysteresis** (WBC interface pattern) | Avoids re-failing on settling encoders after a successful escape. | Policy/state in the controller node, not the IK library. |
+| **E — App-layer outer recovery** (controller-level pre-solve recovery with slacks/trust-region/fallback) | Strong “find a feasible `q` seed” story before main QP. | Separate optimizer/policy; not inside EmbodiK today; integrate at app layer if needed. |
+| **F — Post-recovery hysteresis** (controller pattern) | Avoids re-failing on settling encoders after a successful escape. | Policy/state in the controller node, not the IK library. |
 
-**Practical split**: EmbodiK (B–D) handles **continuous** escape during control; validation-style (E–F) handles **discrete** “re-seed before main solve” and logging gating.
+**Practical split**: EmbodiK (B–D) handles **continuous** escape during control; app-layer recovery (E–F) handles **discrete** “re-seed before main solve” and logging/throttling policy.
 
 ## Recommended hardening sequence
 
@@ -122,7 +122,6 @@ This was the root cause of an order-dependent failure in
 
 ## References
 
-- [`cpp_core/src/kinematics_solver.cpp`](../cpp_core/src/kinematics_solver.cpp)
-- [`test/test_joint_limit_recovery.py`](../test/test_joint_limit_recovery.py)
-- [`test/test_stall_handler.py`](../test/test_stall_handler.py)
-- validation (separate repo): `validation_robots/wbc_recovery.py`, `whole_body_controller/whole_body_controller_interface.py` (recovery probe loop, playback, post-recovery log throttle)
+- [`cpp_core/src/kinematics_solver.cpp`](https://github.com/robodreamer/embodik/blob/main/cpp_core/src/kinematics_solver.cpp)
+- [`test/test_joint_limit_recovery.py`](https://github.com/robodreamer/embodik/blob/main/test/test_joint_limit_recovery.py)
+- [`test/test_stall_handler.py`](https://github.com/robodreamer/embodik/blob/main/test/test_stall_handler.py)
