@@ -504,6 +504,90 @@ def test_position_ik_nullspace_active_joints_and_weights_behave_like_selection_m
         os.unlink(urdf_path)
 
 
+def test_position_step_floating_base_torso_pose_bounds_are_enforced():
+    """PositionStepOptions torso pose bounds should constrain floating-base motion."""
+    urdf_path = _create_two_joint_urdf()
+    try:
+        robot = eik.RobotModel(urdf_path, floating_base=True)
+        solver = eik.KinematicsSolver(robot)
+        solver.dt = 0.02
+        ee_task = solver.add_frame_task("ee_task", "ee")
+        ee_task.priority = 0
+        ee_task.weight = 1.0
+
+        q = np.asarray(robot.get_current_configuration(), dtype=float)
+        assert q.size >= 9, "expected free-flyer (7) + 2 arm joints for this URDF"
+        q[:7] = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0], dtype=float)
+        q[7:] = 0.0
+        robot.update_configuration(q)
+
+        # Last two nv-indices = arm joints; floating base uses nv 0..5.
+        arm_v0, arm_v1 = robot.nv - 2, robot.nv - 1
+        excluded = [arm_v0, arm_v1]
+
+        ref_torso = robot.get_frame_pose("base_link")
+        pose_ee = robot.get_frame_pose("ee")
+        target = np.eye(4, dtype=float)
+        target[:3, :3] = np.asarray(pose_ee.rotation, dtype=float)
+        target[:3, 3] = np.asarray(pose_ee.translation, dtype=float)
+        target[0, 3] += 0.35
+
+        x_lo, x_hi = -0.04, 0.04
+        mask = np.array([1.0, 0.0, 0.0, 0.0, 0.0, 0.0], dtype=float)
+
+        bounded = eik.PositionStepOptions()
+        bounded.max_steps = 80
+        bounded.dt = 0.02
+        bounded.position_gain = 50.0
+        bounded.orientation_gain = 50.0
+        bounded.excluded_joint_indices = excluded
+        bounded.torso_constraint.enabled = True
+        bounded.torso_constraint.frame_name = "base_link"
+        bounded.torso_constraint.pose_lower_bounds = np.array(
+            [x_lo, -1.0, -1.0, -1.0, -1.0, -1.0], dtype=float
+        )
+        bounded.torso_constraint.pose_upper_bounds = np.array(
+            [x_hi, 1.0, 1.0, 1.0, 1.0, 1.0], dtype=float
+        )
+        bounded.torso_constraint.pose_axis_mask = mask
+        bounded.torso_constraint.velocity_limits = np.full(6, 0.5, dtype=float)
+        bounded.torso_constraint.acceleration_limits = np.full(6, 1.0, dtype=float)
+        bounded.torso_constraint.pose_bounds_reference_pose = np.asarray(
+            ref_torso.homogeneous(), dtype=float
+        )
+
+        out_bounded = solver.solve_position_step(q, target, "ee_task", bounded)
+        assert out_bounded.status in (
+            eik.SolverStatus.SUCCESS,
+            eik.SolverStatus.INFEASIBLE,
+            eik.SolverStatus.NO_PROGRESS,
+        )
+        robot.update_configuration(np.asarray(out_bounded.q_solution, dtype=float))
+        rel_bounded = _torso_rel_state_vs_reference(ref_torso, robot.get_frame_pose("base_link"))
+        assert rel_bounded[0] <= x_hi + 2e-3
+        assert rel_bounded[0] >= x_lo - 2e-3
+
+        # Without torso bounds, the same step should move farther in +x.
+        robot.update_configuration(q)
+        unbounded = eik.PositionStepOptions()
+        unbounded.max_steps = bounded.max_steps
+        unbounded.dt = bounded.dt
+        unbounded.position_gain = bounded.position_gain
+        unbounded.orientation_gain = bounded.orientation_gain
+        unbounded.excluded_joint_indices = excluded
+        out_free = solver.solve_position_step(q, target, "ee_task", unbounded)
+        assert out_free.status in (
+            eik.SolverStatus.SUCCESS,
+            eik.SolverStatus.INFEASIBLE,
+            eik.SolverStatus.NO_PROGRESS,
+        )
+        robot.update_configuration(np.asarray(out_free.q_solution, dtype=float))
+        rel_free = _torso_rel_state_vs_reference(ref_torso, robot.get_frame_pose("base_link"))
+        assert rel_free[0] > x_hi + 0.02
+    finally:
+        os.unlink(urdf_path)
+
+
 def test_position_ik_rejects_invalid_new_torso_and_nullspace_options():
     urdf_path = _create_two_joint_urdf()
     try:
