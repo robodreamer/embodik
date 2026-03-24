@@ -1,6 +1,7 @@
 # Include README and LICENSE files
 include README.md
 include LICENSE
+include scripts/install_embodik_macos.sh
 
 # Include CMakeLists.txt and CMake configuration files
 include CMakeLists.txt
