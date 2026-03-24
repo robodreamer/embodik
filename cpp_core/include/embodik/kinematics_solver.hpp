@@ -752,6 +752,9 @@ private:
   /// Set by solve_position_step before each inner solve_velocity(); cleared at
   /// end of solve_velocity(). Enforces v_i = 0 in the QP for listed nv-indices.
   std::vector<int> pending_velocity_lock_indices_;
+  /// Optional torso constraint rows injected by solve_position_step into the
+  /// next solve_velocity() call; cleared at end of solve_velocity().
+  std::optional<TorsoPoseConstraintOptions> pending_step_torso_constraint_;
 
   /// Cached velocity-index → configuration-index map for the current robot
   /// (rebuilt when the model pointer or ``nv`` changes).

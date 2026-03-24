@@ -2158,6 +2158,7 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
     ~ClearPendingVelocityLocks() {
       if (solver != nullptr) {
         solver->pending_velocity_lock_indices_.clear();
+        solver->pending_step_torso_constraint_.reset();
       }
     }
   } clear_pending_locks{this};
@@ -2498,6 +2499,106 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
         /*outward_is_positive_projection=*/true);
   }
 
+  struct StepTorsoConstraintResult {
+    Eigen::MatrixXd jacobian;
+    Eigen::VectorXd lower_bounds;
+    Eigen::VectorXd upper_bounds;
+  };
+  std::optional<StepTorsoConstraintResult> step_torso_constraint_result =
+      std::nullopt;
+  if (pending_step_torso_constraint_.has_value()) {
+    const auto &torso_opts = *pending_step_torso_constraint_;
+    const bool torso_has_pose_bounds =
+        torso_opts.pose_lower_bounds.has_value() &&
+        torso_opts.pose_upper_bounds.has_value();
+    if (torso_opts.enabled && torso_has_pose_bounds &&
+        torso_opts.pose_axis_mask.size() == 6 &&
+        torso_opts.velocity_limits.size() == 6 &&
+        torso_opts.acceleration_limits.size() == 6 &&
+        robot_->has_frame(torso_opts.frame_name)) {
+      pinocchio::SE3 torso_pose_bounds_reference = pinocchio::SE3::Identity();
+      if (torso_opts.pose_bounds_reference_pose.has_value()) {
+        const Eigen::Matrix4d &M = torso_opts.pose_bounds_reference_pose.value();
+        torso_pose_bounds_reference =
+            pinocchio::SE3(M.block<3, 3>(0, 0), M.block<3, 1>(0, 3));
+      } else {
+        torso_pose_bounds_reference = robot_->get_frame_pose(torso_opts.frame_name);
+      }
+
+      const pinocchio::SE3 torso_pose = robot_->get_frame_pose(torso_opts.frame_name);
+      const Matrix6Xd torso_jacobian_full =
+          robot_->get_frame_jacobian(torso_opts.frame_name);
+      Eigen::VectorXd torso_rel_state = Eigen::VectorXd::Zero(6);
+      torso_rel_state.head<3>() =
+          torso_pose.translation() - torso_pose_bounds_reference.translation();
+      torso_rel_state.tail<3>() = pinocchio::log3(
+          torso_pose_bounds_reference.rotation().transpose() *
+          torso_pose.rotation());
+
+      int torso_constraint_rows = 0;
+      for (int i = 0; i < 6; ++i) {
+        if (torso_opts.pose_axis_mask.coeff(i) > 0.5) {
+          ++torso_constraint_rows;
+        }
+      }
+      if (torso_constraint_rows > 0) {
+        StepTorsoConstraintResult sc;
+        sc.jacobian = Eigen::MatrixXd::Zero(torso_constraint_rows, robot_->nv());
+        sc.lower_bounds = Eigen::VectorXd::Constant(torso_constraint_rows, -1e10);
+        sc.upper_bounds = Eigen::VectorXd::Constant(torso_constraint_rows, 1e10);
+
+        int row = 0;
+        for (int i = 0; i < 6; ++i) {
+          if (torso_opts.pose_axis_mask.coeff(i) <= 0.5) {
+            continue;
+          }
+          double slack_lower =
+              torso_rel_state(i) - torso_opts.pose_lower_bounds->coeff(i);
+          double slack_upper =
+              torso_opts.pose_upper_bounds->coeff(i) - torso_rel_state(i);
+          const double torso_slack_eps =
+              (i < 3) ? kTorsoBoundSlackEpsTrans : kTorsoBoundSlackEpsRot;
+          if (slack_lower < 0.0 && slack_lower >= -torso_slack_eps) {
+            slack_lower = 0.0;
+          }
+          if (slack_upper < 0.0 && slack_upper >= -torso_slack_eps) {
+            slack_upper = 0.0;
+          }
+          const bool torso_headroom_enabled =
+              torso_opts.velocity_box_headroom.enabled ||
+              torso_opts.pose_bound_softening_enabled;
+          const double torso_headroom_fraction =
+              torso_opts.velocity_box_headroom.enabled
+                  ? torso_opts.velocity_box_headroom.fraction
+                  : torso_opts.pose_bound_softening_fraction;
+          const double torso_headroom_activation_margin =
+              torso_opts.velocity_box_headroom.enabled
+                  ? torso_opts.velocity_box_headroom.activation_margin
+                  : kMarginThreshold;
+          auto [lower_limit, upper_limit] = calculate_velocity_box_constraint(
+              slack_lower, slack_upper, torso_opts.velocity_limits.coeff(i),
+              torso_opts.acceleration_limits.coeff(i), dt_,
+              torso_headroom_enabled
+                  ? torso_headroom_fraction * torso_opts.velocity_limits.coeff(i)
+                  : -1.0,
+              torso_headroom_activation_margin);
+          sc.jacobian.row(row) = torso_jacobian_full.row(i);
+          sc.lower_bounds(row) = lower_limit;
+          sc.upper_bounds(row) = upper_limit;
+          ++row;
+        }
+        if (!excluded_union.empty()) {
+          for (int idx : excluded_union) {
+            if (idx >= 0 && idx < sc.jacobian.cols()) {
+              sc.jacobian.col(idx).setZero();
+            }
+          }
+        }
+        step_torso_constraint_result = std::move(sc);
+      }
+    }
+  }
+
   // Build constraint matrix
   std::optional<std::chrono::high_resolution_clock::time_point>
       t_constraint_start;
@@ -2529,6 +2630,10 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
   if (rel_pose_constraint_result.has_value()) {
     num_constraints +=
         static_cast<int>(rel_pose_constraint_result->jacobian.rows());
+  }
+  if (step_torso_constraint_result.has_value()) {
+    num_constraints +=
+        static_cast<int>(step_torso_constraint_result->jacobian.rows());
   }
 
   C = Eigen::MatrixXd::Zero(num_constraints, robot_->nv());
@@ -2725,6 +2830,15 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
     C.block(constraint_idx, 0, rows, robot_->nv()) = rpc.jacobian;
     c_lower.segment(constraint_idx, rows) = rpc.lower_bounds;
     c_upper.segment(constraint_idx, rows) = rpc.upper_bounds;
+    constraint_idx += rows;
+  }
+
+  if (step_torso_constraint_result.has_value()) {
+    const auto &tsc = step_torso_constraint_result.value();
+    int rows = static_cast<int>(tsc.jacobian.rows());
+    C.block(constraint_idx, 0, rows, robot_->nv()) = tsc.jacobian;
+    c_lower.segment(constraint_idx, rows) = tsc.lower_bounds;
+    c_upper.segment(constraint_idx, rows) = tsc.upper_bounds;
     constraint_idx += rows;
   }
 
@@ -3430,6 +3544,115 @@ PositionIKResult KinematicsSolver::solve_position_step(
     }
   }
 
+  std::optional<TorsoPoseConstraintOptions> step_torso_constraint = std::nullopt;
+  const auto &torso_opts = options.torso_constraint;
+  const bool torso_enabled = torso_opts.enabled;
+  const bool torso_has_pose_bounds = torso_opts.pose_lower_bounds.has_value() ||
+                                     torso_opts.pose_upper_bounds.has_value();
+  if (torso_enabled) {
+    if (torso_opts.frame_name.empty()) {
+      result.status = SolverStatus::kInvalidInput;
+      result.status_message =
+          "torso_constraint.frame_name must be set when torso constraint is enabled";
+      return result;
+    }
+    if (!robot_->has_frame(torso_opts.frame_name)) {
+      result.status = SolverStatus::kInvalidInput;
+      result.status_message =
+          "torso_constraint.frame_name not found in robot model";
+      return result;
+    }
+    if (torso_has_pose_bounds !=
+        (torso_opts.pose_lower_bounds.has_value() &&
+         torso_opts.pose_upper_bounds.has_value())) {
+      result.status = SolverStatus::kInvalidInput;
+      result.status_message =
+          "torso_constraint pose bounds require both lower and upper vectors";
+      return result;
+    }
+    if (torso_has_pose_bounds) {
+      if (torso_opts.pose_bounds_reference_pose.has_value()) {
+        const Eigen::Matrix4d &M = torso_opts.pose_bounds_reference_pose.value();
+        if (M.rows() != 4 || M.cols() != 4) {
+          result.status = SolverStatus::kInvalidInput;
+          result.status_message =
+              "torso_constraint.pose_bounds_reference_pose must be 4x4";
+          return result;
+        }
+        for (int r = 0; r < 4; ++r) {
+          for (int c = 0; c < 4; ++c) {
+            if (!std::isfinite(M(r, c))) {
+              result.status = SolverStatus::kInvalidInput;
+              result.status_message =
+                  "torso_constraint.pose_bounds_reference_pose contains non-finite values";
+              return result;
+            }
+          }
+        }
+      }
+      if (torso_opts.pose_lower_bounds->size() != 6 ||
+          torso_opts.pose_upper_bounds->size() != 6 ||
+          torso_opts.pose_axis_mask.size() != 6 ||
+          torso_opts.velocity_limits.size() != 6 ||
+          torso_opts.acceleration_limits.size() != 6) {
+        result.status = SolverStatus::kInvalidInput;
+        result.status_message =
+            "torso_constraint bounds, mask, velocity_limits, and acceleration_limits must all be size 6";
+        return result;
+      }
+      for (int i = 0; i < 6; ++i) {
+        if (torso_opts.pose_lower_bounds->coeff(i) >
+            torso_opts.pose_upper_bounds->coeff(i)) {
+          result.status = SolverStatus::kInvalidInput;
+          result.status_message =
+              "torso_constraint lower bound exceeds upper bound";
+          return result;
+        }
+        if (torso_opts.pose_axis_mask.coeff(i) > 0.5 &&
+            (torso_opts.velocity_limits.coeff(i) <= 0.0 ||
+             torso_opts.acceleration_limits.coeff(i) <= 0.0)) {
+          result.status = SolverStatus::kInvalidInput;
+          result.status_message =
+              "torso_constraint velocity/acceleration limits must be positive on constrained axes";
+          return result;
+        }
+      }
+      if (!std::isfinite(torso_opts.pose_bound_softening_fraction) ||
+          torso_opts.pose_bound_softening_fraction < 0.0 ||
+          torso_opts.pose_bound_softening_fraction > 1.0) {
+        result.status = SolverStatus::kInvalidInput;
+        result.status_message =
+            "torso_constraint.pose_bound_softening_fraction must be in [0, 1]";
+        return result;
+      }
+      if (!std::isfinite(torso_opts.velocity_box_headroom.fraction) ||
+          torso_opts.velocity_box_headroom.fraction < 0.0 ||
+          torso_opts.velocity_box_headroom.fraction > 1.0) {
+        result.status = SolverStatus::kInvalidInput;
+        result.status_message =
+            "torso_constraint.velocity_box_headroom.fraction must be in [0, 1]";
+        return result;
+      }
+      if (!std::isfinite(torso_opts.velocity_box_headroom.activation_margin) ||
+          torso_opts.velocity_box_headroom.activation_margin < 0.0) {
+        result.status = SolverStatus::kInvalidInput;
+        result.status_message =
+            "torso_constraint.velocity_box_headroom.activation_margin must be >= 0";
+        return result;
+      }
+
+      TorsoPoseConstraintOptions normalized = torso_opts;
+      if (!normalized.pose_bounds_reference_pose.has_value()) {
+        const pinocchio::SE3 ref_pose = robot_->get_frame_pose(normalized.frame_name);
+        Eigen::Matrix4d ref = Eigen::Matrix4d::Identity();
+        ref.block<3, 3>(0, 0) = ref_pose.rotation();
+        ref.block<3, 1>(0, 3) = ref_pose.translation();
+        normalized.pose_bounds_reference_pose = ref;
+      }
+      step_torso_constraint = std::move(normalized);
+    }
+  }
+
   auto it = task_map_.find(frame_task_name);
   if (it == task_map_.end() || !it->second) {
     result.status = SolverStatus::kInvalidInput;
@@ -3505,6 +3728,7 @@ PositionIKResult KinematicsSolver::solve_position_step(
     frame_task->setTargetVelocity(vel);
 
     pending_velocity_lock_indices_ = step_locked_indices;
+    pending_step_torso_constraint_ = step_torso_constraint;
     VelocitySolverResult vel_out = solve_velocity(q, true);
     have_vel_result = true;
     last_vel_result = std::move(vel_out);
@@ -3596,6 +3820,115 @@ PositionIKResult KinematicsSolver::solve_position_step(
       result.status = SolverStatus::kInvalidInput;
       result.status_message = std::move(opt_err);
       return result;
+    }
+  }
+
+  std::optional<TorsoPoseConstraintOptions> step_torso_constraint = std::nullopt;
+  const auto &torso_opts = options.torso_constraint;
+  const bool torso_enabled = torso_opts.enabled;
+  const bool torso_has_pose_bounds = torso_opts.pose_lower_bounds.has_value() ||
+                                     torso_opts.pose_upper_bounds.has_value();
+  if (torso_enabled) {
+    if (torso_opts.frame_name.empty()) {
+      result.status = SolverStatus::kInvalidInput;
+      result.status_message =
+          "torso_constraint.frame_name must be set when torso constraint is enabled";
+      return result;
+    }
+    if (!robot_->has_frame(torso_opts.frame_name)) {
+      result.status = SolverStatus::kInvalidInput;
+      result.status_message =
+          "torso_constraint.frame_name not found in robot model";
+      return result;
+    }
+    if (torso_has_pose_bounds !=
+        (torso_opts.pose_lower_bounds.has_value() &&
+         torso_opts.pose_upper_bounds.has_value())) {
+      result.status = SolverStatus::kInvalidInput;
+      result.status_message =
+          "torso_constraint pose bounds require both lower and upper vectors";
+      return result;
+    }
+    if (torso_has_pose_bounds) {
+      if (torso_opts.pose_bounds_reference_pose.has_value()) {
+        const Eigen::Matrix4d &M = torso_opts.pose_bounds_reference_pose.value();
+        if (M.rows() != 4 || M.cols() != 4) {
+          result.status = SolverStatus::kInvalidInput;
+          result.status_message =
+              "torso_constraint.pose_bounds_reference_pose must be 4x4";
+          return result;
+        }
+        for (int r = 0; r < 4; ++r) {
+          for (int c = 0; c < 4; ++c) {
+            if (!std::isfinite(M(r, c))) {
+              result.status = SolverStatus::kInvalidInput;
+              result.status_message =
+                  "torso_constraint.pose_bounds_reference_pose contains non-finite values";
+              return result;
+            }
+          }
+        }
+      }
+      if (torso_opts.pose_lower_bounds->size() != 6 ||
+          torso_opts.pose_upper_bounds->size() != 6 ||
+          torso_opts.pose_axis_mask.size() != 6 ||
+          torso_opts.velocity_limits.size() != 6 ||
+          torso_opts.acceleration_limits.size() != 6) {
+        result.status = SolverStatus::kInvalidInput;
+        result.status_message =
+            "torso_constraint bounds, mask, velocity_limits, and acceleration_limits must all be size 6";
+        return result;
+      }
+      for (int i = 0; i < 6; ++i) {
+        if (torso_opts.pose_lower_bounds->coeff(i) >
+            torso_opts.pose_upper_bounds->coeff(i)) {
+          result.status = SolverStatus::kInvalidInput;
+          result.status_message =
+              "torso_constraint lower bound exceeds upper bound";
+          return result;
+        }
+        if (torso_opts.pose_axis_mask.coeff(i) > 0.5 &&
+            (torso_opts.velocity_limits.coeff(i) <= 0.0 ||
+             torso_opts.acceleration_limits.coeff(i) <= 0.0)) {
+          result.status = SolverStatus::kInvalidInput;
+          result.status_message =
+              "torso_constraint velocity/acceleration limits must be positive on constrained axes";
+          return result;
+        }
+      }
+      if (!std::isfinite(torso_opts.pose_bound_softening_fraction) ||
+          torso_opts.pose_bound_softening_fraction < 0.0 ||
+          torso_opts.pose_bound_softening_fraction > 1.0) {
+        result.status = SolverStatus::kInvalidInput;
+        result.status_message =
+            "torso_constraint.pose_bound_softening_fraction must be in [0, 1]";
+        return result;
+      }
+      if (!std::isfinite(torso_opts.velocity_box_headroom.fraction) ||
+          torso_opts.velocity_box_headroom.fraction < 0.0 ||
+          torso_opts.velocity_box_headroom.fraction > 1.0) {
+        result.status = SolverStatus::kInvalidInput;
+        result.status_message =
+            "torso_constraint.velocity_box_headroom.fraction must be in [0, 1]";
+        return result;
+      }
+      if (!std::isfinite(torso_opts.velocity_box_headroom.activation_margin) ||
+          torso_opts.velocity_box_headroom.activation_margin < 0.0) {
+        result.status = SolverStatus::kInvalidInput;
+        result.status_message =
+            "torso_constraint.velocity_box_headroom.activation_margin must be >= 0";
+        return result;
+      }
+
+      TorsoPoseConstraintOptions normalized = torso_opts;
+      if (!normalized.pose_bounds_reference_pose.has_value()) {
+        const pinocchio::SE3 ref_pose = robot_->get_frame_pose(normalized.frame_name);
+        Eigen::Matrix4d ref = Eigen::Matrix4d::Identity();
+        ref.block<3, 3>(0, 0) = ref_pose.rotation();
+        ref.block<3, 1>(0, 3) = ref_pose.translation();
+        normalized.pose_bounds_reference_pose = ref;
+      }
+      step_torso_constraint = std::move(normalized);
     }
   }
 
@@ -3732,6 +4065,7 @@ PositionIKResult KinematicsSolver::solve_position_step(
     prev_combined_error = combined_error;
 
     pending_velocity_lock_indices_ = step_locked_indices;
+    pending_step_torso_constraint_ = step_torso_constraint;
     VelocitySolverResult vel_out = solve_velocity(q, true);
     have_vel_result = true;
     last_vel_result = std::move(vel_out);
