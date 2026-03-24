@@ -8,7 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- None yet.
+- **Shared velocity-box headroom policy type**: added `VelocityBoxHeadroomPolicy` (`enabled`, `fraction`, `activation_margin`) and exposed it under `TorsoPoseConstraintOptions.velocity_box_headroom` in C++ and Python bindings.
+- **Velocity-box helper API extension**: `KinematicsSolver.calculate_velocity_box_constraint(...)` now accepts optional `min_velocity_headroom` and `headroom_activation_margin` arguments for explicit per-call headroom policy testing.
+
+### Changed
+- **Torso pose-bound headroom path generalized**: torso pose-bound rows now use the same shared `calculate_velocity_box_constraint(...)` headroom path as other velocity-box constraints, replacing torso-specific post-processing.
+- **Docs**: Example 10 teleop docs now describe `velocity_box_headroom` as the preferred API and mark `pose_bound_softening_*` as legacy aliases.
+
+### Fixed
+- **Validation coverage for new policy surface**: added regression test coverage for invalid `torso_constraint.velocity_box_headroom.fraction` and preserved existing softening/backward-compat tests.
 
 ## [0.18.0] - 2026-03-24
 

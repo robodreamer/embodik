@@ -502,7 +502,8 @@ void bind_kinematics_solver(nb::module_ &m) {
           &KinematicsSolver::calculate_velocity_box_constraint,
           nb::arg("position_margin_lower"), nb::arg("position_margin_upper"),
           nb::arg("velocity_limit"), nb::arg("acceleration_limit"),
-          nb::arg("dt"),
+          nb::arg("dt"), nb::arg("min_velocity_headroom") = -1.0,
+          nb::arg("headroom_activation_margin") = 0.01,
           "Compute velocity bounds from position/velocity/acceleration limits.")
 
       // Properties

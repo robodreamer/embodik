@@ -128,6 +128,18 @@ NB_MODULE(_embodik_impl, m) {
               &eik::VelocitySolverResult::collision_budget_exhausted,
               "Whether the collision refinement budget was exhausted");
 
+  nb::class_<eik::VelocityBoxHeadroomPolicy>(
+      m, "VelocityBoxHeadroomPolicy",
+      "Shared velocity-box minimum-headroom policy")
+      .def(nb::init<>())
+      .def_rw("enabled", &eik::VelocityBoxHeadroomPolicy::enabled,
+              "Enable minimum velocity headroom away from nearby limits")
+      .def_rw("fraction", &eik::VelocityBoxHeadroomPolicy::fraction,
+              "Fraction in [0, 1] of velocity limit used as minimum headroom")
+      .def_rw("activation_margin",
+              &eik::VelocityBoxHeadroomPolicy::activation_margin,
+              "Position-margin threshold above which headroom can be injected");
+
   nb::class_<eik::TorsoPoseConstraintOptions>(
       m, "TorsoPoseConstraintOptions",
       "Optional torso orientation tracking and 6D torso pose bounds for "
@@ -226,14 +238,16 @@ NB_MODULE(_embodik_impl, m) {
               &eik::TorsoPoseConstraintOptions::acceleration_limits,
               "Per-axis torso pose bound acceleration limits (6D). "
               "Units: [m/s^2,m/s^2,m/s^2,rad/s^2,rad/s^2,rad/s^2]")
+      .def_rw("velocity_box_headroom",
+              &eik::TorsoPoseConstraintOptions::velocity_box_headroom,
+              "Shared velocity-box minimum-headroom policy for torso pose "
+              "bound rows")
       .def_rw("pose_bound_softening_enabled",
               &eik::TorsoPoseConstraintOptions::pose_bound_softening_enabled,
-              "When True, apply torso-row-only velocity-box softening to keep "
-              "minimum velocity headroom away from bounds")
+              "Deprecated alias for velocity_box_headroom.enabled")
       .def_rw("pose_bound_softening_fraction",
               &eik::TorsoPoseConstraintOptions::pose_bound_softening_fraction,
-              "Fraction in [0, 1] of velocity_limits used as minimum torso-row "
-              "headroom when softening is enabled");
+              "Deprecated alias for velocity_box_headroom.fraction");
 
   nb::class_<eik::PositionIKOptions>(m, "PositionIKOptions",
                                      "Options for position-level IK solving")

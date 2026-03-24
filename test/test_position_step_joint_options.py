@@ -880,3 +880,35 @@ def test_position_ik_torso_pose_bound_softening_reduces_jump_infeasible_count():
         assert infeasible_soft <= infeasible_hard
     finally:
         os.unlink(urdf_path)
+
+
+def test_position_ik_rejects_invalid_torso_velocity_box_headroom_fraction():
+    urdf_path = _create_two_joint_urdf()
+    try:
+        robot = eik.RobotModel(urdf_path, floating_base=False)
+        solver = eik.KinematicsSolver(robot)
+        q = np.array([0.0, 0.0], dtype=float)
+        robot.update_configuration(q)
+        pose = robot.get_frame_pose("ee")
+        target = np.eye(4, dtype=float)
+        target[:3, :3] = np.array(pose.rotation, dtype=float)
+        target[:3, 3] = np.array(pose.translation, dtype=float)
+        target[0, 3] += 0.01
+
+        opts = eik.PositionIKOptions()
+        opts.max_iterations = 1
+        opts.torso_constraint.enabled = True
+        opts.torso_constraint.frame_name = "link1"
+        opts.torso_constraint.pose_lower_bounds = np.full(6, -0.1, dtype=float)
+        opts.torso_constraint.pose_upper_bounds = np.full(6, 0.1, dtype=float)
+        opts.torso_constraint.pose_axis_mask = np.ones(6, dtype=float)
+        opts.torso_constraint.velocity_limits = np.full(6, 0.5, dtype=float)
+        opts.torso_constraint.acceleration_limits = np.full(6, 1.0, dtype=float)
+        opts.torso_constraint.velocity_box_headroom.enabled = True
+        opts.torso_constraint.velocity_box_headroom.fraction = 1.5
+
+        out = solver.solve_position(q, target, "ee", opts)
+        assert out.status == eik.SolverStatus.INVALID_INPUT
+        assert "velocity_box_headroom.fraction" in out.status_message
+    finally:
+        os.unlink(urdf_path)
