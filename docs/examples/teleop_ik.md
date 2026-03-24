@@ -52,3 +52,46 @@ pixi run -e teleop python examples/03_teleop_ik.py --robot panda \
 - Use `scripts/benchmark_example10_torso_modes.py` for scripted analysis; it reports
   per-status timing/error buckets, iteration distributions, and jump-vs-no-jump / max-iteration
   sweep matrices to isolate responsiveness bottlenecks.
+
+## Example 10 Torso Pose Motion Bounds (Detailed)
+
+`examples/10_floating_base_torso_hierarchy.py` exposes torso bounds as a 6D box in
+`[x, y, z, rx, ry, rz]` relative motion space (`m, m, m, rad, rad, rad`).
+
+- **Anchor model**: Bounds are enforced against a fixed reference pose
+  (`pose_bounds_reference_pose`). The reference is set when bounds are enabled,
+  after reset, or when `Re-anchor bounds to current torso` is clicked.
+- **Box limits**: The `±x/±y/±z/±rx/±ry/±rz` sliders define half-ranges around
+  the anchor. The solver enforces `pose_lower_bounds`/`pose_upper_bounds` with
+  per-axis velocity and acceleration limits.
+- **Translation/rotation toggles**: Unchecking `Enable translation bounds` or
+  `Enable rotation bounds` does not remove the corresponding rows; it applies an
+  epsilon half-range lock (`1e-4 m` translational, `1e-3 rad` rotational) so
+  those axes are effectively fixed.
+- **Secondary torso task vs hard bounds**: `Enable torso secondary orientation task`
+  controls a separate orientation objective (independent from the box rows). This
+  lets you test box constraints alone, orientation shaping alone, or both together.
+- **Constraint-faithful default**: `Optimize full lock with base joint lock
+  (fixed-base emulation)` is opt-in and defaults off. With it off, full 6D locks
+  are tested through torso constraint rows; with it on, full lock can map to base
+  joint exclusion (`excluded_joint_indices`) for fixed-base-like behavior.
+- **Softening and numerical robustness**:
+  - `Enable torso bound softening` + `Bound softening fraction` keep minimum
+    velocity headroom near bounds to reduce abrupt task-scale collapse.
+  - Solver-side slack dead-zones (`1e-4 m`, `1e-3 rad`) suppress boundary chatter.
+- **Operational diagnostics**:
+  - `Torso box min slack` reports signed margin to the nearest box face.
+  - `Constraint pressure` summarizes runtime stress (`Low/Medium/High`) from slack
+    and infeasible streak trends.
+  - Near-target infeasible streaks are damped so close-enough constrained states
+    do not accumulate misleading stall counters.
+
+### Tuning tips
+
+- Start from `Stable` when validating new torso ranges, then move to `Responsive`
+  for faster teleop motions.
+- If target jumps are large, keep torso bounds active but reduce jump severity
+  (`Limit target step per frame`) before increasing gains aggressively.
+- If full 6D lock appears too stiff for your use case, compare constraint-faithful
+  mode against fixed-base emulation and benchmark both with
+  `scripts/benchmark_example10_torso_modes.py`.
