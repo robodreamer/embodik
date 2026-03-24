@@ -9,6 +9,23 @@ import tempfile
 import numpy as np
 
 import embodik as eik
+from embodik import _embodik_impl as _eik_native
+
+
+def _torso_rel_state_vs_reference(ref_pose, cur_pose) -> np.ndarray:
+    """Match solve_position torso pose-box definition (kinematics_solver.cpp).
+
+    6D state [x,y,z,rx,ry,rz]: translation delta in world (m); rotation delta as
+    log(R_ref^T R_cur) (rad), consistent with native log3 / pinocchio::log3 in C++.
+    """
+    R_ref = np.asarray(ref_pose.rotation, dtype=float)
+    t_ref = np.asarray(ref_pose.translation, dtype=float)
+    R_cur = np.asarray(cur_pose.rotation, dtype=float)
+    t_cur = np.asarray(cur_pose.translation, dtype=float)
+    rel = np.zeros(6, dtype=float)
+    rel[:3] = t_cur - t_ref
+    rel[3:] = _eik_native.log3(R_ref.T @ R_cur)
+    return rel
 
 
 def _create_two_joint_urdf(*, velocity_limit: float = 100.0) -> str:
@@ -439,5 +456,427 @@ def test_one_step_matches_direct_solve_velocity_update():
             atol=1e-6,
             rtol=0.0,
         )
+    finally:
+        os.unlink(urdf_path)
+
+
+def test_position_ik_nullspace_active_joints_and_weights_behave_like_selection_mask():
+    """Nullspace active-joint selection and per-joint weights should gate motion."""
+    urdf_path = _create_two_joint_urdf()
+    try:
+        robot = eik.RobotModel(urdf_path, floating_base=False)
+        solver = eik.KinematicsSolver(robot)
+        q0 = np.array([0.0, 0.0], dtype=float)
+        robot.update_configuration(q0)
+        pose = robot.get_frame_pose("ee")
+        target = np.eye(4, dtype=float)
+        target[:3, :3] = np.array(pose.rotation, dtype=float)
+        target[:3, 3] = np.array(pose.translation, dtype=float)
+        target[0, 3] += 0.03  # avoid immediate convergence check short-circuit
+
+        opts_a = eik.PositionIKOptions()
+        opts_a.max_iterations = 1
+        opts_a.position_gain = 0.0
+        opts_a.orientation_gain = 0.0
+        opts_a.nullspace_bias = np.array([0.4, -0.2], dtype=float)
+        opts_a.nullspace_gain = 1.0
+        opts_a.nullspace_active_joints = [0]
+        opts_a.nullspace_joint_weights = np.array([6.0], dtype=float)
+        out_a = solver.solve_position(q0, target, "ee", opts_a)
+        assert out_a.status in (eik.SolverStatus.SUCCESS, eik.SolverStatus.INFEASIBLE)
+        dq_a = np.asarray(out_a.q_solution, dtype=float) - q0
+        assert abs(dq_a[0]) > abs(dq_a[1]) + 1e-8
+
+        robot.update_configuration(q0)
+        opts_b = eik.PositionIKOptions()
+        opts_b.max_iterations = 1
+        opts_b.position_gain = 0.0
+        opts_b.orientation_gain = 0.0
+        opts_b.nullspace_bias = np.array([0.4, -0.2], dtype=float)
+        opts_b.nullspace_gain = 1.0
+        opts_b.nullspace_active_joints = [1]
+        opts_b.nullspace_joint_weights = np.array([6.0], dtype=float)
+        out_b = solver.solve_position(q0, target, "ee", opts_b)
+        assert out_b.status in (eik.SolverStatus.SUCCESS, eik.SolverStatus.INFEASIBLE)
+        dq_b = np.asarray(out_b.q_solution, dtype=float) - q0
+        assert abs(dq_b[1]) > abs(dq_b[0]) + 1e-8
+    finally:
+        os.unlink(urdf_path)
+
+
+def test_position_ik_rejects_invalid_new_torso_and_nullspace_options():
+    urdf_path = _create_two_joint_urdf()
+    try:
+        robot = eik.RobotModel(urdf_path, floating_base=False)
+        solver = eik.KinematicsSolver(robot)
+        q = np.array([0.0, 0.0], dtype=float)
+        robot.update_configuration(q)
+        pose = robot.get_frame_pose("ee")
+        target = np.eye(4, dtype=float)
+        target[:3, :3] = np.array(pose.rotation, dtype=float)
+        target[:3, 3] = np.array(pose.translation, dtype=float)
+        target[0, 3] += 0.01
+
+        bad_nullspace = eik.PositionIKOptions()
+        bad_nullspace.max_iterations = 1
+        bad_nullspace.nullspace_bias = np.array([0.2, -0.2], dtype=float)
+        bad_nullspace.nullspace_active_joints = [0, 0]
+        bad_nullspace.nullspace_joint_weights = np.array([1.0], dtype=float)
+        out_dup = solver.solve_position(q, target, "ee", bad_nullspace)
+        assert out_dup.status == eik.SolverStatus.INVALID_INPUT
+        assert "nullspace_active_joints" in out_dup.status_message
+
+        bad_torso = eik.PositionIKOptions()
+        bad_torso.max_iterations = 1
+        bad_torso.torso_constraint.enabled = True
+        bad_torso.torso_constraint.frame_name = "link1"
+        bad_torso.torso_constraint.pose_lower_bounds = np.zeros(6, dtype=float)
+        # Missing upper bounds by design.
+        out_torso = solver.solve_position(q, target, "ee", bad_torso)
+        assert out_torso.status == eik.SolverStatus.INVALID_INPUT
+        assert "pose bounds require both lower and upper" in out_torso.status_message
+    finally:
+        os.unlink(urdf_path)
+
+
+def test_position_ik_accepts_asymmetric_torso_pose_bounds():
+    urdf_path = _create_two_joint_urdf()
+    try:
+        robot = eik.RobotModel(urdf_path, floating_base=False)
+        solver = eik.KinematicsSolver(robot)
+        q = np.array([0.0, 0.0], dtype=float)
+        robot.update_configuration(q)
+        pose = robot.get_frame_pose("ee")
+        target = np.eye(4, dtype=float)
+        target[:3, :3] = np.array(pose.rotation, dtype=float)
+        target[:3, 3] = np.array(pose.translation, dtype=float)
+        target[0, 3] += 0.02
+
+        opts = eik.PositionIKOptions()
+        opts.max_iterations = 2
+        opts.torso_constraint.enabled = True
+        opts.torso_constraint.frame_name = "link1"
+        opts.torso_constraint.orientation_mask = np.array([1.0, 1.0, 0.0], dtype=float)
+        # Asymmetric bounds by design.
+        opts.torso_constraint.pose_lower_bounds = np.array(
+            [-0.01, -0.02, -0.03, -0.10, -0.08, -0.05], dtype=float
+        )
+        opts.torso_constraint.pose_upper_bounds = np.array(
+            [0.03, 0.01, 0.02, 0.12, 0.06, 0.04], dtype=float
+        )
+        opts.torso_constraint.pose_axis_mask = np.ones(6, dtype=float)
+        opts.torso_constraint.velocity_limits = np.full(6, 0.5, dtype=float)
+        opts.torso_constraint.acceleration_limits = np.full(6, 1.0, dtype=float)
+
+        out = solver.solve_position(q, target, "ee", opts)
+        assert out.status != eik.SolverStatus.INVALID_INPUT
+    finally:
+        os.unlink(urdf_path)
+
+
+def test_position_ik_floating_base_torso_pose_bounds_respected():
+    """Torso pose box rows must keep bounded axes inside [lower, upper] vs seed.
+
+    Arm joints are excluded so only the floating base can move; an aggressive +x EE
+    target would otherwise require large base translation.
+    """
+    urdf_path = _create_two_joint_urdf()
+    try:
+        robot = eik.RobotModel(urdf_path, floating_base=True)
+        solver = eik.KinematicsSolver(robot)
+        solver.dt = 0.02
+
+        q = np.asarray(robot.get_current_configuration(), dtype=float)
+        assert q.size >= 9, "expected free-flyer (7) + 2 arm joints for this URDF"
+        q[:7] = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0], dtype=float)
+        q[7:] = 0.0
+        robot.update_configuration(q)
+
+        # Last two nv-indices = arm joints; floating base uses nv 0..5.
+        arm_v0, arm_v1 = robot.nv - 2, robot.nv - 1
+        excluded = [arm_v0, arm_v1]
+
+        ref_torso = robot.get_frame_pose("base_link")
+        pose_ee = robot.get_frame_pose("ee")
+        target = np.eye(4, dtype=float)
+        target[:3, :3] = np.asarray(pose_ee.rotation, dtype=float)
+        target[:3, 3] = np.asarray(pose_ee.translation, dtype=float)
+        target[0, 3] += 0.35
+
+        x_lo, x_hi = -0.04, 0.04
+        mask = np.array([1.0, 0.0, 0.0, 0.0, 0.0, 0.0], dtype=float)
+
+        opts = eik.PositionIKOptions()
+        opts.max_iterations = 200
+        opts.dt = 0.02
+        opts.position_gain = 50.0
+        opts.orientation_gain = 50.0
+        opts.stagnation_iterations = 20
+        opts.primary_solve_mode = eik.TaskSolveMode.SCALE
+        opts.primary_allow_min_error_fallback = False
+        opts.excluded_joint_indices = excluded
+
+        opts.torso_constraint.enabled = True
+        opts.torso_constraint.frame_name = "base_link"
+        opts.torso_constraint.orientation_mask = np.zeros(3, dtype=float)
+        opts.torso_constraint.orientation_gain = 1e-3
+        opts.torso_constraint.pose_lower_bounds = np.array(
+            [x_lo, -1.0, -1.0, -3.15, -3.15, -3.15], dtype=float
+        )
+        opts.torso_constraint.pose_upper_bounds = np.array(
+            [x_hi, 1.0, 1.0, 3.15, 3.15, 3.15], dtype=float
+        )
+        opts.torso_constraint.pose_axis_mask = mask
+        opts.torso_constraint.velocity_limits = np.array(
+            [1.0, 1.0, 1.0, 1.0, 1.0, 1.0], dtype=float
+        )
+        opts.torso_constraint.acceleration_limits = np.array(
+            [2.0, 1.0, 1.0, 1.0, 1.0, 1.0], dtype=float
+        )
+        # Explicit anchor matches seed torso (same as default); documents teleop-style API.
+        opts.torso_constraint.pose_bounds_reference_pose = np.asarray(
+            ref_torso.homogeneous(), dtype=float
+        )
+
+        out = solver.solve_position(q, target, "ee", opts)
+        assert out.status != eik.SolverStatus.INVALID_INPUT
+        q_fin = np.asarray(out.q_solution, dtype=float)
+        np.testing.assert_allclose(q_fin[7:], q[7:], atol=1e-5)
+        robot.update_configuration(q_fin)
+        rel = _torso_rel_state_vs_reference(ref_torso, robot.get_frame_pose("base_link"))
+        tol = 8e-3
+        assert x_lo - tol <= rel[0] <= x_hi + tol, (
+            f"torso x delta {rel[0]} outside [{x_lo}, {x_hi}] (tol={tol}); "
+            f"status={out.status} msg={out.status_message!r}"
+        )
+
+        # Same seed/target without pose bounds: base should translate much farther in x.
+        robot.update_configuration(q)
+        ref_b = robot.get_frame_pose("base_link")
+        opts_b = eik.PositionIKOptions()
+        opts_b.max_iterations = 200
+        opts_b.dt = 0.02
+        opts_b.position_gain = 50.0
+        opts_b.orientation_gain = 50.0
+        opts_b.stagnation_iterations = 20
+        opts_b.primary_solve_mode = eik.TaskSolveMode.SCALE
+        opts_b.primary_allow_min_error_fallback = False
+        opts_b.excluded_joint_indices = excluded
+
+        out_b = solver.solve_position(q, target, "ee", opts_b)
+        assert out_b.status != eik.SolverStatus.INVALID_INPUT
+        q_b = np.asarray(out_b.q_solution, dtype=float)
+        np.testing.assert_allclose(q_b[7:], q[7:], atol=1e-5)
+        robot.update_configuration(q_b)
+        rel_b = _torso_rel_state_vs_reference(ref_b, robot.get_frame_pose("base_link"))
+        assert abs(rel_b[0]) > abs(rel[0]) + 0.02, (
+            "expected unconstrained solve to use more base-x motion than bounded run: "
+            f"bounded |dx|={abs(rel[0]):.4g}, unbounded |dx|={abs(rel_b[0]):.4g}"
+        )
+    finally:
+        os.unlink(urdf_path)
+
+
+def test_position_ik_rejects_nonfinite_torso_bounds_reference_pose():
+    urdf_path = _create_two_joint_urdf()
+    try:
+        robot = eik.RobotModel(urdf_path, floating_base=False)
+        solver = eik.KinematicsSolver(robot)
+        q = np.array([0.0, 0.0], dtype=float)
+        robot.update_configuration(q)
+        pose = robot.get_frame_pose("ee")
+        target = np.eye(4, dtype=float)
+        target[:3, :3] = np.array(pose.rotation, dtype=float)
+        target[:3, 3] = np.array(pose.translation, dtype=float)
+
+        M_bad = np.eye(4, dtype=float)
+        M_bad[0, 0] = float("nan")
+
+        opts = eik.PositionIKOptions()
+        opts.max_iterations = 1
+        opts.torso_constraint.enabled = True
+        opts.torso_constraint.frame_name = "link1"
+        opts.torso_constraint.pose_bounds_reference_pose = M_bad
+        opts.torso_constraint.pose_lower_bounds = np.zeros(6, dtype=float)
+        opts.torso_constraint.pose_upper_bounds = np.ones(6, dtype=float)
+        opts.torso_constraint.pose_axis_mask = np.ones(6, dtype=float)
+        opts.torso_constraint.velocity_limits = np.full(6, 0.5, dtype=float)
+        opts.torso_constraint.acceleration_limits = np.full(6, 1.0, dtype=float)
+
+        out = solver.solve_position(q, target, "ee", opts)
+        assert out.status == eik.SolverStatus.INVALID_INPUT
+        assert "pose_bounds_reference_pose" in out.status_message
+    finally:
+        os.unlink(urdf_path)
+
+
+def test_position_ik_stagnation_classification_toggle_changes_status():
+    urdf_path = _create_two_joint_urdf()
+    try:
+        robot = eik.RobotModel(urdf_path, floating_base=False)
+        solver = eik.KinematicsSolver(robot)
+        q = np.array([0.0, 0.0], dtype=float)
+        robot.update_configuration(q)
+        pose = robot.get_frame_pose("ee")
+        target = np.eye(4, dtype=float)
+        target[:3, :3] = np.array(pose.rotation, dtype=float)
+        target[:3, 3] = np.array(pose.translation, dtype=float)
+        target[0, 3] += 0.05
+
+        opts_no_progress = eik.PositionIKOptions()
+        opts_no_progress.max_iterations = 6
+        opts_no_progress.stagnation_iterations = 2
+        opts_no_progress.position_gain = 30.0
+        opts_no_progress.orientation_gain = 30.0
+        opts_no_progress.classify_stagnation_as_no_progress = True
+        opts_no_progress.excluded_joint_indices = [0, 1]
+
+        out_no_progress = solver.solve_position(q, target, "ee", opts_no_progress)
+        assert out_no_progress.status == eik.SolverStatus.NO_PROGRESS
+
+        opts_infeasible = eik.PositionIKOptions()
+        opts_infeasible.max_iterations = 6
+        opts_infeasible.stagnation_iterations = 2
+        opts_infeasible.position_gain = 30.0
+        opts_infeasible.orientation_gain = 30.0
+        opts_infeasible.classify_stagnation_as_no_progress = False
+        opts_infeasible.excluded_joint_indices = [0, 1]
+
+        out_infeasible = solver.solve_position(q, target, "ee", opts_infeasible)
+        assert out_infeasible.status == eik.SolverStatus.INFEASIBLE
+    finally:
+        os.unlink(urdf_path)
+
+
+def test_position_ik_rejects_invalid_torso_pose_bound_softening_fraction():
+    urdf_path = _create_two_joint_urdf()
+    try:
+        robot = eik.RobotModel(urdf_path, floating_base=False)
+        solver = eik.KinematicsSolver(robot)
+        q = np.array([0.0, 0.0], dtype=float)
+        robot.update_configuration(q)
+        pose = robot.get_frame_pose("ee")
+        target = np.eye(4, dtype=float)
+        target[:3, :3] = np.array(pose.rotation, dtype=float)
+        target[:3, 3] = np.array(pose.translation, dtype=float)
+        target[0, 3] += 0.01
+
+        opts = eik.PositionIKOptions()
+        opts.max_iterations = 1
+        opts.torso_constraint.enabled = True
+        opts.torso_constraint.frame_name = "link1"
+        opts.torso_constraint.pose_lower_bounds = np.full(6, -0.1, dtype=float)
+        opts.torso_constraint.pose_upper_bounds = np.full(6, 0.1, dtype=float)
+        opts.torso_constraint.pose_axis_mask = np.ones(6, dtype=float)
+        opts.torso_constraint.velocity_limits = np.full(6, 0.5, dtype=float)
+        opts.torso_constraint.acceleration_limits = np.full(6, 1.0, dtype=float)
+        opts.torso_constraint.pose_bound_softening_enabled = True
+        opts.torso_constraint.pose_bound_softening_fraction = 1.5
+
+        out = solver.solve_position(q, target, "ee", opts)
+        assert out.status == eik.SolverStatus.INVALID_INPUT
+        assert "pose_bound_softening_fraction" in out.status_message
+    finally:
+        os.unlink(urdf_path)
+
+
+def test_position_ik_torso_pose_bound_softening_reduces_jump_infeasible_count():
+    urdf_path = _create_two_joint_urdf()
+    try:
+        robot = eik.RobotModel(urdf_path, floating_base=True)
+        solver = eik.KinematicsSolver(robot)
+        solver.dt = 0.01
+
+        q0 = np.asarray(robot.get_current_configuration(), dtype=float)
+        q0[:7] = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0], dtype=float)
+        q0[7:] = 0.0
+        robot.update_configuration(q0)
+
+        torso_ref = np.asarray(robot.get_frame_pose("base_link").homogeneous(), dtype=float)
+        ee_pose = robot.get_frame_pose("ee")
+        base_target = np.asarray(ee_pose.homogeneous(), dtype=float)
+        q_lower, q_upper = robot.get_joint_limits()
+        excluded = [robot.nv - 2, robot.nv - 1]
+
+        def _run_sequence(enable_softening: bool) -> int:
+            q = q0.copy()
+            last_feasible_q = q.copy()
+            prev_pos_error = float("inf")
+            infeasible = 0
+            for step in range(140):
+                target = np.array(base_target, dtype=float, order="F")
+                t = 0.03 * float(step)
+                target[0, 3] += 0.14 * np.cos(t)
+                target[1, 3] += 0.08 * np.sin(0.8 * t)
+                if step > 0 and step % 35 == 0:
+                    target[0, 3] += 0.10
+                    target[1, 3] -= 0.06
+
+                opts = eik.PositionIKOptions()
+                opts.max_iterations = 10
+                opts.dt = 0.01
+                opts.position_gain = 10.0
+                opts.orientation_gain = 10.0
+                opts.primary_solve_mode = eik.TaskSolveMode.MIN_ERROR
+                opts.primary_allow_min_error_fallback = True
+                opts.classify_stagnation_as_no_progress = False
+                opts.limit_change_from_seed = False
+                opts.stagnation_iterations = 10
+                opts.excluded_joint_indices = excluded
+                opts.nullspace_bias = q.copy()
+                opts.nullspace_gain = 0.002
+                opts.nullspace_active_joints = list(range(6, robot.nv))
+                opts.nullspace_joint_weights = np.ones(robot.nv - 6, dtype=float)
+
+                opts.torso_constraint.enabled = True
+                opts.torso_constraint.frame_name = "base_link"
+                opts.torso_constraint.target_orientation = np.asarray(
+                    robot.get_frame_pose("base_link").rotation, dtype=float
+                )
+                opts.torso_constraint.orientation_mask = np.array([1.0, 1.0, 0.0], dtype=float)
+                opts.torso_constraint.orientation_gain = 0.05
+                opts.torso_constraint.pose_lower_bounds = np.array(
+                    [-0.06, -0.08, -0.10, -0.3, -0.3, -0.3], dtype=float
+                )
+                opts.torso_constraint.pose_upper_bounds = np.array(
+                    [0.06, 0.08, 0.10, 0.3, 0.3, 0.3], dtype=float
+                )
+                opts.torso_constraint.pose_axis_mask = np.ones(6, dtype=float)
+                opts.torso_constraint.velocity_limits = np.full(6, 0.8, dtype=float)
+                opts.torso_constraint.acceleration_limits = np.full(6, 1.0, dtype=float)
+                opts.torso_constraint.pose_bounds_reference_pose = torso_ref
+                opts.torso_constraint.pose_bound_softening_enabled = enable_softening
+                opts.torso_constraint.pose_bound_softening_fraction = 0.1
+
+                out = solver.solve_position(q, target, "ee", opts)
+                if out.status == eik.SolverStatus.SUCCESS:
+                    q_next = np.asarray(out.q_solution, dtype=float).copy()
+                    q_next[3:7] /= max(np.linalg.norm(q_next[3:7]), 1e-12)
+                    q_next[7:] = np.clip(q_next[7:], q_lower[7:], q_upper[7:])
+                    q[:] = q_next
+                    last_feasible_q[:] = q
+                    prev_pos_error = float(out.position_error)
+                elif out.status in (eik.SolverStatus.INFEASIBLE, eik.SolverStatus.NO_PROGRESS):
+                    improved = float(out.position_error) < (prev_pos_error - 1e-6)
+                    if improved:
+                        q_next = np.asarray(out.q_solution, dtype=float).copy()
+                        q_next[3:7] /= max(np.linalg.norm(q_next[3:7]), 1e-12)
+                        q_next[7:] = np.clip(q_next[7:], q_lower[7:], q_upper[7:])
+                        q[:] = q_next
+                        last_feasible_q[:] = q
+                        prev_pos_error = float(out.position_error)
+                    else:
+                        q[:] = last_feasible_q
+                    if out.status == eik.SolverStatus.INFEASIBLE:
+                        infeasible += 1
+                else:
+                    q[:] = last_feasible_q
+                robot.update_configuration(q)
+            return infeasible
+
+        infeasible_hard = _run_sequence(enable_softening=False)
+        robot.update_configuration(q0)
+        infeasible_soft = _run_sequence(enable_softening=True)
+        assert infeasible_soft <= infeasible_hard
     finally:
         os.unlink(urdf_path)

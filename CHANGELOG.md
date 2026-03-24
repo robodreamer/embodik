@@ -8,11 +8,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- None yet.
+
+## [0.18.0] - 2026-03-24
+
+### Added
+- **`TorsoPoseConstraintOptions.pose_bounds_reference_pose`**: optional 4x4 homogeneous anchor so torso pose **box** limits stay fixed relative to a chosen world pose across repeated `solve_position` calls (e.g. teleop ticks), while remaining fixed across inner IK iterations as before.
+- **Torso pose-bound softening controls**: added `TorsoPoseConstraintOptions.pose_bound_softening_enabled` and `pose_bound_softening_fraction` (C++ + Python) as an opt-in way to preserve minimum torso-row velocity headroom near active pose-box limits.
+- **Example 10 benchmark diagnostics**: `scripts/benchmark_example10_torso_modes.py` now reports per-status timing/error buckets, `iterations_used` distributions/histograms, and a jump-vs-no-jump plus max-iterations matrix sweep for deeper responsiveness analysis.
 - **`scripts/install_embodik_macos.sh`**: one-shot macOS setup (Homebrew `eigen@3` / URDF packages, venv, `SDKROOT` + SDK libc++ include workaround, `CMAKE_PREFIX_PATH` for PyPI `pin` + Homebrew, PyPI or editable `pip install`). Shipped in sdist via `MANIFEST.in`.
+- **`scripts/install_embodik_linux.sh`**: one-shot Linux setup (Debian/Ubuntu `apt` deps for Eigen/URDF + toolchain, venv, `CMAKE_PREFIX_PATH` from PyPI `pin`, and PyPI or editable `pip install`). Shipped in sdist via `MANIFEST.in`.
 
 ### Changed
+- **Torso pose-box rotation error**: `solve_position` torso 6D bounds now use `pinocchio::log3` for the relative rotation \(R_\mathrm{ref}^\top R\) instead of a local `acos`/vee implementation, matching Python `embodik.log3` and improving numerical behavior near \(\pi\).
+- **Example 10 interactive tuning workflow**: added bounded-mode behavior presets (`Responsive`, `Stable`, `StrictBounds`), torso bound softening controls, and a `Constraint pressure` indicator to make high-constraint stall risk visible during teleop-style target motion.
 - **Docs (Pixi)**: Developer setup documents optional `pixi install`, macOS Xcode CLT expectation, and that CMake adds the SDK `libc++` include path on Apple platforms.
-- **Docs / README**: expanded macOS pip/sdist guidance (Eigen 3.x via `eigen@3`, `urdfdom_headers` / `urdfdom`, combined `CMAKE_PREFIX_PATH`, Command Line Tools libc++ / `CXXFLAGS` workaround, Python 3.10–3.12 recommendation); troubleshooting table and optional `curl` flow for the installer script.
+- **Docs / README**: expanded pip/sdist guidance with one-shot installer coverage for both macOS and Linux, including optional `curl` flows and distro-specific dependency notes.
 - **CI (`test-macos-arm64`)**: install `eigen@3` and URDF Homebrew packages; set `SDKROOT`, SDK libc++ `CXXFLAGS`, and `CMAKE_PREFIX_PATH="${PIN_PREFIX}:$(brew --prefix)"`.
 - **`cibuildwheel` (macOS)**: `brew install eigen@3` plus URDF packages; `Eigen3_DIR` under `opt/eigen@3`; `CMAKE_PREFIX_PATH=/opt/homebrew` to complement CMake’s PyPI `pin` prefix prepended in `CMakeLists.txt`.
 

@@ -32,7 +32,7 @@ Run `bash scripts/install_embodik_macos.sh --help` for all options (`--skip-brew
 Without cloning, you can download the script and run it from an empty project folder (still installs **embodik from PyPI**):
 
 ```bash
-curl -fsSL -O https://raw.githubusercontent.com/robodreamer/embodik/main/scripts/install_embodik_macos.sh
+curl -fsSL -O https://gist.githubusercontent.com/robodreamer/adc0b4452d474586c5890877b629005b/raw/ee3213c6f25fda3488913ba065fcccdc8f6e98fb/install_embodik_macos.sh
 bash install_embodik_macos.sh --python python3.12
 ```
 
@@ -96,6 +96,57 @@ pip install --no-build-isolation -e .
 ```
 
 If you already use a venv (e.g. under `embodik_test`), only `source` it and skip creating a new one.
+
+## Linux (Debian/Ubuntu): pip / sdist builds
+
+### One-shot installer
+
+From a checkout of this repository (recommended):
+
+```bash
+# PyPI install into ./.venv in your current directory
+bash scripts/install_embodik_linux.sh
+
+# Use a specific Python and venv path
+bash scripts/install_embodik_linux.sh --python python3.12 --venv ./.venv
+
+# Editable install from the repo (default DIR = parent of scripts/)
+bash scripts/install_embodik_linux.sh --editable
+
+# If you have ROS / a local Pinocchio on LD_LIBRARY_PATH or CMAKE_PREFIX_PATH
+bash scripts/install_embodik_linux.sh --clean-env
+```
+
+Run `bash scripts/install_embodik_linux.sh --help` for all options (`--skip-apt`, etc.).
+
+Without cloning, you can download the script and run it from an empty project folder (still installs **embodik from PyPI**):
+
+```bash
+curl -fsSL -O https://gist.githubusercontent.com/robodreamer/adc0b4452d474586c5890877b629005b/raw/ee3213c6f25fda3488913ba065fcccdc8f6e98fb/install_embodik_linux.sh
+bash install_embodik_linux.sh
+```
+
+The installer currently auto-installs system packages on Debian/Ubuntu via `apt-get`. On other distros, install equivalent packages manually and run with `--skip-apt`.
+
+### Manual steps (equivalent)
+
+```bash
+sudo apt-get update
+sudo apt-get install -y \
+  build-essential cmake ninja-build pkg-config \
+  libeigen3-dev liburdfdom-dev
+
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -U pip
+pip install pin scikit-build-core nanobind cmake ninja
+
+PIN_PREFIX="$(python -c "import pinocchio, pathlib; print(pathlib.Path(pinocchio.__file__).resolve().parents[4])")"
+export CMAKE_PREFIX_PATH="$PIN_PREFIX"
+
+pip install --no-build-isolation embodik
+python -c "import embodik; print(embodik.__version__, embodik.RobotModel)"
+```
 
 ## Option A: Fresh Environment (No existing Pinocchio)
 

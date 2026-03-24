@@ -58,13 +58,16 @@ class Workload:
 
 def _stats(values: list[float]) -> dict[str, float]:
     if not values:
-        return {"mean": 0.0, "median": 0.0, "p95": 0.0}
+        return {"mean": 0.0, "median": 0.0, "p95": 0.0, "p99": 0.0, "max": 0.0}
     sorted_vals = sorted(values)
     p95_idx = max(0, min(len(sorted_vals) - 1, int(math.ceil(0.95 * len(sorted_vals)) - 1)))
+    p99_idx = max(0, min(len(sorted_vals) - 1, int(math.ceil(0.99 * len(sorted_vals)) - 1)))
     return {
         "mean": float(statistics.fmean(values)),
         "median": float(statistics.median(values)),
         "p95": float(sorted_vals[p95_idx]),
+        "p99": float(sorted_vals[p99_idx]),
+        "max": float(sorted_vals[-1]),
     }
 
 
@@ -114,10 +117,18 @@ def _add_sample(metrics: MetricMap, result: eik.VelocitySolverResult, wall_ms: f
     )
 
 
-def _panda_base_solver() -> tuple[eik.RobotModel, eik.KinematicsSolver, np.ndarray]:
+def _panda_base_solver(*, floating_base: bool = False) -> tuple[eik.RobotModel, eik.KinematicsSolver, np.ndarray]:
     ensure_ros_package_path(Path(PANDA_URDF_PATH))
-    robot = eik.RobotModel(str(PANDA_URDF_PATH), floating_base=False)
-    q = np.array([0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785, 0.05, 0.05], dtype=float)
+    robot = eik.RobotModel(str(PANDA_URDF_PATH), floating_base=floating_base)
+    if floating_base:
+        q = np.asarray(robot.get_current_configuration(), dtype=float)
+        if q.size >= 7:
+            # Identity world pose for floating base: xyz + quaternion (x,y,z,w).
+            q[:7] = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0], dtype=float)
+        tail = np.array([0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785, 0.05, 0.05], dtype=float)
+        q[-tail.size :] = tail
+    else:
+        q = np.array([0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785, 0.05, 0.05], dtype=float)
     robot.update_configuration(q)
     solver = eik.KinematicsSolver(robot)
     solver.dt = 0.01
@@ -159,13 +170,13 @@ def _moving_target_controller(
 
 
 def _workload_panda_no_collision() -> tuple[eik.RobotModel, eik.KinematicsSolver, Callable[[int], None]]:
-    robot, solver, _ = _panda_base_solver()
+    robot, solver, _ = _panda_base_solver(floating_base=False)
     updater = _moving_target_controller(robot, solver, "panda_hand")
     return robot, solver, updater
 
 
 def _workload_panda_collision() -> tuple[eik.RobotModel, eik.KinematicsSolver, Callable[[int], None]]:
-    robot, solver, _ = _panda_base_solver()
+    robot, solver, _ = _panda_base_solver(floating_base=False)
     if hasattr(solver, "set_collision_refinement_time_budget_us"):
         solver.set_collision_refinement_time_budget_us(COLLISION_REFINEMENT_BUDGET_US)
     if hasattr(solver, "enable_collision_pair_cache"):
@@ -187,7 +198,7 @@ def _workload_panda_collision() -> tuple[eik.RobotModel, eik.KinematicsSolver, C
 
 
 def _workload_panda_com() -> tuple[eik.RobotModel, eik.KinematicsSolver, Callable[[int], None]]:
-    robot, solver, _ = _panda_base_solver()
+    robot, solver, _ = _panda_base_solver(floating_base=False)
     square = np.array(
         [
             [-0.20, -0.20],
@@ -199,6 +210,114 @@ def _workload_panda_com() -> tuple[eik.RobotModel, eik.KinematicsSolver, Callabl
     )
     solver.configure_com_constraint(square, margin=0.0, frame_name="world", proximity_fraction=0.3)
     updater = _moving_target_controller(robot, solver, "panda_hand", radius_xy=0.03, amp_z=0.01)
+    return robot, solver, updater
+
+
+def _resolve_torso_frame(robot: eik.RobotModel, ee_frame: str) -> str:
+    candidates = ("torso", "torso_link", "base_link", "panda_link0", "pelvis", "root_link")
+    frame_names = set(robot.get_frame_names())
+    for name in candidates:
+        if name in frame_names and name != ee_frame:
+            return name
+    for name in robot.get_frame_names():
+        lname = name.lower()
+        if ("torso" in lname or "base" in lname or "pelvis" in lname) and name != ee_frame:
+            return name
+    for name in robot.get_frame_names():
+        if name != ee_frame:
+            return name
+    return ee_frame
+
+
+def _workload_panda_hierarchy_two_priority() -> tuple[eik.RobotModel, eik.KinematicsSolver, Callable[[int], None]]:
+    robot, solver, q = _panda_base_solver(floating_base=False)
+    posture = solver.add_posture_task("posture_task")
+    posture.priority = 1
+    posture.weight = 1e-3
+    posture.set_target_configuration(q.copy())
+    updater = _moving_target_controller(robot, solver, "panda_hand")
+    return robot, solver, updater
+
+
+def _workload_panda_hierarchy_three_priority() -> tuple[eik.RobotModel, eik.KinematicsSolver, Callable[[int], None]]:
+    robot, solver, q = _panda_base_solver(floating_base=False)
+    torso_frame = _resolve_torso_frame(robot, "panda_hand")
+    torso_pose = robot.get_frame_pose(torso_frame)
+    torso_task = solver.add_frame_task(
+        "torso_upright_task", torso_frame, eik.TaskType.FRAME_ORIENTATION
+    )
+    torso_task.priority = 1
+    torso_task.weight = 5e-2
+    torso_task.set_orientation_mask(np.array([1.0, 1.0, 0.0], dtype=float))
+    torso_task.set_target_orientation(np.asarray(torso_pose.rotation, dtype=float))
+
+    posture = solver.add_posture_task("posture_task")
+    posture.priority = 2
+    posture.weight = 1e-3
+    posture.set_target_configuration(q.copy())
+    updater = _moving_target_controller(robot, solver, "panda_hand")
+    return robot, solver, updater
+
+
+def _workload_panda_hierarchy_three_priority_pose_constrained() -> tuple[eik.RobotModel, eik.KinematicsSolver, Callable[[int], None]]:
+    robot, solver, q = _panda_base_solver(floating_base=False)
+    torso_frame = _resolve_torso_frame(robot, "panda_hand")
+    torso_pose = robot.get_frame_pose(torso_frame)
+    torso_rot = np.asarray(torso_pose.rotation, dtype=float)
+    torso_pos = np.asarray(torso_pose.translation, dtype=float)
+
+    torso_orient = solver.add_frame_task(
+        "torso_upright_task", torso_frame, eik.TaskType.FRAME_ORIENTATION
+    )
+    torso_orient.priority = 1
+    torso_orient.weight = 5e-2
+    torso_orient.set_orientation_mask(np.array([1.0, 1.0, 0.0], dtype=float))
+    torso_orient.set_target_orientation(torso_rot)
+
+    torso_pose_task = solver.add_frame_task(
+        "torso_pose_task", torso_frame, eik.TaskType.FRAME_POSE
+    )
+    torso_pose_task.priority = 1
+    torso_pose_task.weight = 2e-2
+    torso_pose_task.set_position_mask(np.array([1.0, 1.0, 1.0], dtype=float))
+    torso_pose_task.set_orientation_mask(np.array([1.0, 1.0, 0.0], dtype=float))
+    torso_pose_task.set_target_pose(torso_pos, torso_rot)
+
+    posture = solver.add_posture_task("posture_task")
+    posture.priority = 2
+    posture.weight = 1e-3
+    posture.set_target_configuration(q.copy())
+    updater = _moving_target_controller(robot, solver, "panda_hand")
+    return robot, solver, updater
+
+
+def _workload_panda_floating_hierarchy_two_priority() -> tuple[eik.RobotModel, eik.KinematicsSolver, Callable[[int], None]]:
+    robot, solver, q = _panda_base_solver(floating_base=True)
+    posture = solver.add_posture_task("posture_task")
+    posture.priority = 1
+    posture.weight = 1e-3
+    posture.set_target_configuration(q.copy())
+    updater = _moving_target_controller(robot, solver, "panda_hand")
+    return robot, solver, updater
+
+
+def _workload_panda_floating_hierarchy_three_priority() -> tuple[eik.RobotModel, eik.KinematicsSolver, Callable[[int], None]]:
+    robot, solver, q = _panda_base_solver(floating_base=True)
+    torso_frame = _resolve_torso_frame(robot, "panda_hand")
+    torso_pose = robot.get_frame_pose(torso_frame)
+    torso_task = solver.add_frame_task(
+        "torso_upright_task", torso_frame, eik.TaskType.FRAME_ORIENTATION
+    )
+    torso_task.priority = 1
+    torso_task.weight = 5e-2
+    torso_task.set_orientation_mask(np.array([1.0, 1.0, 0.0], dtype=float))
+    torso_task.set_target_orientation(np.asarray(torso_pose.rotation, dtype=float))
+
+    posture = solver.add_posture_task("posture_task")
+    posture.priority = 2
+    posture.weight = 1e-3
+    posture.set_target_configuration(q.copy())
+    updater = _moving_target_controller(robot, solver, "panda_hand")
     return robot, solver, updater
 
 
@@ -338,6 +457,31 @@ WORKLOADS: list[Workload] = [
     Workload("panda_no_collision", teleop_relevant=True, builder=_workload_panda_no_collision),
     Workload("panda_collision", teleop_relevant=True, builder=_workload_panda_collision),
     Workload("panda_com_constraint", teleop_relevant=True, builder=_workload_panda_com),
+    Workload(
+        "panda_hierarchy_two_priority",
+        teleop_relevant=True,
+        builder=_workload_panda_hierarchy_two_priority,
+    ),
+    Workload(
+        "panda_hierarchy_three_priority",
+        teleop_relevant=True,
+        builder=_workload_panda_hierarchy_three_priority,
+    ),
+    Workload(
+        "panda_hierarchy_three_priority_pose_constrained",
+        teleop_relevant=True,
+        builder=_workload_panda_hierarchy_three_priority_pose_constrained,
+    ),
+    Workload(
+        "panda_floating_hierarchy_two_priority",
+        teleop_relevant=True,
+        builder=_workload_panda_floating_hierarchy_two_priority,
+    ),
+    Workload(
+        "panda_floating_hierarchy_three_priority",
+        teleop_relevant=True,
+        builder=_workload_panda_floating_hierarchy_three_priority,
+    ),
     Workload("dual_arm_tracking", teleop_relevant=False, builder=_workload_dual_arm_tracking),
     Workload(
         "dual_arm_collision_mesh",
@@ -433,6 +577,45 @@ def main() -> None:
     }
     for workload in WORKLOADS:
         report["workloads"][workload.name] = run_workload(workload, args.warmup, args.steps)
+
+    baseline_name = "panda_hierarchy_two_priority"
+    compare_names = (
+        "panda_hierarchy_three_priority",
+        "panda_hierarchy_three_priority_pose_constrained",
+    )
+    if baseline_name in report["workloads"]:
+        baseline = report["workloads"][baseline_name]["stats_ms"]["wall_time_ms"]
+        comparison = {}
+        for name in compare_names:
+            if name not in report["workloads"]:
+                continue
+            candidate = report["workloads"][name]["stats_ms"]["wall_time_ms"]
+            overhead = {}
+            for key in ("mean", "p95", "p99", "max"):
+                b = float(baseline.get(key, 0.0))
+                c = float(candidate.get(key, 0.0))
+                overhead[key] = 0.0 if b <= 1e-12 else 100.0 * (c - b) / b
+            comparison[name] = {
+                "baseline": baseline_name,
+                "overhead_percent": overhead,
+            }
+        report["priority_hierarchy_comparison"] = comparison
+
+    floating_baseline = "panda_floating_hierarchy_two_priority"
+    floating_candidate = "panda_floating_hierarchy_three_priority"
+    if floating_baseline in report["workloads"] and floating_candidate in report["workloads"]:
+        base_stats = report["workloads"][floating_baseline]["stats_ms"]["wall_time_ms"]
+        cand_stats = report["workloads"][floating_candidate]["stats_ms"]["wall_time_ms"]
+        overhead = {}
+        for key in ("mean", "p95", "p99", "max"):
+            b = float(base_stats.get(key, 0.0))
+            c = float(cand_stats.get(key, 0.0))
+            overhead[key] = 0.0 if b <= 1e-12 else 100.0 * (c - b) / b
+        report["floating_priority_hierarchy_comparison"] = {
+            "baseline": floating_baseline,
+            "candidate": floating_candidate,
+            "overhead_percent": overhead,
+        }
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2))
