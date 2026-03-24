@@ -57,19 +57,37 @@ multi_joint_task = embodik.MultiJointTask(
 )
 ```
 
+## Units Conventions
+
+Use these units consistently across task targets, limits, and tolerances:
+
+- Translation (`x, y, z`): `m`
+- Rotation (`rx, ry, rz`, roll/pitch/yaw, angle errors): `rad`
+- Linear velocity: `m/s`
+- Angular velocity: `rad/s`
+- Linear acceleration: `m/s^2`
+- Angular acceleration: `rad/s^2`
+
+For 6D torso pose vectors in `PositionIKOptions.torso_constraint`, the ordering is
+`[x, y, z, rx, ry, rz]` with units `[m, m, m, rad, rad, rad]`. Pose **bounds** are
+measured relative to `torso_constraint.pose_bounds_reference_pose` when set, else
+relative to the torso frame at the `solve_position` seed configuration for that call.
+
 ## Task Hierarchy
 
-Tasks are solved in priority order. Higher priority tasks (lower index) are satisfied first:
+Tasks are solved in priority order (`0` = highest).
 
 ```python
-tasks = [
-    frame_task,      # Priority 1: Must be satisfied
-    posture_task,   # Priority 2: Satisfied in null space of priority 1
-    com_task,        # Priority 3: Satisfied in null space of priorities 1-2
-]
-
-result = solver.solve_multi_task_ik(tasks=tasks, initial_q=q0)
+ee_task.priority = 0
+torso_task.priority = 1
+posture_task.priority = 2
 ```
+
+Typical use:
+
+- Priority `0`: end-effector tracking (`FrameTask`)
+- Priority `1`: secondary balance/posture frame objective (for example torso upright)
+- Priority `2`: nullspace posture bias (`PostureTask`)
 
 ## Task Solve Modes
 
@@ -102,7 +120,22 @@ Notes:
 - User-created tasks default to `SCALE`.
 - User-created tasks default to `allow_min_error_fallback = False`.
 - Internal nullspace-bias posture tasks used by `solve_position()` run in
-  `MIN_ERROR` mode.
+  `MIN_ERROR` mode and are placed after the optional internal torso objective.
+
+## PostureTask Joint Selection and Weights
+
+`PostureTask` supports explicit selection and per-joint weighting:
+
+```python
+posture = solver.add_posture_task("posture")
+posture.set_controlled_joint_indices([0, 1, 2])
+posture.set_controlled_joint_weights(np.array([2.0, 1.0, 0.5]))
+```
+
+This behavior is consistent with a diagonal selection/weighting matrix:
+
+- selected joints contribute to the nullspace objective
+- unselected joints are not driven by the posture objective
 
 ## API Reference
 

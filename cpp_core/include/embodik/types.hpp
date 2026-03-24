@@ -123,6 +123,49 @@ struct ObjectiveSolveConfig {
   bool allow_min_error_fallback = true;
 };
 
+// Optional torso tracking/constraint configuration for position IK.
+struct TorsoPoseConstraintOptions {
+  bool enabled = false;
+  std::string frame_name;
+  // If unset, target orientation is captured from the seed configuration.
+  std::optional<Eigen::Matrix3d> target_orientation;
+  // Default "upright" behavior: constrain roll/pitch, leave yaw free.
+  // Rotation components are in radians.
+  Eigen::Vector3d orientation_mask = Eigen::Vector3d(1.0, 1.0, 0.0);
+  double orientation_gain = 1.0;
+
+  // Optional 6D torso pose bounds relative to a fixed torso reference pose:
+  // [x, y, z, rx, ry, rz] where translation is meters and rotation is radians.
+  // Set both lower and upper to enable.
+  //
+  // Reference pose for these bounds (world frame, same convention as
+  // RobotModel::get_frame_pose):
+  // - If pose_bounds_reference_pose is set (4x4 homogeneous), bounds are
+  //   measured vs that transform (held fixed for the whole solve_position
+  //   call; does not move with internal IK iterations).
+  // - If unset, the reference is the torso frame pose at the seed
+  //   configuration passed into solve_position (also fixed for all inner
+  //   iterations, but recenters each outer call if seed_q changes).
+  std::optional<Eigen::Matrix4d> pose_bounds_reference_pose;
+  std::optional<Eigen::VectorXd> pose_lower_bounds;
+  std::optional<Eigen::VectorXd> pose_upper_bounds;
+  // 6D mask for bounds rows (1 = constrained, 0 = unconstrained).
+  Eigen::VectorXd pose_axis_mask = Eigen::VectorXd::Ones(6);
+  // Per-axis velocity/acceleration limits used for box constraints.
+  // velocity_limits units: [m/s, m/s, m/s, rad/s, rad/s, rad/s]
+  // acceleration_limits units: [m/s^2, m/s^2, m/s^2, rad/s^2, rad/s^2, rad/s^2]
+  Eigen::VectorXd velocity_limits = Eigen::VectorXd::Constant(6, 0.5);
+  Eigen::VectorXd acceleration_limits = Eigen::VectorXd::Constant(6, 1.0);
+  // Optional velocity-box softening for torso pose-bound rows only.
+  // When enabled, preserve a minimum velocity headroom (fraction of
+  // velocity_limits) away from nearby limits to reduce abrupt scale collapse
+  // in hierarchical solves. Disabled by default for backward compatibility.
+  bool pose_bound_softening_enabled = false;
+  // Fraction in [0, 1] of velocity_limits used as minimum torso-row headroom
+  // when softening is enabled.
+  double pose_bound_softening_fraction = 0.10;
+};
+
 // Position IK options
 struct PositionIKOptions {
   double position_tolerance = 1e-3;    // Position error tolerance (meters)
@@ -145,6 +188,11 @@ struct PositionIKOptions {
       nullspace_bias;          // Target configuration for nullspace
   double nullspace_gain = 0.1; // Nullspace task gain/weight
   std::vector<int> nullspace_active_joints; // Empty = all joints active
+  // Optional per-joint weights for nullspace bias. Size must match nv when
+  // nullspace_active_joints is empty, else size must match active-joint count.
+  std::optional<Eigen::VectorXd> nullspace_joint_weights;
+  // Secondary torso objective and optional torso pose bounds.
+  TorsoPoseConstraintOptions torso_constraint;
 
   // Step size limits (for stability)
   double max_linear_step = 0.3;  // Max meters per iteration

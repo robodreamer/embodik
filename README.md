@@ -55,6 +55,19 @@ EmbodiK is a high-performance inverse kinematics (IK) library for cross-embodime
 
 If the build fails with **`cstddef` / `cmath` file not found**, keep `SDKROOT` set; you may need full Xcode or a supported Python version (see docs).
 
+### Linux (Debian/Ubuntu) before `pip install`
+
+**Automated:** from a clone, run `bash scripts/install_embodik_linux.sh` (PyPI install into `./.venv`) or `bash scripts/install_embodik_linux.sh --editable` — see [docs/installation.md](docs/installation.md#linux-debianubuntu-pip--sdist-builds).
+
+Without cloning, you can download and run the script from an empty project folder:
+
+```bash
+curl -fsSL -O https://gist.githubusercontent.com/robodreamer/adc0b4452d474586c5890877b629005b/raw/ee3213c6f25fda3488913ba065fcccdc8f6e98fb/install_embodik_linux.sh
+bash install_embodik_linux.sh
+```
+
+The script installs Debian/Ubuntu system dependencies (`build-essential`, `cmake`, `ninja-build`, `pkg-config`, `libeigen3-dev`, `liburdfdom-dev`), creates a venv, installs Python build deps (`pin`, `scikit-build-core`, `nanobind`, `cmake`, `ninja`), sets `CMAKE_PREFIX_PATH` from the `pin` wheel prefix, and installs EmbodiK from PyPI (or editable mode with `--editable`).
+
 ### Option A: Fresh Environment (No existing Pinocchio)
 
 If you don't have Pinocchio/Boost installed locally, installation is straightforward:

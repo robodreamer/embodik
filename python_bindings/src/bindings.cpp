@@ -128,6 +128,113 @@ NB_MODULE(_embodik_impl, m) {
               &eik::VelocitySolverResult::collision_budget_exhausted,
               "Whether the collision refinement budget was exhausted");
 
+  nb::class_<eik::TorsoPoseConstraintOptions>(
+      m, "TorsoPoseConstraintOptions",
+      "Optional torso orientation tracking and 6D torso pose bounds for "
+      "position IK")
+      .def(nb::init<>())
+      .def_rw("enabled", &eik::TorsoPoseConstraintOptions::enabled,
+              "Enable torso secondary objective/constraints")
+      .def_rw("frame_name", &eik::TorsoPoseConstraintOptions::frame_name,
+              "Torso frame name")
+      .def_prop_rw(
+          "target_orientation",
+          [](const eik::TorsoPoseConstraintOptions &opt) -> nb::object {
+            if (opt.target_orientation.has_value()) {
+              return nb::cast(opt.target_orientation.value());
+            }
+            return nb::none();
+          },
+          [](eik::TorsoPoseConstraintOptions &opt, nb::object obj) {
+            if (!obj.is_none()) {
+              opt.target_orientation = nb::cast<Eigen::Matrix3d>(obj);
+            } else {
+              opt.target_orientation.reset();
+            }
+          },
+          "Optional torso target orientation (3x3 rotation matrix). "
+          "None => seed torso orientation")
+      .def_rw("orientation_mask",
+              &eik::TorsoPoseConstraintOptions::orientation_mask,
+              "Orientation mask [roll, pitch, yaw] in radians "
+              "(1=enabled, 0=disabled)")
+      .def_rw("orientation_gain",
+              &eik::TorsoPoseConstraintOptions::orientation_gain,
+              "Secondary torso orientation objective gain")
+      .def_prop_rw(
+          "pose_bounds_reference_pose",
+          [](const eik::TorsoPoseConstraintOptions &opt) -> nb::object {
+            if (opt.pose_bounds_reference_pose.has_value()) {
+              return nb::cast(opt.pose_bounds_reference_pose.value());
+            }
+            return nb::none();
+          },
+          [](eik::TorsoPoseConstraintOptions &opt, nb::object obj) {
+            if (!obj.is_none()) {
+              opt.pose_bounds_reference_pose =
+                  nb::cast<Eigen::Matrix4d>(obj);
+            } else {
+              opt.pose_bounds_reference_pose.reset();
+            }
+          },
+          "Optional 4x4 homogeneous torso reference for pose bounds only. "
+          "None => use torso frame at seed_q. Fixed for all inner iterations; "
+          "use in teleop to anchor bounds to session start (not each tick's seed).")
+      .def_prop_rw(
+          "pose_lower_bounds",
+          [](const eik::TorsoPoseConstraintOptions &opt) -> nb::object {
+            if (opt.pose_lower_bounds.has_value()) {
+              return nb::cast(opt.pose_lower_bounds.value());
+            }
+            return nb::none();
+          },
+          [](eik::TorsoPoseConstraintOptions &opt, nb::object obj) {
+            if (!obj.is_none()) {
+              opt.pose_lower_bounds = nb::cast<Eigen::VectorXd>(obj);
+            } else {
+              opt.pose_lower_bounds.reset();
+            }
+          },
+          "Optional 6D lower torso pose bounds vs pose reference (see "
+          "pose_bounds_reference_pose). Order/units: "
+          "[x,y,z,rx,ry,rz] = [m,m,m,rad,rad,rad]")
+      .def_prop_rw(
+          "pose_upper_bounds",
+          [](const eik::TorsoPoseConstraintOptions &opt) -> nb::object {
+            if (opt.pose_upper_bounds.has_value()) {
+              return nb::cast(opt.pose_upper_bounds.value());
+            }
+            return nb::none();
+          },
+          [](eik::TorsoPoseConstraintOptions &opt, nb::object obj) {
+            if (!obj.is_none()) {
+              opt.pose_upper_bounds = nb::cast<Eigen::VectorXd>(obj);
+            } else {
+              opt.pose_upper_bounds.reset();
+            }
+          },
+          "Optional 6D upper torso pose bounds vs pose reference (see "
+          "pose_bounds_reference_pose). Order/units: "
+          "[x,y,z,rx,ry,rz] = [m,m,m,rad,rad,rad]")
+      .def_rw("pose_axis_mask", &eik::TorsoPoseConstraintOptions::pose_axis_mask,
+              "6D axis mask for torso pose bounds [x,y,z,rx,ry,rz]")
+      .def_rw("velocity_limits",
+              &eik::TorsoPoseConstraintOptions::velocity_limits,
+              "Per-axis torso pose bound velocity limits (6D). "
+              "Units: [m/s,m/s,m/s,rad/s,rad/s,rad/s]")
+      .def_rw("acceleration_limits",
+              &eik::TorsoPoseConstraintOptions::acceleration_limits,
+              "Per-axis torso pose bound acceleration limits (6D). "
+              "Units: [m/s^2,m/s^2,m/s^2,rad/s^2,rad/s^2,rad/s^2]")
+      .def_rw("pose_bound_softening_enabled",
+              &eik::TorsoPoseConstraintOptions::pose_bound_softening_enabled,
+              "When True, apply torso-row-only velocity-box softening to keep "
+              "minimum velocity headroom away from bounds")
+      .def_rw("pose_bound_softening_fraction",
+              &eik::TorsoPoseConstraintOptions::pose_bound_softening_fraction,
+              "Fraction in [0, 1] of velocity_limits used as minimum torso-row "
+              "headroom when softening is enabled");
+
   nb::class_<eik::PositionIKOptions>(m, "PositionIKOptions",
                                      "Options for position-level IK solving")
       .def(nb::init<>())
@@ -173,6 +280,26 @@ NB_MODULE(_embodik_impl, m) {
           "nullspace_active_joints",
           &eik::PositionIKOptions::nullspace_active_joints,
           "List of joint indices for nullspace control (empty = all joints)")
+      .def_prop_rw(
+          "nullspace_joint_weights",
+          [](const eik::PositionIKOptions &opt) -> nb::object {
+            if (opt.nullspace_joint_weights.has_value()) {
+              return nb::cast(opt.nullspace_joint_weights.value());
+            }
+            return nb::none();
+          },
+          [](eik::PositionIKOptions &opt, nb::object obj) {
+            if (!obj.is_none()) {
+              opt.nullspace_joint_weights = nb::cast<Eigen::VectorXd>(obj);
+            } else {
+              opt.nullspace_joint_weights.reset();
+            }
+          },
+          "Optional per-joint nullspace weights. Size must match nv (all joints) "
+          "or len(nullspace_active_joints)")
+      .def_rw("torso_constraint", &eik::PositionIKOptions::torso_constraint,
+              "Optional torso orientation task and torso pose bounds for "
+              "secondary-objective enforcement")
       .def_rw("excluded_joint_indices",
               &eik::PositionIKOptions::excluded_joint_indices,
               "Nv-indices excluded from the temporary frame and nullspace "
