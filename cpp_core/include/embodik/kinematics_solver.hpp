@@ -674,11 +674,18 @@ public:
    * @param velocity_limit Maximum allowed velocity
    * @param acceleration_limit Maximum allowed acceleration
    * @param dt Time step
+   * @param min_velocity_headroom Optional minimum |velocity| headroom to
+   * guarantee away from nearby limits. Pass negative to disable and use solver
+   * default behavior.
+   * @param headroom_activation_margin Margin threshold above which headroom can
+   * be injected (prevents pushing toward an already-active limit).
    * @return Pair of (lower_velocity_limit, upper_velocity_limit)
    */
   std::pair<double, double> calculate_velocity_box_constraint(
       double position_margin_lower, double position_margin_upper,
-      double velocity_limit, double acceleration_limit, double dt) const;
+      double velocity_limit, double acceleration_limit, double dt,
+      double min_velocity_headroom = -1.0,
+      double headroom_activation_margin = 0.01) const;
 
 private:
   std::shared_ptr<RobotModel> robot_;

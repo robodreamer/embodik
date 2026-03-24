@@ -75,9 +75,16 @@ pixi run -e teleop python examples/03_teleop_ik.py --robot panda \
   (fixed-base emulation)` is opt-in and defaults off. With it off, full 6D locks
   are tested through torso constraint rows; with it on, full lock can map to base
   joint exclusion (`excluded_joint_indices`) for fixed-base-like behavior.
-- **Softening and numerical robustness**:
-  - `Enable torso bound softening` + `Bound softening fraction` keep minimum
-    velocity headroom near bounds to reduce abrupt task-scale collapse.
+- **Velocity-box headroom policy and numerical robustness**:
+  - Preferred API: `torso_constraint.velocity_box_headroom` with:
+    - `enabled`
+    - `fraction` (minimum headroom as a fraction of per-axis `velocity_limits`)
+    - `activation_margin` (minimum slack before headroom is injected)
+  - This policy now uses the same shared velocity-box helper path as other
+    limit constraints, rather than a torso-specific post-processing block.
+  - Legacy aliases (`pose_bound_softening_enabled`,
+    `pose_bound_softening_fraction`) are still accepted for backward
+    compatibility and map to the shared headroom policy.
   - Solver-side slack dead-zones (`1e-4 m`, `1e-3 rad`) suppress boundary chatter.
 - **Operational diagnostics**:
   - `Torso box min slack` reports signed margin to the nearest box face.

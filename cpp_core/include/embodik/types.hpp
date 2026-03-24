@@ -124,6 +124,16 @@ struct ObjectiveSolveConfig {
 };
 
 // Optional torso tracking/constraint configuration for position IK.
+struct VelocityBoxHeadroomPolicy {
+  // Enable minimum velocity headroom away from nearby limits.
+  bool enabled = false;
+  // Fraction in [0, 1] of velocity_limit used as minimum headroom.
+  double fraction = 0.10;
+  // Margin threshold (same units as position margins) above which headroom can
+  // be injected. Prevents pushing toward an already-active limit.
+  double activation_margin = 0.01;
+};
+
 struct TorsoPoseConstraintOptions {
   bool enabled = false;
   std::string frame_name;
@@ -156,13 +166,13 @@ struct TorsoPoseConstraintOptions {
   // acceleration_limits units: [m/s^2, m/s^2, m/s^2, rad/s^2, rad/s^2, rad/s^2]
   Eigen::VectorXd velocity_limits = Eigen::VectorXd::Constant(6, 0.5);
   Eigen::VectorXd acceleration_limits = Eigen::VectorXd::Constant(6, 1.0);
-  // Optional velocity-box softening for torso pose-bound rows only.
-  // When enabled, preserve a minimum velocity headroom (fraction of
-  // velocity_limits) away from nearby limits to reduce abrupt scale collapse
-  // in hierarchical solves. Disabled by default for backward compatibility.
+  // Shared velocity-box headroom policy for torso pose-bound rows.
+  VelocityBoxHeadroomPolicy velocity_box_headroom;
+
+  // Deprecated alias fields retained for backward compatibility.
+  // These map to velocity_box_headroom.enabled/fraction in solve_position().
+  // New code should use velocity_box_headroom.
   bool pose_bound_softening_enabled = false;
-  // Fraction in [0, 1] of velocity_limits used as minimum torso-row headroom
-  // when softening is enabled.
   double pose_bound_softening_fraction = 0.10;
 };
 
