@@ -65,6 +65,7 @@ build = { cmd = "pip install --no-build-isolation .", depends-on = [
 ] }
 test = "pytest test/"
 test-verbose = "pytest test/ -v"
+verify-agent = "python scripts/verify_changed.py --run"
 # GPU solver tests (requires CUDA)
 test-gpu = "EMBODIK_GPU_TESTS=1 pytest test/test_gpu_solver.py test/test_gpu_collision.py -v"
 # GPU benchmarks

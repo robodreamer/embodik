@@ -257,7 +257,7 @@ Pinocchio’s CMake dependencies expect URDF CMake configs on the system. Instal
 brew install urdfdom_headers urdfdom
 ```
 
-Keep `CMAKE_PREFIX_PATH` as **`${PIN_PREFIX}:$(brew --prefix)`** (see [macOS (Homebrew)](#macos-homebrew-pip--sdist-builds)).
+Keep `CMAKE_PREFIX_PATH` as **`${PIN_PREFIX}:$(brew --prefix)`** (see the `macOS (Homebrew): pip / sdist builds` section above).
 
 ### `'cstddef' file not found` / `'cmath' file not found` (macOS)
 
