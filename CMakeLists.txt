@@ -8,6 +8,20 @@ find_package(Python REQUIRED COMPONENTS Interpreter)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# macOS + Xcode CLT: Clang searches an incomplete libc++ under CommandLineTools before the SDK,
+# which breaks <cmath> / std headers. Prefer the active macOS SDK's libc++ (Pixi, local pip, CI).
+if(APPLE)
+    execute_process(
+        COMMAND xcrun --sdk macosx --show-sdk-path
+        OUTPUT_VARIABLE _EMBODIK_MACOS_SDK
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+    )
+    if(_EMBODIK_MACOS_SDK AND EXISTS "${_EMBODIK_MACOS_SDK}/usr/include/c++/v1/cmath")
+        include_directories(SYSTEM "${_EMBODIK_MACOS_SDK}/usr/include/c++/v1")
+    endif()
+endif()
+
 # Options
 option(BUILD_PYTHON_BINDINGS "Build Python bindings" ON)
 option(BUILD_TESTS "Build unit tests" ON)

@@ -250,8 +250,11 @@ curl -fsSL https://pixi.sh/install.sh | bash
 ```bash
 git clone https://github.com/robodreamer/embodik.git
 cd embodik
+pixi install    # optional first time; `pixi run install` will solve the env if needed
 pixi run install
 ```
+
+**macOS:** Install Xcode command-line tools (`xcode-select --install`). EmbodiK’s `CMakeLists.txt` adds the active macOS SDK’s `libc++` include directory on Apple platforms so standard headers like `<cmath>` resolve with Command Line Tools (same class of issue as the manual `CXXFLAGS` workaround for pip-only installs).
 
 That's it! Pixi automatically:
 - ✅ Installs all system dependencies (CMake, Eigen, Pinocchio, nanobind, etc.)
