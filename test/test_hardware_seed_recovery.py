@@ -194,7 +194,9 @@ def _setup_dual_iiwa_stall_case():
     if dbg is None or not np.isfinite(dbg.distance):
         return None
 
-    min_dist = 0.05
+    # Use a deliberately strict collision margin to force a stall regime in the
+    # baseline path; this makes stall-handler benefit measurable and stable.
+    min_dist = 0.35
     solver.configure_collision_constraint(
         min_distance=min_dist, include_pairs=[], exclude_pairs=list(exclusions)
     )

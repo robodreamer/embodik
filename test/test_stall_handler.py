@@ -195,7 +195,9 @@ def _setup_dual_iiwa_stall():
     if dbg is None or not np.isfinite(dbg.distance):
         return None
 
-    min_dist = 0.05
+    # Keep this scenario in a true stall regime so repeated threshold crossings
+    # are observable under strict assertions.
+    min_dist = 0.35
     solver.configure_collision_constraint(
         min_distance=min_dist, include_pairs=[], exclude_pairs=list(excl),
     )
@@ -745,7 +747,9 @@ def _setup_dual_iiwa_body_stall():
     if dbg is None or not np.isfinite(dbg.distance):
         return None
 
-    min_dist = 0.05
+    # Keep this scenario in a true stall regime so repeated threshold crossings
+    # are observable under strict assertions.
+    min_dist = 0.35
     solver.configure_collision_constraint(
         min_distance=min_dist, include_pairs=[], exclude_pairs=list(excl),
     )

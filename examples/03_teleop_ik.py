@@ -104,9 +104,16 @@ WIRELESS_BUTTON_MAPPINGS = {
 
 # Default numeric constants
 DEFAULT_SOLVER_DT = 0.01
-DEFAULT_POS_GAIN = 1e2
-DEFAULT_ROT_GAIN = 1e2
+DEFAULT_POS_GAIN = 10.0
+DEFAULT_ROT_GAIN = 10.0
 DEFAULT_NULLSPACE_GAIN = 1e-3
+DEFAULT_TORSO_ORIENTATION_GAIN = 5e-2
+DEFAULT_TORSO_POSE_VEL_LIMIT = 0.5
+DEFAULT_TORSO_POSE_ACC_LIMIT = 1.0
+DEFAULT_TORSO_POSE_HALF_RANGE = np.array(
+    [0.08, 0.08, 0.08, np.deg2rad(12.0), np.deg2rad(12.0), np.deg2rad(12.0)],
+    dtype=float,
+)
 DEFAULT_COLLISION_MIN_DISTANCE = 0.05
 COLLISION_TUNING_OPTIONS = ("speed", "balanced", "precise")
 
@@ -215,6 +222,32 @@ def _apply_collision_tuning_mode(
             solver.enable_collision_pair_cache(True, 100, 0.03, 128)
         if hasattr(solver, "set_collision_refinement_time_budget_us"):
             solver.set_collision_refinement_time_budget_us(300)
+
+
+def _resolve_torso_frame(
+    robot: embodik.RobotModel,
+    explicit_frame: Optional[str],
+    ee_frame: str,
+) -> Optional[str]:
+    if explicit_frame:
+        return explicit_frame if robot.has_frame(explicit_frame) else None
+    candidates = [
+        "torso",
+        "torso_link",
+        "base_link",
+        "pelvis",
+        "root_link",
+    ]
+    frame_names = list(robot.get_frame_names())
+    frame_lookup = set(frame_names)
+    for name in candidates:
+        if name in frame_lookup and name != ee_frame:
+            return name
+    for name in frame_names:
+        lower = name.lower()
+        if ("torso" in lower or "pelvis" in lower or "base" in lower) and name != ee_frame:
+            return name
+    return None
 
 
 # -----------------------------------------------------------------------------
@@ -433,7 +466,18 @@ class IKResult:
 class TeleopIKBackend:
     """IK backend for teleop with collision avoidance."""
 
-    def __init__(self, cfg: RobotConfig, enable_collision: bool = True):
+    def __init__(
+        self,
+        cfg: RobotConfig,
+        enable_collision: bool = True,
+        enable_torso_upright: bool = True,
+        enable_torso_pose_constraints: bool = False,
+        torso_frame_name: Optional[str] = None,
+        torso_pose_half_range: Optional[np.ndarray] = None,
+        torso_pose_lower_bounds: Optional[np.ndarray] = None,
+        torso_pose_upper_bounds: Optional[np.ndarray] = None,
+        nullspace_joint_weights: Optional[np.ndarray] = None,
+    ):
         self.cfg = cfg
         ensure_ros_package_path(cfg.urdf_path)
         self.robot = embodik.RobotModel(str(cfg.urdf_path), floating_base=False)
@@ -455,6 +499,39 @@ class TeleopIKBackend:
             except Exception as exc:
                 print(f"Warning: failed to apply collision exclusions: {exc}")
         self._collision_enabled = False
+        self.enable_torso_upright = bool(enable_torso_upright)
+        self.enable_torso_pose_constraints = bool(enable_torso_pose_constraints)
+        self.torso_frame_name = _resolve_torso_frame(
+            self.robot, torso_frame_name, self.cfg.target_link
+        )
+        if self.enable_torso_upright and self.torso_frame_name is None:
+            print("Warning: torso upright enabled but no torso frame was resolved")
+        self.torso_pose_half_range = (
+            torso_pose_half_range.copy()
+            if torso_pose_half_range is not None
+            else DEFAULT_TORSO_POSE_HALF_RANGE.copy()
+        )
+        self.torso_pose_lower_bounds = (
+            torso_pose_lower_bounds.copy()
+            if torso_pose_lower_bounds is not None
+            else None
+        )
+        self.torso_pose_upper_bounds = (
+            torso_pose_upper_bounds.copy()
+            if torso_pose_upper_bounds is not None
+            else None
+        )
+        self.nullspace_joint_weights = (
+            nullspace_joint_weights.copy()
+            if nullspace_joint_weights is not None
+            else None
+        )
+        self._torso_target_orientation: Optional[np.ndarray] = None
+        # World-frame 4x4 reference for torso pose *box* constraints only.
+        # solve_position() defaults to seed torso pose if unset; in teleop the seed
+        # moves every tick, which would let the box drift. We pin to the torso pose
+        # when constraints are first active (startup, after reset, or re-enabled in GUI).
+        self._torso_pose_bounds_reference_homogeneous: Optional[np.ndarray] = None
 
         # Initialize configuration
         self.default_arm = cfg.default_configuration.copy()
@@ -468,6 +545,12 @@ class TeleopIKBackend:
         self.default_full[:self.arm_dofs] = self.default_arm
         self.q = self.default_full.copy()
         self.robot.update_configuration(self.q)
+        if self.torso_frame_name is not None:
+            torso_pose = self.robot.get_frame_pose(self.torso_frame_name)
+            self._torso_target_orientation = np.asarray(torso_pose.rotation, dtype=float)
+
+        if self.enable_torso_pose_constraints and self.torso_frame_name is not None:
+            self._refresh_torso_pose_bounds_reference()
 
         # Joint limits
         lower, upper = self.robot.get_joint_limits()
@@ -477,19 +560,40 @@ class TeleopIKBackend:
         # Initial pose
         self.initial_pose = self.get_pose()
 
+        # Keep explicit task hierarchy for solve_position_step-compatible debugging.
         self.frame_task = self.solver.add_frame_task("ee_task", self.cfg.target_link)
         self.frame_task.priority = 0
         self.frame_task.weight = 1.0
+        self.torso_task = None
+        if self.torso_frame_name is not None:
+            self.torso_task = self.solver.add_frame_task(
+                "torso_upright_task",
+                self.torso_frame_name,
+                embodik.TaskType.FRAME_ORIENTATION,
+            )
+            self.torso_task.priority = 1
+            self.torso_task.weight = DEFAULT_TORSO_ORIENTATION_GAIN
+            self.torso_task.set_orientation_mask(np.array([1.0, 1.0, 0.0], dtype=float))
+            if self._torso_target_orientation is not None:
+                self.torso_task.set_target_orientation(self._torso_target_orientation)
 
         self.nullspace_task = self.solver.add_posture_task("posture_task")
-        self.nullspace_task.priority = 1
+        self.nullspace_task.priority = 2 if self.torso_task is not None else 1
         self.nullspace_task.weight = 0.0
         self.nullspace_task.set_target_configuration(self.q.copy())
         self.nullspace_task.set_controlled_joint_indices([])
-
-        self._step_opts = embodik.PositionStepOptions()
         if enable_collision:
             self.enable_self_collision(True)
+
+    def _refresh_torso_pose_bounds_reference(self) -> None:
+        """Snapshot torso frame in world as 4x4 homogeneous (pose-bounds anchor)."""
+        if self.torso_frame_name is None:
+            self._torso_pose_bounds_reference_homogeneous = None
+            return
+        pose = self.robot.get_frame_pose(self.torso_frame_name)
+        self._torso_pose_bounds_reference_homogeneous = np.asarray(
+            pose.homogeneous(), dtype=float
+        ).copy()
 
     def get_pose(self) -> pin.SE3:
         """Get current end-effector pose."""
@@ -515,23 +619,68 @@ class TeleopIKBackend:
         max_steps: int = 1,
     ) -> IKResult:
         """Solve one IK step toward target pose."""
-        self.frame_task.solve_mode = (
+        if not self.enable_torso_pose_constraints:
+            self._torso_pose_bounds_reference_homogeneous = None
+
+        options = embodik.PositionIKOptions()
+        options.max_iterations = int(max_steps)
+        options.dt = float(self.solver.dt)
+        options.position_gain = float(pos_gain)
+        options.orientation_gain = float(rot_gain)
+        options.primary_solve_mode = (
             embodik.TaskSolveMode.MIN_ERROR
             if ee_mode == "MIN_ERROR"
             else embodik.TaskSolveMode.SCALE
         )
-        self.frame_task.allow_min_error_fallback = bool(ee_fallback)
-        self.nullspace_task.set_controlled_joint_indices(list(range(self.arm_dofs)))
-        self.nullspace_task.set_target_configuration(self.default_full)
-        self.nullspace_task.weight = nullspace_gain
+        options.primary_allow_min_error_fallback = bool(ee_fallback)
+        options.nullspace_bias = self.default_full
+        options.nullspace_gain = float(nullspace_gain)
+        options.nullspace_active_joints = list(range(self.arm_dofs))
+        if self.nullspace_joint_weights is not None:
+            options.nullspace_joint_weights = self.nullspace_joint_weights
 
-        self._step_opts.position_gain = pos_gain
-        self._step_opts.orientation_gain = rot_gain
-        self._step_opts.max_steps = max_steps
+        torso_enabled = self.enable_torso_upright and self.torso_frame_name is not None
+        if torso_enabled:
+            torso = embodik.TorsoPoseConstraintOptions()
+            torso.enabled = True
+            torso.frame_name = self.torso_frame_name
+            if self._torso_target_orientation is not None:
+                torso.target_orientation = self._torso_target_orientation
+            torso.orientation_mask = np.array([1.0, 1.0, 0.0], dtype=float)
+            torso.orientation_gain = DEFAULT_TORSO_ORIENTATION_GAIN
+            if self.enable_torso_pose_constraints:
+                if (
+                    self.torso_pose_lower_bounds is not None
+                    and self.torso_pose_upper_bounds is not None
+                ):
+                    torso.pose_lower_bounds = np.asarray(
+                        self.torso_pose_lower_bounds, dtype=float
+                    )
+                    torso.pose_upper_bounds = np.asarray(
+                        self.torso_pose_upper_bounds, dtype=float
+                    )
+                else:
+                    half_range = np.asarray(self.torso_pose_half_range, dtype=float)
+                    torso.pose_lower_bounds = -half_range
+                    torso.pose_upper_bounds = half_range
+                torso.pose_axis_mask = np.ones(6, dtype=float)
+                torso.velocity_limits = np.full(6, DEFAULT_TORSO_POSE_VEL_LIMIT, dtype=float)
+                torso.acceleration_limits = np.full(
+                    6, DEFAULT_TORSO_POSE_ACC_LIMIT, dtype=float
+                )
+                if self._torso_pose_bounds_reference_homogeneous is None:
+                    self._refresh_torso_pose_bounds_reference()
+                if self._torso_pose_bounds_reference_homogeneous is not None:
+                    torso.pose_bounds_reference_pose = (
+                        self._torso_pose_bounds_reference_homogeneous
+                    )
+            options.torso_constraint = torso
 
         ik_start = time.perf_counter()
-        result = self.solver.solve_position_step(
-            self.q, target, "ee_task", self._step_opts
+        _h = target.homogeneous
+        target_pose = np.asarray(_h() if callable(_h) else _h, dtype=float)
+        result = self.solver.solve_position(
+            self.q, target_pose, self.cfg.target_link, options
         )
         elapsed_ms = (time.perf_counter() - ik_start) * 1000.0
 
@@ -539,6 +688,7 @@ class TeleopIKBackend:
             embodik.SolverStatus.SUCCESS,
             embodik.SolverStatus.INFEASIBLE,
             embodik.SolverStatus.NUMERICAL_ERROR,
+            embodik.SolverStatus.NO_PROGRESS,
         ):
             self.q = np.clip(np.array(result.q_solution), self.lower, self.upper)
             self.robot.update_configuration(self.q)
@@ -555,6 +705,13 @@ class TeleopIKBackend:
         """Reset to default configuration."""
         self.q = self.default_full.copy()
         self.robot.update_configuration(self.q)
+        if self.torso_frame_name is not None:
+            torso_pose = self.robot.get_frame_pose(self.torso_frame_name)
+            self._torso_target_orientation = np.asarray(torso_pose.rotation, dtype=float)
+        if self.enable_torso_pose_constraints and self.torso_frame_name is not None:
+            self._refresh_torso_pose_bounds_reference()
+        else:
+            self._torso_pose_bounds_reference_homogeneous = None
         return self.get_pose()
 
     def enable_self_collision(
@@ -601,8 +758,49 @@ def run_teleop(cfg: RobotConfig, args: argparse.Namespace) -> None:
     - send_robot_command(): Compute IK and send commands
     """
 
+    def _parse_csv6(raw: str, flag_name: str) -> np.ndarray:
+        arr = np.array([float(v.strip()) for v in raw.split(",") if v.strip()], dtype=float)
+        if arr.size != 6:
+            raise ValueError(f"{flag_name} must provide 6 comma-separated values")
+        return arr
+
     # Initialize IK backend
-    backend = TeleopIKBackend(cfg, enable_collision=not args.no_collision)
+    nullspace_joint_weights = None
+    if args.nullspace_joint_weights:
+        tokens = [t.strip() for t in args.nullspace_joint_weights.split(",") if t.strip()]
+        parsed = np.array([float(t) for t in tokens], dtype=float)
+        nullspace_joint_weights = parsed
+
+    torso_pose_half_range = _parse_csv6(
+        args.torso_pose_half_range, "--torso-pose-half-range"
+    )
+    torso_pose_lower_bounds = (
+        _parse_csv6(args.torso_pose_lower_bounds, "--torso-pose-lower-bounds")
+        if args.torso_pose_lower_bounds
+        else None
+    )
+    torso_pose_upper_bounds = (
+        _parse_csv6(args.torso_pose_upper_bounds, "--torso-pose-upper-bounds")
+        if args.torso_pose_upper_bounds
+        else None
+    )
+    if (torso_pose_lower_bounds is None) != (torso_pose_upper_bounds is None):
+        raise ValueError(
+            "Set both --torso-pose-lower-bounds and --torso-pose-upper-bounds "
+            "to use asymmetric limits"
+        )
+
+    backend = TeleopIKBackend(
+        cfg,
+        enable_collision=not args.no_collision,
+        enable_torso_upright=not args.disable_torso_upright,
+        enable_torso_pose_constraints=args.enable_torso_pose_constraints,
+        torso_frame_name=args.torso_frame,
+        torso_pose_half_range=torso_pose_half_range,
+        torso_pose_lower_bounds=torso_pose_lower_bounds,
+        torso_pose_upper_bounds=torso_pose_upper_bounds,
+        nullspace_joint_weights=nullspace_joint_weights,
+    )
     print(f"Loaded robot: {cfg.display_name}")
     print(f"Target link: {cfg.target_link}")
     print(f"DOFs: {backend.arm_dofs}")
@@ -664,6 +862,7 @@ def run_teleop(cfg: RobotConfig, args: argparse.Namespace) -> None:
         scale_slider = server.gui.add_slider("Position Scale", min=0.5, max=3.0, initial_value=args.scale, step=0.1)
         pos_gain = server.gui.add_slider("Position Gain", min=0.1, max=200.0, initial_value=DEFAULT_POS_GAIN, step=0.1)
         rot_gain = server.gui.add_slider("Orientation Gain", min=0.1, max=200.0, initial_value=DEFAULT_ROT_GAIN, step=0.1)
+        nullspace_gain = server.gui.add_slider("Nullspace Gain", min=0.0, max=1.0, initial_value=DEFAULT_NULLSPACE_GAIN, step=0.0005)
         iterations_slider = server.gui.add_slider("IK Iterations", min=1, max=20, initial_value=1, step=1)
         ee_mode_dropdown = server.gui.add_dropdown(
             "EE Solve Mode",
@@ -692,6 +891,16 @@ def run_teleop(cfg: RobotConfig, args: argparse.Namespace) -> None:
             step=1,
         )
         manual_mode = server.gui.add_checkbox("Manual Mode (use transform controls)", initial_value=not controller_connected)
+        torso_upright_checkbox = server.gui.add_checkbox(
+            "Torso Upright Secondary",
+            initial_value=backend.enable_torso_upright,
+            disabled=backend.torso_frame_name is None,
+        )
+        torso_pose_constraints_checkbox = server.gui.add_checkbox(
+            "Torso Pose Constraint",
+            initial_value=backend.enable_torso_pose_constraints,
+            disabled=backend.torso_frame_name is None,
+        )
         reset_button = server.gui.add_button("Reset Robot & Controller")
 
     with server.gui.add_folder("Controller Info", expand_by_default=False):
@@ -898,11 +1107,16 @@ def run_teleop(cfg: RobotConfig, args: argparse.Namespace) -> None:
 
             # Only send commands when streaming (like teleop_stack)
             if controller.state.streaming or manual_mode.value:
+                backend.enable_torso_upright = bool(torso_upright_checkbox.value)
+                backend.enable_torso_pose_constraints = bool(
+                    torso_pose_constraints_checkbox.value
+                )
                 # Solve IK toward goal pose
                 result = backend.solve_step(
                     goal_pose,
                     pos_gain=pos_gain.value,
                     rot_gain=rot_gain.value,
+                    nullspace_gain=nullspace_gain.value,
                     ee_mode=ee_mode_dropdown.value,
                     ee_fallback=ee_fallback_checkbox.value,
                     max_steps=int(iterations_slider.value),
@@ -964,6 +1178,52 @@ def parse_args() -> argparse.Namespace:
         "--no-collision",
         action="store_true",
         help="Disable collision avoidance",
+    )
+    parser.add_argument(
+        "--torso-frame",
+        type=str,
+        default="",
+        help="Optional torso frame name override for upright/torso constraints",
+    )
+    parser.add_argument(
+        "--disable-torso-upright",
+        action="store_true",
+        help="Disable secondary torso upright objective",
+    )
+    parser.add_argument(
+        "--enable-torso-pose-constraints",
+        action="store_true",
+        help="Enable optional torso pose bounds",
+    )
+    parser.add_argument(
+        "--torso-pose-half-range",
+        type=str,
+        default="0.08,0.08,0.08,0.20944,0.20944,0.20944",
+        help="Comma-separated torso pose half ranges [x,y,z,rx,ry,rz] "
+        "with units [m,m,m,rad,rad,rad]",
+    )
+    parser.add_argument(
+        "--torso-pose-lower-bounds",
+        type=str,
+        default="",
+        help="Optional comma-separated 6D lower torso pose bounds "
+        "[x,y,z,rx,ry,rz] with units [m,m,m,rad,rad,rad] "
+        "(overrides symmetric half-range when paired)",
+    )
+    parser.add_argument(
+        "--torso-pose-upper-bounds",
+        type=str,
+        default="",
+        help="Optional comma-separated 6D upper torso pose bounds "
+        "[x,y,z,rx,ry,rz] with units [m,m,m,rad,rad,rad] "
+        "(overrides symmetric half-range when paired)",
+    )
+    parser.add_argument(
+        "--nullspace-joint-weights",
+        type=str,
+        default="",
+        help="Optional comma-separated per-joint nullspace weights "
+        "(length must match arm DoFs)",
     )
     return parser.parse_args()
 
