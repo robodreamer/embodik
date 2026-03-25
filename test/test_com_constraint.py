@@ -407,6 +407,55 @@ class TestVelocityAccelerationLimits:
         solver.clear_tasks()
         solver.clear_com_constraint()
 
+    def test_solve_position_respects_com_constraint(self, robot, solver):
+        """solve_position should include configured CoM constraint rows."""
+        shifted_square = np.array([[0.05, -0.3], [0.30, -0.3], [0.30, 0.3], [0.05, 0.3]])
+        x_min = 0.05
+        q0 = np.zeros(robot.nq)
+
+        ee_pose = robot.get_frame_pose("end_effector")
+        target = np.eye(4)
+        target[:3, :3] = np.asarray(ee_pose.rotation)
+        target[:3, 3] = np.asarray(ee_pose.translation) + np.array([-0.15, 0.0, 0.0])
+
+        opts = embodik.PositionIKOptions()
+        opts.max_iterations = 40
+        opts.position_gain = 20.0
+        opts.orientation_gain = 20.0
+
+        solver.clear_com_constraint()
+        out_free = solver.solve_position(q0, target, "end_effector", opts)
+        assert out_free.status in (
+            embodik.SolverStatus.SUCCESS,
+            embodik.SolverStatus.NO_PROGRESS,
+            embodik.SolverStatus.INFEASIBLE,
+        )
+        robot.update_configuration(np.asarray(out_free.q_solution))
+        violation_free = max(0.0, x_min - float(robot.get_com_position()[0]))
+
+        solver.configure_com_constraint(
+            shifted_square,
+            margin=0.0,
+            com_vel_max=0.4,
+            com_acc_max=0.1,
+            use_acceleration_limits=True,
+        )
+        out_constrained = solver.solve_position(q0, target, "end_effector", opts)
+        assert out_constrained.status in (
+            embodik.SolverStatus.SUCCESS,
+            embodik.SolverStatus.NO_PROGRESS,
+            embodik.SolverStatus.INFEASIBLE,
+        )
+        robot.update_configuration(np.asarray(out_constrained.q_solution))
+        violation_constrained = max(0.0, x_min - float(robot.get_com_position()[0]))
+
+        assert violation_constrained <= violation_free + 1e-9, (
+            f"Expected solve_position CoM constraint to reduce/equal violation: "
+            f"free={violation_free:.6f}, constrained={violation_constrained:.6f}"
+        )
+
+        solver.clear_com_constraint()
+
 
 # ===========================================================================
 # Phase 3.5 – Frame transform

@@ -3286,6 +3286,18 @@ PositionIKResult KinematicsSolver::solve_position(
         }
       }
     }
+    std::optional<ComConstraintResult> com_constraint_result = std::nullopt;
+    if (com_constraint_.has_value() && com_constraint_->enabled) {
+      com_constraint_result = compute_com_constraint();
+    }
+    if (com_constraint_result.has_value() &&
+        !options.excluded_joint_indices.empty()) {
+      for (int idx : options.excluded_joint_indices) {
+        if (idx >= 0 && idx < com_constraint_result->jacobian.cols()) {
+          com_constraint_result->jacobian.col(idx).setZero();
+        }
+      }
+    }
 
     Eigen::MatrixXd torso_constraint_jacobian;
     Eigen::VectorXd torso_constraint_lower;
@@ -3366,6 +3378,10 @@ PositionIKResult KinematicsSolver::solve_position(
       num_constraints +=
           static_cast<int>(collision_constraint_result->jacobian.rows());
     }
+    if (com_constraint_result.has_value()) {
+      num_constraints +=
+          static_cast<int>(com_constraint_result->jacobian.rows());
+    }
     num_constraints += torso_constraint_rows;
 
     Eigen::MatrixXd C = Eigen::MatrixXd::Zero(num_constraints, robot_->nv());
@@ -3411,13 +3427,30 @@ PositionIKResult KinematicsSolver::solve_position(
       c_upper.segment(constraint_idx, collision_rows) =
           collision_constraint_result->upper_bounds;
     }
+    if (com_constraint_result.has_value()) {
+      const int com_rows = static_cast<int>(com_constraint_result->jacobian.rows());
+      const int base_rows = robot_->nv();
+      const int collision_rows =
+          collision_constraint_result.has_value()
+              ? static_cast<int>(collision_constraint_result->jacobian.rows())
+              : 0;
+      const int com_idx = base_rows + collision_rows;
+      C.block(com_idx, 0, com_rows, robot_->nv()) =
+          com_constraint_result->jacobian;
+      c_lower.segment(com_idx, com_rows) = com_constraint_result->lower_bounds;
+      c_upper.segment(com_idx, com_rows) = com_constraint_result->upper_bounds;
+    }
     if (torso_constraint_rows > 0) {
       const int base_rows = robot_->nv();
       const int collision_rows =
           collision_constraint_result.has_value()
               ? static_cast<int>(collision_constraint_result->jacobian.rows())
               : 0;
-      const int torso_idx = base_rows + collision_rows;
+      const int com_rows =
+          com_constraint_result.has_value()
+              ? static_cast<int>(com_constraint_result->jacobian.rows())
+              : 0;
+      const int torso_idx = base_rows + collision_rows + com_rows;
       C.block(torso_idx, 0, torso_constraint_rows, robot_->nv()) =
           torso_constraint_jacobian;
       c_lower.segment(torso_idx, torso_constraint_rows) =

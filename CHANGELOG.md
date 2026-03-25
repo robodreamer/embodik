@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.2] - 2026-03-25
+
+### Fixed
+- **`solve_position` CoM constraint gap**: position IK now includes configured CoM support-polygon inequality rows in its constraint stack (including excluded-joint handling), matching expected CoM-limit behavior already present in velocity IK.
+- **Regression coverage for CoM-constrained position IK**: added a targeted test in `test/test_com_constraint.py` to verify CoM-constraint configuration reduces or matches unconstrained support-polygon violation in `solve_position`.
+
 ## [0.18.1] - 2026-03-23
 
 ### Added
