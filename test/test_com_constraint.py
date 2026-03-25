@@ -456,6 +456,81 @@ class TestVelocityAccelerationLimits:
 
         solver.clear_com_constraint()
 
+    def test_velocity_and_position_api_consistency_for_com_constraint(self, robot, solver):
+        """CoM constraints should improve/equal violation in both solve APIs."""
+        shifted_square = np.array([[0.05, -0.3], [0.30, -0.3], [0.30, 0.3], [0.05, 0.3]])
+        x_min = 0.05
+        q0 = np.zeros(robot.nq)
+
+        # Velocity API check (single-step integrated update).
+        task = solver.add_frame_task("ee_consistency", "end_effector")
+        ee_pose = robot.get_frame_pose("end_effector")
+        task.set_target_pose(ee_pose.translation + np.array([-0.1, 0.0, 0.0]), ee_pose.rotation)
+        task.weight = 1.0
+        robot.update_configuration(q0)
+        solver.clear_com_constraint()
+        vel_free = solver.solve_velocity(q0)
+        assert vel_free.status in (embodik.SolverStatus.SUCCESS, embodik.SolverStatus.INFEASIBLE)
+        q_vel_free = q0 + np.asarray(vel_free.joint_velocities) * solver.dt
+        robot.update_configuration(q_vel_free)
+        vel_violation_free = max(0.0, x_min - float(robot.get_com_position()[0]))
+
+        robot.update_configuration(q0)
+        solver.configure_com_constraint(
+            shifted_square,
+            margin=0.0,
+            com_vel_max=0.4,
+            com_acc_max=0.1,
+            use_acceleration_limits=True,
+        )
+        vel_constrained = solver.solve_velocity(q0)
+        assert vel_constrained.status in (embodik.SolverStatus.SUCCESS, embodik.SolverStatus.INFEASIBLE)
+        q_vel_constrained = q0 + np.asarray(vel_constrained.joint_velocities) * solver.dt
+        robot.update_configuration(q_vel_constrained)
+        vel_violation_constrained = max(0.0, x_min - float(robot.get_com_position()[0]))
+        assert vel_violation_constrained <= vel_violation_free + 1e-9
+
+        # Position API check.
+        target = np.eye(4)
+        target[:3, :3] = np.asarray(ee_pose.rotation)
+        target[:3, 3] = np.asarray(ee_pose.translation) + np.array([-0.15, 0.0, 0.0])
+        opts = embodik.PositionIKOptions()
+        opts.max_iterations = 40
+        opts.position_gain = 20.0
+        opts.orientation_gain = 20.0
+
+        robot.update_configuration(q0)
+        solver.clear_com_constraint()
+        pos_free = solver.solve_position(q0, target, "end_effector", opts)
+        assert pos_free.status in (
+            embodik.SolverStatus.SUCCESS,
+            embodik.SolverStatus.NO_PROGRESS,
+            embodik.SolverStatus.INFEASIBLE,
+        )
+        robot.update_configuration(np.asarray(pos_free.q_solution))
+        pos_violation_free = max(0.0, x_min - float(robot.get_com_position()[0]))
+
+        robot.update_configuration(q0)
+        solver.configure_com_constraint(
+            shifted_square,
+            margin=0.0,
+            com_vel_max=0.4,
+            com_acc_max=0.1,
+            use_acceleration_limits=True,
+        )
+        pos_constrained = solver.solve_position(q0, target, "end_effector", opts)
+        assert pos_constrained.status in (
+            embodik.SolverStatus.SUCCESS,
+            embodik.SolverStatus.NO_PROGRESS,
+            embodik.SolverStatus.INFEASIBLE,
+        )
+        robot.update_configuration(np.asarray(pos_constrained.q_solution))
+        pos_violation_constrained = max(0.0, x_min - float(robot.get_com_position()[0]))
+        assert pos_violation_constrained <= pos_violation_free + 1e-9
+
+        solver.clear_tasks()
+        solver.clear_com_constraint()
+
 
 # ===========================================================================
 # Phase 3.5 – Frame transform
