@@ -145,6 +145,120 @@ static void project_task_jacobians_away_from_violated_rows(
   }
 }
 
+struct ConstraintBlock {
+  Eigen::MatrixXd jacobian;
+  Eigen::VectorXd lower_bounds;
+  Eigen::VectorXd upper_bounds;
+};
+
+template <typename IntContainer>
+static void zero_excluded_columns(Eigen::MatrixXd &jacobian,
+                                  const IntContainer &excluded_indices) {
+  for (int idx : excluded_indices) {
+    if (idx >= 0 && idx < jacobian.cols()) {
+      jacobian.col(idx).setZero();
+    }
+  }
+}
+
+static int append_constraint_block(Eigen::MatrixXd &C, Eigen::VectorXd &c_lower,
+                                   Eigen::VectorXd &c_upper, int constraint_idx,
+                                   int nv, const Eigen::MatrixXd &jacobian,
+                                   const Eigen::VectorXd &lower_bounds,
+                                   const Eigen::VectorXd &upper_bounds) {
+  const int rows = static_cast<int>(jacobian.rows());
+  C.block(constraint_idx, 0, rows, nv) = jacobian;
+  c_lower.segment(constraint_idx, rows) = lower_bounds;
+  c_upper.segment(constraint_idx, rows) = upper_bounds;
+  return constraint_idx + rows;
+}
+
+template <typename IntContainer>
+static std::optional<ConstraintBlock> build_torso_pose_bound_rows(
+    const KinematicsSolver &solver, const RobotModel &robot,
+    const TorsoPoseConstraintOptions &torso_opts,
+    const pinocchio::SE3 &torso_pose_bounds_reference, double dt,
+    const IntContainer &excluded_indices) {
+  if (!torso_opts.enabled || !torso_opts.pose_lower_bounds.has_value() ||
+      !torso_opts.pose_upper_bounds.has_value() ||
+      torso_opts.pose_axis_mask.size() != 6 ||
+      torso_opts.velocity_limits.size() != 6 ||
+      torso_opts.acceleration_limits.size() != 6 ||
+      !robot.has_frame(torso_opts.frame_name)) {
+    return std::nullopt;
+  }
+
+  const pinocchio::SE3 torso_pose = robot.get_frame_pose(torso_opts.frame_name);
+  const Matrix6Xd torso_jacobian_full =
+      robot.get_frame_jacobian(torso_opts.frame_name);
+  Eigen::VectorXd torso_rel_state = Eigen::VectorXd::Zero(6);
+  torso_rel_state.head<3>() =
+      torso_pose.translation() - torso_pose_bounds_reference.translation();
+  torso_rel_state.tail<3>() = pinocchio::log3(
+      torso_pose_bounds_reference.rotation().transpose() * torso_pose.rotation());
+
+  int torso_constraint_rows = 0;
+  for (int i = 0; i < 6; ++i) {
+    if (torso_opts.pose_axis_mask.coeff(i) > 0.5) {
+      ++torso_constraint_rows;
+    }
+  }
+  if (torso_constraint_rows <= 0) {
+    return std::nullopt;
+  }
+
+  ConstraintBlock result;
+  result.jacobian = Eigen::MatrixXd::Zero(torso_constraint_rows, robot.nv());
+  result.lower_bounds = Eigen::VectorXd::Constant(torso_constraint_rows, -1e10);
+  result.upper_bounds = Eigen::VectorXd::Constant(torso_constraint_rows, 1e10);
+
+  int row = 0;
+  for (int i = 0; i < 6; ++i) {
+    if (torso_opts.pose_axis_mask.coeff(i) <= 0.5) {
+      continue;
+    }
+    double slack_lower =
+        torso_rel_state(i) - torso_opts.pose_lower_bounds->coeff(i);
+    double slack_upper =
+        torso_opts.pose_upper_bounds->coeff(i) - torso_rel_state(i);
+    const double torso_slack_eps =
+        (i < 3) ? kTorsoBoundSlackEpsTrans : kTorsoBoundSlackEpsRot;
+    if (slack_lower < 0.0 && slack_lower >= -torso_slack_eps) {
+      slack_lower = 0.0;
+    }
+    if (slack_upper < 0.0 && slack_upper >= -torso_slack_eps) {
+      slack_upper = 0.0;
+    }
+    const bool torso_headroom_enabled =
+        torso_opts.velocity_box_headroom.enabled ||
+        torso_opts.pose_bound_softening_enabled;
+    const double torso_headroom_fraction =
+        torso_opts.velocity_box_headroom.enabled
+            ? torso_opts.velocity_box_headroom.fraction
+            : torso_opts.pose_bound_softening_fraction;
+    const double torso_headroom_activation_margin =
+        torso_opts.velocity_box_headroom.enabled
+            ? torso_opts.velocity_box_headroom.activation_margin
+            : kMarginThreshold;
+    auto [lower_limit, upper_limit] = solver.calculate_velocity_box_constraint(
+        slack_lower, slack_upper, torso_opts.velocity_limits.coeff(i),
+        torso_opts.acceleration_limits.coeff(i), dt,
+        torso_headroom_enabled
+            ? torso_headroom_fraction * torso_opts.velocity_limits.coeff(i)
+            : -1.0,
+        torso_headroom_activation_margin);
+    result.jacobian.row(row) = torso_jacobian_full.row(i);
+    result.lower_bounds(row) = lower_limit;
+    result.upper_bounds(row) = upper_limit;
+    ++row;
+  }
+
+  if (!excluded_indices.empty()) {
+    zero_excluded_columns(result.jacobian, excluded_indices);
+  }
+  return result;
+}
+
 static void sanitize_solver_inputs(std::vector<Eigen::VectorXd> &goals,
                                    std::vector<Eigen::MatrixXd> &jacobians,
                                    Eigen::MatrixXd &C, Eigen::VectorXd &c_lower,
@@ -2435,9 +2549,7 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
     result.collision_budget_exhausted = last_collision_budget_exhausted_;
   }
   if (collision_constraint_result.has_value() && !excluded_union.empty()) {
-    for (int idx : excluded_union) {
-      collision_constraint_result->jacobian.col(idx).setZero();
-    }
+    zero_excluded_columns(collision_constraint_result->jacobian, excluded_union);
   }
 
   // Task normal projection: when a collision constraint is violated
@@ -2466,8 +2578,7 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
     com_constraint_result = compute_com_constraint();
   }
   if (com_constraint_result.has_value() && !excluded_union.empty()) {
-    for (int idx : excluded_union)
-      com_constraint_result->jacobian.col(idx).setZero();
+    zero_excluded_columns(com_constraint_result->jacobian, excluded_union);
   }
 
   // Task normal projection for violated CoM rows:
@@ -2489,8 +2600,7 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
     rel_pose_constraint_result = compute_relative_pose_constraint();
   }
   if (rel_pose_constraint_result.has_value() && !excluded_union.empty()) {
-    for (int idx : excluded_union)
-      rel_pose_constraint_result->jacobian.col(idx).setZero();
+    zero_excluded_columns(rel_pose_constraint_result->jacobian, excluded_union);
   }
   if (apply_limits && rel_pose_constraint_result.has_value()) {
     const auto &rpc = rel_pose_constraint_result.value();
@@ -2499,23 +2609,10 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
         /*outward_is_positive_projection=*/true);
   }
 
-  struct StepTorsoConstraintResult {
-    Eigen::MatrixXd jacobian;
-    Eigen::VectorXd lower_bounds;
-    Eigen::VectorXd upper_bounds;
-  };
-  std::optional<StepTorsoConstraintResult> step_torso_constraint_result =
-      std::nullopt;
+  std::optional<ConstraintBlock> step_torso_constraint_result = std::nullopt;
   if (pending_step_torso_constraint_.has_value()) {
     const auto &torso_opts = *pending_step_torso_constraint_;
-    const bool torso_has_pose_bounds =
-        torso_opts.pose_lower_bounds.has_value() &&
-        torso_opts.pose_upper_bounds.has_value();
-    if (torso_opts.enabled && torso_has_pose_bounds &&
-        torso_opts.pose_axis_mask.size() == 6 &&
-        torso_opts.velocity_limits.size() == 6 &&
-        torso_opts.acceleration_limits.size() == 6 &&
-        robot_->has_frame(torso_opts.frame_name)) {
+    if (torso_opts.enabled && robot_->has_frame(torso_opts.frame_name)) {
       pinocchio::SE3 torso_pose_bounds_reference = pinocchio::SE3::Identity();
       if (torso_opts.pose_bounds_reference_pose.has_value()) {
         const Eigen::Matrix4d &M = torso_opts.pose_bounds_reference_pose.value();
@@ -2524,78 +2621,9 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
       } else {
         torso_pose_bounds_reference = robot_->get_frame_pose(torso_opts.frame_name);
       }
-
-      const pinocchio::SE3 torso_pose = robot_->get_frame_pose(torso_opts.frame_name);
-      const Matrix6Xd torso_jacobian_full =
-          robot_->get_frame_jacobian(torso_opts.frame_name);
-      Eigen::VectorXd torso_rel_state = Eigen::VectorXd::Zero(6);
-      torso_rel_state.head<3>() =
-          torso_pose.translation() - torso_pose_bounds_reference.translation();
-      torso_rel_state.tail<3>() = pinocchio::log3(
-          torso_pose_bounds_reference.rotation().transpose() *
-          torso_pose.rotation());
-
-      int torso_constraint_rows = 0;
-      for (int i = 0; i < 6; ++i) {
-        if (torso_opts.pose_axis_mask.coeff(i) > 0.5) {
-          ++torso_constraint_rows;
-        }
-      }
-      if (torso_constraint_rows > 0) {
-        StepTorsoConstraintResult sc;
-        sc.jacobian = Eigen::MatrixXd::Zero(torso_constraint_rows, robot_->nv());
-        sc.lower_bounds = Eigen::VectorXd::Constant(torso_constraint_rows, -1e10);
-        sc.upper_bounds = Eigen::VectorXd::Constant(torso_constraint_rows, 1e10);
-
-        int row = 0;
-        for (int i = 0; i < 6; ++i) {
-          if (torso_opts.pose_axis_mask.coeff(i) <= 0.5) {
-            continue;
-          }
-          double slack_lower =
-              torso_rel_state(i) - torso_opts.pose_lower_bounds->coeff(i);
-          double slack_upper =
-              torso_opts.pose_upper_bounds->coeff(i) - torso_rel_state(i);
-          const double torso_slack_eps =
-              (i < 3) ? kTorsoBoundSlackEpsTrans : kTorsoBoundSlackEpsRot;
-          if (slack_lower < 0.0 && slack_lower >= -torso_slack_eps) {
-            slack_lower = 0.0;
-          }
-          if (slack_upper < 0.0 && slack_upper >= -torso_slack_eps) {
-            slack_upper = 0.0;
-          }
-          const bool torso_headroom_enabled =
-              torso_opts.velocity_box_headroom.enabled ||
-              torso_opts.pose_bound_softening_enabled;
-          const double torso_headroom_fraction =
-              torso_opts.velocity_box_headroom.enabled
-                  ? torso_opts.velocity_box_headroom.fraction
-                  : torso_opts.pose_bound_softening_fraction;
-          const double torso_headroom_activation_margin =
-              torso_opts.velocity_box_headroom.enabled
-                  ? torso_opts.velocity_box_headroom.activation_margin
-                  : kMarginThreshold;
-          auto [lower_limit, upper_limit] = calculate_velocity_box_constraint(
-              slack_lower, slack_upper, torso_opts.velocity_limits.coeff(i),
-              torso_opts.acceleration_limits.coeff(i), dt_,
-              torso_headroom_enabled
-                  ? torso_headroom_fraction * torso_opts.velocity_limits.coeff(i)
-                  : -1.0,
-              torso_headroom_activation_margin);
-          sc.jacobian.row(row) = torso_jacobian_full.row(i);
-          sc.lower_bounds(row) = lower_limit;
-          sc.upper_bounds(row) = upper_limit;
-          ++row;
-        }
-        if (!excluded_union.empty()) {
-          for (int idx : excluded_union) {
-            if (idx >= 0 && idx < sc.jacobian.cols()) {
-              sc.jacobian.col(idx).setZero();
-            }
-          }
-        }
-        step_torso_constraint_result = std::move(sc);
-      }
+      step_torso_constraint_result = build_torso_pose_bound_rows(
+          *this, *robot_, torso_opts, torso_pose_bounds_reference, dt_,
+          excluded_union);
     }
   }
 
@@ -2807,39 +2835,34 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
   }
 
   if (collision_constraint_result.has_value()) {
-    const auto &collision = collision_constraint_result.value();
-    int rows = static_cast<int>(collision.jacobian.rows());
-    C.block(constraint_idx, 0, rows, robot_->nv()) = collision.jacobian;
-    c_lower.segment(constraint_idx, rows) = collision.lower_bounds;
-    c_upper.segment(constraint_idx, rows) = collision.upper_bounds;
-    constraint_idx += rows;
+    constraint_idx = append_constraint_block(
+        C, c_lower, c_upper, constraint_idx, robot_->nv(),
+        collision_constraint_result->jacobian,
+        collision_constraint_result->lower_bounds,
+        collision_constraint_result->upper_bounds);
   }
 
   if (com_constraint_result.has_value()) {
-    const auto &com = com_constraint_result.value();
-    int rows = static_cast<int>(com.jacobian.rows());
-    C.block(constraint_idx, 0, rows, robot_->nv()) = com.jacobian;
-    c_lower.segment(constraint_idx, rows) = com.lower_bounds;
-    c_upper.segment(constraint_idx, rows) = com.upper_bounds;
-    constraint_idx += rows;
+    constraint_idx = append_constraint_block(
+        C, c_lower, c_upper, constraint_idx, robot_->nv(),
+        com_constraint_result->jacobian, com_constraint_result->lower_bounds,
+        com_constraint_result->upper_bounds);
   }
 
   if (rel_pose_constraint_result.has_value()) {
-    const auto &rpc = rel_pose_constraint_result.value();
-    int rows = static_cast<int>(rpc.jacobian.rows());
-    C.block(constraint_idx, 0, rows, robot_->nv()) = rpc.jacobian;
-    c_lower.segment(constraint_idx, rows) = rpc.lower_bounds;
-    c_upper.segment(constraint_idx, rows) = rpc.upper_bounds;
-    constraint_idx += rows;
+    constraint_idx = append_constraint_block(
+        C, c_lower, c_upper, constraint_idx, robot_->nv(),
+        rel_pose_constraint_result->jacobian,
+        rel_pose_constraint_result->lower_bounds,
+        rel_pose_constraint_result->upper_bounds);
   }
 
   if (step_torso_constraint_result.has_value()) {
-    const auto &tsc = step_torso_constraint_result.value();
-    int rows = static_cast<int>(tsc.jacobian.rows());
-    C.block(constraint_idx, 0, rows, robot_->nv()) = tsc.jacobian;
-    c_lower.segment(constraint_idx, rows) = tsc.lower_bounds;
-    c_upper.segment(constraint_idx, rows) = tsc.upper_bounds;
-    constraint_idx += rows;
+    constraint_idx = append_constraint_block(
+        C, c_lower, c_upper, constraint_idx, robot_->nv(),
+        step_torso_constraint_result->jacobian,
+        step_torso_constraint_result->lower_bounds,
+        step_torso_constraint_result->upper_bounds);
   }
 
   if (timing && t_constraint_start.has_value()) {
@@ -3280,11 +3303,8 @@ PositionIKResult KinematicsSolver::solve_position(
     }
     if (collision_constraint_result.has_value() &&
         !options.excluded_joint_indices.empty()) {
-      for (int idx : options.excluded_joint_indices) {
-        if (idx >= 0 && idx < collision_constraint_result->jacobian.cols()) {
-          collision_constraint_result->jacobian.col(idx).setZero();
-        }
-      }
+      zero_excluded_columns(collision_constraint_result->jacobian,
+                            options.excluded_joint_indices);
     }
     std::optional<ComConstraintResult> com_constraint_result = std::nullopt;
     if (com_constraint_.has_value() && com_constraint_->enabled) {
@@ -3292,85 +3312,15 @@ PositionIKResult KinematicsSolver::solve_position(
     }
     if (com_constraint_result.has_value() &&
         !options.excluded_joint_indices.empty()) {
-      for (int idx : options.excluded_joint_indices) {
-        if (idx >= 0 && idx < com_constraint_result->jacobian.cols()) {
-          com_constraint_result->jacobian.col(idx).setZero();
-        }
-      }
+      zero_excluded_columns(com_constraint_result->jacobian,
+                            options.excluded_joint_indices);
     }
 
-    Eigen::MatrixXd torso_constraint_jacobian;
-    Eigen::VectorXd torso_constraint_lower;
-    Eigen::VectorXd torso_constraint_upper;
-    int torso_constraint_rows = 0;
+    std::optional<ConstraintBlock> torso_constraint_result = std::nullopt;
     if (torso_task && torso_has_pose_bounds) {
-      const pinocchio::SE3 torso_pose = robot_->get_frame_pose(torso_opts.frame_name);
-      const Matrix6Xd torso_jacobian_full =
-          robot_->get_frame_jacobian(torso_opts.frame_name);
-      Eigen::VectorXd torso_rel_state = Eigen::VectorXd::Zero(6);
-      torso_rel_state.head<3>() =
-          torso_pose.translation() - torso_pose_bounds_reference.translation();
-      torso_rel_state.tail<3>() = pinocchio::log3(
-          torso_pose_bounds_reference.rotation().transpose() *
-          torso_pose.rotation());
-
-      for (int i = 0; i < 6; ++i) {
-        if (torso_opts.pose_axis_mask.coeff(i) > 0.5) {
-          ++torso_constraint_rows;
-        }
-      }
-      torso_constraint_jacobian =
-          Eigen::MatrixXd::Zero(torso_constraint_rows, robot_->nv());
-      torso_constraint_lower = Eigen::VectorXd::Constant(torso_constraint_rows, -1e10);
-      torso_constraint_upper = Eigen::VectorXd::Constant(torso_constraint_rows, 1e10);
-
-      int row = 0;
-      for (int i = 0; i < 6; ++i) {
-        if (torso_opts.pose_axis_mask.coeff(i) <= 0.5) {
-          continue;
-        }
-        double slack_lower =
-            torso_rel_state(i) - torso_opts.pose_lower_bounds->coeff(i);
-        double slack_upper =
-            torso_opts.pose_upper_bounds->coeff(i) - torso_rel_state(i);
-        const double torso_slack_eps =
-            (i < 3) ? kTorsoBoundSlackEpsTrans : kTorsoBoundSlackEpsRot;
-        if (slack_lower < 0.0 && slack_lower >= -torso_slack_eps) {
-          slack_lower = 0.0;
-        }
-        if (slack_upper < 0.0 && slack_upper >= -torso_slack_eps) {
-          slack_upper = 0.0;
-        }
-        const bool torso_headroom_enabled =
-            torso_opts.velocity_box_headroom.enabled ||
-            torso_opts.pose_bound_softening_enabled;
-        const double torso_headroom_fraction =
-            torso_opts.velocity_box_headroom.enabled
-                ? torso_opts.velocity_box_headroom.fraction
-                : torso_opts.pose_bound_softening_fraction;
-        const double torso_headroom_activation_margin =
-            torso_opts.velocity_box_headroom.enabled
-                ? torso_opts.velocity_box_headroom.activation_margin
-                : kMarginThreshold;
-        auto [lower_limit, upper_limit] = calculate_velocity_box_constraint(
-            slack_lower, slack_upper, torso_opts.velocity_limits.coeff(i),
-            torso_opts.acceleration_limits.coeff(i), options.dt,
-            torso_headroom_enabled
-                ? torso_headroom_fraction * torso_opts.velocity_limits.coeff(i)
-                : -1.0,
-            torso_headroom_activation_margin);
-        torso_constraint_jacobian.row(row) = torso_jacobian_full.row(i);
-        torso_constraint_lower(row) = lower_limit;
-        torso_constraint_upper(row) = upper_limit;
-        ++row;
-      }
-      if (!options.excluded_joint_indices.empty()) {
-        for (int idx : options.excluded_joint_indices) {
-          if (idx >= 0 && idx < torso_constraint_jacobian.cols()) {
-            torso_constraint_jacobian.col(idx).setZero();
-          }
-        }
-      }
+      torso_constraint_result = build_torso_pose_bound_rows(
+          *this, *robot_, torso_opts, torso_pose_bounds_reference, options.dt,
+          options.excluded_joint_indices);
     }
 
     int num_constraints = robot_->nv();
@@ -3382,7 +3332,10 @@ PositionIKResult KinematicsSolver::solve_position(
       num_constraints +=
           static_cast<int>(com_constraint_result->jacobian.rows());
     }
-    num_constraints += torso_constraint_rows;
+    if (torso_constraint_result.has_value()) {
+      num_constraints +=
+          static_cast<int>(torso_constraint_result->jacobian.rows());
+    }
 
     Eigen::MatrixXd C = Eigen::MatrixXd::Zero(num_constraints, robot_->nv());
     Eigen::VectorXd c_lower =
@@ -3392,6 +3345,7 @@ PositionIKResult KinematicsSolver::solve_position(
 
     C.block(0, 0, robot_->nv(), robot_->nv()) =
         Eigen::MatrixXd::Identity(robot_->nv(), robot_->nv());
+    int constraint_idx = robot_->nv();
 
     if (use_position_limits_ || use_velocity_limits_) {
       auto vel_limits = robot_->get_velocity_limits();
@@ -3417,47 +3371,27 @@ PositionIKResult KinematicsSolver::solve_position(
     }
 
     if (collision_constraint_result.has_value()) {
-      int collision_rows =
-          static_cast<int>(collision_constraint_result->jacobian.rows());
-      int constraint_idx = robot_->nv();
-      C.block(constraint_idx, 0, collision_rows, robot_->nv()) =
-          collision_constraint_result->jacobian;
-      c_lower.segment(constraint_idx, collision_rows) =
-          collision_constraint_result->lower_bounds;
-      c_upper.segment(constraint_idx, collision_rows) =
-          collision_constraint_result->upper_bounds;
+      constraint_idx = append_constraint_block(
+          C, c_lower, c_upper, constraint_idx, robot_->nv(),
+          collision_constraint_result->jacobian,
+          collision_constraint_result->lower_bounds,
+          collision_constraint_result->upper_bounds);
     }
     if (com_constraint_result.has_value()) {
-      const int com_rows = static_cast<int>(com_constraint_result->jacobian.rows());
-      const int base_rows = robot_->nv();
-      const int collision_rows =
-          collision_constraint_result.has_value()
-              ? static_cast<int>(collision_constraint_result->jacobian.rows())
-              : 0;
-      const int com_idx = base_rows + collision_rows;
-      C.block(com_idx, 0, com_rows, robot_->nv()) =
-          com_constraint_result->jacobian;
-      c_lower.segment(com_idx, com_rows) = com_constraint_result->lower_bounds;
-      c_upper.segment(com_idx, com_rows) = com_constraint_result->upper_bounds;
+      constraint_idx = append_constraint_block(
+          C, c_lower, c_upper, constraint_idx, robot_->nv(),
+          com_constraint_result->jacobian, com_constraint_result->lower_bounds,
+          com_constraint_result->upper_bounds);
     }
-    if (torso_constraint_rows > 0) {
-      const int base_rows = robot_->nv();
-      const int collision_rows =
-          collision_constraint_result.has_value()
-              ? static_cast<int>(collision_constraint_result->jacobian.rows())
-              : 0;
-      const int com_rows =
-          com_constraint_result.has_value()
-              ? static_cast<int>(com_constraint_result->jacobian.rows())
-              : 0;
-      const int torso_idx = base_rows + collision_rows + com_rows;
-      C.block(torso_idx, 0, torso_constraint_rows, robot_->nv()) =
-          torso_constraint_jacobian;
-      c_lower.segment(torso_idx, torso_constraint_rows) =
-          torso_constraint_lower;
-      c_upper.segment(torso_idx, torso_constraint_rows) =
-          torso_constraint_upper;
+    if (torso_constraint_result.has_value()) {
+      constraint_idx = append_constraint_block(
+          C, c_lower, c_upper, constraint_idx, robot_->nv(),
+          torso_constraint_result->jacobian,
+          torso_constraint_result->lower_bounds,
+          torso_constraint_result->upper_bounds);
     }
+
+    sanitize_solver_inputs(goals, jacobians, C, c_lower, c_upper);
 
     VelocitySolverConfig config;
     config.epsilon = constraint_tolerance_;
