@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.3] - 2026-03-25
+
+### Changed
+- **Constraint assembly internals unified across APIs**: extracted shared helper paths in the solver implementation for excluded-joint Jacobian masking, inequality-row appending, and torso pose-bound row construction so `solve_velocity` and `solve_position` follow one consistent constraint assembly pattern.
+
+### Fixed
+- **Reduced drift risk between `solve_velocity` and `solve_position`**: replaced manual row-offset recomputation in position IK with the same append-editor pattern used in velocity IK, reducing error-prone index math during future constraint additions.
+- **Safety-net parity across solve APIs**: `solve_position` now runs `sanitize_solver_inputs(...)` before backend solve, matching `solve_velocity` handling for non-finite goal/Jacobian/constraint inputs.
+- **Regression coverage for API consistency**: added CoM-constraint parity coverage in `test/test_com_constraint.py` validating that both solve APIs improve or match unconstrained support-polygon violation behavior.
+
 ## [0.18.2] - 2026-03-25
 
 ### Fixed
