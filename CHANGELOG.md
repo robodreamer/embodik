@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.4] - 2026-03-26
+
+### Added
+- **Explicit proximity-gating toggle API**: added `set_proximity_gated_collision_activation_enabled(...)` / `get_proximity_gated_collision_activation_enabled()` in C++ and Python so gating can be enabled/disabled without mutating threshold multipliers.
+- **Regression coverage for gating toggle semantics**: added tests verifying enable/disable behavior flips row activation while preserving configured activation multiplier and effective margin.
+
+### Changed
+- **Proximity-gated collision activation controls**: added optional, min-distance-scaled activation threshold controls (`constraint_activation_multiplier`, effective `constraint_activation_margin`) and wired automatic margin updates when `min_distance` changes.
+- **Collision tuning preset behavior**: restored `PRECISE` to conservative legacy-equivalent behavior (cache disabled, no budget, gating off), while `BALANCED` and `SPEED` enable proximity gating with distinct activation multipliers.
+- **Collision row assembly path**: collision QP rows are now emitted conditionally based on proximity threshold when gating is enabled, reducing far-from-collision overhead.
+
 ## [0.18.3] - 2026-03-25
 
 ### Changed
