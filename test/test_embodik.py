@@ -1199,6 +1199,222 @@ def test_collision_constraint_max_constraints_invalid_clamped(tmp_path):
     assert len(debug_list) <= 1
 
 
+def _find_positive_distance_q(robot: eik.RobotModel, solver: eik.KinematicsSolver) -> np.ndarray:
+    """Find a 1-DoF configuration with strictly positive signed distance."""
+    q = np.zeros(robot.nq, dtype=float)
+    for angle in np.linspace(-1.2, 1.2, 49):
+        q_try = q.copy()
+        q_try[0] = float(angle)
+        dbg = solver.evaluate_collision_debug(q_try)
+        if dbg is not None and np.isfinite(dbg.distance) and float(dbg.distance) > 1e-4:
+            return q_try
+    pytest.skip("Could not find a positive-distance configuration for activation tests.")
+
+
+def _setup_minimal_collision_solver(tmp_path):
+    urdf_path = _create_minimal_collision_urdf(tmp_path)
+    robot = eik.RobotModel(str(urdf_path), floating_base=False)
+    solver = eik.KinematicsSolver(robot)
+    posture = solver.add_posture_task("posture")
+    posture.priority = 0
+    posture.weight = 1.0
+    posture.set_target_configuration(np.zeros(robot.nq, dtype=float))
+    return robot, solver
+
+
+def _solve_with_activation_multiplier(
+    robot: eik.RobotModel,
+    solver: eik.KinematicsSolver,
+    q: np.ndarray,
+    min_distance: float,
+    multiplier: float,
+    gating_enabled: bool = True,
+):
+    robot.update_configuration(q)
+    solver.configure_collision_constraint(min_distance=float(min_distance), max_constraints=1)
+    solver.set_collision_constraint_activation_multiplier(float(multiplier))
+    if hasattr(solver, "set_proximity_gated_collision_activation_enabled"):
+        solver.set_proximity_gated_collision_activation_enabled(bool(gating_enabled))
+    result = solver.solve_velocity(q, apply_limits=False)
+    debug_list = solver.get_last_collision_debug_list()
+    return result, debug_list
+
+
+def test_activation_margin_disabled_matches_legacy(tmp_path):
+    robot, solver = _setup_minimal_collision_solver(tmp_path)
+    if not hasattr(solver, "set_collision_constraint_activation_multiplier"):
+        pytest.skip("Activation multiplier API not available.")
+
+    q = _find_positive_distance_q(robot, solver)
+    dbg = solver.evaluate_collision_debug(q)
+    assert dbg is not None
+    min_distance = max(1e-4, float(dbg.distance) * 0.5)
+
+    result_legacy, rows_legacy = _solve_with_activation_multiplier(
+        robot, solver, q, min_distance=min_distance, multiplier=0.0
+    )
+    solver.clear_collision_constraint()
+    result_disabled, rows_disabled = _solve_with_activation_multiplier(
+        robot, solver, q, min_distance=min_distance, multiplier=0.0
+    )
+
+    assert result_legacy.status == result_disabled.status
+    np.testing.assert_allclose(
+        np.asarray(result_legacy.joint_velocities, dtype=float),
+        np.asarray(result_disabled.joint_velocities, dtype=float),
+        rtol=0.0,
+        atol=1e-12,
+    )
+    assert len(rows_legacy) == len(rows_disabled)
+    assert len(rows_legacy) >= 1
+
+
+def test_activation_margin_zero_is_identity(tmp_path):
+    robot, solver = _setup_minimal_collision_solver(tmp_path)
+    if not hasattr(solver, "set_collision_constraint_activation_multiplier"):
+        pytest.skip("Activation multiplier API not available.")
+
+    q = _find_positive_distance_q(robot, solver)
+    dbg = solver.evaluate_collision_debug(q)
+    assert dbg is not None
+    min_distance = max(1e-4, float(dbg.distance) * 0.4)
+
+    baseline, _ = _solve_with_activation_multiplier(
+        robot, solver, q, min_distance=min_distance, multiplier=0.0
+    )
+    zeroed, _ = _solve_with_activation_multiplier(
+        robot, solver, q, min_distance=min_distance, multiplier=0.0
+    )
+    np.testing.assert_allclose(
+        np.asarray(baseline.joint_velocities, dtype=float),
+        np.asarray(zeroed.joint_velocities, dtype=float),
+        rtol=0.0,
+        atol=1e-12,
+    )
+    assert baseline.status == zeroed.status
+
+
+def test_activation_margin_skips_rows_when_far(tmp_path):
+    robot, solver = _setup_minimal_collision_solver(tmp_path)
+    if not hasattr(solver, "set_collision_constraint_activation_multiplier"):
+        pytest.skip("Activation multiplier API not available.")
+
+    q = _find_positive_distance_q(robot, solver)
+    dbg = solver.evaluate_collision_debug(q)
+    assert dbg is not None
+    d = float(dbg.distance)
+    min_distance = max(1e-4, d * 0.5)
+
+    no_gate, rows_no_gate = _solve_with_activation_multiplier(
+        robot, solver, q, min_distance=min_distance, multiplier=0.0
+    )
+    gated, rows_gated = _solve_with_activation_multiplier(
+        robot, solver, q, min_distance=min_distance, multiplier=0.05
+    )
+
+    assert len(rows_no_gate) >= 1
+    assert len(rows_gated) == 0
+    assert gated.status == no_gate.status
+
+
+def test_activation_margin_engages_when_near(tmp_path):
+    robot, solver = _setup_minimal_collision_solver(tmp_path)
+    if not hasattr(solver, "set_collision_constraint_activation_multiplier"):
+        pytest.skip("Activation multiplier API not available.")
+
+    q = _find_positive_distance_q(robot, solver)
+    dbg = solver.evaluate_collision_debug(q)
+    assert dbg is not None
+    d = float(dbg.distance)
+    min_distance = max(1e-4, d * 0.7)
+    multiplier = 1.0
+
+    result, rows = _solve_with_activation_multiplier(
+        robot, solver, q, min_distance=min_distance, multiplier=multiplier
+    )
+
+    assert result.status == eik.SolverStatus.SUCCESS
+    assert len(rows) >= 1
+
+
+def test_activation_margin_auto_updates_with_min_distance(tmp_path):
+    robot, solver = _setup_minimal_collision_solver(tmp_path)
+    if not hasattr(solver, "set_collision_constraint_activation_multiplier"):
+        pytest.skip("Activation multiplier API not available.")
+
+    q = _find_positive_distance_q(robot, solver)
+    robot.update_configuration(q)
+    solver.configure_collision_constraint(min_distance=0.02, max_constraints=1)
+    solver.set_collision_constraint_activation_multiplier(5.0)
+
+    assert abs(solver.get_collision_constraint_activation_margin() - 0.1) < 1e-12
+    assert solver.set_collision_min_distance(0.03)
+    assert abs(solver.get_collision_constraint_activation_margin() - 0.15) < 1e-12
+
+
+def test_activation_margin_boundary_exact(tmp_path):
+    robot, solver = _setup_minimal_collision_solver(tmp_path)
+    if not hasattr(solver, "set_collision_constraint_activation_multiplier"):
+        pytest.skip("Activation multiplier API not available.")
+
+    q = _find_positive_distance_q(robot, solver)
+    dbg = solver.evaluate_collision_debug(q)
+    assert dbg is not None
+    d = float(dbg.distance)
+    eps = max(1e-5, 1e-3 * d)
+
+    # Slightly below threshold: row suppressed.
+    min_below = max(1e-6, 0.5 * (d - eps))
+    _, rows_below = _solve_with_activation_multiplier(
+        robot, solver, q, min_distance=min_below, multiplier=1.0
+    )
+
+    # Slightly above threshold: row active.
+    min_above = max(1e-6, 0.5 * (d + eps))
+    _, rows_above = _solve_with_activation_multiplier(
+        robot, solver, q, min_distance=min_above, multiplier=1.0
+    )
+
+    assert len(rows_below) == 0
+    assert len(rows_above) >= 1
+
+
+def test_activation_enabled_toggle_preserves_multiplier_and_switches_behavior(tmp_path):
+    robot, solver = _setup_minimal_collision_solver(tmp_path)
+    if not hasattr(solver, "set_proximity_gated_collision_activation_enabled"):
+        pytest.skip("Activation enabled API not available.")
+
+    q = _find_positive_distance_q(robot, solver)
+    dbg = solver.evaluate_collision_debug(q)
+    assert dbg is not None
+    d = float(dbg.distance)
+    min_distance = max(1e-4, d * 0.5)
+
+    robot.update_configuration(q)
+    solver.configure_collision_constraint(min_distance=min_distance, max_constraints=1)
+    solver.set_collision_constraint_activation_multiplier(0.05)
+    margin_before = solver.get_collision_constraint_activation_margin()
+    mult_before = solver.get_collision_constraint_activation_multiplier()
+    assert mult_before > 0.0
+
+    solver.set_proximity_gated_collision_activation_enabled(False)
+    res_disabled = solver.solve_velocity(q, apply_limits=False)
+    rows_disabled = solver.get_last_collision_debug_list()
+
+    solver.set_proximity_gated_collision_activation_enabled(True)
+    res_enabled = solver.solve_velocity(q, apply_limits=False)
+    rows_enabled = solver.get_last_collision_debug_list()
+
+    # Enable/disable should not mutate multiplier/margin.
+    assert solver.get_collision_constraint_activation_multiplier() == mult_before
+    assert solver.get_collision_constraint_activation_margin() == margin_before
+
+    # Behavior toggles under same threshold params.
+    assert len(rows_disabled) >= 1
+    assert len(rows_enabled) == 0
+    assert res_disabled.status == res_enabled.status
+
+
 # =============================================================================
 # Test runner
 # =============================================================================
