@@ -353,6 +353,27 @@ void bind_kinematics_solver(nb::module_ &m) {
            &KinematicsSolver::get_collision_min_distance,
            "Read the current collision min_distance. Returns -1 if no "
            "collision constraint is active.")
+      .def("set_proximity_gated_collision_activation_enabled",
+           &KinematicsSolver::set_proximity_gated_collision_activation_enabled,
+           nb::arg("enabled"),
+           "Enable/disable proximity-gated collision-row activation without "
+           "changing multiplier or margin values.")
+      .def("get_proximity_gated_collision_activation_enabled",
+           &KinematicsSolver::get_proximity_gated_collision_activation_enabled,
+           "Get whether proximity-gated collision-row activation is enabled.")
+      .def("set_collision_constraint_activation_multiplier",
+           &KinematicsSolver::set_collision_constraint_activation_multiplier,
+           nb::arg("multiplier"),
+           "Set proximity-gated collision-row activation multiplier.\n\n"
+           "Effective activation margin is multiplier * min_distance.\n"
+           "Values <= 0 disable gating and preserve legacy row-emission "
+           "behavior.")
+      .def("get_collision_constraint_activation_multiplier",
+           &KinematicsSolver::get_collision_constraint_activation_multiplier,
+           "Get collision-row activation multiplier.")
+      .def("get_collision_constraint_activation_margin",
+           &KinematicsSolver::get_collision_constraint_activation_margin,
+           "Get effective collision-row activation margin in meters.")
       .def("clear_collision_constraint",
            &KinematicsSolver::clear_collision_constraint,
            "Disable collision avoidance constraint.")
