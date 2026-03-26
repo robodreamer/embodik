@@ -779,6 +779,12 @@ void KinematicsSolver::configure_collision_constraint(
   auto &config = *collision_constraint_;
   config.enabled = true;
   config.min_distance = std::max(0.0, min_distance);
+  if (config.constraint_activation_multiplier > 0.0) {
+    config.constraint_activation_margin =
+        config.constraint_activation_multiplier * config.min_distance;
+  } else {
+    config.constraint_activation_margin = 0.0;
+  }
   config.upper_distance = kCollisionUpperDistance;
   config.tolerance = kCollisionTolerance;
   config.nearest_points_all_pairs = nearest_points_all_pairs;
@@ -937,8 +943,59 @@ bool KinematicsSolver::set_collision_min_distance(double min_distance) {
   if (!collision_constraint_.has_value() || !collision_constraint_->enabled) {
     return false;
   }
-  collision_constraint_->min_distance = min_distance;
+  collision_constraint_->min_distance = std::max(0.0, min_distance);
+  if (collision_constraint_->constraint_activation_multiplier > 0.0) {
+    collision_constraint_->constraint_activation_margin =
+        collision_constraint_->constraint_activation_multiplier *
+        collision_constraint_->min_distance;
+  } else {
+    collision_constraint_->constraint_activation_margin = 0.0;
+  }
   return true;
+}
+
+void KinematicsSolver::set_proximity_gated_collision_activation_enabled(
+    bool enabled) {
+  if (!collision_constraint_.has_value()) {
+    collision_constraint_.emplace();
+  }
+  collision_constraint_->constraint_activation_enabled = enabled;
+}
+
+bool KinematicsSolver::get_proximity_gated_collision_activation_enabled() const {
+  if (!collision_constraint_.has_value()) {
+    return false;
+  }
+  return collision_constraint_->constraint_activation_enabled;
+}
+
+void KinematicsSolver::set_collision_constraint_activation_multiplier(
+    double multiplier) {
+  if (!collision_constraint_.has_value()) {
+    collision_constraint_.emplace();
+  }
+  auto &config = *collision_constraint_;
+  config.constraint_activation_multiplier = std::max(0.0, multiplier);
+  if (config.constraint_activation_multiplier > 0.0) {
+    config.constraint_activation_margin =
+        config.constraint_activation_multiplier * std::max(0.0, config.min_distance);
+  } else {
+    config.constraint_activation_margin = 0.0;
+  }
+}
+
+double KinematicsSolver::get_collision_constraint_activation_multiplier() const {
+  if (!collision_constraint_.has_value()) {
+    return 0.0;
+  }
+  return collision_constraint_->constraint_activation_multiplier;
+}
+
+double KinematicsSolver::get_collision_constraint_activation_margin() const {
+  if (!collision_constraint_.has_value()) {
+    return 0.0;
+  }
+  return collision_constraint_->constraint_activation_margin;
 }
 
 void KinematicsSolver::enable_collision_pair_cache(
@@ -983,8 +1040,11 @@ void KinematicsSolver::set_collision_tuning_mode(CollisionTuningMode mode) {
     //
     // Budget is intentionally disabled (0) so exact distance refinement does not
     // stop early under time pressure.
-    enable_collision_pair_cache(false, 1, 0.0, 128);
+    // Use legacy-equivalent disabled-cache defaults.
+    enable_collision_pair_cache(false, 20, 0.03, 128);
     set_collision_refinement_time_budget_us(0);
+    set_proximity_gated_collision_activation_enabled(false);
+    set_collision_constraint_activation_multiplier(0.0);
     break;
   case CollisionTuningMode::kBalanced:
     // Conservative compromise:
@@ -994,6 +1054,10 @@ void KinematicsSolver::set_collision_tuning_mode(CollisionTuningMode mode) {
     //   than the speed preset.
     enable_collision_pair_cache(true, 20, 0.05, 256);
     set_collision_refinement_time_budget_us(0);
+    set_proximity_gated_collision_activation_enabled(true);
+    // Optional proximity-gated activation: rows are emitted only near
+    // min_distance, with a conservative activation band.
+    set_collision_constraint_activation_multiplier(5.0);
     break;
   case CollisionTuningMode::kSpeed:
   default:
@@ -1002,6 +1066,9 @@ void KinematicsSolver::set_collision_tuning_mode(CollisionTuningMode mode) {
     // refinement cost, trading some edge-case precision for predictable latency.
     enable_collision_pair_cache(true, 100, 0.03, 128);
     set_collision_refinement_time_budget_us(300);
+    set_proximity_gated_collision_activation_enabled(true);
+    // Tighter activation band than BALANCED for lower steady-state overhead.
+    set_collision_constraint_activation_multiplier(3.0);
     break;
   }
 }
@@ -1842,6 +1909,22 @@ KinematicsSolver::compute_collision_constraint() {
     selected_sorted.resize(static_cast<std::size_t>(max_k));
   }
 
+  // Optional proximity-gated row activation.
+  // When disabled (margin <= 0), behavior is unchanged.
+  const auto &config = *collision_constraint_;
+  if (config.constraint_activation_enabled &&
+      config.constraint_activation_margin > 0.0) {
+    const double activation_threshold =
+        config.min_distance + config.constraint_activation_margin;
+    selected_sorted.erase(
+        std::remove_if(
+            selected_sorted.begin(), selected_sorted.end(),
+            [activation_threshold](const std::pair<double, std::size_t> &entry) {
+              return entry.first > activation_threshold;
+            }),
+        selected_sorted.end());
+  }
+
   // Update the per-step active indices for next step's hysteresis.
   last_collision_constraint_pair_indices_.clear();
   for (const auto &[dist, idx] : selected_sorted) {
@@ -1922,7 +2005,6 @@ KinematicsSolver::compute_collision_constraint() {
     return std::nullopt;
   }
 
-  const auto &config = *collision_constraint_;
   const double dt = std::max(dt_, 1e-6);
   const int nv = robot_->nv();
   const int num_selected = static_cast<int>(selected_sorted.size());

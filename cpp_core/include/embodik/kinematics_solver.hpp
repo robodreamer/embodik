@@ -431,6 +431,41 @@ public:
   bool set_collision_min_distance(double min_distance);
 
   /**
+   * @brief Enable/disable proximity-gated collision-row activation.
+   *
+   * This toggle does not modify the configured activation multiplier/margin.
+   * Use this when comparing gated and non-gated behavior under the same
+   * threshold parameters.
+   */
+  void set_proximity_gated_collision_activation_enabled(bool enabled);
+
+  /**
+   * @brief Read whether proximity-gated collision-row activation is enabled.
+   */
+  bool get_proximity_gated_collision_activation_enabled() const;
+
+  /**
+   * @brief Set collision-row activation multiplier relative to min_distance.
+   *
+   * Effective activation margin is computed as:
+   *   constraint_activation_margin = multiplier * min_distance
+   *
+   * A multiplier <= 0 disables proximity-gated row activation, preserving
+   * legacy behavior (rows emitted for selected pairs regardless of distance).
+   */
+  void set_collision_constraint_activation_multiplier(double multiplier);
+
+  /**
+   * @brief Read the activation multiplier used for proximity-gated row emission.
+   */
+  double get_collision_constraint_activation_multiplier() const;
+
+  /**
+   * @brief Read current effective activation margin (meters).
+   */
+  double get_collision_constraint_activation_margin() const;
+
+  /**
    * @brief Read the current collision min_distance.
    * @return Current min_distance, or -1 if no collision constraint is active.
    */
@@ -773,6 +808,14 @@ private:
     double min_distance = 0.05;
     double upper_distance = 10.0;
     double tolerance = 1e-4;
+    bool constraint_activation_enabled = false;
+    // Optional proximity gate for emitting collision QP rows.
+    // <= 0 disables gating and preserves legacy behavior.
+    double constraint_activation_margin = 0.0;
+    // Auto-tuning factor applied to min_distance:
+    //   margin = multiplier * min_distance
+    // <= 0 keeps gating disabled.
+    double constraint_activation_multiplier = 0.0;
     bool nearest_points_all_pairs = true;
     std::unordered_set<std::string> include_pairs;
     std::unordered_set<std::string> exclude_pairs;
