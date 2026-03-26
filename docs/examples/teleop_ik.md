@@ -7,9 +7,12 @@ Overview for `examples/03_teleop_ik.py`.
 - Real-time teleoperation with a Seer wireless controller
 - Frame-task target updates from controller pose deltas
 - Optional collision-aware IK while teleoperating
-- Optional torso-upright secondary objective and torso pose bounds
-- Nullspace bias as tertiary objective with optional per-joint weights
+- Fixed-base arm IK via `solve_position_step` (same task stack as `02_collision_aware_IK.py`)
+- Nullspace bias toward the default pose with optional per-joint weights
 - GUI fallback mode when no controller is connected
+
+Torso / floating-base pose bounds are **not** part of this script; use
+`examples/10_floating_base_torso_hierarchy.py` for that.
 
 ## Key Controls
 
@@ -24,23 +27,19 @@ Overview for `examples/03_teleop_ik.py`.
 pixi run -e teleop demo-teleop
 # or
 pixi run -e teleop python examples/03_teleop_ik.py --robot panda
-
-# optional torso controls
-pixi run -e teleop python examples/03_teleop_ik.py --robot panda \
-  --enable-torso-pose-constraints
 ```
 
 ## Notes
 
 - Requires `xvisio` and host runtime support for Seer controller.
 - Use `--no-collision` to disable collision constraints for debugging.
+- With self-collision enabled, turn on **Show Collision Debug** in the UI to mirror
+  `examples/02_collision_aware_IK.py`: closest pair, distance, and segment between
+  `point_a` / `point_b` (updates after each IK step). Console `[embodiK] Collision pair:` lines
+  are suppressed unless you pass **`--verbose`** / **`-v`**.
 - Use `--nullspace-joint-weights` for explicit per-joint nullspace weighting.
-- By default torso pose bounds use symmetric half-range; set both
-  `--torso-pose-lower-bounds` and `--torso-pose-upper-bounds` to use asymmetric limits.
-- Torso pose bound units are `[x,y,z,rx,ry,rz] = [m,m,m,rad,rad,rad]`.
-- Torso pose **box** limits are anchored to the torso world pose when constraints
-  become active (startup, after reset, or when re-enabling the GUI checkbox), via
-  `pose_bounds_reference_pose`, so they do not recentre on every IK tick.
+- Install the library into the `teleop` Pixi env once: `pixi run -e teleop install`
+  (separate solve-group from `default`).
 - For floating-base torso-oriented validation, run `examples/10_floating_base_torso_hierarchy.py`
   (default: **Viser** UI — drag the EE target; sliders adjust torso pose box half-ranges, vel/acc
   limits, torso bound softening, and IK gains; **Re-anchor** updates the fixed
