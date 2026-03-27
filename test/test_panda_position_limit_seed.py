@@ -26,8 +26,6 @@ _PANDA_GRIPPER_Q = np.array([0.02, 0.02], dtype=float)
 
 _POSITION_STEP_DT = 0.05
 _SOLVER_DAMPING = 0.1
-_BARRIER_MARGIN = 0.3
-_BARRIER_GAIN = 1.0
 _NUDGE_EPS = 1e-3
 _EE_TRANSLATION_OFFSET_X_M = 0.06
 _LIMIT_SLACK_EPS = 1e-6
@@ -71,10 +69,6 @@ def test_panda_solve_position_step_at_joint_limit_vs_nudged_seed():
     solver.dt = _POSITION_STEP_DT
     solver.enable_position_limits(True)
     solver.set_damping(_SOLVER_DAMPING)
-    if hasattr(solver, "set_joint_limit_barrier_task"):
-        solver.set_joint_limit_barrier_task(
-            barrier_margin=_BARRIER_MARGIN, gain=_BARRIER_GAIN
-        )
 
     q_lo, q_hi = robot.get_joint_limits()
     # Pin panda_joint1 at its upper limit. From the default posture, +X EE motion

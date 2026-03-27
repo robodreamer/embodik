@@ -335,10 +335,10 @@ NB_MODULE(_embodik_impl, m) {
               "Allow SCALE primary task to fall back to MIN_ERROR in position IK")
       .def_rw("stall_recovery",
               &eik::PositionIKOptions::stall_recovery,
-              "When True, enable automatic stall recovery. Detects "
-              "consecutive INFEASIBLE steps with near-zero velocities and "
-              "temporarily relaxes collision margins / enables MIN_ERROR "
-              "fallback. Default False.");
+              "When True, enable automatic stall recovery. Detects consecutive "
+              "stalled velocity solves (non-success with near-zero ||dq||) "
+              "and temporarily relaxes/restores the effective collision "
+              "min_distance. Default False.");
 
   nb::class_<eik::PositionStepOptions>(
       m, "PositionStepOptions",
@@ -378,10 +378,10 @@ NB_MODULE(_embodik_impl, m) {
               "Out-of-range → InvalidInput.")
       .def_rw("stall_recovery",
               &eik::PositionStepOptions::stall_recovery,
-              "When True, enable automatic stall recovery. Detects "
-              "consecutive INFEASIBLE steps with near-zero velocities and "
-              "temporarily relaxes collision margins / enables MIN_ERROR "
-              "fallback. Default False.")
+              "When True, enable automatic stall recovery. Detects consecutive "
+              "stalled velocity solves (non-success with near-zero ||dq||) "
+              "and temporarily relaxes/restores the effective collision "
+              "min_distance. Default False.")
       .def_rw("limit_change_from_seed",
               &eik::PositionStepOptions::limit_change_from_seed,
               "When True, tighten each inner step so q stays within "

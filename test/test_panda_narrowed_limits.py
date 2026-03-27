@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-"""Narrowed-limits Panda test framework for saturation exit behavior.
+"""Narrowed-limits Panda tests for saturation-exit behavior.
 
-Uses set_joint_limits() to narrow the Panda's joint ranges around the default
-configuration, forcing multiple joints to saturate during normal EE motion
-without triggering kinematic singularity.  Compares baseline, Strategy A
-(Python-level saturated-joint posture task), and Strategy B (C++ built-in
-barrier gradient task) across multiple scenarios.
+Uses set_joint_limits() to narrow Panda joint ranges around the default
+configuration, forcing multi-joint saturation during normal EE motion.
+These tests validate the baseline solver path (including Jacobian clamping
+near position limits) and a Python-level Strategy A posture assist.
 """
 
 from __future__ import annotations
@@ -220,41 +219,6 @@ class StrategyACallback:
 
 
 # ---------------------------------------------------------------------------
-# Strategy B: C++ built-in barrier gradient task (no Python callback needed
-# for the solver, but we enable/disable it before the run)
-# ---------------------------------------------------------------------------
-
-
-def setup_strategy_b(
-    solver: eik.KinematicsSolver,
-    barrier_margin: float = 0.3,
-    gain: float = 1.0,
-):
-    """Enable the C++ barrier gradient task."""
-    solver.set_joint_limit_barrier_task(barrier_margin, gain)
-
-
-def setup_strategy_b_with_posture(
-    solver: eik.KinematicsSolver,
-    robot: eik.RobotModel,
-    q_target: np.ndarray | None = None,
-    posture_weight: float = 0.1,
-    barrier_margin: float = 0.3,
-    gain: float = 1.0,
-):
-    """Enable barrier + a posture bias toward q_target."""
-    solver.set_joint_limit_barrier_task(barrier_margin, gain)
-    q_lower, q_upper = robot.get_joint_limits()
-    if q_target is None:
-        q_target = 0.5 * (q_lower + q_upper)
-    posture = solver.add_posture_task("_b_posture")
-    posture.priority = 1
-    posture.weight = posture_weight
-    posture.set_target_configuration(q_target)
-    return posture
-
-
-# ---------------------------------------------------------------------------
 # Test scenarios
 # ---------------------------------------------------------------------------
 
@@ -277,41 +241,15 @@ def panda_narrow():
 
 def _run_baseline(robot, solver, offset, steps=200):
     solver.clear_tasks()
-    solver.clear_joint_limit_barrier_task()
     return run_round_trip(robot, solver, offset, steps_per_phase=steps)
 
 
 def _run_strategy_a(robot, solver, offset, steps=200):
     solver.clear_tasks()
-    solver.clear_joint_limit_barrier_task()
     cb = StrategyACallback(solver, robot)
     m = run_round_trip(robot, solver, offset, steps_per_phase=steps, callback=cb)
     if cb._posture_task is not None:
         solver.remove_task("_strategy_a_posture")
-    return m
-
-
-def _run_strategy_b(robot, solver, offset, steps=200):
-    solver.clear_tasks()
-    setup_strategy_b(solver, barrier_margin=0.3, gain=1.0)
-    m = run_round_trip(robot, solver, offset, steps_per_phase=steps)
-    solver.clear_joint_limit_barrier_task()
-    return m
-
-
-def _run_strategy_b_with_posture(robot, solver, offset, q_target=None, steps=200):
-    solver.clear_tasks()
-    setup_strategy_b(solver, barrier_margin=0.3, gain=1.0)
-    q_lower, q_upper = robot.get_joint_limits()
-    if q_target is None:
-        q_target = 0.5 * (q_lower + q_upper)
-    posture = solver.add_posture_task("_b_posture")
-    posture.priority = 1
-    posture.weight = 0.1
-    posture.set_target_configuration(q_target)
-    m = run_round_trip(robot, solver, offset, steps_per_phase=steps)
-    solver.clear_joint_limit_barrier_task()
-    solver.remove_task("_b_posture")
     return m
 
 
@@ -356,61 +294,7 @@ class TestBaseline:
 
 
 class TestStrategyComparison:
-    """Compare baseline vs A vs B on the same scenarios."""
-
-    @pytest.mark.parametrize("axis", [0, 1, 2], ids=["X", "Y", "Z"])
-    def test_strategy_b_improves_over_baseline_single_axis(self, panda_narrow, axis):
-        robot, solver = panda_narrow
-        offset = _SINGLE_AXIS_OFFSETS[axis]
-        baseline = _run_baseline(robot, solver, offset)
-
-        robot.update_configuration(np.concatenate([_PANDA_DEFAULT_Q, _PANDA_GRIPPER_EXTRA]))
-        _narrow_limits(robot, margin=0.25)
-        b_result = _run_strategy_b(robot, solver, offset)
-
-        assert (
-            b_result.stall_steps_reverse <= baseline.stall_steps_reverse + 5
-        ), f"axis={axis}: B stalls {b_result.stall_steps_reverse} > baseline {baseline.stall_steps_reverse}+5"
-        assert (
-            b_result.ee_return_error <= baseline.ee_return_error + 0.02
-        ), f"axis={axis}: B error {b_result.ee_return_error:.4f} > baseline {baseline.ee_return_error:.4f}+0.02"
-
-    @pytest.mark.xfail(
-        reason="Diagonal offset with narrowed limits causes inherent barrier oscillation (185 flips). "
-               "Tracked separately from recovery removal.",
-        strict=False,
-    )
-    def test_strategy_b_no_oscillation(self, panda_narrow):
-        robot, solver = panda_narrow
-        m = _run_strategy_b(robot, solver, _DIAGONAL_OFFSET)
-        assert m.oscillation_count < 30, f"Oscillations: {m.oscillation_count}"
-
-    def test_strategy_b_with_posture_coexistence(self, panda_narrow):
-        """B + posture bias should not oscillate or degrade vs B alone."""
-        robot, solver = panda_narrow
-        b_alone = _run_strategy_b(robot, solver, _SINGLE_AXIS_OFFSETS[0])
-
-        robot.update_configuration(np.concatenate([_PANDA_DEFAULT_Q, _PANDA_GRIPPER_EXTRA]))
-        _narrow_limits(robot, margin=0.25)
-        b_posture = _run_strategy_b_with_posture(robot, solver, _SINGLE_AXIS_OFFSETS[0])
-
-        assert (
-            b_posture.oscillation_count < 30
-        ), f"B+posture oscillations: {b_posture.oscillation_count}"
-        assert (
-            b_posture.ee_return_error < b_alone.ee_return_error + 0.03
-        ), f"B+posture error {b_posture.ee_return_error:.4f} >> B alone {b_alone.ee_return_error:.4f}"
-
-    def test_strategy_b_with_posture_near_limits_stress(self, panda_narrow):
-        """B + posture bias targeting near-limit config should not oscillate."""
-        robot, solver = panda_narrow
-        q_lower, q_upper = robot.get_joint_limits()
-        q_near_limit = q_upper.copy()
-        q_near_limit[:7] = q_upper[:7] - 0.05
-        m = _run_strategy_b_with_posture(
-            robot, solver, _SINGLE_AXIS_OFFSETS[0], q_target=q_near_limit
-        )
-        assert m.oscillation_count < 30, f"Stress test oscillations: {m.oscillation_count}"
+    """Compare baseline vs Strategy A on the same scenarios."""
 
     @pytest.mark.parametrize("axis", [0, 1, 2], ids=["X", "Y", "Z"])
     def test_strategy_a_vs_baseline(self, panda_narrow, axis):
@@ -426,41 +310,21 @@ class TestStrategyComparison:
         ), f"axis={axis}: A stalls {a_result.stall_steps_reverse} > baseline {baseline.stall_steps_reverse}+5"
 
 
-class TestBarrierQuantitativeBenefit:
-    """Document quantitative baseline vs barrier (Strategy B) improvement.
-
-    Validation runs (margin=0.25, X-axis 0.10m): baseline ee_return_error ~0.59 m,
-    stall_steps_reverse 200; barrier ee_return_error ~0, stall_steps ~97.
-    Very narrow (margin=0.15): barrier improves X/Y return error and reduces stalls.
-    """
+class TestClampingQuantitativeBehavior:
+    """Quantitative checks for baseline clamping behavior under narrowed limits."""
 
     @pytest.mark.parametrize("axis", [0, 1, 2], ids=["X", "Y", "Z"])
-    def test_barrier_improves_or_matches_baseline(self, panda_narrow, axis):
-        """Barrier (Strategy B) must not degrade vs baseline on any axis."""
+    def test_baseline_not_fully_frozen_on_reverse(self, panda_narrow, axis):
+        """Reverse phase should recover; not all reverse steps may stall."""
         robot, solver = panda_narrow
-        offset = _SINGLE_AXIS_OFFSETS[axis]
-        baseline = _run_baseline(robot, solver, offset)
-
-        robot.update_configuration(np.concatenate([_PANDA_DEFAULT_Q, _PANDA_GRIPPER_EXTRA]))
-        _narrow_limits(robot, margin=0.25)
-        barrier = _run_strategy_b(robot, solver, offset)
-
-        assert barrier.ee_return_error <= baseline.ee_return_error + 0.02
-        assert barrier.stall_steps_reverse <= baseline.stall_steps_reverse + 5
-
-    def test_barrier_very_narrow_x_improves(self, panda_narrow):
-        """Very narrow (0.15): barrier improves X-axis return error."""
-        robot, solver = panda_narrow
-        _narrow_limits(robot, margin=0.15)
-        baseline = _run_baseline(robot, solver, _SINGLE_AXIS_OFFSETS[0])
-
-        robot.update_configuration(np.concatenate([_PANDA_DEFAULT_Q, _PANDA_GRIPPER_EXTRA]))
-        _narrow_limits(robot, margin=0.15)
-        barrier = _run_strategy_b(robot, solver, _SINGLE_AXIS_OFFSETS[0])
-
-        assert barrier.ee_return_error <= baseline.ee_return_error + 0.02
-        assert barrier.stall_steps_reverse <= baseline.stall_steps_reverse + 5
-
+        m = _run_baseline(robot, solver, _SINGLE_AXIS_OFFSETS[axis])
+        assert (
+            m.stall_steps_reverse < m.reverse_steps
+        ), f"axis={axis}: reverse phase fully stalled ({m.stall_steps_reverse}/{m.reverse_steps})"
+        assert m.ee_return_error < 0.2, (
+            f"axis={axis}: excessive return error with narrowed limits: "
+            f"{m.ee_return_error:.4f}"
+        )
 
 class TestMultiSaturationStress:
     """Very narrow limits (0.15 rad) to stress-test multi-joint saturation."""
@@ -476,7 +340,7 @@ class TestMultiSaturationStress:
         m = _run_baseline(robot, solver, np.array([0.05, 0.0, 0.0]))
         assert m.forward_steps == 200
 
-    def test_stress_strategy_b(self, panda_very_narrow):
+    def test_stress_strategy_a(self, panda_very_narrow):
         robot, solver = panda_very_narrow
-        m = _run_strategy_b(robot, solver, np.array([0.05, 0.0, 0.0]))
-        assert m.oscillation_count < 50, f"Stress B oscillations: {m.oscillation_count}"
+        m = _run_strategy_a(robot, solver, np.array([0.05, 0.0, 0.0]))
+        assert m.oscillation_count < 50, f"Stress A oscillations: {m.oscillation_count}"

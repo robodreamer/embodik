@@ -339,31 +339,6 @@ public:
   bool solver_recovery_enabled() const { return false; }
 
   /**
-   * @brief Enable a joint-limit barrier gradient task (priority 1, nullspace).
-   *
-   * When enabled, the solver automatically computes an analytical gradient of
-   * the joint-limit-distance metric and injects it as a priority-1 velocity
-   * target.  The gradient uses a barrier shape: near-zero in a configurable
-   * deadband and growing as ~1/dist^2 near each limit.
-   *
-   * If other priority-1 tasks already exist (e.g. a posture bias), the barrier
-   * velocity is appended to the same priority group so the SNS finds a single
-   * least-squares solution instead of competing scales.
-   *
-   * The task is skipped (zero cost) when all joints are inside the deadband.
-   *
-   * @param barrier_margin Fraction of joint range from each limit where the
-   *   barrier activates (e.g. 0.3 = outer 30% on each side).
-   * @param gain Peak velocity magnitude at the limit boundary (rad/s).
-   */
-  void set_joint_limit_barrier_task(double barrier_margin, double gain);
-
-  /**
-   * @brief Disable the joint-limit barrier gradient task.
-   */
-  void clear_joint_limit_barrier_task();
-
-  /**
    * @brief Enable verbose debugging for position IK iterations.
    * @param enable True to print/log per-iteration errors and store traces.
    */
@@ -543,16 +518,18 @@ public:
   /**
    * @brief Enable the automatic stall handler.
    *
-   * When enabled, the solver detects consecutive INFEASIBLE steps with
-   * near-zero dq and applies two recovery mechanisms:
+   * When enabled, after each velocity solve the handler updates stall state:
+   * a **stall** is a non-success status with joint velocity norm below
+   * `dq_stall_eps` (see `configure_stall_handler` defaults).
    *
-   * 1. **Collision margin relaxation** — if the stall is collision-bounded,
-   *    temporarily reduce the collision min_distance.
-   * 2. **MIN_ERROR fallback** — temporarily enable allow_min_error_fallback
-   *    on all priority-0 tasks so the solver finds the least-infeasible
-   *    direction.
+   * After enough consecutive stalled steps, recovery **only** adjusts the
+   * effective collision `min_distance`: ratchet down (or set an escape margin
+   * under penetration) when self-collision appears to bind the QP, then
+   * gradually restore toward `nominal_min_distance` when solves succeed again.
    *
-   * Both mechanisms deactivate gradually once motion resumes.
+   * Primary-task `MIN_ERROR` fallback is **not** toggled by the stall handler;
+   * use `Task::setAllowMinErrorFallback` / position IK options separately if
+   * desired.
    *
    * @param nominal_min_distance  The original user-intended collision
    *        min_distance. The handler relaxes below this during stalls
@@ -572,7 +549,7 @@ public:
    * Only call after enable_stall_handler(). All parameters have sensible
    * defaults for interactive loops at 50–200 Hz.
    *
-   * @param stall_threshold  Consecutive infeasible steps to trigger (default 5)
+   * @param stall_threshold  Consecutive stalled steps to trigger (default 5)
    * @param restore_rate     Per-step restoration of min_distance as fraction of nominal (default 0.005)
    * @param floor_fraction   Minimum min_distance as fraction of nominal (default 0.3)
    */
@@ -751,29 +728,8 @@ private:
   bool use_velocity_limits_ = true;
   bool use_position_limits_ = true;
 
-  // Joint-limit barrier task
-  bool barrier_task_enabled_ = false;
-  double barrier_margin_ = 0.3;
-  double barrier_gain_ = 1.0;
-  static constexpr double barrier_epsilon_ = 0.04;
-  /// Clamp bounds for ``set_joint_limit_barrier_task(barrier_margin, ...)``.
-  static constexpr double kBarrierMarginClampMin = 0.01;
-  static constexpr double kBarrierMarginClampMax = 0.5;
-  /// Skip joints whose URDF limit range is degenerate (meters/radians).
-  static constexpr double kJointLimitBarrierMinJointRange = 1e-6;
-  /// Guard denominator ``(a*b)`` in the barrier derivative near singularities.
-  static constexpr double kJointLimitBarrierDenomEps = 1e-12;
-  /// Treat computed barrier velocity contribution as zero below this threshold.
-  static constexpr double kJointLimitBarrierVelocityEps = 1e-12;
-  /// Initial ``std::vector`` reserve when collecting active barrier DoFs.
-  static constexpr int kJointLimitBarrierActiveReserve = 8;
-  /// Normalized limit coordinate: ``p = kNormSpan * fraction - kNormOffset`` ∈ [-1, 1].
-  static constexpr double kJointLimitBarrierNormSpan = 2.0;
-  static constexpr double kJointLimitBarrierNormOffset = 1.0;
   /// Sentinel in ``velocity_to_config_index_cache_`` for unmapped velocity indices.
   static constexpr int kVelocityToConfigUnmapped = -1;
-  /// SNS priority for the injected joint-limit barrier nullspace objective.
-  static constexpr int kJointLimitBarrierObjectivePriority = 1;
 
   // Debug/perf instrumentation (off by default)
   bool timing_breakdown_enabled_ = false;
@@ -802,6 +758,11 @@ private:
 
   /// Rebuild ``velocity_to_config_index_cache_`` if needed; return reference.
   const std::vector<int> &velocity_to_config_index_cache();
+
+  /// Zero Jacobian entries that command motion into nearby joint limits.
+  void clamp_jacobians_near_joint_limits(
+      std::vector<Eigen::MatrixXd> &jacobians,
+      const std::vector<int> &velocity_to_config_index) const;
 
   struct CollisionConstraintConfig {
     bool enabled = false;
