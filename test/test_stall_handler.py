@@ -1390,3 +1390,202 @@ class TestTwoJointLimitTrap:
         assert dq > 1e-2, (
             f"Pull-away should produce meaningful motion, got dq={dq:.4e}"
         )
+
+
+# ===================================================================
+# Regression: clamping-induced stall must not relax collision margins
+# ===================================================================
+
+class TestClampingDoesNotTriggerStallRelaxation:
+    """When Jacobian clamping reduces task motion near joint limits,
+    the stall handler must NOT misinterpret this as a collision-caused
+    stall and relax ``min_distance``.
+
+    Root cause scenario observed on Alpha robot:
+      1. Arm approaches torso → joints near limits get Jacobian columns
+         clamped to zero.
+      2. Clamped Jacobian produces INFEASIBLE or SUCCESS with tiny ||dq||.
+      3. Stall handler sees status != SUCCESS with ||dq|| < dq_stall_eps
+         → increments stall counter.
+      4. After stall_threshold steps, handler relaxes min_distance.
+      5. With relaxed collision margin, the task drives the arm *into*
+         the torso — the opposite of intended behavior.
+    """
+
+    def test_stall_near_joint_limits_does_not_relax_collision_margin(self):
+        """Drive EE toward body with stall_recovery ON and a high enough
+        ``min_distance`` that the stall handler fires before joint limits
+        are reached. Once joints clamp, the handler must stop relaxing
+        collision margin further (it is no longer the bottleneck).
+
+        With ``min_dist=0.08`` the stall-relax-advance cycle runs until
+        joint 3 hits its lower limit. After that, further relaxation is
+        wasted — the bottleneck is joint limits, not collision. The
+        handler must not keep ratcheting ``min_distance`` down once
+        collision distance stops decreasing while a joint is clamped.
+        """
+        setup = _setup_panda_stall()
+        if setup is None:
+            pytest.skip("Panda collision model not available")
+
+        robot, solver, q, task, target_pos, min_dist_orig = setup
+
+        min_dist = 0.08
+        solver.clear_collision_constraint()
+        excl = _panda_collision_exclusions(robot)
+        solver.configure_collision_constraint(
+            min_distance=min_dist,
+            include_pairs=[],
+            exclude_pairs=list(excl),
+        )
+        solver.enable_stall_handler(min_dist)
+        solver.configure_stall_handler(stall_threshold=5)
+
+        opts = eik.PositionStepOptions()
+        opts.stall_recovery = True
+        opts.max_steps = 1
+        opts.position_gain = 20.0
+        opts.orientation_gain = 20.0
+
+        rot = np.array(robot.get_frame_pose(_PANDA_EE_FRAME).rotation)
+        into_T = np.eye(4)
+        into_T[:3, :3] = rot
+        into_T[:3, 3] = target_pos
+
+        collision_distances = []
+        stall_min_distances = []
+        for _ in range(100):
+            result = solver.solve_position_step(q, into_T, "panda_stall", opts)
+            q = np.asarray(result.q_solution, dtype=float)
+            robot.update_configuration(q)
+            dbg = solver.evaluate_collision_debug(q)
+            d = float(dbg.distance) if dbg is not None else float("inf")
+            collision_distances.append(d)
+            stall_min_distances.append(solver.stall_handler_current_min_distance())
+
+        worst_collision = min(collision_distances)
+        final_margin = solver.stall_handler_current_min_distance()
+
+        assert worst_collision > -0.01, (
+            f"Arm pulled into deep collision (d={worst_collision:.4f}m). "
+            f"Stall handler relaxed min_distance from {min_dist} to "
+            f"{min(stall_min_distances):.4f}; this is a regression."
+        )
+
+        floor_min = min_dist * 0.3
+        assert final_margin >= floor_min - 1e-6, (
+            f"Stall handler dropped margin below floor "
+            f"({final_margin:.4f} < {floor_min:.4f})"
+        )
+        solver.disable_stall_handler()
+
+    def test_stall_handler_stops_relaxing_when_joint_limit_is_bottleneck(self):
+        """Once a joint is clamped near its limit and collision distance
+        stops decreasing, the stall handler must not keep relaxing
+        ``min_distance`` on every stall-threshold crossing.
+
+        Specifically: after the arm reaches the joint limit, the margin
+        should stabilize (not keep dropping by relax_drop_fraction each
+        cycle). We allow a few initial drops during the transition, but
+        the total relaxation after joint clamping begins must be bounded.
+        """
+        setup = _setup_panda_stall()
+        if setup is None:
+            pytest.skip("Panda collision model not available")
+
+        robot, solver, q, task, target_pos, min_dist_orig = setup
+
+        min_dist = 0.08
+        solver.clear_collision_constraint()
+        excl = _panda_collision_exclusions(robot)
+        solver.configure_collision_constraint(
+            min_distance=min_dist,
+            include_pairs=[],
+            exclude_pairs=list(excl),
+        )
+        solver.enable_stall_handler(min_dist)
+        solver.configure_stall_handler(stall_threshold=5)
+
+        opts = eik.PositionStepOptions()
+        opts.stall_recovery = True
+        opts.max_steps = 1
+        opts.position_gain = 20.0
+        opts.orientation_gain = 20.0
+
+        rot = np.array(robot.get_frame_pose(_PANDA_EE_FRAME).rotation)
+        into_T = np.eye(4)
+        into_T[:3, :3] = rot
+        into_T[:3, 3] = target_pos
+
+        q_min, _ = robot.get_joint_limits()
+        clamp_margin = 5e-4
+
+        margin_at_first_clamp = None
+        margin_after_clamp = None
+        for step in range(100):
+            near_limit = any(
+                0 < q[i] - q_min[i] < clamp_margin
+                for i in range(min(7, q.size))
+            )
+
+            result = solver.solve_position_step(q, into_T, "panda_stall", opts)
+            q = np.asarray(result.q_solution, dtype=float)
+            robot.update_configuration(q)
+
+            cur_margin = solver.stall_handler_current_min_distance()
+            if near_limit and margin_at_first_clamp is None:
+                margin_at_first_clamp = cur_margin
+            margin_after_clamp = cur_margin
+
+        if margin_at_first_clamp is not None:
+            drop_after_clamp = margin_at_first_clamp - margin_after_clamp
+            max_acceptable_drop = 2 * 0.10 * min_dist
+            assert drop_after_clamp <= max_acceptable_drop + 1e-6, (
+                f"Stall handler kept relaxing after joint limit became "
+                f"bottleneck: dropped from {margin_at_first_clamp:.4f} to "
+                f"{margin_after_clamp:.4f} "
+                f"(delta={drop_after_clamp:.4f} > {max_acceptable_drop:.4f})"
+            )
+        solver.disable_stall_handler()
+
+    def test_collision_distance_monotonic_near_limits_with_stall_recovery(self):
+        """When driving toward the torso, collision distance should not
+        suddenly drop (indicating penetration from stall relaxation).
+        Small decreases per step are OK; large jumps (> 0.02m) are not."""
+        setup = _setup_panda_stall()
+        if setup is None:
+            pytest.skip("Panda collision model not available")
+
+        robot, solver, q, task, target_pos, min_dist = setup
+        solver.enable_stall_handler(min_dist)
+
+        opts = eik.PositionStepOptions()
+        opts.stall_recovery = True
+        opts.max_steps = 1
+        opts.position_gain = 20.0
+        opts.orientation_gain = 20.0
+
+        rot = np.array(robot.get_frame_pose(_PANDA_EE_FRAME).rotation)
+        into_T = np.eye(4)
+        into_T[:3, :3] = rot
+        into_T[:3, 3] = target_pos
+
+        prev_d = float(solver.evaluate_collision_debug(q).distance)
+        max_drop = 0.0
+        for step in range(60):
+            result = solver.solve_position_step(q, into_T, "panda_stall", opts)
+            q = np.asarray(result.q_solution, dtype=float)
+            robot.update_configuration(q)
+            dbg = solver.evaluate_collision_debug(q)
+            d = float(dbg.distance) if dbg is not None else prev_d
+            drop = prev_d - d
+            if drop > max_drop:
+                max_drop = drop
+            prev_d = d
+
+        assert max_drop < 0.02, (
+            f"Collision distance dropped by {max_drop:.4f}m in a single "
+            f"step; stall handler likely relaxed collision margin "
+            f"inappropriately near joint limits."
+        )
+        solver.disable_stall_handler()

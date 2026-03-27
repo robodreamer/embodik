@@ -1194,8 +1194,13 @@ void KinematicsSolver::stall_handler_update(VelocitySolverResult &result) {
 
   // --- Phase 1: Stall threshold reached → relax collision margin ---
   if (st.consecutive_stall_steps >= cfg.stall_threshold) {
+    // Collision is only the bottleneck when the QP row is actually
+    // binding: distance at or below the active min_distance.  The
+    // proximity band is intentionally NOT used here — it would cause
+    // false relaxation when joint-limit clamping (not collision) is the
+    // true cause of infeasibility.
     const bool collision_is_bottleneck =
-        collision_dist < st.current_min_distance + cfg.collision_proximity_band;
+        collision_dist <= st.current_min_distance;
 
     if (collision_dist < 0.0) {
       // Penetration escape: set margin just below actual penetration depth
