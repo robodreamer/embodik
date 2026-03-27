@@ -16,7 +16,6 @@ __all__ = [
     "limit_task_velocity",
     "normalize_quaternion",
     "clamp_configuration",
-    "apply_joint_limit_barrier_to_velocities",
     # Spatialmath-python compatible functions
     "r2q",
     "q2r",
@@ -161,88 +160,6 @@ def clamp_configuration(
     """Clip joint configuration to provided limits."""
 
     return np.clip(configuration, lower, upper)
-
-
-def apply_joint_limit_barrier_to_velocities(
-    q_current: np.ndarray,
-    q_lower: np.ndarray,
-    q_upper: np.ndarray,
-    joint_velocities: np.ndarray,
-    dt: float,
-    *,
-    barrier_margin: float = 0.1,
-    barrier_gain: float = 0.5,
-    num_arm_joints: int = 7,
-    enable_debug: bool = False,
-    debug_logger: Optional[object] = None,
-) -> np.ndarray:
-    """
-    Apply barrier function to modify joint velocities, pushing away from limits.
-
-    This is more effective than modifying positions as it works with the solver's
-    velocities rather than against them.
-
-    Args:
-        q_current: Current joint configuration
-        q_lower: Lower joint limits
-        q_upper: Upper joint limits
-        joint_velocities: Joint velocities from solver
-        dt: Time step for integration (unused but kept for API compatibility)
-        barrier_margin: Distance from limit to activate barrier (radians)
-        barrier_gain: Strength of barrier push
-        num_arm_joints: Number of arm joints (excludes gripper)
-        enable_debug: Whether to log debug info
-        debug_logger: Logger instance for debug output
-
-    Returns:
-        Modified joint velocities with barrier forces added
-    """
-    modified_velocities = joint_velocities.copy()
-    arm_limit = min(num_arm_joints, len(q_current), len(joint_velocities))
-
-    for i in range(arm_limit):
-        # Distance to limits
-        dist_to_lower = q_current[i] - q_lower[i]
-        dist_to_upper = q_upper[i] - q_current[i]
-
-        # Apply barrier force if too close to limits
-        if dist_to_lower < barrier_margin:
-            # Barrier velocity away from lower limit
-            barrier_vel = barrier_gain * (1.0 / max(dist_to_lower, 1e-6) - 1.0 / barrier_margin)
-            barrier_vel = min(barrier_vel, 1.0)  # Cap maximum push
-
-            # If solver wants to go towards limit, override it
-            if joint_velocities[i] < 0:
-                modified_velocities[i] = barrier_vel
-            else:
-                # Add to existing velocity away from limit
-                modified_velocities[i] += barrier_vel
-
-            if enable_debug and debug_logger is not None:
-                debug_logger.info(
-                    f"Barrier active for joint {i} (lower): dist={dist_to_lower:.4f}, "
-                    f"original_vel={joint_velocities[i]:.4f}, modified_vel={modified_velocities[i]:.4f}"
-                )
-
-        elif dist_to_upper < barrier_margin:
-            # Barrier velocity away from upper limit
-            barrier_vel = barrier_gain * (1.0 / max(dist_to_upper, 1e-6) - 1.0 / barrier_margin)
-            barrier_vel = min(barrier_vel, 1.0)  # Cap maximum push
-
-            # If solver wants to go towards limit, override it
-            if joint_velocities[i] > 0:
-                modified_velocities[i] = -barrier_vel
-            else:
-                # Add to existing velocity away from limit
-                modified_velocities[i] -= barrier_vel
-
-            if enable_debug and debug_logger is not None:
-                debug_logger.info(
-                    f"Barrier active for joint {i} (upper): dist={dist_to_upper:.4f}, "
-                    f"original_vel={joint_velocities[i]:.4f}, modified_vel={modified_velocities[i]:.4f}"
-                )
-
-    return modified_velocities
 
 
 def r2q(rotation: np.ndarray, order: str = "sxyz") -> np.ndarray:

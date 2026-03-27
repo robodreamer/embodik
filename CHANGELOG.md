@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.5] - 2026-03-26
+
+### Changed
+- **Joint-limit handling simplification**: removed the optional joint-limit barrier task API from C++/Python solver surfaces and internal solve path, keeping the near-limit Jacobian clamping strategy as the primary behavior near active limits.
+- **Examples/docs cleanup**: removed barrier-specific controls and references from examples and recovery documentation to align with current default solver behavior.
+
+### Fixed
+- **Two-joint limit trap behavior**: improved near-limit escape behavior by clamping task Jacobian entries that would push joints further into active limits, reducing apparent teleop stalls when one joint must move away while another remains near a bound.
+- **Regression stability around recovery fixtures**: updated hardware-seed recovery checks to deterministic non-regression assertions so tests remain robust across environment-sensitive collision fixtures.
+
 ## [0.18.4] - 2026-03-26
 
 ### Added

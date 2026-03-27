@@ -2276,18 +2276,6 @@ std::pair<double, double> KinematicsSolver::calculate_velocity_box_constraint(
   return std::make_pair(lower_limit, upper_limit);
 }
 
-void KinematicsSolver::set_joint_limit_barrier_task(double barrier_margin,
-                                                    double gain) {
-  barrier_margin_ =
-      std::clamp(barrier_margin, kBarrierMarginClampMin, kBarrierMarginClampMax);
-  barrier_gain_ = std::max(0.0, gain);
-  barrier_task_enabled_ = true;
-}
-
-void KinematicsSolver::clear_joint_limit_barrier_task() {
-  barrier_task_enabled_ = false;
-}
-
 const std::vector<int> &KinematicsSolver::velocity_to_config_index_cache() {
   const int nv = robot_->nv();
   const RobotModel *model = robot_.get();
@@ -2321,6 +2309,55 @@ const std::vector<int> &KinematicsSolver::velocity_to_config_index_cache() {
   velocity_to_config_cache_robot_ = model;
   velocity_to_config_cache_nv_ = nv;
   return velocity_to_config_index_cache_;
+}
+
+void KinematicsSolver::clamp_jacobians_near_joint_limits(
+    std::vector<Eigen::MatrixXd> &jacobians,
+    const std::vector<int> &velocity_to_config_index) const {
+  constexpr double kJointLimitClampMargin = 5e-4;
+  const int nv_clamp = robot_->nv();
+  auto [q_min_clamp, q_max_clamp] = robot_->get_joint_limits();
+  const Eigen::VectorXd q_cur_clamp = robot_->get_current_configuration();
+  const int fb_offset = robot_->is_floating_base() ? 6 : 0;
+
+  for (int i = fb_offset; i < nv_clamp; ++i) {
+    const int q_idx = (i < static_cast<int>(velocity_to_config_index.size()))
+                          ? velocity_to_config_index[i]
+                          : kVelocityToConfigUnmapped;
+    if (q_idx == kVelocityToConfigUnmapped || q_idx >= q_cur_clamp.size() ||
+        q_idx >= q_min_clamp.size() || q_idx >= q_max_clamp.size()) {
+      continue;
+    }
+    if (!std::isfinite(q_min_clamp[q_idx]) ||
+        !std::isfinite(q_max_clamp[q_idx])) {
+      continue;
+    }
+
+    const double margin_lower = q_cur_clamp[q_idx] - q_min_clamp[q_idx];
+    const double margin_upper = q_max_clamp[q_idx] - q_cur_clamp[q_idx];
+    const bool clamp_lower =
+        margin_lower > 0.0 && margin_lower < kJointLimitClampMargin;
+    const bool clamp_upper =
+        margin_upper > 0.0 && margin_upper < kJointLimitClampMargin;
+    if (!clamp_lower && !clamp_upper) {
+      continue;
+    }
+
+    for (auto &J : jacobians) {
+      if (J.cols() != nv_clamp || J.rows() <= 0) {
+        continue;
+      }
+      for (int r = 0; r < static_cast<int>(J.rows()); ++r) {
+        double &val = J(r, i);
+        if (clamp_lower && val < 0.0) {
+          val = 0.0;
+        }
+        if (clamp_upper && val > 0.0) {
+          val = 0.0;
+        }
+      }
+    }
+  }
 }
 
 void KinematicsSolver::sort_tasks_by_priority() {
@@ -2511,83 +2548,10 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
   }
 
 
-  // Velocity-to-configuration index mapping (cached; used by barrier task and
+  // Velocity-to-configuration index mapping (cached; used by
   // position-based velocity constraints).
   const std::vector<int> &velocity_to_config_index =
       velocity_to_config_index_cache();
-
-  // Inject joint-limit barrier gradient as a priority-1 nullspace task.
-  // Single pass: only joints outside the deadband contribute rows — no full
-  // nv-dimensional barrier vector allocation.
-  if (barrier_task_enabled_ && apply_limits) {
-    const int nv = robot_->nv();
-    auto [q_min, q_max] = robot_->get_joint_limits();
-    const Eigen::VectorXd q_current = robot_->get_current_configuration();
-    const double deadband =
-        kJointLimitBarrierNormOffset -
-        kJointLimitBarrierNormSpan * barrier_margin_;
-    const double e = barrier_epsilon_;
-
-    std::vector<int> active_indices;
-    std::vector<double> active_values;
-    active_indices.reserve(
-        static_cast<size_t>(kJointLimitBarrierActiveReserve));
-    active_values.reserve(static_cast<size_t>(kJointLimitBarrierActiveReserve));
-
-    for (int i = 0; i < nv; ++i) {
-      const int q_idx = velocity_to_config_index[i];
-      if (q_idx == kVelocityToConfigUnmapped ||
-          q_idx >= q_min.size() || q_idx >= q_max.size()) {
-        continue;
-      }
-      const double range = q_max[q_idx] - q_min[q_idx];
-      if (range < kJointLimitBarrierMinJointRange ||
-          !std::isfinite(q_min[q_idx]) || !std::isfinite(q_max[q_idx])) {
-        continue;
-      }
-      const double p =
-          kJointLimitBarrierNormSpan *
-              (q_current[q_idx] - q_min[q_idx]) / range -
-          kJointLimitBarrierNormOffset;
-      if (std::abs(p) < deadband) {
-        continue;
-      }
-      const double a = kJointLimitBarrierNormOffset + e - p;
-      const double b = p + kJointLimitBarrierNormOffset + e;
-      const double ab = a * b;
-      if (ab < kJointLimitBarrierDenomEps) {
-        continue;
-      }
-      const double dhdp =
-          (kJointLimitBarrierNormSpan * p * ab + p * p * (a - b)) / (ab * ab);
-      const double vel_comp =
-          barrier_gain_ *
-          (-dhdp * (kJointLimitBarrierNormSpan / range));
-      if (std::abs(vel_comp) >= kJointLimitBarrierVelocityEps) {
-        active_indices.push_back(i);
-        active_values.push_back(vel_comp);
-      }
-    }
-
-    const int k = static_cast<int>(active_indices.size());
-    if (k > 0) {
-      Eigen::VectorXd barrier_goal(k);
-      Eigen::MatrixXd barrier_jac(k, nv);
-      barrier_jac.setZero();
-      for (int j = 0; j < k; ++j) {
-        barrier_goal[j] = active_values[j];
-        barrier_jac(j, active_indices[j]) = 1.0;
-      }
-      goals.push_back(std::move(barrier_goal));
-      jacobians.push_back(std::move(barrier_jac));
-      objective_configs.push_back(ObjectiveSolveConfig{
-          kJointLimitBarrierObjectivePriority,
-          TaskSolveMode::kMinError,
-          false,
-      });
-      objective_tasks.push_back(nullptr);
-    }
-  }
 
   if (!pending_velocity_lock_indices_.empty()) {
     const int nv_lock = robot_->nv();
@@ -2601,6 +2565,13 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
         }
       }
     }
+  }
+
+  // Near a joint position limit, zero Jacobian entries that would command
+  // motion further into that limit. This avoids whole-task SNS scale collapse
+  // and preserves partial solutions through remaining DOFs.
+  if (apply_limits && use_position_limits_) {
+    clamp_jacobians_near_joint_limits(jacobians, velocity_to_config_index);
   }
 
   // If no active tasks, return early
@@ -2781,7 +2752,7 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
     // Get acceleration limits from robot model
     Eigen::VectorXd accel_limits = robot_->get_acceleration_limits();
 
-    // velocity_to_config_index was built earlier (before barrier injection).
+    // velocity_to_config_index was built earlier.
 
     // For each joint, compute maximum velocity to stay within position limits
     C.block(constraint_idx, 0, robot_->nv(), robot_->nv()) =

@@ -141,9 +141,9 @@ void bind_kinematics_solver(nb::module_ &m) {
            nb::arg("stall_recovery") = false,
            "Solve for joint velocities without integration. Returns velocities "
            "and identifies saturated joints. When stall_recovery=True, "
-           "enables automatic stall detection and recovery (collision margin "
-           "relaxation + MIN_ERROR fallback). The handler stays active across "
-           "calls so stall counts accumulate correctly in user loops.")
+           "enables automatic stall detection and collision-margin relaxation "
+           "/ restoration. The handler stays active across calls so stall "
+           "counts accumulate correctly in user loops.")
       .def(
           "solve_velocity_dq",
           [](KinematicsSolver &self, const Eigen::VectorXd &current_q,
@@ -279,23 +279,6 @@ void bind_kinematics_solver(nb::module_ &m) {
            &KinematicsSolver::enable_position_ik_debug, nb::arg("enable"),
            "Enable verbose logging for position IK iterations")
 
-      .def("set_joint_limit_barrier_task",
-           &KinematicsSolver::set_joint_limit_barrier_task,
-           nb::arg("barrier_margin"), nb::arg("gain"),
-           "Enable a joint-limit barrier gradient task (priority 1).\n\n"
-           "Computes an analytical gradient of the joint-limit-distance metric\n"
-           "and injects it as a priority-1 velocity target.  The gradient uses\n"
-           "a barrier shape: near-zero in the deadband and growing rapidly\n"
-           "near each limit.  If other priority-1 tasks exist (e.g. posture\n"
-           "bias), the barrier is appended to the same group.\n\n"
-           "Args:\n"
-           "  barrier_margin: Fraction of joint range from each limit where\n"
-           "    the barrier activates (e.g. 0.3 = outer 30% on each side).\n"
-           "  gain: Peak velocity magnitude at the limit boundary (rad/s).")
-      .def("clear_joint_limit_barrier_task",
-           &KinematicsSolver::clear_joint_limit_barrier_task,
-           "Disable the joint-limit barrier gradient task.")
-
       .def(
           "configure_collision_constraint",
           [](KinematicsSolver &self, double min_distance,
@@ -418,9 +401,9 @@ void bind_kinematics_solver(nb::module_ &m) {
       .def("enable_stall_handler",
            &KinematicsSolver::enable_stall_handler,
            nb::arg("nominal_min_distance"),
-           "Enable the automatic stall handler. Detects consecutive "
-           "infeasible steps and applies collision margin relaxation "
-           "to break out of stalls.")
+           "Enable the automatic stall handler. Detects consecutive stalled "
+           "velocity solves (non-success with near-zero ||dq||) and applies "
+           "collision margin relaxation/restoration to break out of stalls.")
       .def("disable_stall_handler",
            &KinematicsSolver::disable_stall_handler,
            "Disable the stall handler and restore nominal parameters.")

@@ -8,9 +8,8 @@ This note maps how EmbodiK behaves when the initial configuration is slightly ou
 |-----------|----------|------|
 | Joint-limit velocity box | [`cpp_core/src/kinematics_solver.cpp`](https://github.com/robodreamer/embodik/blob/main/cpp_core/src/kinematics_solver.cpp) — `calculate_velocity_box_constraint()`, `solve_velocity()` position rows | Margins from current `q` vs URDF limits (with `margin_limit = 1e-4` in `solve_velocity`). Outside a joint: recovery term pushes velocity back inside; if **both** lower and upper margins are violated, the box widens to `[-vmax, vmax]` (no unique recovery direction). |
 | Joint-limit tunables | [`cpp_core/include/embodik/kinematics_solver.hpp`](https://github.com/robodreamer/embodik/blob/main/cpp_core/include/embodik/kinematics_solver.hpp) | `set_limit_recovery_gain`, `set_limit_recovery_hysteresis`, `set_limit_exit_release_margin`, `enable_saturation_exit_behavior` (off by default). |
-| Joint-limit barrier task | Same `.cpp` — `set_joint_limit_barrier_task()` | Optional priority-1 gradient pushing away from limits in the nullspace. |
 | Self-collision rows | Same `.cpp` — `compute_collision_constraint()` | Separation velocity lower bound with deadbands, stronger push when penetrating (`signed_distance < 0`). |
-| Stall handler | Same `.cpp` — `enable_stall_handler()`, `stall_handler_update()` | After repeated stalls, can **lower** effective `min_distance`; for penetration, sets margin below measured depth so the QP row gains slack. |
+| Stall handler | Same `.cpp` — `enable_stall_handler()`, `stall_handler_update()` | After repeated stalled solves, adjusts effective collision `min_distance` only (ratchet / penetration escape, then restore). Does **not** toggle primary-task `MIN_ERROR`; configure that on tasks or position IK options separately. |
 | Outcome classification | Same `.cpp` — `classify_velocity_outcome()` | Successful QP can still be reported as `kInfeasible` if the primary task scale collapses to zero under constraints. |
 | Position IK inner loop | Same `.cpp` — `solve_position()` | Uses **0.02 rad** joint margin in its velocity box (`lower_margin = q - qmin - 0.02`), **not** `1e-4` like `solve_velocity`. |
 | Position step | Same `.cpp` — `solve_position_step()` | Calls `solve_velocity(q, true)` then `pinocchio::integrate`; optional `PositionStepOptions.stall_recovery` enables stall handler across steps. **No** explicit post-step clamp of `q` to limits in this path. |
@@ -59,9 +58,9 @@ current evidence for an opt-in recommendation now comes from **Panda** and **dua
 
 - Slight violations of `panda_joint1` on either side recover under `solve_velocity()` with
   **`SUCCESS`** on every checked step and velocity pointing back toward the valid range.
-- A slightly over-limit Panda seed also recovers under `solve_position_step()` with the
-  joint-limit barrier enabled; over a small multi-step budget, `q` returns to the limit
-  band while the solver still reports **`SUCCESS`**.
+- A slightly over-limit Panda seed also recovers under `solve_position_step()`; over a
+  small multi-step budget, `q` returns to the limit band while the solver still reports
+  **`SUCCESS`**.
 
 This is the strongest current signal that EmbodiK can already be *forgiving* on realistic
 hardware-seeded joint-limit errors without requiring an outer recovery module.
@@ -89,7 +88,7 @@ So for collision-heavy startup states, the current EmbodiK story is:
 | Approach | Pros | Cons / notes |
 |----------|------|----------------|
 | **A — Default EmbodiK** (limits + collision + default gains) | No extra moving parts; good for nominal control. | May report `INFEASIBLE` or stall when seed + task + constraints conflict; collision escape may need stall for hard cases. |
-| **B — Tune limits** (gain, hysteresis, release margin, optional barrier) | Addresses encoder jitter and boundary chatter; barrier adds nullspace push. | Barrier competes with other P1 tasks; tuning is robot-specific. |
+| **B — Tune limits** (gain, hysteresis, release margin) | Addresses encoder jitter and boundary chatter. | Tuning is robot-specific. |
 | **C — Stall / `stall_recovery`** | Automatic temporary collision margin relaxation; penetration escape path in C++. | Changes safety envelope while active; must restore to nominal margin when healthy. |
 | **D — `enable_saturation_exit_behavior`** | Extra velocity headroom near saturation for SNS feasibility (commented in C++). | Off by default; needs regression coverage before wide use (see `test_joint_limit_exit_symmetry.py`). |
 | **E — App-layer outer recovery** (controller-level pre-solve recovery with slacks/trust-region/fallback) | Strong “find a feasible `q` seed” story before main QP. | Separate optimizer/policy; not inside EmbodiK today; integrate at app layer if needed. |
@@ -100,7 +99,7 @@ So for collision-heavy startup states, the current EmbodiK story is:
 ## Recommended hardening sequence
 
 1. **Measure** with `test_hardware_seed_recovery.py` on target URDFs (extend fixtures if needed).
-2. **Prefer tuning** (`limit_recovery_*`, optional barrier, collision `min_distance`) before new C++ features.
+2. **Prefer tuning** (`limit_recovery_*`, collision `min_distance`) before new C++ features.
 3. **Unify or document** the `1e-4` vs `0.02` margin split between `solve_velocity` and `solve_position`; add a regression if you change behavior.
 4. **Enable stall recovery** on interactive / hardware paths where shallow collision is expected at startup, but treat it as an explicit safety/performance trade-off.
 5. **Opt in** only after confirming on the target robot that:

@@ -1044,3 +1044,349 @@ class TestDualEEBodyStall:
         assert handler_stalls <= baseline_stalls, (
             f"Handler should not increase stalls: {handler_stalls} > {baseline_stalls}"
         )
+
+
+# ===================================================================
+# Joint-limit stall: collision must not prevent pull-away recovery
+# ===================================================================
+
+class TestJointLimitCollisionInteraction:
+    """Verify that collision constraints do not prevent recovery from
+    a joint-limit-induced stall when the gizmo target reverses direction.
+
+    Root cause scenario (panda fixture):
+    1. Target drives EE inward until a joint (e.g. joint 3) saturates at
+       its lower limit -> solver returns INFEASIBLE with dq=0.
+    2. User reverses gizmo to pull the EE *away* from the torso.
+    3. The solver must produce SUCCESS with meaningful motion on the very
+       first step, regardless of collision tuning mode or proximity gating.
+    """
+
+    @staticmethod
+    def _drive_to_joint_limit_stall(mode):
+        """Drive panda into a joint-limit stall and return frozen state."""
+        setup = _setup_panda_stall()
+        if setup is None:
+            return None
+        robot, solver, q, task, target_pos, min_dist = setup
+        solver.set_collision_tuning_mode(mode)
+        opts = eik.PositionStepOptions()
+        opts.max_steps = 1
+        opts.position_gain = 20.0
+        opts.orientation_gain = 20.0
+        rot = np.array(robot.get_frame_pose(_PANDA_EE_FRAME).rotation)
+        into = np.eye(4)
+        into[:3, :3] = rot
+        into[:3, 3] = target_pos
+        for _ in range(30):
+            result = solver.solve_position_step(q, into, "panda_stall", opts)
+            q = np.asarray(result.q_solution, dtype=float)
+            robot.update_configuration(q)
+        return robot, solver, q, opts, rot
+
+    def test_pull_away_recovers_immediately_all_modes(self):
+        """After joint-limit stall, a target in the +X direction must
+        produce SUCCESS on the very first step for all tuning modes."""
+        for mode in (
+            eik.CollisionTuningMode.PRECISE,
+            eik.CollisionTuningMode.BALANCED,
+            eik.CollisionTuningMode.SPEED,
+        ):
+            state = self._drive_to_joint_limit_stall(mode)
+            if state is None:
+                pytest.skip("Panda collision model not available")
+            robot, solver, q, opts, rot = state
+            ee = np.array(robot.get_frame_pose(_PANDA_EE_FRAME).translation)
+            away = np.eye(4)
+            away[:3, :3] = rot
+            away[:3, 3] = ee + np.array([0.15, 0.10, 0.10])
+            result = solver.solve_position_step(q, away, "panda_stall", opts)
+            dq = float(np.linalg.norm(np.asarray(result.q_solution) - q))
+            assert result.status == eik.SolverStatus.SUCCESS, (
+                f"Mode {mode.name}: expected SUCCESS on pull-away, got {result.status.name}"
+            )
+            assert dq > 1e-4, (
+                f"Mode {mode.name}: expected meaningful motion on pull-away, got dq={dq}"
+            )
+
+    def test_collision_does_not_worsen_infeasibility(self):
+        """With collision ON vs OFF at the joint-limit stall config,
+        the set of feasible target directions must be identical."""
+        setup = _setup_panda_stall()
+        if setup is None:
+            pytest.skip("Panda collision model not available")
+        robot, solver, q, task, target_pos, min_dist = setup
+        solver.set_collision_tuning_mode(eik.CollisionTuningMode.SPEED)
+        opts = eik.PositionStepOptions()
+        opts.max_steps = 1
+        opts.position_gain = 20.0
+        opts.orientation_gain = 20.0
+        rot = np.array(robot.get_frame_pose(_PANDA_EE_FRAME).rotation)
+        into = np.eye(4)
+        into[:3, :3] = rot
+        into[:3, 3] = target_pos
+        for _ in range(30):
+            result = solver.solve_position_step(q, into, "panda_stall", opts)
+            q = np.asarray(result.q_solution, dtype=float)
+            robot.update_configuration(q)
+
+        ee = np.array(robot.get_frame_pose(_PANDA_EE_FRAME).translation)
+        excl = _panda_collision_exclusions(robot)
+        offsets = [
+            np.array([-0.005, 0.0, 0.0]),
+            np.array([0.005, 0.0, 0.0]),
+            np.array([0.0, 0.01, 0.0]),
+            np.array([0.0, 0.0, 0.01]),
+            np.array([0.0, 0.0, -0.01]),
+            np.array([0.10, 0.10, 0.10]),
+        ]
+        for off in offsets:
+            T = np.eye(4)
+            T[:3, :3] = rot
+            T[:3, 3] = ee + off
+
+            q_with = q.copy()
+            robot.update_configuration(q_with)
+            r_with = solver.solve_position_step(q_with, T, "panda_stall", opts)
+
+            solver.clear_collision_constraint()
+            q_without = q.copy()
+            robot.update_configuration(q_without)
+            r_without = solver.solve_position_step(q_without, T, "panda_stall", opts)
+
+            solver.configure_collision_constraint(
+                min_distance=min_dist,
+                include_pairs=[],
+                exclude_pairs=list(excl),
+            )
+
+            assert r_with.status == r_without.status, (
+                f"offset={off}: collision ON -> {r_with.status.name} "
+                f"but collision OFF -> {r_without.status.name}"
+            )
+
+    def test_sideways_motion_at_joint_limit(self):
+        """At joint-limit stall, lateral targets (+Y, +Z) must produce
+        motion even with collision active."""
+        state = self._drive_to_joint_limit_stall(eik.CollisionTuningMode.SPEED)
+        if state is None:
+            pytest.skip("Panda collision model not available")
+        robot, solver, q, opts, rot = state
+        ee = np.array(robot.get_frame_pose(_PANDA_EE_FRAME).translation)
+        for label, offset in [
+            ("+Y", np.array([0.0, 0.10, 0.0])),
+            ("+Z", np.array([0.0, 0.0, 0.10])),
+            ("+Y+Z", np.array([0.0, 0.07, 0.07])),
+        ]:
+            T = np.eye(4)
+            T[:3, :3] = rot
+            T[:3, 3] = ee + offset
+            result = solver.solve_position_step(q, T, "panda_stall", opts)
+            dq = float(np.linalg.norm(np.asarray(result.q_solution) - q))
+            assert result.status == eik.SolverStatus.SUCCESS, (
+                f"{label}: expected SUCCESS, got {result.status.name}"
+            )
+            assert dq > 1e-4, f"{label}: expected motion, got dq={dq}"
+
+    def test_no_all_direction_trap(self):
+        """At the joint-limit stall config, at least some directions must
+        be feasible -- the solver must not create an all-direction trap
+        where no motion is possible."""
+        state = self._drive_to_joint_limit_stall(eik.CollisionTuningMode.SPEED)
+        if state is None:
+            pytest.skip("Panda collision model not available")
+        robot, solver, q, opts, rot = state
+        ee = np.array(robot.get_frame_pose(_PANDA_EE_FRAME).translation)
+        feasible_count = 0
+        for dx in [-0.05, 0.0, 0.05]:
+            for dy in [-0.05, 0.0, 0.05]:
+                for dz in [-0.05, 0.0, 0.05]:
+                    if dx == 0 and dy == 0 and dz == 0:
+                        continue
+                    T = np.eye(4)
+                    T[:3, :3] = rot
+                    T[:3, 3] = ee + np.array([dx, dy, dz])
+                    robot.update_configuration(q.copy())
+                    result = solver.solve_position_step(
+                        q, T, "panda_stall", opts,
+                    )
+                    dq = float(np.linalg.norm(
+                        np.asarray(result.q_solution) - q
+                    ))
+                    if result.status == eik.SolverStatus.SUCCESS and dq > 1e-5:
+                        feasible_count += 1
+        assert feasible_count >= 10, (
+            f"Only {feasible_count}/26 directions feasible at joint-limit "
+            f"stall; arm is trapped"
+        )
+
+
+# ===================================================================
+# Two-joint-limit trap: Jacobian clamping prevents SNS task-scaling
+# ===================================================================
+
+class TestTwoJointLimitTrap:
+    """Verify that when two joints are simultaneously near their position
+    limits, the solver does not become effectively frozen for all
+    task directions.
+
+    Root cause scenario (alpha robot):
+      right_elbow_pitch at q=-0.326 (lower limit -0.3491, margin 23 mrad)
+      right_wrist_roll  at q=-0.436 (lower limit -0.4363, margin 0.3 mrad)
+    The wrist roll's velocity-box bound is ~0.02 rad/s, causing the SNS
+    solver to scale the entire 6D task to nearly zero even for directions
+    that don't kinematically require the saturated joint.
+
+    Fix: Jacobian column clamping zeros out task Jacobian entries that
+    would command velocity toward a saturated joint limit, letting the
+    SNS solver use the remaining DOFs for partial solutions.
+    """
+
+    @staticmethod
+    def _setup_two_joint_limit():
+        """Panda with joint 4 and joint 6 near their lower limits,
+        mimicking the alpha arm's elbow+wrist trap."""
+        from robot_descriptions.panda_description import URDF_PATH
+
+        urdf_path = Path(URDF_PATH)
+        _ensure_ros_package_path(urdf_path)
+
+        robot = eik.RobotModel(str(urdf_path), floating_base=False)
+        solver = eik.KinematicsSolver(robot)
+        solver.dt = 0.01
+
+        q_min, q_max = robot.get_joint_limits()
+        q = np.array([0.0, -0.785, 0.0, -3.05, 0.0, -0.0172, 0.785, 0.04, 0.04])
+        robot.update_configuration(q)
+
+        solver.clear_tasks()
+        task = solver.add_frame_task("trap_test", _PANDA_EE_FRAME)
+        task.priority = 0
+        task.weight = 1.0
+        task.solve_mode = eik.TaskSolveMode.SCALE
+
+        return robot, solver, q, task
+
+    def test_meaningful_motion_near_two_limits(self):
+        """With two joints near their lower limits, all 26 sampled
+        directions must produce meaningful motion (dq > 1e-3)."""
+        robot, solver, q, task = self._setup_two_joint_limit()
+        ee = np.array(robot.get_frame_pose(_PANDA_EE_FRAME).translation)
+        rot = np.array(robot.get_frame_pose(_PANDA_EE_FRAME).rotation)
+
+        opts = eik.PositionStepOptions()
+        opts.max_steps = 1
+        opts.position_gain = 20.0
+        opts.orientation_gain = 20.0
+
+        q_min, _ = robot.get_joint_limits()
+        assert q[3] - q_min[3] < 0.025, "j4 should be near lower limit"
+        assert q[5] - q_min[5] < 0.001, "j6 should be near lower limit"
+
+        feasible = 0
+        for dx in [-0.05, 0.0, 0.05]:
+            for dy in [-0.05, 0.0, 0.05]:
+                for dz in [-0.05, 0.0, 0.05]:
+                    if dx == 0 and dy == 0 and dz == 0:
+                        continue
+                    T = np.eye(4)
+                    T[:3, :3] = rot
+                    T[:3, 3] = ee + np.array([dx, dy, dz])
+                    robot.update_configuration(q.copy())
+                    result = solver.solve_position_step(
+                        q.copy(), T, "trap_test", opts,
+                    )
+                    dq = float(np.linalg.norm(
+                        np.asarray(result.q_solution) - q
+                    ))
+                    if result.status == eik.SolverStatus.SUCCESS and dq > 1e-3:
+                        feasible += 1
+        assert feasible >= 20, (
+            f"Only {feasible}/26 directions produced meaningful motion "
+            f"with two joints near limits (expected >= 20)"
+        )
+
+    def test_trap_direction_not_frozen(self):
+        """The specific [-X, +Z] direction that triggered the trap must
+        produce meaningful motion, not the near-zero dq that the
+        pre-fix solver returned."""
+        robot, solver, q, task = self._setup_two_joint_limit()
+        ee = np.array(robot.get_frame_pose(_PANDA_EE_FRAME).translation)
+        rot = np.array(robot.get_frame_pose(_PANDA_EE_FRAME).rotation)
+
+        opts = eik.PositionStepOptions()
+        opts.max_steps = 1
+        opts.position_gain = 20.0
+        opts.orientation_gain = 20.0
+
+        T = np.eye(4)
+        T[:3, :3] = rot
+        T[:3, 3] = ee + np.array([-0.15, 0.0, 0.10])
+        result = solver.solve_position_step(q.copy(), T, "trap_test", opts)
+        dq = float(np.linalg.norm(np.asarray(result.q_solution) - q))
+        assert result.status == eik.SolverStatus.SUCCESS, (
+            f"Expected SUCCESS for [-X,+Z] direction, got {result.status.name}"
+        )
+        assert dq > 1e-2, (
+            f"Expected meaningful motion (dq > 0.01) for [-X,+Z], got dq={dq:.4e}. "
+            f"Joint-limit Jacobian clamping may not be active."
+        )
+
+    def test_drive_into_limits_then_recover(self):
+        """Drive the arm into joint limits, then verify recovery when
+        the target reverses to a feasible direction."""
+        from robot_descriptions.panda_description import URDF_PATH
+
+        urdf_path = Path(URDF_PATH)
+        _ensure_ros_package_path(urdf_path)
+
+        robot = eik.RobotModel(str(urdf_path), floating_base=False)
+        solver = eik.KinematicsSolver(robot)
+        solver.dt = 0.01
+
+        q = np.array([0.0, -0.785, 0.0, -2.8, 0.0, 0.1, 0.785, 0.04, 0.04])
+        robot.update_configuration(q)
+
+        solver.clear_tasks()
+        task = solver.add_frame_task("recover", _PANDA_EE_FRAME)
+        task.priority = 0
+        task.weight = 1.0
+        task.solve_mode = eik.TaskSolveMode.SCALE
+
+        ee_pos = np.array(robot.get_frame_pose(_PANDA_EE_FRAME).translation)
+        ee_rot = np.array(robot.get_frame_pose(_PANDA_EE_FRAME).rotation)
+        target_pos = ee_pos + np.array([-0.30, 0.0, 0.15])
+
+        opts = eik.PositionStepOptions()
+        opts.max_steps = 1
+        opts.position_gain = 20.0
+        opts.orientation_gain = 20.0
+
+        for _ in range(40):
+            T = np.eye(4)
+            T[:3, :3] = ee_rot
+            T[:3, 3] = target_pos
+            robot.update_configuration(q.copy())
+            result = solver.solve_position_step(q, T, "recover", opts)
+            if result.status == eik.SolverStatus.SUCCESS:
+                q = np.asarray(result.q_solution, dtype=float)
+
+        q_min, _ = robot.get_joint_limits()
+        assert q[5] - q_min[5] < 0.002, (
+            "j6 should be near its lower limit after driving inward"
+        )
+
+        ee_now = np.array(robot.get_frame_pose(_PANDA_EE_FRAME).translation)
+        pull_target = ee_now + np.array([0.05, 0.0, -0.05])
+        T_pull = np.eye(4)
+        T_pull[:3, :3] = ee_rot
+        T_pull[:3, 3] = pull_target
+        robot.update_configuration(q.copy())
+        result = solver.solve_position_step(q, T_pull, "recover", opts)
+        dq = float(np.linalg.norm(np.asarray(result.q_solution) - q))
+        assert result.status == eik.SolverStatus.SUCCESS, (
+            f"Pull-away after limit stall: expected SUCCESS, got {result.status.name}"
+        )
+        assert dq > 1e-2, (
+            f"Pull-away should produce meaningful motion, got dq={dq:.4e}"
+        )
