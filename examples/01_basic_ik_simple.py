@@ -146,11 +146,6 @@ def main(args: argparse.Namespace):
         )
         damping_slider = server.gui.add_slider("Solver Damping", min=0.01, max=1.0, initial_value=0.1, step=0.01)
 
-        # C++ barrier task controls (solver-level, priority-1 nullspace)
-        enable_barrier = server.gui.add_checkbox("Enable Barrier Task", initial_value=False)
-        barrier_margin_slider = server.gui.add_slider("Barrier Margin", min=0.01, max=0.5, initial_value=0.3, step=0.01)
-        barrier_gain_slider = server.gui.add_slider("Barrier Gain", min=0.1, max=5.0, initial_value=1.0, step=0.1)
-
         # Target control buttons
         snap_target_button = server.gui.add_button("Snap Target to Current EE")
         reset_arm_button = server.gui.add_button("Reset Arm & Target")
@@ -268,25 +263,6 @@ def main(args: argparse.Namespace):
         solver.set_damping(damping_slider.value)
         if enable_debug.value:
             logger.info(f"Solver damping updated to: {damping_slider.value:.3f}")
-
-    @enable_barrier.on_update
-    def _(_):
-        if enable_barrier.value:
-            solver.set_joint_limit_barrier_task(barrier_margin_slider.value, barrier_gain_slider.value)
-            logger.info(f"Barrier task enabled: margin={barrier_margin_slider.value:.2f}, gain={barrier_gain_slider.value:.1f}")
-        else:
-            solver.clear_joint_limit_barrier_task()
-            logger.info("Barrier task disabled")
-
-    @barrier_margin_slider.on_update
-    def _(_):
-        if enable_barrier.value:
-            solver.set_joint_limit_barrier_task(barrier_margin_slider.value, barrier_gain_slider.value)
-
-    @barrier_gain_slider.on_update
-    def _(_):
-        if enable_barrier.value:
-            solver.set_joint_limit_barrier_task(barrier_margin_slider.value, barrier_gain_slider.value)
 
     @snap_target_button.on_click
     def _(_):
