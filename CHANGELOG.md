@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.6] - 2026-03-26
+
+### Changed
+- **Stall-handler bottleneck gating tightened**: stall recovery now relaxes collision `min_distance` only when collision constraints are actually binding (`distance <= current min_distance`), preventing false-positive relaxation when joint-limit clamping is the real bottleneck.
+- **Stall-handler docs clarified**: API documentation now explicitly describes collision-only relaxation behavior and why joint-limit-driven stalls do not trigger collision-margin relaxation.
+
+### Fixed
+- **Deep-collision pull-in regression near joint limits**: resolved a regression where repeated stall-threshold triggers could ratchet down collision margin while Jacobian clamping constrained motion, allowing tasks to pull the arm further into body collision.
+- **Regression test coverage for clamping-stall interaction**: added/validated targeted tests ensuring stall recovery does not keep relaxing collision margins once joint limits become the bottleneck.
+
 ## [0.18.5] - 2026-03-26
 
 ### Changed
