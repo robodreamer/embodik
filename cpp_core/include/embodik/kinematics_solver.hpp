@@ -524,8 +524,14 @@ public:
    *
    * After enough consecutive stalled steps, recovery **only** adjusts the
    * effective collision `min_distance`: ratchet down (or set an escape margin
-   * under penetration) when self-collision appears to bind the QP, then
-   * gradually restore toward `nominal_min_distance` when solves succeed again.
+   * under penetration) when self-collision actually binds the QP (collision
+   * distance <= current min_distance), then gradually restore toward
+   * `nominal_min_distance` when solves succeed again.
+   *
+   * Stalls caused by joint-limit clamping (where the collision QP row has
+   * slack) do **not** trigger margin relaxation — this prevents the handler
+   * from inadvertently opening a collision gap that lets the task drive the
+   * arm into the body.
    *
    * Primary-task `MIN_ERROR` fallback is **not** toggled by the stall handler;
    * use `Task::setAllowMinErrorFallback` / position IK options separately if
