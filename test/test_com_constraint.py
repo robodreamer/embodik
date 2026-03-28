@@ -531,6 +531,109 @@ class TestVelocityAccelerationLimits:
         solver.clear_tasks()
         solver.clear_com_constraint()
 
+    def test_velocity_and_position_step_api_consistency_for_com_constraint(self, robot, solver):
+        """CoM constraint should improve/equal violation for position-step too."""
+        shifted_square = np.array([[0.05, -0.3], [0.30, -0.3], [0.30, 0.3], [0.05, 0.3]])
+        x_min = 0.05
+        q0 = np.zeros(robot.nq)
+
+        task = solver.add_frame_task("ee_step_consistency", "end_effector")
+        ee_pose = robot.get_frame_pose("end_effector")
+        task.set_target_pose(ee_pose.translation + np.array([-0.1, 0.0, 0.0]), ee_pose.rotation)
+        task.weight = 1.0
+
+        target = np.eye(4)
+        target[:3, :3] = np.asarray(ee_pose.rotation)
+        target[:3, 3] = np.asarray(ee_pose.translation) + np.array([-0.15, 0.0, 0.0])
+
+        step_opts = embodik.PositionStepOptions()
+        step_opts.max_steps = 1
+        step_opts.position_gain = 20.0
+        step_opts.orientation_gain = 20.0
+
+        robot.update_configuration(q0)
+        solver.clear_com_constraint()
+        step_free = solver.solve_position_step(q0, target, "ee_step_consistency", step_opts)
+        assert step_free.status in (
+            embodik.SolverStatus.SUCCESS,
+            embodik.SolverStatus.NO_PROGRESS,
+            embodik.SolverStatus.INFEASIBLE,
+        )
+        robot.update_configuration(np.asarray(step_free.q_solution))
+        step_violation_free = max(0.0, x_min - float(robot.get_com_position()[0]))
+
+        robot.update_configuration(q0)
+        solver.configure_com_constraint(
+            shifted_square,
+            margin=0.0,
+            com_vel_max=0.4,
+            com_acc_max=0.1,
+            use_acceleration_limits=True,
+        )
+        step_constrained = solver.solve_position_step(q0, target, "ee_step_consistency", step_opts)
+        assert step_constrained.status in (
+            embodik.SolverStatus.SUCCESS,
+            embodik.SolverStatus.NO_PROGRESS,
+            embodik.SolverStatus.INFEASIBLE,
+        )
+        robot.update_configuration(np.asarray(step_constrained.q_solution))
+        step_violation_constrained = max(0.0, x_min - float(robot.get_com_position()[0]))
+        assert step_violation_constrained <= step_violation_free + 1e-9
+
+        solver.clear_tasks()
+        solver.clear_com_constraint()
+
+    def test_outside_polygon_directional_parity_velocity_vs_position_step(self, robot, solver):
+        """When outside support polygon, both APIs should avoid worsening outward motion."""
+        shifted_square = np.array([[0.05, -0.3], [0.30, -0.3], [0.30, 0.3], [0.05, 0.3]])
+        x_min = 0.05
+        q0 = np.zeros(robot.nq)
+        robot.update_configuration(q0)
+        x0 = float(robot.get_com_position()[0])
+        assert x0 < x_min, "Test requires initial CoM to start outside x_min boundary"
+
+        task = solver.add_frame_task("ee_step_parity", "end_effector")
+        ee_pose = robot.get_frame_pose("end_effector")
+        task.set_target_pose(ee_pose.translation + np.array([-0.1, 0.0, 0.0]), ee_pose.rotation)
+        task.weight = 1.0
+
+        solver.configure_com_constraint(
+            shifted_square,
+            margin=0.0,
+            com_vel_max=0.4,
+            com_acc_max=0.1,
+            use_acceleration_limits=True,
+        )
+
+        # Velocity API (single step integration)
+        vel_res = solver.solve_velocity(q0)
+        q_vel = q0 + np.asarray(vel_res.joint_velocities) * solver.dt
+        robot.update_configuration(q_vel)
+        x_vel = float(robot.get_com_position()[0])
+
+        # Position-step API (single inner step)
+        target = np.eye(4)
+        target[:3, :3] = np.asarray(ee_pose.rotation)
+        target[:3, 3] = np.asarray(ee_pose.translation) + np.array([-0.15, 0.0, 0.0])
+        step_opts = embodik.PositionStepOptions()
+        step_opts.max_steps = 1
+        step_opts.position_gain = 20.0
+        step_opts.orientation_gain = 20.0
+
+        robot.update_configuration(q0)
+        step_res = solver.solve_position_step(q0, target, "ee_step_parity", step_opts)
+        robot.update_configuration(np.asarray(step_res.q_solution))
+        x_step = float(robot.get_com_position()[0])
+
+        # Outside polygon means x < x_min. "Worsening outward" means x decreases.
+        assert x_vel >= x0 - 1e-6, f"solve_velocity moved further outward: x0={x0}, x_vel={x_vel}"
+        assert x_step >= x0 - 1e-6, (
+            f"solve_position_step moved further outward: x0={x0}, x_step={x_step}"
+        )
+
+        solver.clear_tasks()
+        solver.clear_com_constraint()
+
 
 # ===========================================================================
 # Phase 3.5 – Frame transform

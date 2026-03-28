@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.7] - 2026-03-26
+
+### Changed
+- **Stall recovery bottleneck classification**: stall handling now evaluates active collision-row distances from `get_last_collision_debug_list()` (with backward-compatible fallback) instead of relying on a single scalar debug pair.
+- **Position-step stall path parity**: `solve_position`/`solve_position_step` now propagate saturated-joint information into stall handling, matching `solve_velocity`-path bottleneck context.
+
+### Fixed
+- **Limit-dominated deep-collision pull-in**: when joints are saturated near limits, stall recovery no longer relaxes collision margin as if collision were the primary bottleneck, avoiding false-positive margin ratcheting into penetration.
+- **Regression coverage for K>1 collision rows**: added stall-handler tests for multi-constraint collision regimes (`max_constraints > 1`) and parity checks for CoM-constrained `solve_position_step` directional behavior.
+
 ## [0.18.6] - 2026-03-26
 
 ### Changed

@@ -1183,12 +1183,32 @@ void KinematicsSolver::stall_handler_update(VelocitySolverResult &result) {
     st.consecutive_stall_steps = 0;
   }
 
-  // --- Read collision distance ---
-  double collision_dist = std::numeric_limits<double>::infinity();
-  if (last_collision_debug_.has_value() &&
-      std::isfinite(last_collision_debug_->distance)) {
-    collision_dist = last_collision_debug_->distance;
+  // --- Read active collision-row distances ---
+  std::vector<double> active_collision_distances;
+  active_collision_distances.reserve(last_collision_debug_list_.size());
+  for (const auto &row : last_collision_debug_list_) {
+    if (std::isfinite(row.distance)) {
+      active_collision_distances.push_back(row.distance);
+    }
   }
+  if (active_collision_distances.empty() && last_collision_debug_.has_value() &&
+      std::isfinite(last_collision_debug_->distance)) {
+    active_collision_distances.push_back(last_collision_debug_->distance);
+  }
+  const double collision_dist =
+      active_collision_distances.empty()
+          ? std::numeric_limits<double>::infinity()
+          : *std::min_element(active_collision_distances.begin(),
+                              active_collision_distances.end());
+  const bool any_collision_binding = std::any_of(
+      active_collision_distances.begin(), active_collision_distances.end(),
+      [&st](double d) { return d <= st.current_min_distance; });
+  const bool any_penetration = std::any_of(active_collision_distances.begin(),
+                                           active_collision_distances.end(),
+                                           [](double d) { return d < 0.0; });
+  // If any joint velocity is saturated at a combined velocity/position bound,
+  // treat this as limit-dominated and avoid collision-margin relaxation.
+  const bool limit_dominated_stall = !result.saturated_joints.empty();
 
   const double floor_min = st.nominal_min_distance * cfg.floor_fraction;
 
@@ -1200,9 +1220,9 @@ void KinematicsSolver::stall_handler_update(VelocitySolverResult &result) {
     // false relaxation when joint-limit clamping (not collision) is the
     // true cause of infeasibility.
     const bool collision_is_bottleneck =
-        collision_dist <= st.current_min_distance;
+        any_collision_binding && !limit_dominated_stall;
 
-    if (collision_dist < 0.0) {
+    if (any_penetration && !limit_dominated_stall) {
       // Penetration escape: set margin just below actual penetration depth
       // so the collision QP row has slack and motion can resume.
       const double escape_margin =
@@ -3478,6 +3498,22 @@ PositionIKResult KinematicsSolver::solve_position(
       vsr.joint_velocities = Eigen::Map<const Eigen::VectorXd>(
           vel_result.solution.data(),
           static_cast<Eigen::Index>(vel_result.solution.size()));
+      if (c_lower.size() >= robot_->nv()) {
+        constexpr double kSaturationTol = 0.01;
+        for (int i = 0; i < robot_->nv(); ++i) {
+          double lower = c_lower[i];
+          double upper = c_upper[i];
+          if (static_cast<int>(c_lower.size()) >= 2 * robot_->nv()) {
+            lower = std::max(lower, c_lower[robot_->nv() + i]);
+            upper = std::min(upper, c_upper[robot_->nv() + i]);
+          }
+          const double joint_vel = vsr.joint_velocities[i];
+          if (joint_vel <= lower + kSaturationTol ||
+              joint_vel >= upper - kSaturationTol) {
+            vsr.saturated_joints.push_back(i);
+          }
+        }
+      }
       stall_handler_update(vsr);
     }
 

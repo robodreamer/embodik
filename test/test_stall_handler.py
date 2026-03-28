@@ -1589,3 +1589,109 @@ class TestClampingDoesNotTriggerStallRelaxation:
             f"inappropriately near joint limits."
         )
         solver.disable_stall_handler()
+
+
+class TestStallHandlerMultiConstraintRegression:
+    """Regression tests for K>1 collision rows + stall handling.
+
+    These tests mirror the alpha-wheelbase failure mode at a smaller scale:
+    stall recovery plus multiple collision rows should not pull the arm into
+    deeper penetration when joint limits dominate.
+    """
+
+    @staticmethod
+    def _run_trial(*, max_constraints: int, stall_recovery: bool, steps: int = 80):
+        setup = _setup_panda_stall()
+        if setup is None:
+            pytest.skip("Panda collision model not available")
+
+        robot, solver, q, _task, target_pos, _ = setup
+        min_dist = 0.08
+        solver.clear_collision_constraint()
+        excl = _panda_collision_exclusions(robot)
+        solver.configure_collision_constraint(
+            min_distance=min_dist,
+            include_pairs=[],
+            exclude_pairs=list(excl),
+            max_constraints=max_constraints,
+        )
+        if stall_recovery:
+            solver.enable_stall_handler(min_dist)
+            solver.configure_stall_handler(stall_threshold=5)
+        else:
+            solver.disable_stall_handler()
+
+        opts = eik.PositionStepOptions()
+        opts.stall_recovery = stall_recovery
+        opts.max_steps = 1
+        opts.position_gain = 20.0
+        opts.orientation_gain = 20.0
+
+        rot = np.array(robot.get_frame_pose(_PANDA_EE_FRAME).rotation)
+        into_T = np.eye(4)
+        into_T[:3, :3] = rot
+        into_T[:3, 3] = target_pos
+
+        worst_collision = float("inf")
+        min_stall_margin = float("inf")
+        success_count = 0
+        infeasible_count = 0
+        max_active_rows = 0
+        for _ in range(steps):
+            result = solver.solve_position_step(q, into_T, "panda_stall", opts)
+            status_str = str(result.status)
+            if "SUCCESS" in status_str:
+                q = np.asarray(result.q_solution, dtype=float)
+                success_count += 1
+            elif "INFEASIBLE" in status_str:
+                infeasible_count += 1
+
+            robot.update_configuration(q)
+            dbg = solver.evaluate_collision_debug(q)
+            d = float(dbg.distance) if dbg is not None else float("inf")
+            worst_collision = min(worst_collision, d)
+
+            rows = solver.get_last_collision_debug_list()
+            max_active_rows = max(max_active_rows, len(rows))
+            if stall_recovery:
+                min_stall_margin = min(
+                    min_stall_margin, float(solver.stall_handler_current_min_distance())
+                )
+
+        return {
+            "worst_collision": worst_collision,
+            "min_stall_margin": min_stall_margin if stall_recovery else None,
+            "success_count": success_count,
+            "infeasible_count": infeasible_count,
+            "max_active_rows": max_active_rows,
+        }
+
+    def test_multi_constraint_rows_are_active_with_k2(self):
+        m2 = self._run_trial(max_constraints=2, stall_recovery=False, steps=25)
+        m1 = self._run_trial(max_constraints=1, stall_recovery=False, steps=25)
+        assert m2["max_active_rows"] >= 2, (
+            "Expected at least two active collision rows with max_constraints=2"
+        )
+        assert m1["max_active_rows"] <= 1, (
+            "Expected at most one active collision row with max_constraints=1"
+        )
+
+    def test_stall_recovery_k2_does_not_worsen_penetration_vs_off(self):
+        with_stall = self._run_trial(max_constraints=2, stall_recovery=True, steps=80)
+        without_stall = self._run_trial(max_constraints=2, stall_recovery=False, steps=80)
+
+        # Regression guard: enabling stall recovery should not pull into deeper
+        # collision than leaving it disabled in this near-limit scenario.
+        assert with_stall["worst_collision"] >= without_stall["worst_collision"] - 1e-3, (
+            "Stall recovery worsened penetration under K=2:\n"
+            f"with_stall={with_stall['worst_collision']:.4f}, "
+            f"without_stall={without_stall['worst_collision']:.4f}"
+        )
+
+        # Guard against unconditional penetration escape ratcheting margin below
+        # zero when the configuration remains limit-dominated.
+        assert with_stall["min_stall_margin"] is not None
+        assert with_stall["min_stall_margin"] >= -1e-9, (
+            "Stall handler dropped collision margin below zero in a limit-dominated "
+            f"K=2 run (min_margin={with_stall['min_stall_margin']:.4f})"
+        )
