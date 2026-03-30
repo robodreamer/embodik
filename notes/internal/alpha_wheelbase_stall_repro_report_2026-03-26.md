@@ -33,6 +33,80 @@ Notes:
 - Uses real alpha URDF and real `collisions.json`.
 - Reproduces hmnd-like `solve_position_step` behavior, including success-only update semantics.
 
+## Build + Test in `hmnd_robot` Wheelbase Example
+
+Use this runbook to validate the current EmbodiK solver changes in the actual wheelbase app flow.
+
+### 1) Build and test EmbodiK first
+
+From `embodik` repo root:
+
+```bash
+pixi run build
+pixi run test -k stall -q
+```
+
+### 2) Install the local EmbodiK into hmnd Pixi env (no dependency reinstall)
+
+From `hmnd_robot` repo root:
+
+```bash
+pixi run python -m pip install --no-deps --force-reinstall "/home/andypark/Projects/repos/embodik"
+```
+
+Quick import/path sanity check:
+
+```bash
+pixi run python -c "import embodik,sys; print(sys.version); print(embodik.__file__)"
+```
+
+Expected:
+- import succeeds,
+- printed module path resolves to the hmnd Pixi environment site-packages,
+- install timestamp matches the current local rebuild window.
+
+### 2b) Actual low-level rebuild path used during debugging (cp311)
+
+During incident debugging we also used a direct CMake target rebuild for rapid iteration on the Python extension:
+
+```bash
+cmake --build build-cp311 --target _embodik_impl -j8
+```
+
+Notes:
+- This rebuilds only the `_embodik_impl` extension from an existing `build-cp311` tree.
+- It was used to quickly refresh the cp311 backend while avoiding full dependency reinstall cycles.
+- After rebuilding, we still verified that `hmnd_robot` imported the intended freshly built module.
+
+### 3) Run wheelbase viser example and exercise the known scenario
+
+From `hmnd_robot` repo root:
+
+```bash
+pixi run alpha_wheelbase_viser
+```
+
+Recommended manual validation sequence:
+1. Enable interactive IK with collision enabled.
+2. Reproduce the near-torso right-arm motion where pull-in/stall previously occurred.
+3. Toggle torso lock/unlock and repeat near-contact motion.
+4. Switch solve mode between `SCALE` and `MIN_ERROR` and confirm behavior does not regress.
+
+### 4) Optional runtime diagnostics during hmnd validation
+
+If additional telemetry is needed, use existing hmnd-side opt-in logging:
+
+```bash
+export HMND_EMBODIK_DEBUG_LOG=/tmp/embodik_debug.jsonl
+export HMND_EMBODIK_DEBUG_EVERY=5
+pixi run alpha_wheelbase_viser
+```
+
+Then inspect:
+- solver status transitions (`SUCCESS` / `INFEASIBLE` / `NUMERICAL_ERROR`),
+- `dq_norm` near-zero lock windows,
+- collision distance trend and stall margin behavior.
+
 ## Reproduced Issues
 
 Using the alpha harness before solver-side fix:
@@ -199,7 +273,7 @@ Summary:
    - candidate approach: bounded, deterministic fallback step (collision-safe) after N consecutive collapsed ticks.
 3. Re-check task-priority interactions in wheelbase app:
    - especially transitions where only `secondary_torso_yaw` remains active.
-4. Keep a lightweight debug restore path (documented in `notes/internal/wheelbase_debug_logging_playbook_2026-03-30.md`) so runtime telemetry can be re-enabled quickly without reintroducing ad-hoc code.
+4. Keep a lightweight debug restore path (see **Debug Logging Mechanism (Restore Notes)** in this document) so runtime telemetry can be re-enabled quickly without reintroducing ad-hoc code.
 
 ## Debug Logging Mechanism (Restore Notes)
 
@@ -217,4 +291,98 @@ To re-enable quickly in a future incident:
 4. Keep fields minimal but actionable:
    - status, dq norm, collision min distance, active rows, saturated joints,
    - reject/escape counters and step acceptance path (full/reduced/reverted).
+
+## Archive Handoff Snapshot (2026-03-30)
+
+This section captures the full state at archive time so a future restart does not
+require reconstructing context from chat history.
+
+### Implemented solver-side behavior changes (kept)
+
+- Position-step post-solve rejection for steps that newly create or significantly
+  worsen penetration.
+- Rejection backoff path (fractional step retries) before full reversion.
+- Hard-jump rejection guard for sudden deep-penetration transitions.
+- Stall escape activation widened beyond penetration-only:
+  - includes configured-clearance violations during stalled states.
+- Collision cache/candidate safety improvements:
+  - force full scan on underfilled/empty cached candidate subsets,
+  - ensure currently penetrating pairs are represented in active rows.
+- Limit-dominated stall handling improvements:
+  - avoid treating joint-limit-dominated stalls as collision-dominated,
+  - preserve/propagate saturated-joint context in position-IK stall paths.
+- Recovery/rejection logic remains active even when stall-relaxed
+  `min_distance` becomes non-positive.
+
+### Python wheelbase integration behavior (kept)
+
+- Apply `q_solution` when solver reports explicit intervention
+  (`collision_rejection_count > 0` or `stall_escape_count > 0`), not only plain success.
+- Keep staged no-progress recovery flow used for UX:
+  - solver re-sync path first,
+  - handle snap only as later-stage fallback.
+- Keep torso unlock re-anchoring behavior to reduce stale torso-target locking.
+
+### Debug instrumentation cleanup completed
+
+- Removed session-specific C++ NDJSON logging helpers and probes from
+  `cpp_core/src/kinematics_solver.cpp`.
+- Removed session-specific Python hypothesis logging blocks from wheelbase files.
+- Removed hardcoded debug session path/id usage in cleaned paths.
+- Left restore guidance in this document (no dependency on external playbook file).
+
+### Build/test workflow used
+
+EmbodiK:
+
+```bash
+pixi run build
+pixi run test -k stall -q
+```
+
+hmnd_robot install path (preferred):
+
+```bash
+pixi run python -m pip install --no-deps --force-reinstall "/home/andypark/Projects/repos/embodik"
+pixi run python -c "import embodik,sys; print(sys.version); print(embodik.__file__)"
+```
+
+Low-level rebuild path used during incident work:
+
+```bash
+cmake --build build-cp311 --target _embodik_impl -j8
+```
+
+Wheelbase app validation entrypoint:
+
+```bash
+pixi run alpha_wheelbase_viser
+```
+
+### Validation status at archive time
+
+- EmbodiK targeted stall suite passed after cleanup:
+  - `pixi run test -k stall -q` -> all selected tests passed.
+- Wheelbase Python files passed syntax validation after debug cleanup:
+  - `python -m py_compile` over edited wheelbase modules succeeded.
+- Runtime reproductions showed substantial reduction of severe deep-penetration
+  events versus earlier failing revisions, but residual infeasible/zero-motion
+  plateaus can still occur in specific constrained postures.
+
+### Commits containing the finalized state
+
+- EmbodiK commit: `b806036`
+  - solver behavior + changelog + internal report updates.
+- hmnd commit: `bec5caaa90`
+  - wheelbase Python debug instrumentation cleanup.
+
+### Remaining known issue to prioritize next
+
+- Long plateau behavior (`INFEASIBLE` / `NUMERICAL_ERROR` with near-zero applied
+  motion) under active constraints, often correlated with effective primary-task
+  scale collapse.
+- Recommended immediate follow-up:
+  1. add deterministic plateau regression test(s),
+  2. add bounded fallback for prolonged collapsed-scale streaks,
+  3. re-validate with unlocked torso + mode transitions (`SCALE` <-> `MIN_ERROR`).
 
