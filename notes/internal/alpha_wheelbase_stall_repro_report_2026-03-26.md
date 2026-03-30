@@ -173,3 +173,48 @@ Summary:
   - This can create path-dependent behavior between APIs and should be revisited if parity matters for teleop stabilization.
 - No immediate hard conflict was observed in full test suite, but parity-focused tests are recommended for CoM-heavy scenarios (especially near boundary and with simultaneous collision/limit pressure).
 
+## Progress Update (2026-03-30)
+
+### Stabilization outcomes
+
+- Removed session-specific runtime debug instrumentation from EmbodiK C++ and wheelbase viser Python after collecting enough evidence.
+- Kept solver-side behavioral fixes that were supported by runtime evidence:
+  - clearance-aware stall escape activation (not penetration-only),
+  - hard-jump rejection guard for sudden deep penetration transitions,
+  - recovery/rejection logic now remains active even when stall handler relaxes configured `min_distance` to non-positive values.
+- Latest long run showed major reduction in severe deep-penetration events compared with earlier reproductions.
+
+### Current residual behavior
+
+- Residual lock plateaus can still appear as long `INFEASIBLE` / `NUMERICAL_ERROR` windows with near-zero applied motion.
+- Dominant residual message remains: `primary task scale collapsed to zero under active constraints`.
+- These plateaus are less catastrophic than prior deep pull-in failures, but still a usability issue for fluid teleop.
+
+## Remaining Issues / Next Steps (2026-03-30)
+
+1. Add focused regression tests for *plateau* behavior:
+   - prolonged infeasible plateau with active torso secondary task,
+   - ensure escape/rejection counters continue to engage while `stall_min_distance <= 0`.
+2. Add solver-side guardrail for extended `primary task scale collapsed` streaks:
+   - candidate approach: bounded, deterministic fallback step (collision-safe) after N consecutive collapsed ticks.
+3. Re-check task-priority interactions in wheelbase app:
+   - especially transitions where only `secondary_torso_yaw` remains active.
+4. Keep a lightweight debug restore path (documented in `notes/internal/wheelbase_debug_logging_playbook_2026-03-30.md`) so runtime telemetry can be re-enabled quickly without reintroducing ad-hoc code.
+
+## Debug Logging Mechanism (Restore Notes)
+
+The session-specific debug instrumentation used during this investigation was intentionally removed from both EmbodiK C++ and wheelbase viser Python once behavior stabilized.
+
+To re-enable quickly in a future incident:
+
+1. Prefer existing opt-in Python telemetry hook in wheelbase runtime:
+   - `HMND_EMBODIK_DEBUG_LOG=/tmp/embodik_debug.jsonl`
+   - optional: `HMND_EMBODIK_DEBUG_EVERY`, `HMND_EMBODIK_DEBUG_COLLISION_THRESHOLD`.
+2. For C++ solver internals, add temporary local logging behind a feature flag/env var only:
+   - avoid hardcoded absolute paths and session IDs,
+   - emit only under lock/failure predicates (`INFEASIBLE`, `NUMERICAL_ERROR`, near-zero `dq`).
+3. Keep instrumentation in clearly marked blocks and remove after verification.
+4. Keep fields minimal but actionable:
+   - status, dq norm, collision min distance, active rows, saturated joints,
+   - reject/escape counters and step acceptance path (full/reduced/reverted).
+

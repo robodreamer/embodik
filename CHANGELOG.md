@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Position IK collision diagnostics counters**: `PositionIKResult` now exposes `collision_rejection_count` and `stall_escape_count` (C++ + Python bindings) so callers can quantify rejected penetration steps and successful stall-escape nudges.
+
+### Changed
+- **Collision candidate-set safety fallback**: collision row selection now forces a full scan when cached/top-K candidate subsets are underfilled or empty, and guarantees any currently penetrating pair is included in the active set before truncation.
+- **Collision debug semantics for top-K mode**: `evaluate_collision_debug()` now reports the globally closest pair rather than only the closest active constraint row, improving observability when the nearest pair is outside the current top-K active rows.
+- **Penetration/stall constants normalized**: newly introduced penetration-rejection and stall-escape thresholds in position-step paths are now defined as shared file-level constants instead of repeated inline literals.
+- **Stall-escape activation widened for clearance violations**: stalled recovery now treats configured clearance violations (`distance < min_distance`) as escape-eligible even when still non-penetrating, reducing prolonged zero-motion plateaus.
+- **Debug instrumentation cleanup**: removed session-specific C++ runtime log sinks used during incident debugging while preserving solver behavior changes validated by runtime evidence.
+
+### Fixed
+- **Position-step penetration regression guard**: `solve_position` and both `solve_position_step` overloads now reject integration steps that newly create or significantly deepen collision penetration, reverting to the pre-step configuration when unsafe.
+- **Stalled penetration escape robustness**: when stalled in penetration, position-step IK now invalidates stale collision-pair caches and applies Jacobian-based escape nudges (active-row first, then global-pair fallback) to recover from deep contact states more reliably.
+- **Hard jump protection in step integration**: sudden deep penetration transitions are now rejected via additional hard-jump thresholds in position-step rejection logic.
+- **Recovery gating when stall margin goes non-positive**: collision rejection/escape paths now remain active when collision constraints are enabled, even if the temporary stall-adjusted `min_distance` becomes non-positive.
+
 ## [0.18.7] - 2026-03-26
 
 ### Changed
