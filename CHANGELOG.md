@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.8] - 2026-03-30
+
 ### Added
 - **Position IK collision diagnostics counters**: `PositionIKResult` now exposes `collision_rejection_count` and `stall_escape_count` (C++ + Python bindings) so callers can quantify rejected penetration steps and successful stall-escape nudges.
 

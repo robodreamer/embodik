@@ -1,6 +1,6 @@
 [workspace]
 name = "embodik"
-version = "0.18.7"
+version = "0.18.8"
 description = "High-performance inverse kinematics solver optimized for cross-embodiment VLA/AI applications"
 authors = ["Andy Park <andypark.purdue@gmail.com>"]
 channels = ["conda-forge"]
