@@ -301,6 +301,13 @@ struct PositionIKResult : public VelocitySolverResult {
   std::vector<double> position_error_trace; // Per-iteration position error
   std::vector<double>
       orientation_error_trace; // Per-iteration orientation error
+
+  /// Number of integration steps rejected because they would have created
+  /// or deepened collision penetration.
+  int collision_rejection_count = 0;
+  /// Number of steps where a Jacobian-based escape nudge was applied to
+  /// move the configuration out of collision penetration during a stall.
+  int stall_escape_count = 0;
 };
 
 } // namespace embodik
