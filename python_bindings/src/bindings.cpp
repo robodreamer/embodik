@@ -435,7 +435,11 @@ NB_MODULE(_embodik_impl, m) {
       .def_ro("position_error_trace",
               &eik::PositionIKResult::position_error_trace)
       .def_ro("orientation_error_trace",
-              &eik::PositionIKResult::orientation_error_trace);
+              &eik::PositionIKResult::orientation_error_trace)
+      .def_ro("collision_rejection_count",
+              &eik::PositionIKResult::collision_rejection_count)
+      .def_ro("stall_escape_count",
+              &eik::PositionIKResult::stall_escape_count);
 
   m.def("pose_error_norm", &eik::calculateConfigurationDistance, "current"_a,
         "target"_a,
