@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.9] - 2026-03-29
+
+### Added
+- **Focused solver perf gates**: added targeted benchmark scripts for velocity and position-step collision workloads plus a hardened median-of-medians aggregator to make refactor acceptance decisions robust against run-to-run noise.
+
+### Changed
+- **Collision-heavy IK loop efficiency**: reduced per-step overhead by removing avoidable allocations in stall/candidate handling, reserving hot-path containers, and simplifying collision debug evaluation in repeated checks.
+- **Position-step recovery hot path**: skip redundant post-step collision rejection when integration does not move configuration, and cache collision-object-to-frame lookups during stall normal-escape attempts.
+- **Constraint bound readability**: replaced unbounded torso-row magic literals with the shared `kUnboundedConstraintLimit` constant.
+
 ## [0.18.8] - 2026-03-30
 
 ### Added
