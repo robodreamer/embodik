@@ -918,6 +918,8 @@ private:
   std::string canonical_pair_key(const std::string &a,
                                  const std::string &b) const;
   bool collision_pair_allowed(const std::string &a, const std::string &b) const;
+  std::optional<double> evaluate_min_collision_distance(
+      const Eigen::VectorXd &current_q = Eigen::VectorXd());
   std::optional<CollisionConstraintResult> compute_collision_constraint();
 
 public:
