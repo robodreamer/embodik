@@ -395,7 +395,7 @@ def run_viser(args: argparse.Namespace) -> None:
             "Enable torso secondary orientation task", initial_value=True
         )
         primary_mode = server.gui.add_dropdown(
-            "Primary solve mode", ("MIN_ERROR", "SCALE"), initial_value="MIN_ERROR"
+            "Primary solve mode", ("MIN_ERROR", "SCALE", "SCALE_ELASTIC"), initial_value="MIN_ERROR"
         )
         pos_gain_s = server.gui.add_slider("EE position gain", 1.0, 80.0, initial_value=10.0, step=1.0)
         rot_gain_s = server.gui.add_slider("EE orientation gain", 1.0, 80.0, initial_value=10.0, step=1.0)
@@ -636,10 +636,8 @@ def run_viser(args: argparse.Namespace) -> None:
         solver.dt = opts.dt
         opts.position_gain = float(pos_gain_s.value)
         opts.orientation_gain = float(rot_gain_s.value)
-        opts.primary_solve_mode = (
-            eik.TaskSolveMode.MIN_ERROR
-            if primary_mode.value == "MIN_ERROR"
-            else eik.TaskSolveMode.SCALE
+        opts.primary_solve_mode = getattr(
+            eik.TaskSolveMode, primary_mode.value, eik.TaskSolveMode.SCALE
         )
         opts.primary_allow_min_error_fallback = bool(allow_fallback.value)
         # Keep behavior closer to example 01: avoid early NO_PROGRESS exits on large target jumps.
