@@ -867,6 +867,8 @@ void KinematicsSolver::configure_collision_constraint(
     last_collision_exact_distance_queries_ = 0;
     last_collision_bound_culled_pairs_ = 0;
     last_collision_budget_exhausted_ = false;
+    last_constraint_min_distance_ = std::numeric_limits<double>::infinity();
+    last_constraint_was_full_scan_ = false;
     collision_stuck_counters_.clear();
     collision_stuck_last_distances_.clear();
   }
@@ -1019,6 +1021,103 @@ KinematicsSolver::evaluate_min_collision_distance(const Eigen::VectorXd &current
   (void)current_q;
   return std::nullopt;
 #endif
+}
+
+std::optional<double>
+KinematicsSolver::evaluate_min_collision_distance_targeted(
+    const Eigen::VectorXd &current_q,
+    const std::vector<std::size_t> &pair_indices) {
+#ifdef PINOCCHIO_WITH_HPP_FCL
+  if (!robot_->has_collision_geometry() || pair_indices.empty()) {
+    return std::nullopt;
+  }
+
+  if (current_q.size() > 0) {
+    if (current_q.size() != robot_->nq()) {
+      throw std::runtime_error(
+          "Invalid configuration size for collision evaluation.");
+    }
+    robot_->update_kinematics(current_q);
+  } else {
+    robot_->update_kinematics(robot_->get_current_configuration());
+  }
+
+  auto *collision_model = robot_->collision_model();
+  auto *collision_data = robot_->collision_data();
+  if (collision_model == nullptr || collision_data == nullptr) {
+    return std::nullopt;
+  }
+
+  pinocchio::updateGeometryPlacements(robot_->model(), robot_->data(),
+                                      *collision_model, *collision_data);
+  double best_distance = std::numeric_limits<double>::infinity();
+  bool found = false;
+
+  for (std::size_t idx : pair_indices) {
+    if (idx >= collision_model->collisionPairs.size()) continue;
+    if (!collision_data->activeCollisionPairs.empty() &&
+        !collision_data->activeCollisionPairs[idx]) {
+      continue;
+    }
+    pinocchio::computeDistance(*collision_model, *collision_data, idx);
+    const double distance = collision_data->distanceResults[idx].min_distance;
+    if (!std::isfinite(distance)) continue;
+    best_distance = std::min(best_distance, distance);
+    found = true;
+  }
+
+  if (!found) return std::nullopt;
+  return best_distance;
+#else
+  (void)current_q;
+  (void)pair_indices;
+  return std::nullopt;
+#endif
+}
+
+std::vector<std::size_t>
+KinematicsSolver::get_post_step_rejection_pair_indices() const {
+  std::unordered_set<std::size_t> unique;
+  for (std::size_t idx : last_collision_constraint_pair_indices_) {
+    unique.insert(idx);
+  }
+  for (std::size_t idx : collision_cached_candidate_pair_indices_) {
+    unique.insert(idx);
+  }
+  return std::vector<std::size_t>(unique.begin(), unique.end());
+}
+
+// Post-step collision rejection safety margin.  The early-exit gate skips
+// the full scan when the constraint computation's global minimum distance
+// exceeds the penetration threshold by at least this margin.  Must be large
+// enough that a single bounded integration step cannot close the gap.
+constexpr double kPostStepSafeMargin = 0.01;
+
+std::optional<double>
+KinematicsSolver::evaluate_post_step_collision_distance(
+    const Eigen::VectorXd &q) {
+  // Tier 1: Early-exit gate.
+  // If the constraint computation already found all pairs well above the
+  // penetration threshold, a single bounded integration step cannot create
+  // penetration.  Skip the scan entirely.
+  // Disabled when budget was exhausted (some pairs may not have been checked).
+  if (std::isfinite(last_constraint_min_distance_) &&
+      !last_collision_budget_exhausted_ &&
+      last_constraint_min_distance_ >=
+          kCollisionPenetrationDistanceThreshold + kPostStepSafeMargin) {
+    return last_constraint_min_distance_;
+  }
+
+  // Tier 2: Targeted scan of known-close pairs.
+  // Only check pairs the constraint computation already identified as close
+  // (active constraints + cached candidates).
+  auto targeted_pairs = get_post_step_rejection_pair_indices();
+  if (!targeted_pairs.empty()) {
+    return evaluate_min_collision_distance_targeted(q, targeted_pairs);
+  }
+
+  // Tier 3: Full scan fallback (no constraint data available).
+  return evaluate_min_collision_distance(q);
 }
 
 void KinematicsSolver::add_collision_constraint(
@@ -1771,6 +1870,29 @@ KinematicsSolver::compute_collision_constraint() {
       collision_constraint_.has_value() &&
       collision_constraint_->nearest_points_all_pairs;
 
+  // Fast path: when the cache is warm and previous step confirmed all pairs
+  // are well clear of the activation threshold, skip the expensive geometry
+  // update entirely and return an empty constraint (no active rows).
+  if (constraint_active && collision_pair_cache_enabled_ &&
+      collision_pair_cache_has_full_scan_ &&
+      !last_collision_budget_exhausted_ &&
+      std::isfinite(last_constraint_min_distance_) &&
+      collision_constraint_->constraint_activation_enabled &&
+      collision_constraint_->constraint_activation_margin > 0.0) {
+    const double activation_threshold =
+        collision_constraint_->min_distance +
+        collision_constraint_->constraint_activation_margin;
+    if (last_constraint_min_distance_ > activation_threshold) {
+      // All pairs are beyond the activation margin — no constraint rows
+      // would be emitted.  Increment the cache step counter and return
+      // an empty result, preserving the cached candidate set.
+      collision_pair_cache_steps_since_refresh_++;
+      last_collision_pairs_considered_ = 0;
+      last_collision_exact_distance_queries_ = 0;
+      return std::nullopt;
+    }
+  }
+
   // Update collision placements and compute distances for all pairs
   pinocchio::updateGeometryPlacements(robot_->model(), robot_->data(),
                                       *collision_model, *collision_data);
@@ -1840,13 +1962,22 @@ KinematicsSolver::compute_collision_constraint() {
           static_cast<std::size_t>(collision_constraint_->max_constraints)) {
     // Safety fallback: near-contact cached subsets can become underfilled
     // (e.g. only one historical pair left while max_constraints>1), which can
-    // miss newly critical pairs for a whole tick. Force a full scan to refresh
-    // candidate coverage before constructing constraint rows.
-    use_cached_candidate_subset = false;
-    eval_indices.clear();
-    eval_indices.reserve(pairs.size());
-    for (std::size_t idx = 0; idx < pairs.size(); ++idx) {
-      eval_indices.push_back(idx);
+    // miss newly critical pairs for a whole tick.  Only force a full scan
+    // when near penetration; in clear space the underfilled cache is harmless
+    // and a full scan wastes the tuning mode's latency budget.
+    const bool underfill_near_penetration =
+        !std::isfinite(last_constraint_min_distance_) ||
+        last_collision_budget_exhausted_ ||
+        last_constraint_min_distance_ <
+            kCollisionPenetrationDistanceThreshold +
+                kPostStepSafeMargin;
+    if (underfill_near_penetration) {
+      use_cached_candidate_subset = false;
+      eval_indices.clear();
+      eval_indices.reserve(pairs.size());
+      for (std::size_t idx = 0; idx < pairs.size(); ++idx) {
+        eval_indices.push_back(idx);
+      }
     }
   }
   if (use_cached_candidate_subset && eval_indices.empty()) {
@@ -2001,6 +2132,10 @@ KinematicsSolver::compute_collision_constraint() {
     collision_pair_cache_has_full_scan_ = true;
     collision_pair_cache_steps_since_refresh_ = 0;
   }
+
+  // Expose global minimum distance for the post-step rejection fast path.
+  last_constraint_min_distance_ = best_distance_debug;
+  last_constraint_was_full_scan_ = !use_cached_candidate_subset;
 
   // ---- Pair selection: top-K with hysteresis ----
   // Sort all allowed candidates by distance (ascending).
@@ -3718,11 +3853,11 @@ PositionIKResult KinematicsSolver::solve_position(
     // Post-solve collision rejection (same logic as solve_position_step).
     if (step_moved && collision_constraint_.has_value() &&
         collision_constraint_->enabled) {
-      auto post_dist_debug = evaluate_min_collision_distance(q_current);
+      auto post_dist_debug = evaluate_post_step_collision_distance(q_current);
       if (post_dist_debug.has_value() &&
           std::isfinite(*post_dist_debug) &&
           *post_dist_debug < kCollisionPenetrationDistanceThreshold) {
-        auto pre_dist_debug = evaluate_min_collision_distance(q_pre_step);
+        auto pre_dist_debug = evaluate_post_step_collision_distance(q_pre_step);
         double pre_dist = (pre_dist_debug.has_value() && std::isfinite(*pre_dist_debug))
                               ? *pre_dist_debug
                               : std::numeric_limits<double>::infinity();
@@ -4037,11 +4172,11 @@ PositionIKResult KinematicsSolver::solve_position_step(
     // Post-solve collision rejection (same logic as multi-target overload).
     if (step_moved && collision_constraint_.has_value() &&
         collision_constraint_->enabled) {
-      auto post_dist_debug = evaluate_min_collision_distance(q);
+      auto post_dist_debug = evaluate_post_step_collision_distance(q);
       if (post_dist_debug.has_value() &&
           std::isfinite(*post_dist_debug) &&
           *post_dist_debug < kCollisionPenetrationDistanceThreshold) {
-        auto pre_dist_debug = evaluate_min_collision_distance(q_pre_step);
+        auto pre_dist_debug = evaluate_post_step_collision_distance(q_pre_step);
         double pre_dist = (pre_dist_debug.has_value() && std::isfinite(*pre_dist_debug))
                               ? *pre_dist_debug
                               : std::numeric_limits<double>::infinity();
@@ -4062,7 +4197,7 @@ PositionIKResult KinematicsSolver::solve_position_step(
             Eigen::VectorXd q_backoff = pinocchio::integrate(
                 robot_->model(), q_pre_step, frac * dq_nominal);
             robot_->update_configuration(q_backoff);
-            auto backoff_dist_debug = evaluate_min_collision_distance(q_backoff);
+            auto backoff_dist_debug = evaluate_post_step_collision_distance(q_backoff);
             if (backoff_dist_debug.has_value() &&
                 std::isfinite(*backoff_dist_debug) &&
                 *backoff_dist_debug >=
@@ -4083,17 +4218,38 @@ PositionIKResult KinematicsSolver::solve_position_step(
     }
 
     // Cache invalidation on stall (same as multi-target overload).
+    // Only invalidate when actually near collision — in clear space the cache
+    // remains valid and avoids an expensive full scan on the next step.
     const double step_dq_norm = last_vel_result.joint_velocities.norm();
     const double effective_step_dq_norm =
         step_collision_rejected ? 0.0 : step_dq_norm;
     if (effective_step_dq_norm < stall_config_.dq_stall_eps) {
-      collision_pair_cache_has_full_scan_ = false;
+      const bool near_penetration =
+          !std::isfinite(last_constraint_min_distance_) ||
+          last_collision_budget_exhausted_ ||
+          last_constraint_min_distance_ <
+              kCollisionPenetrationDistanceThreshold +
+                  kPostStepSafeMargin;
+      if (near_penetration) {
+        collision_pair_cache_has_full_scan_ = false;
+      }
     }
 
     // Stall escape (same logic as multi-target overload).
-    if (collision_constraint_.has_value() && collision_constraint_->enabled &&
+    // Skip the expensive escape logic entirely when we know from the
+    // constraint computation that all pairs are well clear.
+    const bool stall_escape_eligible =
+        collision_constraint_.has_value() && collision_constraint_->enabled &&
         (effective_step_dq_norm < stall_config_.dq_stall_eps ||
-         step_collision_rejected)) {
+         step_collision_rejected);
+    const bool stall_escape_near_collision =
+        stall_escape_eligible &&
+        (!std::isfinite(last_constraint_min_distance_) ||
+         last_collision_budget_exhausted_ ||
+         last_constraint_min_distance_ <
+             collision_constraint_->min_distance +
+                 kPostStepSafeMargin);
+    if (stall_escape_near_collision) {
       double min_dist = std::numeric_limits<double>::infinity();
       int worst_row = -1;
       for (int i = 0; i < static_cast<int>(last_collision_debug_list_.size()); ++i) {
@@ -4118,20 +4274,46 @@ PositionIKResult KinematicsSolver::solve_position_step(
       double global_min_dist = min_dist;
 
       if (!use_jacobian_escape) {
-        auto global_debug = evaluate_collision_debug(q);
-        if (global_debug.has_value() && std::isfinite(global_debug->distance) &&
-            global_debug->distance < escape_activation_threshold) {
-          global_min_dist = global_debug->distance;
-          Eigen::Vector3d diff = global_debug->point_b_world - global_debug->point_a_world;
-          double diff_norm = diff.norm();
-          if (diff_norm > kCollisionEscapeNormEps) {
-            escape_normal = diff / diff_norm;
-          } else {
-            escape_normal = Eigen::Vector3d(0, 0, 1);
+        // Fast path: when the constraint computation already has a reliable
+        // global minimum distance, use it directly instead of the expensive
+        // full-scan evaluate_collision_debug().  Only fall back to the full
+        // scan when no constraint data is available or budget was exhausted.
+        const bool have_reliable_constraint_dist =
+            std::isfinite(last_constraint_min_distance_) &&
+            !last_collision_budget_exhausted_;
+        if (have_reliable_constraint_dist) {
+          if (last_constraint_min_distance_ < escape_activation_threshold &&
+              last_collision_debug_.has_value() &&
+              std::isfinite(last_collision_debug_->distance)) {
+            global_min_dist = last_collision_debug_->distance;
+            Eigen::Vector3d diff = last_collision_debug_->point_b_world -
+                                   last_collision_debug_->point_a_world;
+            double diff_norm = diff.norm();
+            if (diff_norm > kCollisionEscapeNormEps) {
+              escape_normal = diff / diff_norm;
+            } else {
+              escape_normal = Eigen::Vector3d(0, 0, 1);
+            }
+            escape_frame_a = last_collision_debug_->object_a;
+            escape_frame_b = last_collision_debug_->object_b;
+            use_normal_escape = true;
           }
-          escape_frame_a = global_debug->object_a;
-          escape_frame_b = global_debug->object_b;
-          use_normal_escape = true;
+        } else {
+          auto global_debug = evaluate_collision_debug(q);
+          if (global_debug.has_value() && std::isfinite(global_debug->distance) &&
+              global_debug->distance < escape_activation_threshold) {
+            global_min_dist = global_debug->distance;
+            Eigen::Vector3d diff = global_debug->point_b_world - global_debug->point_a_world;
+            double diff_norm = diff.norm();
+            if (diff_norm > kCollisionEscapeNormEps) {
+              escape_normal = diff / diff_norm;
+            } else {
+              escape_normal = Eigen::Vector3d(0, 0, 1);
+            }
+            escape_frame_a = global_debug->object_a;
+            escape_frame_b = global_debug->object_b;
+            use_normal_escape = true;
+          }
         }
       }
 
@@ -4160,9 +4342,9 @@ PositionIKResult KinematicsSolver::solve_position_step(
                 }
               }
               robot_->update_configuration(q_candidate);
-              auto esc_debug = evaluate_collision_debug(q_candidate);
-              if (esc_debug.has_value() && std::isfinite(esc_debug->distance) &&
-                  esc_debug->distance > min_dist) {
+              auto esc_dist = evaluate_post_step_collision_distance(q_candidate);
+              if (esc_dist.has_value() && std::isfinite(*esc_dist) &&
+                  *esc_dist > min_dist) {
                 q = q_candidate;
                 result.stall_escape_count++;
                 return true;
@@ -4220,9 +4402,9 @@ PositionIKResult KinematicsSolver::solve_position_step(
             }
           }
           robot_->update_configuration(q_candidate);
-          auto esc_debug = evaluate_collision_debug(q_candidate);
-          if (esc_debug.has_value() && std::isfinite(esc_debug->distance) &&
-              esc_debug->distance > global_min_dist) {
+          auto esc_dist = evaluate_post_step_collision_distance(q_candidate);
+          if (esc_dist.has_value() && std::isfinite(*esc_dist) &&
+              *esc_dist > global_min_dist) {
             q = q_candidate;
             result.stall_escape_count++;
             return true;
@@ -4272,17 +4454,17 @@ PositionIKResult KinematicsSolver::solve_position_step(
             q_candidate[j] = std::min(q_candidate[j], q_max[j]);
           }
         }
-        auto curr_debug = evaluate_collision_debug(q);
+        auto curr_dist = evaluate_post_step_collision_distance(q);
         robot_->update_configuration(q_candidate);
-        auto cand_debug = evaluate_collision_debug(q_candidate);
+        auto cand_dist = evaluate_post_step_collision_distance(q_candidate);
         const bool safe_candidate =
-            (!cand_debug.has_value() || !std::isfinite(cand_debug->distance) ||
-             cand_debug->distance >= kCollisionPenetrationDistanceThreshold);
-        const bool not_worse = (!curr_debug.has_value() || !cand_debug.has_value() ||
-                                !std::isfinite(curr_debug->distance) ||
-                                !std::isfinite(cand_debug->distance) ||
-                                cand_debug->distance >=
-                                    curr_debug->distance - kCollisionPenetrationWorsenTolerance);
+            (!cand_dist.has_value() || !std::isfinite(*cand_dist) ||
+             *cand_dist >= kCollisionPenetrationDistanceThreshold);
+        const bool not_worse = (!curr_dist.has_value() || !cand_dist.has_value() ||
+                                !std::isfinite(*curr_dist) ||
+                                !std::isfinite(*cand_dist) ||
+                                *cand_dist >=
+                                    *curr_dist - kCollisionPenetrationWorsenTolerance);
         if (safe_candidate && not_worse) {
           q = q_candidate;
           result.stall_escape_count++;
@@ -4653,12 +4835,12 @@ PositionIKResult KinematicsSolver::solve_position_step(
     // penetration past a safety threshold, revert to pre-step config.
     if (step_moved && collision_constraint_.has_value() &&
         collision_constraint_->enabled) {
-      auto post_dist_debug = evaluate_min_collision_distance(q);
+      auto post_dist_debug = evaluate_post_step_collision_distance(q);
       if (post_dist_debug.has_value() &&
           std::isfinite(*post_dist_debug) &&
           *post_dist_debug < kCollisionPenetrationDistanceThreshold) {
         // Check pre-step distance to decide if this step caused the problem.
-        auto pre_dist_debug = evaluate_min_collision_distance(q_pre_step);
+        auto pre_dist_debug = evaluate_post_step_collision_distance(q_pre_step);
         double pre_dist = (pre_dist_debug.has_value() && std::isfinite(*pre_dist_debug))
                               ? *pre_dist_debug
                               : std::numeric_limits<double>::infinity();
@@ -4675,7 +4857,7 @@ PositionIKResult KinematicsSolver::solve_position_step(
             Eigen::VectorXd q_backoff = pinocchio::integrate(
                 robot_->model(), q_pre_step, frac * dq_nominal);
             robot_->update_configuration(q_backoff);
-            auto backoff_dist_debug = evaluate_min_collision_distance(q_backoff);
+            auto backoff_dist_debug = evaluate_post_step_collision_distance(q_backoff);
             if (backoff_dist_debug.has_value() &&
                 std::isfinite(*backoff_dist_debug) &&
                 *backoff_dist_debug >=
@@ -4698,20 +4880,41 @@ PositionIKResult KinematicsSolver::solve_position_step(
     // When stalled, invalidate the collision pair cache so the next solve
     // tick performs a full scan and picks up any penetrating pairs that the
     // cached candidate set may have missed.
+    // Only invalidate when actually near collision — in clear space the cache
+    // remains valid and avoids an expensive full scan on the next step.
     const double step_dq_norm = last_vel_result.joint_velocities.norm();
     const double effective_step_dq_norm =
         step_collision_rejected ? 0.0 : step_dq_norm;
     if (effective_step_dq_norm < stall_config_.dq_stall_eps) {
-      collision_pair_cache_has_full_scan_ = false;
+      const bool near_penetration =
+          !std::isfinite(last_constraint_min_distance_) ||
+          last_collision_budget_exhausted_ ||
+          last_constraint_min_distance_ <
+              kCollisionPenetrationDistanceThreshold +
+                  kPostStepSafeMargin;
+      if (near_penetration) {
+        collision_pair_cache_has_full_scan_ = false;
+      }
     }
 
     // Stall escape: when stalled in penetration, nudge the config along the
     // collision normal to escape.  First check the QP's active constraint
     // list; if that doesn't show penetration, fall back to the full-scan
     // evaluate_collision_debug() which finds pairs the cache may have missed.
-    if (collision_constraint_.has_value() && collision_constraint_->enabled &&
+    // Skip the expensive escape logic entirely when we know from the
+    // constraint computation that all pairs are well clear.
+    const bool mt_stall_escape_eligible =
+        collision_constraint_.has_value() && collision_constraint_->enabled &&
         (effective_step_dq_norm < stall_config_.dq_stall_eps ||
-         step_collision_rejected)) {
+         step_collision_rejected);
+    const bool mt_stall_escape_near_collision =
+        mt_stall_escape_eligible &&
+        (!std::isfinite(last_constraint_min_distance_) ||
+         last_collision_budget_exhausted_ ||
+         last_constraint_min_distance_ <
+             collision_constraint_->min_distance +
+                 kPostStepSafeMargin);
+    if (mt_stall_escape_near_collision) {
       double min_dist = std::numeric_limits<double>::infinity();
       int worst_row = -1;
       for (int i = 0; i < static_cast<int>(last_collision_debug_list_.size()); ++i) {
@@ -4736,20 +4939,46 @@ PositionIKResult KinematicsSolver::solve_position_step(
       double global_min_dist = min_dist;
 
       if (!use_jacobian_escape) {
-        auto global_debug = evaluate_collision_debug(q);
-        if (global_debug.has_value() && std::isfinite(global_debug->distance) &&
-            global_debug->distance < escape_activation_threshold) {
-          global_min_dist = global_debug->distance;
-          Eigen::Vector3d diff = global_debug->point_b_world - global_debug->point_a_world;
-          double diff_norm = diff.norm();
-          if (diff_norm > kCollisionEscapeNormEps) {
-            escape_normal = diff / diff_norm;
-          } else {
-            escape_normal = Eigen::Vector3d(0, 0, 1);
+        // Fast path: when the constraint computation already has a reliable
+        // global minimum distance, use it directly instead of the expensive
+        // full-scan evaluate_collision_debug().  Only fall back to the full
+        // scan when no constraint data is available or budget was exhausted.
+        const bool have_reliable_constraint_dist =
+            std::isfinite(last_constraint_min_distance_) &&
+            !last_collision_budget_exhausted_;
+        if (have_reliable_constraint_dist) {
+          if (last_constraint_min_distance_ < escape_activation_threshold &&
+              last_collision_debug_.has_value() &&
+              std::isfinite(last_collision_debug_->distance)) {
+            global_min_dist = last_collision_debug_->distance;
+            Eigen::Vector3d diff = last_collision_debug_->point_b_world -
+                                   last_collision_debug_->point_a_world;
+            double diff_norm = diff.norm();
+            if (diff_norm > kCollisionEscapeNormEps) {
+              escape_normal = diff / diff_norm;
+            } else {
+              escape_normal = Eigen::Vector3d(0, 0, 1);
+            }
+            escape_frame_a = last_collision_debug_->object_a;
+            escape_frame_b = last_collision_debug_->object_b;
+            use_normal_escape = true;
           }
-          escape_frame_a = global_debug->object_a;
-          escape_frame_b = global_debug->object_b;
-          use_normal_escape = true;
+        } else {
+          auto global_debug = evaluate_collision_debug(q);
+          if (global_debug.has_value() && std::isfinite(global_debug->distance) &&
+              global_debug->distance < escape_activation_threshold) {
+            global_min_dist = global_debug->distance;
+            Eigen::Vector3d diff = global_debug->point_b_world - global_debug->point_a_world;
+            double diff_norm = diff.norm();
+            if (diff_norm > kCollisionEscapeNormEps) {
+              escape_normal = diff / diff_norm;
+            } else {
+              escape_normal = Eigen::Vector3d(0, 0, 1);
+            }
+            escape_frame_a = global_debug->object_a;
+            escape_frame_b = global_debug->object_b;
+            use_normal_escape = true;
+          }
         }
       }
 
@@ -4778,9 +5007,9 @@ PositionIKResult KinematicsSolver::solve_position_step(
                 }
               }
               robot_->update_configuration(q_candidate);
-              auto esc_debug = evaluate_collision_debug(q_candidate);
-              if (esc_debug.has_value() && std::isfinite(esc_debug->distance) &&
-                  esc_debug->distance > min_dist) {
+              auto esc_dist = evaluate_post_step_collision_distance(q_candidate);
+              if (esc_dist.has_value() && std::isfinite(*esc_dist) &&
+                  *esc_dist > min_dist) {
                 q = q_candidate;
                 result.stall_escape_count++;
                 return true;
@@ -4841,9 +5070,9 @@ PositionIKResult KinematicsSolver::solve_position_step(
             }
           }
           robot_->update_configuration(q_candidate);
-          auto esc_debug = evaluate_collision_debug(q_candidate);
-          if (esc_debug.has_value() && std::isfinite(esc_debug->distance) &&
-              esc_debug->distance > global_min_dist) {
+          auto esc_dist = evaluate_post_step_collision_distance(q_candidate);
+          if (esc_dist.has_value() && std::isfinite(*esc_dist) &&
+              *esc_dist > global_min_dist) {
             q = q_candidate;
             result.stall_escape_count++;
             return true;
@@ -4893,17 +5122,17 @@ PositionIKResult KinematicsSolver::solve_position_step(
             q_candidate[j] = std::min(q_candidate[j], q_max[j]);
           }
         }
-        auto curr_debug = evaluate_collision_debug(q);
+        auto curr_dist = evaluate_post_step_collision_distance(q);
         robot_->update_configuration(q_candidate);
-        auto cand_debug = evaluate_collision_debug(q_candidate);
+        auto cand_dist = evaluate_post_step_collision_distance(q_candidate);
         const bool safe_candidate =
-            (!cand_debug.has_value() || !std::isfinite(cand_debug->distance) ||
-             cand_debug->distance >= kCollisionPenetrationDistanceThreshold);
-        const bool not_worse = (!curr_debug.has_value() || !cand_debug.has_value() ||
-                                !std::isfinite(curr_debug->distance) ||
-                                !std::isfinite(cand_debug->distance) ||
-                                cand_debug->distance >=
-                                    curr_debug->distance - kCollisionPenetrationWorsenTolerance);
+            (!cand_dist.has_value() || !std::isfinite(*cand_dist) ||
+             *cand_dist >= kCollisionPenetrationDistanceThreshold);
+        const bool not_worse = (!curr_dist.has_value() || !cand_dist.has_value() ||
+                                !std::isfinite(*curr_dist) ||
+                                !std::isfinite(*cand_dist) ||
+                                *cand_dist >=
+                                    *curr_dist - kCollisionPenetrationWorsenTolerance);
         if (safe_candidate && not_worse) {
           q = q_candidate;
           result.stall_escape_count++;
