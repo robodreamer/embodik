@@ -1333,45 +1333,57 @@ void KinematicsSolver::elastic_band_update(
     st.delta = Eigen::VectorXd::Zero(nv);
   }
 
-  const double dq_norm = result.joint_velocities.norm();
-  const bool limit_dominated = !result.saturated_joints.empty();
-  const bool near_zero_motion = dq_norm < cfg.dq_stall_eps;
+  // --- Proactive proximity-based expansion ---
+  // Instead of waiting for stalls, expand margins proactively when:
+  //   1. A joint is saturated (at its velocity limit), AND
+  //   2. The task scale is low (solver is struggling)
+  // This prevents the stop-start oscillation of reactive expansion.
 
-  // A stall is near-zero motion with either non-success status or
-  // non-trivial task error (to distinguish "stuck" from "nothing to do").
+  const double primary_scale =
+      result.task_scales.empty() ? 1.0 : result.task_scales[0];
   const bool has_task_error =
       !result.task_errors.empty() && result.task_errors[0] > 1e-4;
-  const bool is_stall = near_zero_motion && has_task_error;
+  const bool scale_is_low = primary_scale < 0.5 && has_task_error;
 
-  if (is_stall && limit_dominated) {
-    st.consecutive_stall_steps++;
-  } else if (!is_stall) {
-    st.consecutive_stall_steps = 0;
+  // Build saturated joint set.
+  std::vector<bool> is_saturated(nv, false);
+  for (int idx : result.saturated_joints) {
+    if (idx >= 0 && idx < nv) {
+      is_saturated[idx] = true;
+    }
   }
 
-  // --- Expansion: stall threshold reached, expand saturated joints ---
-  if (st.consecutive_stall_steps >= cfg.stall_threshold && limit_dominated) {
-    // Build set of saturated joint indices for fast lookup.
-    std::vector<bool> is_saturated(nv, false);
-    for (int idx : result.saturated_joints) {
-      if (idx >= 0 && idx < nv) {
-        is_saturated[idx] = true;
-      }
-    }
+  // Expansion: proportional to how constrained we are.
+  // - Scale near 0 → expand at full rate
+  // - Scale near 0.5 → expand at half rate
+  // - No saturated joints or scale >= 0.5 → no expansion
+  if (scale_is_low && !result.saturated_joints.empty()) {
+    const double expansion_factor =
+        std::max(0.0, 1.0 - 2.0 * primary_scale);  // 1.0 at scale=0, 0.0 at scale>=0.5
+    const double step_expand = cfg.expand_rate * expansion_factor;
 
     for (int i = 0; i < nv; ++i) {
       if (!cfg.expand_only_saturated || is_saturated[i]) {
-        st.delta[i] = std::min(st.delta[i] + cfg.expand_rate, cfg.delta_max);
+        st.delta[i] = std::min(st.delta[i] + step_expand, cfg.delta_max);
       }
     }
-    st.consecutive_stall_steps = 0;
     st.total_expansion_steps++;
-    return;
   }
 
-  // --- Decay: solver healthy → shrink deltas toward zero ---
-  // Decay when not stalling (either success or no task error).
-  if (!is_stall) {
+  // --- Decay: shrink deltas for joints that are NOT saturated ---
+  // Only decay joints that have room — saturated joints keep their expansion
+  // to avoid the oscillation between expand/decay at the limit boundary.
+  for (int i = 0; i < nv; ++i) {
+    if (st.delta[i] > 0.0 && !is_saturated[i]) {
+      st.delta[i] *= (1.0 - cfg.decay_rate);
+      if (st.delta[i] < 1e-8) {
+        st.delta[i] = 0.0;
+      }
+    }
+  }
+
+  // Global decay when task is satisfied (no error) — all joints.
+  if (!has_task_error) {
     for (int i = 0; i < nv; ++i) {
       st.delta[i] *= (1.0 - cfg.decay_rate);
       if (st.delta[i] < 1e-8) {
