@@ -1864,7 +1864,11 @@ KinematicsSolver::compute_collision_constraint() {
         last_collision_constraint_result_.has_value() &&
         last_collision_constraint_q_.size() == robot_->nq() &&
         std::isfinite(last_constraint_min_distance_) &&
-        !last_collision_budget_exhausted_) {
+        !last_collision_budget_exhausted_ &&
+        // Respect the cache refresh interval: periodic full recomputation
+        // prevents the cached result from going permanently stale.
+        collision_pair_cache_steps_since_refresh_ <
+            collision_pair_cache_refresh_interval_) {
       const Eigen::VectorXd &q_current = robot_->get_current_configuration();
       const double dq_norm =
           (q_current - last_collision_constraint_q_).squaredNorm();
