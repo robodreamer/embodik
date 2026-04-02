@@ -60,6 +60,11 @@ constexpr double kJointLimitDesaturationStep = 2e-4;
 // Conservative bound gate constants (Proxima-inspired).
 constexpr double kCollisionBoundRotationRadius = 1.5; // meters
 constexpr double kCollisionBoundSafetyMargin = 5e-3; // meters
+// Post-step rejection: safe margin above penetration threshold for early-exit.
+constexpr double kPostStepSafeMargin = 0.01; // 1cm
+// Lazy constraint reuse: skip recomputation when dq is tiny and distance is safe.
+constexpr double kLazyReuseMaxDqSqNorm = 1e-6;  // ~0.001 rad change
+constexpr double kLazyReuseMinDistMargin = 0.005; // 5mm safety margin
 
 // Velocity box constraint: minimum fraction of vel_limit when inside limits
 constexpr double kMinBoundFraction = 0.10;
@@ -869,6 +874,8 @@ void KinematicsSolver::configure_collision_constraint(
     last_collision_budget_exhausted_ = false;
     last_constraint_min_distance_ = std::numeric_limits<double>::infinity();
     last_constraint_was_full_scan_ = false;
+    last_collision_constraint_result_.reset();
+    last_collision_constraint_q_ = Eigen::VectorXd();
     collision_stuck_counters_.clear();
     collision_stuck_last_distances_.clear();
   }
@@ -1088,11 +1095,6 @@ KinematicsSolver::get_post_step_rejection_pair_indices() const {
 }
 
 // Post-step collision rejection safety margin.  The early-exit gate skips
-// the full scan when the constraint computation's global minimum distance
-// exceeds the penetration threshold by at least this margin.  Must be large
-// enough that a single bounded integration step cannot close the gap.
-constexpr double kPostStepSafeMargin = 0.01;
-
 std::optional<double>
 KinematicsSolver::evaluate_post_step_collision_distance(
     const Eigen::VectorXd &q) {
@@ -1870,6 +1872,28 @@ KinematicsSolver::compute_collision_constraint() {
       collision_constraint_.has_value() &&
       collision_constraint_->nearest_points_all_pairs;
 
+  // Lazy reuse: when configuration change is small and we have a safe margin,
+  // reuse the previous constraint result.  The constraint Jacobian and bounds
+  // remain approximately valid for small dq, and the safety margin absorbs
+  // the approximation error.
+  if (constraint_active && collision_pair_cache_enabled_ &&
+      last_collision_constraint_result_.has_value() &&
+      last_collision_constraint_q_.size() == robot_->nq() &&
+      std::isfinite(last_constraint_min_distance_) &&
+      !last_collision_budget_exhausted_) {
+    const Eigen::VectorXd &q_current = robot_->get_current_configuration();
+    const double dq_norm =
+        (q_current - last_collision_constraint_q_).squaredNorm();
+    if (dq_norm < kLazyReuseMaxDqSqNorm &&
+        last_constraint_min_distance_ >
+            kCollisionPenetrationDistanceThreshold +
+                kLazyReuseMinDistMargin) {
+      // Reuse previous result — configuration barely changed.
+      collision_pair_cache_steps_since_refresh_++;
+      return last_collision_constraint_result_;
+    }
+  }
+
   // Fast path: when the cache is warm and previous step confirmed all pairs
   // are well clear of the activation threshold, skip the expensive geometry
   // update entirely and return an empty constraint (no active rows).
@@ -2089,6 +2113,16 @@ KinematicsSolver::compute_collision_constraint() {
       continue;
     }
 
+    // When evaluating a small cached subset WITHOUT a time budget, enable
+    // nearest points on the initial query to avoid a costly re-query later
+    // for constraint pairs.  Skip this when budget is active — the extra
+    // cost would exhaust the budget and trigger safety fallbacks.
+    if (use_cached_candidate_subset && !budget_enabled &&
+        !nearest_points_all_pairs &&
+        idx < collision_data->distanceRequests.size() &&
+        !collision_data->distanceRequests[idx].enable_nearest_points) {
+      collision_data->distanceRequests[idx].enable_nearest_points = true;
+    }
     last_collision_exact_distance_queries_++;
     pinocchio::computeDistance(*collision_model, *collision_data, idx);
 
@@ -2483,6 +2517,10 @@ KinematicsSolver::compute_collision_constraint() {
       result.point_b_world = p2_world;
     }
   }
+
+  // Cache the result and configuration for lazy reuse.
+  last_collision_constraint_result_ = result;
+  last_collision_constraint_q_ = robot_->get_current_configuration();
 
   return result;
 #else

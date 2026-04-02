@@ -914,6 +914,9 @@ private:
   // recent compute_collision_constraint() call and whether it was a full scan.
   double last_constraint_min_distance_ = std::numeric_limits<double>::infinity();
   bool last_constraint_was_full_scan_ = false;
+  // Cached constraint result for lazy reuse when configuration change is small.
+  std::optional<CollisionConstraintResult> last_collision_constraint_result_;
+  Eigen::VectorXd last_collision_constraint_q_;
   CollisionTuningMode collision_tuning_mode_ = CollisionTuningMode::kSpeed;
   // Track solver stagnation near collision boundary for stronger recovery (per-pair).
   double last_solution_dq_norm_ = 0.0;
