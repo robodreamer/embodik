@@ -1257,6 +1257,130 @@ int KinematicsSolver::stall_handler_consecutive_stall_steps() const {
   return stall_state_.consecutive_stall_steps;
 }
 
+// ============================================================
+// Elastic band joint limit expansion
+// ============================================================
+
+void KinematicsSolver::enable_elastic_band(double delta_max) {
+  if (elastic_band_config_.enabled) {
+    elastic_band_config_.delta_max = std::max(0.0, delta_max);
+    return;
+  }
+  elastic_band_config_.enabled = true;
+  elastic_band_config_.delta_max = std::max(0.0, delta_max);
+  const int nv = robot_->nv();
+  elastic_band_state_.delta = Eigen::VectorXd::Zero(nv);
+  elastic_band_state_.consecutive_stall_steps = 0;
+  elastic_band_state_.total_expansion_steps = 0;
+}
+
+void KinematicsSolver::disable_elastic_band() {
+  elastic_band_config_.enabled = false;
+  elastic_band_state_.delta.setZero();
+  elastic_band_state_.consecutive_stall_steps = 0;
+}
+
+bool KinematicsSolver::elastic_band_enabled() const {
+  return elastic_band_config_.enabled;
+}
+
+void KinematicsSolver::configure_elastic_band(double delta_max,
+                                               double expand_rate,
+                                               double decay_rate,
+                                               int stall_threshold,
+                                               bool expand_only_saturated) {
+  elastic_band_config_.delta_max = std::max(0.0, delta_max);
+  elastic_band_config_.expand_rate = std::max(0.0, expand_rate);
+  elastic_band_config_.decay_rate = std::clamp(decay_rate, 0.0, 1.0);
+  elastic_band_config_.stall_threshold = std::max(1, stall_threshold);
+  elastic_band_config_.expand_only_saturated = expand_only_saturated;
+}
+
+double KinematicsSolver::elastic_band_max_delta() const {
+  if (!elastic_band_config_.enabled ||
+      elastic_band_state_.delta.size() == 0) {
+    return 0.0;
+  }
+  return elastic_band_state_.delta.maxCoeff();
+}
+
+Eigen::VectorXd KinematicsSolver::elastic_band_deltas() const {
+  if (!elastic_band_config_.enabled ||
+      elastic_band_state_.delta.size() == 0) {
+    return Eigen::VectorXd::Zero(robot_->nv());
+  }
+  return elastic_band_state_.delta;
+}
+
+bool KinematicsSolver::elastic_band_is_expanded() const {
+  return elastic_band_config_.enabled &&
+         elastic_band_state_.delta.size() > 0 &&
+         elastic_band_state_.delta.maxCoeff() > 1e-10;
+}
+
+void KinematicsSolver::elastic_band_update(
+    const VelocitySolverResult &result) {
+  if (!elastic_band_config_.enabled) {
+    return;
+  }
+
+  const auto &cfg = elastic_band_config_;
+  auto &st = elastic_band_state_;
+  const int nv = robot_->nv();
+
+  // Ensure delta vector is sized correctly.
+  if (st.delta.size() != nv) {
+    st.delta = Eigen::VectorXd::Zero(nv);
+  }
+
+  const double dq_norm = result.joint_velocities.norm();
+  const bool limit_dominated = !result.saturated_joints.empty();
+  const bool near_zero_motion = dq_norm < cfg.dq_stall_eps;
+
+  // A stall is near-zero motion with either non-success status or
+  // non-trivial task error (to distinguish "stuck" from "nothing to do").
+  const bool has_task_error =
+      !result.task_errors.empty() && result.task_errors[0] > 1e-4;
+  const bool is_stall = near_zero_motion && has_task_error;
+
+  if (is_stall && limit_dominated) {
+    st.consecutive_stall_steps++;
+  } else if (!is_stall) {
+    st.consecutive_stall_steps = 0;
+  }
+
+  // --- Expansion: stall threshold reached, expand saturated joints ---
+  if (st.consecutive_stall_steps >= cfg.stall_threshold && limit_dominated) {
+    // Build set of saturated joint indices for fast lookup.
+    std::vector<bool> is_saturated(nv, false);
+    for (int idx : result.saturated_joints) {
+      if (idx >= 0 && idx < nv) {
+        is_saturated[idx] = true;
+      }
+    }
+
+    for (int i = 0; i < nv; ++i) {
+      if (!cfg.expand_only_saturated || is_saturated[i]) {
+        st.delta[i] = std::min(st.delta[i] + cfg.expand_rate, cfg.delta_max);
+      }
+    }
+    st.consecutive_stall_steps = 0;
+    st.total_expansion_steps++;
+    return;
+  }
+
+  // --- Decay: solver healthy → shrink deltas toward zero ---
+  // Decay when not stalling (either success or no task error).
+  if (!is_stall) {
+    for (int i = 0; i < nv; ++i) {
+      st.delta[i] *= (1.0 - cfg.decay_rate);
+      if (st.delta[i] < 1e-8) {
+        st.delta[i] = 0.0;
+      }
+    }
+  }
+}
+
 void KinematicsSolver::stall_handler_update(VelocitySolverResult &result) {
   if (!stall_config_.enabled) {
     return;
@@ -2502,6 +2626,14 @@ void KinematicsSolver::clamp_jacobians_near_joint_limits(
       continue;
     }
 
+    // Skip Jacobian clamping for joints with active elastic band expansion.
+    // The elastic zone explicitly allows motion near/beyond nominal limits.
+    if (elastic_band_config_.enabled &&
+        i < elastic_band_state_.delta.size() &&
+        elastic_band_state_.delta[i] > kJointLimitClampMargin) {
+      continue;
+    }
+
     const double margin_lower = q_cur_clamp[q_idx] - q_min_clamp[q_idx];
     const double margin_upper = q_max_clamp[q_idx] - q_cur_clamp[q_idx];
     const bool clamp_lower =
@@ -2957,6 +3089,28 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
     // post-solve clamp (below) still prevents actual limit violations.
     constexpr double margin_limit = 1e-4;
 
+    // Elastic band: compute effective limits with expansion.
+    Eigen::VectorXd q_min_eff = q_min;
+    Eigen::VectorXd q_max_eff = q_max;
+    const bool elastic_active = elastic_band_config_.enabled &&
+                                elastic_band_state_.delta.size() == robot_->nv();
+    if (elastic_active) {
+      for (int i = 0; i < robot_->nv(); ++i) {
+        const int q_idx =
+            (i < static_cast<int>(velocity_to_config_index.size()))
+                ? velocity_to_config_index[i]
+                : kVelocityToConfigUnmapped;
+        if (q_idx == kVelocityToConfigUnmapped || q_idx >= q_min.size()) {
+          continue;
+        }
+        if (!std::isfinite(q_min[q_idx]) || !std::isfinite(q_max[q_idx])) {
+          continue;
+        }
+        q_min_eff[q_idx] -= elastic_band_state_.delta[i];
+        q_max_eff[q_idx] += elastic_band_state_.delta[i];
+      }
+    }
+
     if (robot_->is_floating_base()) {
       // Handle floating-base constraints (first 6 DoFs)
       // Get current base pose error if bounds are set
@@ -3028,9 +3182,9 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
           continue;
         }
 
-        // Calculate margins to limits
-        double lower_margin = q_current[q_idx] - q_min[q_idx] - margin_limit;
-        double upper_margin = q_max[q_idx] - q_current[q_idx] - margin_limit;
+        // Calculate margins to limits (elastic band expands effective limits)
+        double lower_margin = q_current[q_idx] - q_min_eff[q_idx] - margin_limit;
+        double upper_margin = q_max_eff[q_idx] - q_current[q_idx] - margin_limit;
 
         auto [lower_limit, upper_limit] = calculate_velocity_box_constraint(
             lower_margin, upper_margin, vel_limits[i], accel_limits[i], dt_);
@@ -3057,9 +3211,9 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
           continue;
         }
 
-        // Calculate margins to limits
-        double lower_margin = q_current[q_idx] - q_min[q_idx] - margin_limit;
-        double upper_margin = q_max[q_idx] - q_current[q_idx] - margin_limit;
+        // Calculate margins to limits (elastic band expands effective limits)
+        double lower_margin = q_current[q_idx] - q_min_eff[q_idx] - margin_limit;
+        double upper_margin = q_max_eff[q_idx] - q_current[q_idx] - margin_limit;
 
         auto [lower_limit, upper_limit] = calculate_velocity_box_constraint(
             lower_margin, upper_margin, vel_limits[i], accel_limits[i], dt_);
@@ -3199,6 +3353,7 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
   }
 
   stall_handler_update(result);
+  elastic_band_update(result);
 
   return result;
 }

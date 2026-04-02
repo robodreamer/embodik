@@ -572,6 +572,55 @@ public:
   /// @return number of consecutive stall steps in the current streak.
   int stall_handler_consecutive_stall_steps() const;
 
+  // ========== Elastic Band Joint Limit Expansion ==========
+
+  /**
+   * @brief Enable elastic band joint limit expansion.
+   *
+   * When enabled, the solver temporarily expands joint position limit margins
+   * for joints that are saturated during limit-dominated stalls. This keeps
+   * more DOFs active in the SNS solver, allowing task progress even when
+   * multiple joints are near their limits.
+   *
+   * The expansion is elastic: it grows when the solver is stuck at joint
+   * limits and decays exponentially when the solver is healthy.
+   *
+   * @param delta_max  Maximum expansion per joint in radians (default 0.05).
+   */
+  void enable_elastic_band(double delta_max = 0.05);
+
+  /// Disable elastic band and reset expansion state.
+  void disable_elastic_band();
+
+  /// @return true if elastic band is enabled.
+  bool elastic_band_enabled() const;
+
+  /**
+   * @brief Configure elastic band tuning parameters.
+   *
+   * Only call after enable_elastic_band().
+   *
+   * @param delta_max  Maximum expansion per joint (radians, default 0.05)
+   * @param expand_rate  Expansion per stall trigger (radians/step, default 0.01)
+   * @param decay_rate  Exponential decay per healthy step (0-1, default 0.2)
+   * @param stall_threshold  Consecutive stalls before expansion (default 3)
+   * @param expand_only_saturated  Only expand saturated joints (default true)
+   */
+  void configure_elastic_band(double delta_max = 0.05,
+                               double expand_rate = 0.01,
+                               double decay_rate = 0.2,
+                               int stall_threshold = 3,
+                               bool expand_only_saturated = true);
+
+  /// @return maximum delta currently active across all joints.
+  double elastic_band_max_delta() const;
+
+  /// @return per-joint delta vector (size == nv).
+  Eigen::VectorXd elastic_band_deltas() const;
+
+  /// @return true if any joint has nonzero expansion.
+  bool elastic_band_is_expanded() const;
+
   /**
    * @brief Configure a CoM support-polygon constraint (inequality).
    *
@@ -833,6 +882,35 @@ private:
   StallHandlerState stall_state_;
 
   void stall_handler_update(VelocitySolverResult &result);
+
+  // ---- Elastic band joint limit expansion ----
+  struct ElasticBandConfig {
+    bool enabled = false;
+    /// Maximum expansion per joint (radians).
+    double delta_max = 0.05;
+    /// Expansion rate per stall trigger (radians/step).
+    double expand_rate = 0.01;
+    /// Exponential decay rate per healthy step (dimensionless, 0-1).
+    double decay_rate = 0.2;
+    /// Consecutive stall steps before expansion starts.
+    int stall_threshold = 3;
+    /// Joint-velocity norm below which a step counts as "no motion".
+    double dq_stall_eps = 1e-5;
+    /// Whether to expand only saturated joints or all joints.
+    bool expand_only_saturated = true;
+  };
+
+  struct ElasticBandState {
+    /// Per-joint expansion amounts (size == nv, initialized to 0).
+    Eigen::VectorXd delta;
+    int consecutive_stall_steps = 0;
+    int total_expansion_steps = 0;
+  };
+
+  ElasticBandConfig elastic_band_config_;
+  ElasticBandState elastic_band_state_;
+
+  void elastic_band_update(const VelocitySolverResult &result);
 
   // ---- CoM support-polygon constraint ----
   struct ComConstraintConfig {
