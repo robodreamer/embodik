@@ -137,7 +137,7 @@ def main(args: argparse.Namespace):
         iterations_slider = server.gui.add_slider("IK Iterations", min=1, max=20, initial_value=1, step=1)
         ee_mode_dropdown = server.gui.add_dropdown(
             "EE Solve Mode",
-            options=("SCALE", "MIN_ERROR"),
+            options=("SCALE", "SCALE_ELASTIC", "MIN_ERROR"),
             initial_value="SCALE",
         )
         ee_fallback_checkbox = server.gui.add_checkbox(
@@ -351,10 +351,8 @@ def main(args: argparse.Namespace):
         start_time = time.time()
 
         frame_task.weight = task_weight.value
-        frame_task.solve_mode = (
-            embodik.TaskSolveMode.MIN_ERROR
-            if ee_mode_dropdown.value == "MIN_ERROR"
-            else embodik.TaskSolveMode.SCALE
+        frame_task.solve_mode = getattr(
+            embodik.TaskSolveMode, ee_mode_dropdown.value, embodik.TaskSolveMode.SCALE
         )
         frame_task.allow_min_error_fallback = bool(ee_fallback_checkbox.value)
 
