@@ -582,7 +582,7 @@ def run_gui(cfg: RobotConfig, args: argparse.Namespace) -> None:
         nullspace_gain = server.gui.add_slider("Nullspace Gain", min=0.0, max=2.0, initial_value=DEFAULT_NULLSPACE_GAIN, step=0.05)
         self_collision_checkbox = server.gui.add_checkbox(
             "Enable Self-Collision",
-            initial_value=False,
+            initial_value=True,
             disabled=not hasattr(backend, "enable_self_collision"),
         )
         collision_tuning_dropdown = server.gui.add_dropdown(
@@ -602,7 +602,7 @@ def run_gui(cfg: RobotConfig, args: argparse.Namespace) -> None:
         )
         collision_debug_checkbox = server.gui.add_checkbox(
             "Show Collision Debug",
-            initial_value=False,
+            initial_value=True,
             disabled=not (
                 hasattr(backend, "solver")
                 and hasattr(backend.solver, "get_last_collision_debug")
