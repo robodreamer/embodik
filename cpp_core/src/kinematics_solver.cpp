@@ -2790,8 +2790,12 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
     }
 
     bool all_scale_no_fallback = true;
+    bool any_elastic = false;
     for (const auto &task : group_tasks) {
       const auto mode = task->getSolveMode();
+      if (mode == TaskSolveMode::kScaleElastic) {
+        any_elastic = true;
+      }
       if ((mode != TaskSolveMode::kScale &&
            mode != TaskSolveMode::kScaleElastic) ||
           task->getAllowMinErrorFallback()) {
@@ -2800,7 +2804,7 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
       }
     }
 
-    if (all_scale_no_fallback) {
+    if (all_scale_no_fallback && !any_elastic) {
       int total_rows = 0;
       for (const auto &g : group_goals) {
         total_rows += static_cast<int>(g.rows());
@@ -2829,16 +2833,20 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
         const auto &task = group_tasks[i];
         goals.push_back(group_goals[i]);
         jacobians.push_back(group_jacobians[i]);
-        // SCALE_ELASTIC is treated as SCALE in the SNS solver;
-        // the elastic band mechanism handles the limit expansion.
+        // SCALE_ELASTIC is treated as SCALE in the SNS solver with
+        // min_error_fallback enabled: elastic band keeps DOFs active to
+        // prevent premature scale collapse, and when scale is still low
+        // near limits the fallback provides smooth full-velocity motion.
+        const bool is_elastic =
+            (task->getSolveMode() == TaskSolveMode::kScaleElastic);
         const auto effective_mode =
-            (task->getSolveMode() == TaskSolveMode::kScaleElastic)
-                ? TaskSolveMode::kScale
-                : task->getSolveMode();
+            is_elastic ? TaskSolveMode::kScale : task->getSolveMode();
+        const bool effective_fallback =
+            is_elastic ? true : task->getAllowMinErrorFallback();
         objective_configs.push_back(ObjectiveSolveConfig{
             task->getPriority(),
             effective_mode,
-            task->getAllowMinErrorFallback(),
+            effective_fallback,
         });
         objective_tasks.push_back(task);
       }
@@ -3720,9 +3728,14 @@ PositionIKResult KinematicsSolver::solve_position(
         (options.primary_solve_mode == TaskSolveMode::kScaleElastic)
             ? TaskSolveMode::kScale
             : options.primary_solve_mode;
+    // SCALE_ELASTIC enables min_error_fallback for smooth motion near limits.
+    const bool effective_primary_fallback =
+        (options.primary_solve_mode == TaskSolveMode::kScaleElastic)
+            ? true
+            : options.primary_allow_min_error_fallback;
     objective_configs.push_back(
         ObjectiveSolveConfig{0, effective_primary_mode,
-                             options.primary_allow_min_error_fallback});
+                             effective_primary_fallback});
 
     if (torso_task) {
       torso_task->update(*robot_);
