@@ -35,6 +35,13 @@ namespace embodik {
 enum class TaskSolveMode {
   kScale = 0,
   kMinError = 1,
+  /// SCALE with automatic elastic band joint limit expansion.
+  /// Behaves identically to kScale in the SNS solver, but automatically
+  /// enables the elastic band mechanism that temporarily expands joint
+  /// limit margins when the solver is overconstrained by joint limits.
+  /// This keeps more DOFs active, preventing premature task scale collapse.
+  /// Uses proven defaults: delta_max=0.05, expand_rate=0.01, decay_rate=0.2.
+  kScaleElastic = 2,
 };
 
 enum class CollisionTuningMode {
@@ -224,6 +231,10 @@ struct PositionIKOptions {
   /// collision min_distance. The nominal min_distance is read from the
   /// current collision constraint config. Default false (opt-in).
   bool stall_recovery = false;
+
+  /// When true, enable elastic band joint limit expansion.
+  /// Default false (opt-in).
+  bool elastic_band = false;
 };
 
 // Options for solve_position_step() — lightweight struct for interactive loops.
@@ -272,6 +283,13 @@ struct PositionStepOptions {
   /// disable_stall_handler() explicitly to tear it down.
   /// Default false (opt-in).
   bool stall_recovery = false;
+  /// When true, enable the elastic band joint limit expansion mechanism.
+  /// The handler temporarily expands joint position limit margins when the
+  /// solver is overconstrained by joint limits, keeping more DOFs active.
+  /// The handler is enabled once and persists across successive
+  /// solve_position_step calls. Uses proven defaults (delta_max=0.05).
+  /// Default false (opt-in).
+  bool elastic_band = false;
   // Optional seed-referenced bound tightening:
   // each inner step constrains dq so integrated q stays within
   // initial_current_q ± v_limit*dt.

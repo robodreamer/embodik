@@ -2726,6 +2726,24 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
     }
   }
 
+  // Auto-enable elastic band when any task uses SCALE_ELASTIC mode.
+  {
+    bool any_scale_elastic = false;
+    for (const auto &task : tasks_) {
+      if (task && task->isActive() &&
+          task->getSolveMode() == TaskSolveMode::kScaleElastic) {
+        any_scale_elastic = true;
+        break;
+      }
+    }
+    if (any_scale_elastic && !elastic_band_config_.enabled) {
+      enable_elastic_band(0.05);
+      configure_elastic_band(/*delta_max=*/0.05, /*expand_rate=*/0.01,
+                             /*decay_rate=*/0.2, /*stall_threshold=*/3,
+                             /*expand_only_saturated=*/true);
+    }
+  }
+
   // Sort tasks by priority
   sort_tasks_by_priority();
 
@@ -2773,7 +2791,9 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
 
     bool all_scale_no_fallback = true;
     for (const auto &task : group_tasks) {
-      if (task->getSolveMode() != TaskSolveMode::kScale ||
+      const auto mode = task->getSolveMode();
+      if ((mode != TaskSolveMode::kScale &&
+           mode != TaskSolveMode::kScaleElastic) ||
           task->getAllowMinErrorFallback()) {
         all_scale_no_fallback = false;
         break;
@@ -2809,9 +2829,15 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
         const auto &task = group_tasks[i];
         goals.push_back(group_goals[i]);
         jacobians.push_back(group_jacobians[i]);
+        // SCALE_ELASTIC is treated as SCALE in the SNS solver;
+        // the elastic band mechanism handles the limit expansion.
+        const auto effective_mode =
+            (task->getSolveMode() == TaskSolveMode::kScaleElastic)
+                ? TaskSolveMode::kScale
+                : task->getSolveMode();
         objective_configs.push_back(ObjectiveSolveConfig{
             task->getPriority(),
-            task->getSolveMode(),
+            effective_mode,
             task->getAllowMinErrorFallback(),
         });
         objective_tasks.push_back(task);
@@ -3565,6 +3591,13 @@ PositionIKResult KinematicsSolver::solve_position(
     enable_stall_handler(nominal);
   }
 
+  if (options.elastic_band && !elastic_band_config_.enabled) {
+    enable_elastic_band(0.05);
+    configure_elastic_band(/*delta_max=*/0.05, /*expand_rate=*/0.01,
+                           /*decay_rate=*/0.2, /*stall_threshold=*/3,
+                           /*expand_only_saturated=*/true);
+  }
+
   Eigen::VectorXd q_current = seed_q;
   const Eigen::VectorXd q_reference = seed_q;
   const auto &velocity_to_config_index = velocity_to_config_index_cache();
@@ -3682,8 +3715,13 @@ PositionIKResult KinematicsSolver::solve_position(
 
     goals.push_back(v_desired);
     jacobians.push_back(frame_task->getJacobian());
+    // SCALE_ELASTIC is treated as SCALE in the SNS solver.
+    const auto effective_primary_mode =
+        (options.primary_solve_mode == TaskSolveMode::kScaleElastic)
+            ? TaskSolveMode::kScale
+            : options.primary_solve_mode;
     objective_configs.push_back(
-        ObjectiveSolveConfig{0, options.primary_solve_mode,
+        ObjectiveSolveConfig{0, effective_primary_mode,
                              options.primary_allow_min_error_fallback});
 
     if (torso_task) {
@@ -4098,6 +4136,13 @@ PositionIKResult KinematicsSolver::solve_position_step(
     const double nominal =
         get_collision_min_distance() > 0.0 ? get_collision_min_distance() : 0.0;
     enable_stall_handler(nominal);
+  }
+
+  if (options.elastic_band && !elastic_band_config_.enabled) {
+    enable_elastic_band(0.05);
+    configure_elastic_band(/*delta_max=*/0.05, /*expand_rate=*/0.01,
+                           /*decay_rate=*/0.2, /*stall_threshold=*/3,
+                           /*expand_only_saturated=*/true);
   }
 
   Eigen::VectorXd q = current_q;
@@ -4669,6 +4714,13 @@ PositionIKResult KinematicsSolver::solve_position_step(
     const double nominal =
         get_collision_min_distance() > 0.0 ? get_collision_min_distance() : 0.0;
     enable_stall_handler(nominal);
+  }
+
+  if (options.elastic_band && !elastic_band_config_.enabled) {
+    enable_elastic_band(0.05);
+    configure_elastic_band(/*delta_max=*/0.05, /*expand_rate=*/0.01,
+                           /*decay_rate=*/0.2, /*stall_threshold=*/3,
+                           /*expand_only_saturated=*/true);
   }
 
   Eigen::VectorXd q = current_q;
