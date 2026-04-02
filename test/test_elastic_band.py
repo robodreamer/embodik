@@ -294,7 +294,8 @@ class TestElasticBandStateDynamics:
 
         solver.enable_elastic_band(delta_max=0.05)
         assert solver.elastic_band_enabled()
-        assert solver.elastic_band_max_delta() == 0.0
+        # Pre-seed may set small deltas for joints near limits (e.g. grippers).
+        initial_delta = solver.elastic_band_max_delta()
 
         # Add task driving EE far beyond reachable range to force stalling
         solver.clear_tasks()

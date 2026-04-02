@@ -1373,6 +1373,31 @@ void KinematicsSolver::enable_elastic_band(double delta_max) {
   elastic_band_state_.delta = Eigen::VectorXd::Zero(nv);
   elastic_band_state_.consecutive_stall_steps = 0;
   elastic_band_state_.total_expansion_steps = 0;
+
+  // Pre-seed expansion for joints that are at or very near their limits.
+  // This avoids the initial stall when the seed configuration has joints
+  // sitting exactly on a limit boundary (common with zero-config seeds).
+  constexpr double kAtLimitMargin = 1e-3;  // 1 mrad
+  const auto &v2c = velocity_to_config_index_cache();
+  auto [q_min, q_max] = robot_->get_joint_limits();
+  const Eigen::VectorXd q_cur = robot_->get_current_configuration();
+  const double seed_delta = std::min(elastic_band_config_.expand_rate,
+                                     elastic_band_config_.delta_max);
+  for (int i = 0; i < nv; ++i) {
+    const int q_idx =
+        (i < static_cast<int>(v2c.size())) ? v2c[i] : kVelocityToConfigUnmapped;
+    if (q_idx == kVelocityToConfigUnmapped || q_idx >= q_cur.size()) {
+      continue;
+    }
+    if (!std::isfinite(q_min[q_idx]) || !std::isfinite(q_max[q_idx])) {
+      continue;
+    }
+    const double margin_lo = q_cur[q_idx] - q_min[q_idx];
+    const double margin_hi = q_max[q_idx] - q_cur[q_idx];
+    if (margin_lo < kAtLimitMargin || margin_hi < kAtLimitMargin) {
+      elastic_band_state_.delta[i] = seed_delta;
+    }
+  }
 }
 
 void KinematicsSolver::disable_elastic_band() {
