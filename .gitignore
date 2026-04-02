@@ -86,6 +86,8 @@ site/
 !plan_docs/**/*.md
 !CHANGELOG.md
 !CONTRIBUTING.md
+!agent guidance
+!AGENTS.md
 !LICENSE
 
 # Robot models
