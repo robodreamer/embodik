@@ -952,3 +952,118 @@ class TestElasticBandSafety:
         solver.disable_elastic_band()
         solver.disable_stall_handler()
         solver.clear_tasks()
+
+
+# ---------------------------------------------------------------------------
+# Phase 6b: SCALE_ELASTIC TaskSolveMode (Test 17-18)
+# ---------------------------------------------------------------------------
+
+
+class TestScaleElasticMode:
+    """Tests for the SCALE_ELASTIC convenience mode."""
+
+    def test_scale_elastic_auto_enables_elastic_band(self):
+        """Test 17: setting task.solve_mode = SCALE_ELASTIC auto-enables
+        elastic band with proven defaults."""
+        robot, solver = _load_panda()
+        _narrow_limits(robot, margin=0.15)
+        q = np.concatenate([_PANDA_DEFAULT_Q, _PANDA_GRIPPER_EXTRA])
+        robot.update_configuration(q)
+        robot.update_kinematics(q)
+
+        assert not solver.elastic_band_enabled()
+
+        solver.clear_tasks()
+        task = solver.add_frame_task("ee", _PANDA_EE_FRAME, eik.TaskType.FRAME_POSE)
+        task.priority = 0
+        task.weight = 10.0
+        task.solve_mode = eik.TaskSolveMode.SCALE_ELASTIC
+        robot.update_kinematics(q)
+        ee_pos = np.array(task.current_position)
+        ee_rot = np.array(task.current_orientation)
+        task.set_target_pose(ee_pos + np.array([0.3, 0.0, 0.0]), ee_rot)
+
+        # First solve should auto-enable elastic band
+        result = solver.solve_velocity(q)
+        assert solver.elastic_band_enabled(), (
+            "SCALE_ELASTIC should auto-enable elastic band"
+        )
+        assert np.all(np.isfinite(result.joint_velocities))
+
+        solver.disable_elastic_band()
+        solver.clear_tasks()
+
+    def test_scale_elastic_reduces_infeasible(self):
+        """Test 18: SCALE_ELASTIC performs as well as manual elastic band."""
+        robot, solver = _load_panda()
+        _narrow_limits(robot, margin=0.15)
+        q = np.concatenate([_PANDA_DEFAULT_Q, _PANDA_GRIPPER_EXTRA])
+        robot.update_configuration(q)
+        robot.update_kinematics(q)
+
+        solver.clear_tasks()
+        task = solver.add_frame_task("ee", _PANDA_EE_FRAME, eik.TaskType.FRAME_POSE)
+        task.priority = 0
+        task.weight = 10.0
+        task.solve_mode = eik.TaskSolveMode.SCALE_ELASTIC
+        robot.update_kinematics(q)
+        ee_pos = np.array(task.current_position)
+        ee_rot = np.array(task.current_orientation)
+        task.set_target_pose(ee_pos + np.array([0.3, 0.0, 0.0]), ee_rot)
+
+        infeasible = 0
+        q_run = q.copy()
+        q_lower, q_upper = robot.get_joint_limits()
+        for _ in range(50):
+            result = solver.solve_velocity(q_run)
+            if result.status == eik.SolverStatus.INFEASIBLE:
+                infeasible += 1
+            dq = result.joint_velocities
+            q_run = robot.integrate(q_run, dq, solver.dt)
+            q_run = np.clip(q_run, q_lower, q_upper)
+            robot.update_kinematics(q_run)
+
+        # With 0.15 rad narrowed limits, baseline has ~43 infeasible.
+        # SCALE_ELASTIC should have significantly fewer.
+        print(f"\nSCALE_ELASTIC infeasible: {infeasible}")
+        assert infeasible < 30, (
+            f"SCALE_ELASTIC should reduce infeasible count: {infeasible}"
+        )
+
+        solver.disable_elastic_band()
+        solver.clear_tasks()
+
+    def test_position_step_options_elastic_band(self):
+        """Test: opts.elastic_band = True auto-enables elastic band."""
+        robot, solver = _load_panda()
+        _narrow_limits(robot, margin=0.15)
+        q = np.concatenate([_PANDA_DEFAULT_Q, _PANDA_GRIPPER_EXTRA])
+        robot.update_configuration(q)
+        robot.update_kinematics(q)
+
+        assert not solver.elastic_band_enabled()
+
+        solver.clear_tasks()
+        task = solver.add_frame_task("ee", _PANDA_EE_FRAME, eik.TaskType.FRAME_POSE)
+        task.priority = 0
+        task.weight = 10.0
+
+        robot.update_kinematics(q)
+        ee_pos = np.array(task.current_position)
+        ee_rot = np.array(task.current_orientation)
+        target_pose = np.eye(4)
+        target_pose[:3, :3] = np.array(task.current_orientation)
+        target_pose[:3, 3] = ee_pos + np.array([0.05, 0.0, 0.0])
+
+        opts = eik.PositionStepOptions()
+        opts.elastic_band = True
+        opts.max_steps = 1
+
+        result = solver.solve_position_step(q, target_pose, "ee", opts)
+        assert solver.elastic_band_enabled(), (
+            "opts.elastic_band should auto-enable elastic band"
+        )
+        assert np.all(np.isfinite(result.q_solution))
+
+        solver.disable_elastic_band()
+        solver.clear_tasks()

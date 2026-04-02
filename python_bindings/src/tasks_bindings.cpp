@@ -29,7 +29,8 @@ void bind_tasks(nb::module_ &m) {
 
   nb::enum_<TaskSolveMode>(m, "TaskSolveMode")
       .value("SCALE", TaskSolveMode::kScale)
-      .value("MIN_ERROR", TaskSolveMode::kMinError);
+      .value("MIN_ERROR", TaskSolveMode::kMinError)
+      .value("SCALE_ELASTIC", TaskSolveMode::kScaleElastic);
 
   // Base Task class (abstract, so we don't expose constructor)
   nb::class_<Task>(m, "Task")

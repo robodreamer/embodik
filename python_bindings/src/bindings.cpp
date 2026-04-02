@@ -382,6 +382,12 @@ NB_MODULE(_embodik_impl, m) {
               "stalled velocity solves (non-success with near-zero ||dq||) "
               "and temporarily relaxes/restores the effective collision "
               "min_distance. Default False.")
+      .def_rw("elastic_band",
+              &eik::PositionStepOptions::elastic_band,
+              "When True, enable elastic band joint limit expansion. "
+              "Temporarily expands joint position limit margins when the "
+              "solver is overconstrained by joint limits, keeping more DOFs "
+              "active. Uses proven defaults (delta_max=0.05). Default False.")
       .def_rw("limit_change_from_seed",
               &eik::PositionStepOptions::limit_change_from_seed,
               "When True, tighten each inner step so q stays within "
