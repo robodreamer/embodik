@@ -35,12 +35,16 @@ namespace embodik {
 enum class TaskSolveMode {
   kScale = 0,
   kMinError = 1,
-  /// SCALE with automatic elastic band joint limit expansion.
-  /// Behaves identically to kScale in the SNS solver, but automatically
-  /// enables the elastic band mechanism that temporarily expands joint
-  /// limit margins when the solver is overconstrained by joint limits.
-  /// This keeps more DOFs active, preventing premature task scale collapse.
-  /// Uses proven defaults: delta_max=0.05, expand_rate=0.01, decay_rate=0.2.
+  /// SCALE with elastic band joint limit expansion + min_error fallback.
+  /// Combines three mechanisms for smooth motion near joint limits:
+  ///  1. Elastic band: temporarily expands joint limit margins when the
+  ///     solver is overconstrained, keeping more DOFs active.
+  ///  2. Scale mode: task-aligned velocity direction (not arbitrary).
+  ///  3. Min-error fallback: when scale is still very low near limits,
+  ///     drives at full velocity for smooth responsive motion.
+  /// This avoids the sluggishness of pure SCALE near limits and the
+  /// jitter of pure MIN_ERROR by using elastic band for most cases and
+  /// falling back to MIN_ERROR only when truly needed.
   kScaleElastic = 2,
 };
 
