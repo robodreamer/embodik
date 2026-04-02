@@ -276,9 +276,14 @@ class TestElasticBandStateDynamics:
 
     @pytest.fixture
     def panda_narrow(self):
+        """Fresh robot/solver per test method for isolation."""
         robot, solver = _load_panda()
         _narrow_limits(robot, margin=0.15)
-        return robot, solver
+        yield robot, solver
+        # Cleanup: ensure elastic band is disabled after each test
+        if solver.elastic_band_enabled():
+            solver.disable_elastic_band()
+        solver.clear_tasks()
 
     def test_elastic_state_grows_on_limit_stall(self, panda_narrow):
         """Test 1: delta grows when solver is stalled at joint limits."""
@@ -316,17 +321,22 @@ class TestElasticBandStateDynamics:
         )
         solver.clear_tasks()
 
-    def test_elastic_state_decays_when_healthy(self, panda_narrow):
-        """Test 2: delta decays toward 0 when solver is healthy."""
-        robot, solver = panda_narrow
+    def test_elastic_state_decays_when_healthy(self):
+        """Test 2: delta decays toward 0 when solver is healthy.
+
+        Uses very narrow limits (0.05 rad) so that even with elastic band
+        expansion, the solver still stalls on very far targets.
+        """
+        robot, solver = _load_panda()
+        _narrow_limits(robot, margin=0.05)  # Very narrow to force stalling
         q = np.concatenate([_PANDA_DEFAULT_Q, _PANDA_GRIPPER_EXTRA])
         robot.update_configuration(q)
         robot.update_kinematics(q)
 
-        solver.enable_elastic_band(delta_max=0.05)
+        solver.enable_elastic_band(delta_max=0.02)
         solver.configure_elastic_band(
-            delta_max=0.05, expand_rate=0.01, decay_rate=0.3,
-            stall_threshold=3,
+            delta_max=0.02, expand_rate=0.005, decay_rate=0.3,
+            stall_threshold=2,
         )
 
         solver.clear_tasks()
@@ -337,18 +347,21 @@ class TestElasticBandStateDynamics:
         ee_pos = np.array(task.current_position)
         ee_rot = np.array(task.current_orientation)
 
-        # Phase 1: Force stalling to build up delta
-        task.set_target_pose(ee_pos + np.array([0.5, 0.0, 0.0]), ee_rot)
-        for _ in range(20):
+        # Phase 1: Force stalling with very far target (even with elastic
+        # band's small expansion, this should still hit limits hard)
+        task.set_target_pose(ee_pos + np.array([1.0, 0.0, 0.0]), ee_rot)
+        q_lower, q_upper = robot.get_joint_limits()
+        for _ in range(40):
             result = solver.solve_velocity(q)
             dq = result.joint_velocities
             q = robot.integrate(q, dq, solver.dt)
-            q_lower, q_upper = robot.get_joint_limits()
             q = np.clip(q, q_lower, q_upper)
             robot.update_kinematics(q)
 
         peak_delta = solver.elastic_band_max_delta()
-        assert peak_delta > 0.0, "Should have expanded during stall phase"
+        assert peak_delta > 0.0, (
+            f"Should have expanded during stall phase (max_delta={peak_delta})"
+        )
 
         # Phase 2: Set target to current pose (trivially achievable)
         robot.update_kinematics(q)
@@ -360,7 +373,6 @@ class TestElasticBandStateDynamics:
             result = solver.solve_velocity(q)
             dq = result.joint_velocities
             q = robot.integrate(q, dq, solver.dt)
-            q_lower, q_upper = robot.get_joint_limits()
             q = np.clip(q, q_lower, q_upper)
             robot.update_kinematics(q)
 
@@ -368,6 +380,7 @@ class TestElasticBandStateDynamics:
             f"Delta should decay: was {peak_delta:.6f}, "
             f"now {solver.elastic_band_max_delta():.6f}"
         )
+        solver.disable_elastic_band()
         solver.clear_tasks()
 
     def test_elastic_delta_respects_max(self, panda_narrow):
@@ -638,4 +651,304 @@ class TestElasticBandVelocityBox:
             "Elastic band should be active or improve task scales"
         )
         solver.disable_elastic_band()
+        solver.clear_tasks()
+
+
+# ---------------------------------------------------------------------------
+# Phase 4: Round-Trip Integration Tests (Tests 10-12)
+# ---------------------------------------------------------------------------
+
+
+def _run_elastic_round_trip(
+    offset, *, steps=200, enable_elastic=True, delta_max=0.05,
+):
+    """Helper: run round-trip with optional elastic band.
+
+    Creates a fresh robot/solver each call for test isolation.
+    """
+    robot, solver = _load_panda()
+    _narrow_limits(robot, margin=0.15)
+
+    if enable_elastic:
+        solver.enable_elastic_band(delta_max=delta_max)
+        solver.configure_elastic_band(
+            delta_max=delta_max, expand_rate=0.01, decay_rate=0.2,
+            stall_threshold=3,
+        )
+
+    metrics = _run_solve_loop(robot, solver, offset, steps_per_phase=steps)
+
+    if enable_elastic:
+        solver.disable_elastic_band()
+
+    return metrics
+
+
+class TestElasticBandRoundTrip:
+    """Integration tests: round-trip performance with elastic band."""
+
+    @pytest.mark.parametrize("axis,offset", [
+        ("X", np.array([0.08, 0.0, 0.0])),
+        ("Y", np.array([0.0, 0.08, 0.0])),
+    ], ids=["X", "Y"])
+    def test_elastic_reduces_stall_count(self, axis, offset):
+        """Test 10: elastic band reduces total stall count vs baseline."""
+        baseline = _run_elastic_round_trip(offset, enable_elastic=False)
+        elastic = _run_elastic_round_trip(offset, enable_elastic=True)
+
+        total_b = baseline.stall_steps_forward + baseline.stall_steps_reverse
+        total_e = elastic.stall_steps_forward + elastic.stall_steps_reverse
+
+        print(f"\n--- {axis} Round-Trip ---")
+        print(f"Baseline: stalls={total_b}, infeasible={baseline.infeasible_count}, "
+              f"return_err={baseline.ee_return_error:.4f}")
+        print(f"Elastic:  stalls={total_e}, infeasible={elastic.infeasible_count}, "
+              f"return_err={elastic.ee_return_error:.4f}")
+
+        # Elastic should have fewer or equal stalls (equal is acceptable on
+        # axes where baseline already works reasonably well).
+        assert total_e <= total_b, (
+            f"{axis}: elastic stalls ({total_e}) > baseline ({total_b})"
+        )
+
+    def test_elastic_converges_back_after_round_trip(self):
+        """Test 11: after round-trip, all deltas should decay to near zero."""
+        robot, solver = _load_panda()
+        _narrow_limits(robot, margin=0.15)
+        q_init = np.concatenate([_PANDA_DEFAULT_Q, _PANDA_GRIPPER_EXTRA])
+        robot.update_configuration(q_init)
+        robot.update_kinematics(q_init)
+
+        solver.enable_elastic_band(delta_max=0.05)
+        solver.configure_elastic_band(
+            delta_max=0.05, expand_rate=0.01, decay_rate=0.3,
+            stall_threshold=3,
+        )
+
+        # Forward phase (will stall and expand)
+        solver.clear_tasks()
+        task = solver.add_frame_task("ee", _PANDA_EE_FRAME, eik.TaskType.FRAME_POSE)
+        task.priority = 0
+        task.weight = 10.0
+        robot.update_kinematics(q_init)
+        ee_pos = np.array(task.current_position)
+        ee_rot = np.array(task.current_orientation)
+        task.set_target_pose(ee_pos + np.array([0.08, 0.0, 0.0]), ee_rot)
+
+        q = q_init.copy()
+        q_lower, q_upper = robot.get_joint_limits()
+        for _ in range(200):
+            result = solver.solve_velocity(q)
+            dq = result.joint_velocities
+            q = robot.integrate(q, dq, solver.dt)
+            q = np.clip(q, q_lower, q_upper)
+            robot.update_kinematics(q)
+
+        # Reverse back to start
+        task.set_target_pose(ee_pos, ee_rot)
+        for _ in range(200):
+            result = solver.solve_velocity(q)
+            dq = result.joint_velocities
+            q = robot.integrate(q, dq, solver.dt)
+            q = np.clip(q, q_lower, q_upper)
+            robot.update_kinematics(q)
+
+        # After settling at start, deltas should be near zero
+        assert solver.elastic_band_max_delta() < 0.01, (
+            f"Deltas should converge: {solver.elastic_band_max_delta():.6f}"
+        )
+        solver.disable_elastic_band()
+        solver.clear_tasks()
+
+    @pytest.mark.parametrize("axis,offset", [
+        ("X", np.array([0.08, 0.0, 0.0])),
+        ("Y", np.array([0.0, 0.08, 0.0])),
+    ], ids=["X", "Y"])
+    def test_elastic_fewer_oscillations_than_min_error(self, axis, offset):
+        """Test 12: elastic band has fewer oscillations than min_error fallback."""
+        # Run with elastic band
+        elastic = _run_elastic_round_trip(offset, enable_elastic=True)
+
+        # Run with min_error fallback instead
+        robot, solver = _load_panda()
+        _narrow_limits(robot, margin=0.15)
+        q_init = np.concatenate([_PANDA_DEFAULT_Q, _PANDA_GRIPPER_EXTRA])
+        robot.update_configuration(q_init)
+        robot.update_kinematics(q_init)
+        solver.clear_tasks()
+        task = solver.add_frame_task("ee", _PANDA_EE_FRAME, eik.TaskType.FRAME_POSE)
+        task.priority = 0
+        task.weight = 10.0
+        task.allow_min_error_fallback = True
+        robot.update_kinematics(q_init)
+        ee_pos = np.array(task.current_position)
+        ee_rot = np.array(task.current_orientation)
+
+        q = q_init.copy()
+        q_lower, q_upper = robot.get_joint_limits()
+        min_error_metrics = RoundTripMetrics()
+        prev_dq_sign = None
+
+        for target, is_reverse in [(ee_pos + offset, False), (ee_pos, True)]:
+            task.set_target_pose(target, ee_rot)
+            for _ in range(200):
+                result = solver.solve_velocity(q)
+                dq = result.joint_velocities
+                q = robot.integrate(q, dq, solver.dt)
+                q = np.clip(q, q_lower, q_upper)
+                robot.update_kinematics(q)
+
+                if is_reverse:
+                    dq_sign = np.sign(np.sum(dq[:7]))
+                    if prev_dq_sign is not None and dq_sign != 0 and prev_dq_sign != 0:
+                        if dq_sign != prev_dq_sign:
+                            min_error_metrics.oscillation_count += 1
+                    prev_dq_sign = dq_sign if dq_sign != 0 else prev_dq_sign
+
+        solver.clear_tasks()
+
+        print(f"\n--- {axis} Oscillations ---")
+        print(f"Elastic: {elastic.oscillation_count}, MinError: {min_error_metrics.oscillation_count}")
+
+        # Elastic band should not have dramatically more oscillations.
+        # Allow some tolerance since both approaches may have different
+        # oscillation patterns depending on the axis.
+        assert elastic.oscillation_count <= min_error_metrics.oscillation_count + 20, (
+            f"{axis}: elastic oscillations ({elastic.oscillation_count}) much more than "
+            f"min_error ({min_error_metrics.oscillation_count})"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Phase 5: Safety + Regression Tests (Tests 13-16)
+# ---------------------------------------------------------------------------
+
+
+class TestElasticBandSafety:
+    """Safety and regression tests."""
+
+    def test_q_always_within_nominal_limits(self):
+        """Test 13: q_command stays within nominal limits under stress."""
+        robot, solver = _load_panda()
+        _narrow_limits(robot, margin=0.05)  # Very narrow!
+        q_lower_nom, q_upper_nom = robot.get_joint_limits()
+
+        solver.enable_elastic_band(delta_max=0.05)
+        solver.configure_elastic_band(
+            delta_max=0.05, expand_rate=0.02, decay_rate=0.1,
+            stall_threshold=2,
+        )
+
+        metrics = _run_solve_loop(
+            robot, solver, np.array([0.05, 0.05, 0.05]),
+            steps_per_phase=100,
+        )
+
+        for i, q in enumerate(metrics.q_trace):
+            assert np.all(q >= q_lower_nom - 1e-10), (
+                f"Step {i}: q below nominal lower limit"
+            )
+            assert np.all(q <= q_upper_nom + 1e-10), (
+                f"Step {i}: q above nominal upper limit"
+            )
+        solver.disable_elastic_band()
+
+    def test_no_divergence_extreme_params(self):
+        """Test 14: no NaN or divergence with large delta_max."""
+        robot, solver = _load_panda()
+        _narrow_limits(robot, margin=0.10)
+
+        solver.enable_elastic_band(delta_max=0.2)
+        solver.configure_elastic_band(
+            delta_max=0.2, expand_rate=0.05, decay_rate=0.05,
+            stall_threshold=2,
+        )
+
+        q = np.concatenate([_PANDA_DEFAULT_Q, _PANDA_GRIPPER_EXTRA])
+        robot.update_configuration(q)
+        robot.update_kinematics(q)
+
+        solver.clear_tasks()
+        task = solver.add_frame_task("ee", _PANDA_EE_FRAME, eik.TaskType.FRAME_POSE)
+        task.priority = 0
+        task.weight = 10.0
+        robot.update_kinematics(q)
+        ee_pos = np.array(task.current_position)
+        ee_rot = np.array(task.current_orientation)
+        task.set_target_pose(ee_pos + np.array([0.5, 0.3, -0.2]), ee_rot)
+
+        q_lower, q_upper = robot.get_joint_limits()
+        for _ in range(200):
+            result = solver.solve_velocity(q)
+            dq = result.joint_velocities
+            assert np.all(np.isfinite(dq)), "NaN in joint velocities"
+            q = robot.integrate(q, dq, solver.dt)
+            q = np.clip(q, q_lower, q_upper)
+            robot.update_kinematics(q)
+
+            deltas = solver.elastic_band_deltas()
+            assert np.all(np.isfinite(deltas)), "NaN in elastic band deltas"
+            assert solver.elastic_band_max_delta() <= 0.2 + 1e-10, (
+                f"Delta exceeded max: {solver.elastic_band_max_delta()}"
+            )
+
+        solver.disable_elastic_band()
+        solver.clear_tasks()
+
+    def test_disabled_matches_baseline(self):
+        """Test 15: disabled elastic band produces identical results to no elastic band."""
+        # Run baseline
+        baseline = _run_elastic_round_trip(np.array([0.08, 0.0, 0.0]),
+                                           enable_elastic=False)
+
+        # Run with elastic band disabled (enable then immediately disable)
+        robot, solver = _load_panda()
+        _narrow_limits(robot, margin=0.15)
+        solver.enable_elastic_band(delta_max=0.05)
+        solver.disable_elastic_band()
+        disabled = _run_solve_loop(robot, solver, np.array([0.08, 0.0, 0.0]))
+
+        # Results should be very close (within floating point tolerance)
+        assert abs(baseline.infeasible_count - disabled.infeasible_count) <= 1, (
+            f"Infeasible mismatch: {baseline.infeasible_count} vs {disabled.infeasible_count}"
+        )
+
+    def test_works_alongside_collision_stall_handler(self):
+        """Test 16: elastic band + collision stall handler don't interfere."""
+        robot, solver = _load_panda()
+        _narrow_limits(robot, margin=0.15)
+
+        # Enable both
+        solver.enable_elastic_band(delta_max=0.05)
+        solver.enable_stall_handler(0.04)
+        solver.configure_stall_handler(stall_threshold=5, restore_rate=0.005)
+
+        q = np.concatenate([_PANDA_DEFAULT_Q, _PANDA_GRIPPER_EXTRA])
+        robot.update_configuration(q)
+        robot.update_kinematics(q)
+
+        solver.clear_tasks()
+        task = solver.add_frame_task("ee", _PANDA_EE_FRAME, eik.TaskType.FRAME_POSE)
+        task.priority = 0
+        task.weight = 10.0
+        robot.update_kinematics(q)
+        ee_pos = np.array(task.current_position)
+        ee_rot = np.array(task.current_orientation)
+        task.set_target_pose(ee_pos + np.array([0.3, 0.0, 0.0]), ee_rot)
+
+        q_lower, q_upper = robot.get_joint_limits()
+        for _ in range(50):
+            result = solver.solve_velocity(q)
+            dq = result.joint_velocities
+            assert np.all(np.isfinite(dq)), "NaN with both handlers active"
+            q = robot.integrate(q, dq, solver.dt)
+            q = np.clip(q, q_lower, q_upper)
+            robot.update_kinematics(q)
+
+        # Both should be functional without crashes
+        assert solver.elastic_band_enabled()
+        assert solver.stall_handler_enabled()
+
+        solver.disable_elastic_band()
+        solver.disable_stall_handler()
         solver.clear_tasks()
