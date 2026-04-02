@@ -910,6 +910,10 @@ private:
   std::uint64_t last_collision_exact_distance_queries_ = 0;
   std::uint64_t last_collision_bound_culled_pairs_ = 0;
   bool last_collision_budget_exhausted_ = false;
+  // Post-step rejection fast path: minimum signed distance from the most
+  // recent compute_collision_constraint() call and whether it was a full scan.
+  double last_constraint_min_distance_ = std::numeric_limits<double>::infinity();
+  bool last_constraint_was_full_scan_ = false;
   CollisionTuningMode collision_tuning_mode_ = CollisionTuningMode::kSpeed;
   // Track solver stagnation near collision boundary for stronger recovery (per-pair).
   double last_solution_dq_norm_ = 0.0;
@@ -920,6 +924,12 @@ private:
   bool collision_pair_allowed(const std::string &a, const std::string &b) const;
   std::optional<double> evaluate_min_collision_distance(
       const Eigen::VectorXd &current_q = Eigen::VectorXd());
+  std::optional<double> evaluate_min_collision_distance_targeted(
+      const Eigen::VectorXd &current_q,
+      const std::vector<std::size_t> &pair_indices);
+  std::optional<double> evaluate_post_step_collision_distance(
+      const Eigen::VectorXd &q);
+  std::vector<std::size_t> get_post_step_rejection_pair_indices() const;
   std::optional<CollisionConstraintResult> compute_collision_constraint();
 
 public:
