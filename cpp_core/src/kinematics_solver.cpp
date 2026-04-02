@@ -1850,6 +1850,39 @@ KinematicsSolver::get_active_collision_pairs() const {
 std::optional<KinematicsSolver::CollisionConstraintResult>
 KinematicsSolver::compute_collision_constraint() {
 #ifdef PINOCCHIO_WITH_HPP_FCL
+  // Lazy reuse: when configuration change is small and we have a safe margin,
+  // reuse the previous constraint result.  The constraint Jacobian and bounds
+  // remain approximately valid for small dq, and the safety margin absorbs
+  // the approximation error.
+  // Checked BEFORE resetting debug state so that last_collision_debug_ and
+  // last_collision_debug_list_ remain valid for callers (avoids flickering
+  // in visualization).
+  {
+    const bool constraint_active_for_reuse =
+        collision_constraint_.has_value() && collision_constraint_->enabled;
+    if (constraint_active_for_reuse && collision_pair_cache_enabled_ &&
+        last_collision_constraint_result_.has_value() &&
+        last_collision_constraint_q_.size() == robot_->nq() &&
+        std::isfinite(last_constraint_min_distance_) &&
+        !last_collision_budget_exhausted_) {
+      const Eigen::VectorXd &q_current = robot_->get_current_configuration();
+      const double dq_norm =
+          (q_current - last_collision_constraint_q_).squaredNorm();
+      if (dq_norm < kLazyReuseMaxDqSqNorm &&
+          last_constraint_min_distance_ >
+              kCollisionPenetrationDistanceThreshold +
+                  kLazyReuseMinDistMargin) {
+        // Reuse previous result — configuration barely changed.
+        // Preserve last_collision_debug_ and instrumentation counters.
+        collision_pair_cache_steps_since_refresh_++;
+        last_collision_pairs_considered_ = 0;
+        last_collision_exact_distance_queries_ = 0;
+        last_collision_bound_culled_pairs_ = 0;
+        return last_collision_constraint_result_;
+      }
+    }
+  }
+
   last_collision_pairs_considered_ = 0;
   last_collision_exact_distance_queries_ = 0;
   last_collision_bound_culled_pairs_ = 0;
@@ -1871,28 +1904,6 @@ KinematicsSolver::compute_collision_constraint() {
   const bool nearest_points_all_pairs =
       collision_constraint_.has_value() &&
       collision_constraint_->nearest_points_all_pairs;
-
-  // Lazy reuse: when configuration change is small and we have a safe margin,
-  // reuse the previous constraint result.  The constraint Jacobian and bounds
-  // remain approximately valid for small dq, and the safety margin absorbs
-  // the approximation error.
-  if (constraint_active && collision_pair_cache_enabled_ &&
-      last_collision_constraint_result_.has_value() &&
-      last_collision_constraint_q_.size() == robot_->nq() &&
-      std::isfinite(last_constraint_min_distance_) &&
-      !last_collision_budget_exhausted_) {
-    const Eigen::VectorXd &q_current = robot_->get_current_configuration();
-    const double dq_norm =
-        (q_current - last_collision_constraint_q_).squaredNorm();
-    if (dq_norm < kLazyReuseMaxDqSqNorm &&
-        last_constraint_min_distance_ >
-            kCollisionPenetrationDistanceThreshold +
-                kLazyReuseMinDistMargin) {
-      // Reuse previous result — configuration barely changed.
-      collision_pair_cache_steps_since_refresh_++;
-      return last_collision_constraint_result_;
-    }
-  }
 
   // Fast path: when the cache is warm and previous step confirmed all pairs
   // are well clear of the activation threshold, skip the expensive geometry
