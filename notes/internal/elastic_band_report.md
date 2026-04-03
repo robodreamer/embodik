@@ -102,9 +102,14 @@ Both auto-enable elastic band with proven defaults. All 6 Viser examples expose 
   - Velocity box margin widening: uses `q_min_eff`/`q_max_eff`
   - Jacobian clamping bypass for expanded joints
   - Auto-enable when any task uses `kScaleElastic`
+  - Pre-seed delta for joints at limits on `enable_elastic_band()` (within 1 mrad)
   - Hook into `solve_velocity()` after `stall_handler_update()`
 - `kinematics_solver_bindings.cpp`: Python bindings
 - `tasks_bindings.cpp`: `SCALE_ELASTIC` enum value
+
+**Also includes** (squash-merged from `fix/collision-post-step-rejection-perf`):
+- Lazy constraint reuse and nearest-points coalescing
+- Elimination of full-scan collision overhead in position-step hot paths
 
 **Integration**:
 - Complementary to collision stall handler (collision handler gates on `!limit_dominated_stall`, elastic band gates on saturated joints + low scale)
@@ -123,40 +128,36 @@ Both auto-enable elastic band with proven defaults. All 6 Viser examples expose 
 | Y infeasible | 168 | 21 | **88% reduction** |
 | Y return error | 0.0028 | 0.0000 | **100% improvement** |
 
-### Alpha Wheelbase — Right Arm (120 steps, 4 offsets)
+### Alpha Wheelbase — Right Arm (120 steps, 4 offsets, with collision perf fix + pre-seed)
 
 | Mode | Success | Infeasible | Stalls | Mean Scale | EE Distance |
 |------|---------|-----------|--------|------------|-------------|
-| SCALE (baseline) | 66 | 174 | 414 | 0.14 | 0.183 |
-| **SCALE_ELASTIC** | **176** | **64** | **338** | **0.36** | **0.324** |
-| min_error_fallback | 121 | 119 | 406 | 0.21 | 0.184 |
+| SCALE (baseline) | 72 | 168 | 408 | 0.15 | 0.184 |
+| **SCALE_ELASTIC** | **192** | **49** | **319** | **0.40** | **0.328** |
+| min_error_fallback | 121 | 119 | 387 | 0.19 | 0.206 |
 
-**Improvement over baseline**: +167% success, -63% infeasible, +168% mean scale, +77% EE distance
+**Improvement over baseline**: +167% success, -71% infeasible, +167% mean scale, +78% EE distance
 
-**Improvement over min_error**: +45% success, -46% infeasible, +70% mean scale, +76% EE distance
+**Improvement over min_error**: +59% success, -59% infeasible, +113% mean scale, +59% EE distance
 
 #### Per-offset breakdown (right arm):
 
 | Offset | Mode | Success | Infeasible | Mean Scale | EE Dist |
 |--------|------|---------|-----------|------------|---------|
 | X +0.05 | SCALE | 1 | 119 | 0.008 | 0.007 |
-| X +0.05 | **SCALE_ELASTIC** | **61** | **59** | **0.508** | **0.147** |
+| X +0.05 | **SCALE_ELASTIC** | **90** | **28** | **0.750** | **0.148** |
 | X +0.05 | min_error | 1 | 119 | 0.008 | 0.007 |
-| Diagonal | SCALE | 65 | 55 | 0.535 | 0.177 |
-| Diagonal | **SCALE_ELASTIC** | **115** | **5** | **0.948** | **0.177** |
-| Diagonal | min_error | 120 | 0 | 0.850 | 0.177 |
+| Y +0.05 | SCALE | 0 | 0 | 0.000 | 0.000 |
+| Y +0.05 | **SCALE_ELASTIC** | **1** | **2** | **0.008** | **0.007** |
+| Y +0.05 | min_error | 0 | 0 | 0.000 | 0.000 |
+| Z -0.05 | SCALE | 0 | 0 | 0.000 | 0.000 |
+| Z -0.05 | SCALE_ELASTIC | 0 | 0 | 0.000 | 0.000 |
+| Z -0.05 | min_error | 0 | 0 | 0.000 | 0.000 |
+| Diagonal | SCALE | 71 | 49 | 0.584 | 0.177 |
+| Diagonal | **SCALE_ELASTIC** | **101** | **19** | **0.832** | **0.173** |
+| Diagonal | min_error | 120 | 0 | 0.743 | 0.199 |
 
-### Alpha Wheelbase — Left Arm (120 steps, 2 offsets)
-
-| Mode | Success | Infeasible | Stalls | Mean Scale | EE Distance |
-|------|---------|-----------|--------|------------|-------------|
-| SCALE (baseline) | 2 | 119 | 238 | 0.01 | 0.014 |
-| **SCALE_ELASTIC** | **59** | **62** | **181** | **0.24** | **0.147** |
-| min_error_fallback | 2 | 119 | 238 | 0.01 | 0.014 |
-
-**Improvement over baseline**: +2850% success, -48% infeasible, +2849% mean scale, +953% EE distance
-
-The left arm result is particularly striking — baseline and min_error are essentially frozen (2 successes, 14mm movement) while SCALE_ELASTIC achieves 59 successes and 147mm movement.
+Note: Y and Z offsets from zero config are limited by torso joints (`base_pitch`, `knee_pitch`, `hip_pitch`) that have zero range in one direction at the zero configuration. The pre-seed fix resolved the NUMERICAL_ERROR (was 120 steps of NUMERICAL_ERROR, now at least attempts solving), but the kinematic workspace is fundamentally constrained in those directions from this seed. The diagonal offset, which combines all axes, shows the strongest SCALE_ELASTIC improvement.
 
 ## Interactive GUI Validation
 
