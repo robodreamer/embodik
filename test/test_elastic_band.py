@@ -1070,3 +1070,148 @@ class TestScaleElasticMode:
 
         solver.disable_elastic_band()
         solver.clear_tasks()
+
+
+# ---------------------------------------------------------------------------
+# Collision warm-start tests
+# ---------------------------------------------------------------------------
+
+
+class TestCollisionWarmStart:
+    """Tests for warm-start collision margin when initial config violates min_distance."""
+
+    def test_warm_start_relaxes_collision_margin(self):
+        """When initial config is inside collision margin but not penetrating,
+        elastic band warm-start should relax the collision min_distance to
+        the actual clearance so the solver isn't stuck from step 0."""
+        robot, solver = _load_panda()
+        q = np.concatenate([_PANDA_DEFAULT_Q, _PANDA_GRIPPER_EXTRA])
+        robot.update_configuration(q)
+        robot.update_kinematics(q)
+
+        # Configure collision with a large min_distance that the initial
+        # config likely violates (Panda's self-collision at default config).
+        collision_pairs = list(robot.get_collision_pair_names())
+        if not collision_pairs:
+            pytest.skip("No collision pairs available")
+
+        # Set a very large min_distance to force violation
+        large_min_dist = 0.3
+        solver.configure_collision_constraint(
+            min_distance=large_min_dist,
+            include_pairs=collision_pairs[:20],
+            exclude_pairs=[],
+            max_constraints=2,
+        )
+
+        # Check initial actual distance
+        actual_min = solver.evaluate_min_collision_distance(q)
+        if actual_min is None or actual_min >= large_min_dist:
+            pytest.skip("Initial config doesn't violate min_distance")
+
+        print(f"\nActual min distance: {actual_min:.4f}, configured: {large_min_dist}")
+
+        # Without elastic band: solver should stall
+        solver.clear_tasks()
+        task = solver.add_frame_task("ee", _PANDA_EE_FRAME, eik.TaskType.FRAME_POSE)
+        task.priority = 0
+        task.weight = 10.0
+        robot.update_kinematics(q)
+        ee_pos = np.array(task.current_position)
+        ee_rot = np.array(task.current_orientation)
+        task.set_target_pose(ee_pos + np.array([0.05, 0.0, 0.0]), ee_rot)
+
+        result_no_elastic = solver.solve_velocity(q)
+        scale_no_elastic = result_no_elastic.task_scales[0] if result_no_elastic.task_scales else -1
+
+        # Enable elastic band (which warm-starts collision margin)
+        solver.enable_elastic_band(delta_max=0.05)
+
+        # The stall handler should now be enabled with a reduced margin
+        assert solver.stall_handler_enabled(), (
+            "Warm-start should auto-enable stall handler for margin restoration"
+        )
+        warm_start_min = solver.stall_handler_current_min_distance()
+        print(f"Warm-start min_distance: {warm_start_min:.4f}")
+        assert warm_start_min < large_min_dist, (
+            f"Warm-start should reduce min_distance: {warm_start_min:.4f} >= {large_min_dist}"
+        )
+
+        # Now the solver should be able to find a feasible direction
+        result_elastic = solver.solve_velocity(q)
+        scale_elastic = result_elastic.task_scales[0] if result_elastic.task_scales else -1
+        dq_norm = float(np.linalg.norm(result_elastic.joint_velocities))
+
+        print(f"Without elastic: scale={scale_no_elastic:.4f}")
+        print(f"With elastic:    scale={scale_elastic:.4f}, dq={dq_norm:.6f}")
+
+        # The warm-started solver should produce motion
+        assert dq_norm > 1e-6 or scale_elastic > scale_no_elastic, (
+            f"Warm-start should allow motion: dq={dq_norm}, "
+            f"scale_elastic={scale_elastic} vs scale_no={scale_no_elastic}"
+        )
+
+        solver.disable_elastic_band()
+        solver.disable_stall_handler()
+        solver.clear_tasks()
+
+    def test_warm_start_restores_margin_as_robot_clears(self):
+        """After warm-start, the stall handler should gradually restore
+        collision min_distance toward nominal as the robot gains clearance."""
+        robot, solver = _load_panda()
+        q = np.concatenate([_PANDA_DEFAULT_Q, _PANDA_GRIPPER_EXTRA])
+        robot.update_configuration(q)
+        robot.update_kinematics(q)
+
+        collision_pairs = list(robot.get_collision_pair_names())
+        if not collision_pairs:
+            pytest.skip("No collision pairs available")
+
+        # Use moderate min_distance that initial config likely violates
+        min_dist = 0.15
+        solver.configure_collision_constraint(
+            min_distance=min_dist,
+            include_pairs=collision_pairs[:20],
+            exclude_pairs=[],
+            max_constraints=2,
+        )
+
+        actual_min = solver.evaluate_min_collision_distance(q)
+        if actual_min is None or actual_min >= min_dist:
+            pytest.skip("Initial config doesn't violate min_distance")
+
+        solver.enable_elastic_band(delta_max=0.05)
+        initial_effective = solver.stall_handler_current_min_distance()
+
+        # Run steps with a reachable target
+        solver.clear_tasks()
+        task = solver.add_frame_task("ee", _PANDA_EE_FRAME, eik.TaskType.FRAME_POSE)
+        task.priority = 0
+        task.weight = 10.0
+        robot.update_kinematics(q)
+        ee_pos = np.array(task.current_position)
+        ee_rot = np.array(task.current_orientation)
+        task.set_target_pose(ee_pos + np.array([0.02, 0.0, 0.0]), ee_rot)
+
+        q_lower, q_upper = robot.get_joint_limits()
+        for _ in range(50):
+            result = solver.solve_velocity(q)
+            dq = result.joint_velocities
+            q = robot.integrate(q, dq, solver.dt)
+            q = np.clip(q, q_lower, q_upper)
+            robot.update_kinematics(q)
+
+        final_effective = solver.stall_handler_current_min_distance()
+        print(f"\nInitial effective: {initial_effective:.4f}, "
+              f"Final effective: {final_effective:.4f}, "
+              f"Nominal: {min_dist:.4f}")
+
+        # The effective min_distance should have moved toward nominal
+        assert final_effective >= initial_effective, (
+            f"Effective min_distance should increase: "
+            f"{final_effective:.4f} < {initial_effective:.4f}"
+        )
+
+        solver.disable_elastic_band()
+        solver.disable_stall_handler()
+        solver.clear_tasks()
