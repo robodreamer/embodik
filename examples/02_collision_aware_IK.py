@@ -326,6 +326,9 @@ class embodiKResult:
     primary_mode: str = "SCALE"
     primary_fallback: bool = False
     primary_scale: float = 1.0
+    collision_time_ms: float = 0.0
+    collision_sphere_culled: int = 0
+    collision_exact_queries: int = 0
 
 
 class embodiKBackend:
@@ -473,6 +476,9 @@ class embodiKBackend:
                 if len(result.task_scales) > 0
                 else 1.0
             ),
+            collision_time_ms=float(getattr(result, "collision_constraint_time_ms", 0.0)),
+            collision_sphere_culled=int(getattr(result, "collision_sphere_culled_pairs", 0)),
+            collision_exact_queries=int(getattr(result, "collision_exact_distance_queries", 0)),
         )
 
     def reset(self) -> pin.SE3:
@@ -519,11 +525,14 @@ class embodiKBackend:
 
 def run_gui(cfg: RobotConfig, args: argparse.Namespace) -> None:
     backend = embodiKBackend(cfg)
-    if getattr(args, "timing_breakdown", False):
-        try:
-            backend.solver.enable_timing_breakdown(True)
-        except Exception as exc:  # pragma: no cover
-            print(f"[embodiK] Warning: enable_timing_breakdown failed: {exc}")
+    # Always enable timing breakdown so collision stats are populated.
+    try:
+        backend.solver.enable_timing_breakdown(True)
+    except Exception as exc:  # pragma: no cover
+        print(f"[embodiK] Warning: enable_timing_breakdown failed: {exc}")
+
+    bp_status = "ON" if getattr(backend.solver, "sphere_broadphase_enabled", lambda: False)() else "OFF"
+    print(f"[embodiK] Sphere broadphase: {bp_status}")
 
     if hasattr(backend, "robot"):
         try:
@@ -1105,10 +1114,12 @@ def run_gui(cfg: RobotConfig, args: argparse.Namespace) -> None:
             )
             q_current = result.joints
             solver_elapsed_ms = result.elapsed_ms
+            col_ms = result.collision_time_ms
             status_handle.value = (
                 f"Status: embodiK {result.status} | "
                 f"pos={result.position_error*1e3:.2f} mm, rot={result.rotation_error:.4f} rad | "
-                f"mode={result.primary_mode}, fb={result.primary_fallback}, scale={result.primary_scale:.3f}"
+                f"mode={result.primary_mode}, fb={result.primary_fallback}, scale={result.primary_scale:.3f} | "
+                f"col={col_ms:.2f}ms"
             )
 
             for slider, value in zip(joint_sliders, q_current):
@@ -1128,7 +1139,14 @@ def run_gui(cfg: RobotConfig, args: argparse.Namespace) -> None:
             # If C++ timing breakdown is enabled, fetch it from an extra solve call
             # would be intrusive; instead we show the wall-time here and rely on
             # collision_debug/self_collision toggles for deeper analysis.
-            print(f"[Performance] Iter {iteration_count}: solve_step elapsed={solver_elapsed_ms:.3f} ms")
+            col_info = ""
+            if not manual_control.value and result is not None:
+                col_info = (
+                    f" | collision={result.collision_time_ms:.3f}ms"
+                    f" sphere_culled={result.collision_sphere_culled}"
+                    f" exact={result.collision_exact_queries}"
+                )
+            print(f"[Performance] Iter {iteration_count}: solve_step={solver_elapsed_ms:.3f}ms{col_info}")
 
         time.sleep(0.001)
 
