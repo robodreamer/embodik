@@ -527,6 +527,13 @@ void bind_kinematics_solver(nb::module_ &m) {
            "Evaluate collisions at the provided configuration and return debug "
            "info (side-effect free).")
 
+      .def("evaluate_post_step_collision_distance",
+           &KinematicsSolver::evaluate_post_step_collision_distance,
+           nb::arg("current_q"),
+           "Evaluate the scalar collision distance used by post-step safety "
+           "checks. Prefers cached / targeted collision data before falling "
+           "back to a global scan.")
+
       .def("get_active_collision_pairs",
            &KinematicsSolver::get_active_collision_pairs,
            "Return the list of collision pairs currently considered by the "

@@ -723,6 +723,16 @@ public:
       const Eigen::VectorXd &current_q = Eigen::VectorXd());
 
   /**
+   * @brief Evaluate the scalar collision distance used by post-step safety
+   * checks.
+   *
+   * Prefers cached / targeted collision data from the most recent constraint
+   * solve before falling back to a global distance scan.
+   */
+  std::optional<double> evaluate_post_step_collision_distance(
+      const Eigen::VectorXd &q);
+
+  /**
    * @brief Retrieve the list of currently active collision pairs (after
    * include/exclude filtering).
    */
@@ -1015,8 +1025,6 @@ private:
   std::optional<double> evaluate_min_collision_distance_targeted(
       const Eigen::VectorXd &current_q,
       const std::vector<std::size_t> &pair_indices);
-  std::optional<double> evaluate_post_step_collision_distance(
-      const Eigen::VectorXd &q);
   std::vector<std::size_t> get_post_step_rejection_pair_indices() const;
   std::optional<CollisionConstraintResult> compute_collision_constraint();
 
