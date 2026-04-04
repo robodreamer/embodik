@@ -1509,17 +1509,23 @@ void KinematicsSolver::elastic_band_update(
   }
 
   // Expansion: proportional to how constrained we are.
+  // - Scale = 0 (infeasible) → boost to delta_max/2 immediately
   // - Scale near 0 → expand at full rate
   // - Scale near 0.5 → expand at half rate
   // - No saturated joints or scale >= 0.5 → no expansion
   if (scale_is_low && !result.saturated_joints.empty()) {
     const double expansion_factor =
-        std::max(0.0, 1.0 - 2.0 * primary_scale);  // 1.0 at scale=0, 0.0 at scale>=0.5
+        std::max(0.0, 1.0 - 2.0 * primary_scale);
     const double step_expand = cfg.expand_rate * expansion_factor;
+    // When completely infeasible, boost immediately to reduce the number
+    // of stalled steps needed to reach useful expansion.
+    const double boost_floor =
+        (primary_scale < 1e-6) ? cfg.delta_max * 0.5 : 0.0;
 
     for (int i = 0; i < nv; ++i) {
       if (!cfg.expand_only_saturated || is_saturated[i]) {
-        st.delta[i] = std::min(st.delta[i] + step_expand, cfg.delta_max);
+        const double new_delta = std::max(st.delta[i] + step_expand, boost_floor);
+        st.delta[i] = std::min(new_delta, cfg.delta_max);
       }
     }
     st.total_expansion_steps++;
