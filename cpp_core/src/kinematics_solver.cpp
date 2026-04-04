@@ -1407,32 +1407,24 @@ void KinematicsSolver::enable_elastic_band(double delta_max) {
   // the collision margin to the actual clearance so the solver isn't stuck
   // from step 0.  The stall handler's restore logic will gradually bring
   // it back to nominal as the robot gains clearance.
+  //
+  // Only warm-start when the violation is significant enough to actually
+  // block the solver (actual clearance < 50% of nominal).  Small violations
+  // are handled by the normal stall handler without needing a warm-start.
   if (elastic_band_config_.warm_start_collision_margin &&
       collision_constraint_.has_value() && collision_constraint_->enabled) {
     const double nominal_min = collision_constraint_->min_distance;
     auto actual_min = evaluate_min_collision_distance();
-    if (actual_min.has_value() && *actual_min < nominal_min &&
-        *actual_min >= 0.0) {
-      // Set effective min_distance to just below actual clearance so the
-      // collision constraint row has minimal slack and motion can begin,
-      // while still maintaining collision awareness for nearby geometry.
-      const double warm_start_min = std::max(0.0, *actual_min - kElasticWarmStartSlack);
+    if (actual_min.has_value() && *actual_min >= 0.0 &&
+        *actual_min < nominal_min * 0.5) {
+      const double warm_start_min =
+          std::max(0.0, *actual_min - kElasticWarmStartSlack);
       set_collision_min_distance(warm_start_min);
 
-      // Set up stall handler for restore-only mode: it will gradually
-      // bring min_distance back to nominal but never relax below warm_start.
       if (!stall_config_.enabled) {
         enable_stall_handler(nominal_min);
       }
       stall_state_.current_min_distance = warm_start_min;
-      // Raise the floor so stall handler relaxation cannot drift below
-      // the warm-start level — only upward restoration is allowed.
-      const double warm_floor = (nominal_min > 0.0)
-                                    ? (warm_start_min / nominal_min)
-                                    : 1.0;
-      if (warm_floor > stall_config_.floor_fraction) {
-        stall_config_.floor_fraction = std::min(1.0, warm_floor);
-      }
     }
   }
 }
