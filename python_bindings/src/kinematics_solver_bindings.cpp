@@ -396,6 +396,16 @@ void bind_kinematics_solver(nb::module_ &m) {
       .def("get_collision_tuning_mode",
            &KinematicsSolver::get_collision_tuning_mode,
            "Get the active high-level collision tuning preset.")
+      .def("enable_sphere_broadphase",
+           &KinematicsSolver::enable_sphere_broadphase,
+           nb::arg("enable"),
+           "Enable sphere-based broadphase culling for collision queries.\n\n"
+           "When enabled, cheap sphere-sphere distance bounds skip expensive\n"
+           "GJK/EPA calls for pairs whose bounding spheres are far apart.\n"
+           "Spheres are auto-computed from collision geometry AABBs.")
+      .def("sphere_broadphase_enabled",
+           &KinematicsSolver::sphere_broadphase_enabled,
+           "Whether sphere broadphase culling is enabled.")
 
       // Stall handler
       .def("enable_stall_handler",
