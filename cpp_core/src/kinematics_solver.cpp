@@ -82,8 +82,6 @@ constexpr double kTorsoBoundSlackEpsRot = 1e-3;   // ~0.057 deg
 constexpr double kUnboundedConstraintLimit = 1e10;
 // Elastic band: margin (rad) within which a joint is considered "at limit".
 constexpr double kElasticAtLimitMargin = 1e-3; // 1 mrad
-// Elastic band: collision warm-start slack below actual clearance (meters).
-constexpr double kElasticWarmStartSlack = 0.002; // 2mm
 
 struct HalfspaceBoundResult {
   Eigen::VectorXd lower;
@@ -1427,29 +1425,6 @@ void KinematicsSolver::enable_elastic_band(double delta_max) {
 
   // Warm-start collision margin: if the initial config already violates
   // the collision min_distance (but is not penetrating), temporarily relax
-  // the collision margin to the actual clearance so the solver isn't stuck
-  // from step 0.  The stall handler's restore logic will gradually bring
-  // it back to nominal as the robot gains clearance.
-  //
-  // Only warm-start when the violation is significant enough to actually
-  // block the solver (actual clearance < 50% of nominal).  Small violations
-  // are handled by the normal stall handler without needing a warm-start.
-  if (elastic_band_config_.warm_start_collision_margin &&
-      collision_constraint_.has_value() && collision_constraint_->enabled) {
-    const double nominal_min = collision_constraint_->min_distance;
-    auto actual_min = evaluate_min_collision_distance();
-    if (actual_min.has_value() && *actual_min >= 0.0 &&
-        *actual_min < nominal_min * 0.5) {
-      const double warm_start_min =
-          std::max(0.0, *actual_min - kElasticWarmStartSlack);
-      set_collision_min_distance(warm_start_min);
-
-      if (!stall_config_.enabled) {
-        enable_stall_handler(nominal_min);
-      }
-      stall_state_.current_min_distance = warm_start_min;
-    }
-  }
 }
 
 void KinematicsSolver::disable_elastic_band() {

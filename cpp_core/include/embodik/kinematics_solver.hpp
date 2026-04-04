@@ -918,13 +918,6 @@ private:
     int stall_threshold = 3;
     /// Joint-velocity norm below which a step counts as "no motion".
     double dq_stall_eps = 1e-5;
-    /// When true, on enable check if initial config violates collision
-    /// min_distance and temporarily relax the margin to match actual
-    /// clearance. Restoration is handled by the stall handler.
-    /// Default false — the stall handler's reactive relaxation is
-    /// preferred; warm-start can interfere with cases where the robot
-    /// starts close to collision but can still move freely.
-    bool warm_start_collision_margin = false;
     /// Whether to expand only saturated joints or all joints.
     bool expand_only_saturated = true;
   };
