@@ -57,6 +57,9 @@ constexpr std::array<double, 4> kCollisionRejectionBackoffFractions = {
     0.5, 0.25, 0.1, 0.05};
 constexpr double kJointLimitDesaturationMargin = 5e-4;
 constexpr double kJointLimitDesaturationStep = 2e-4;
+constexpr double kJointLimitDesaturationExpandedMargin = 2e-3;
+constexpr double kJointLimitDesaturationBoostStep = 1e-3;
+constexpr int kJointLimitDesaturationPlateauThreshold = 3;
 // Conservative bound gate constants (Proxima-inspired).
 constexpr double kCollisionBoundRotationRadius = 1.5; // meters
 constexpr double kCollisionBoundSafetyMargin = 5e-3; // meters
@@ -4747,12 +4750,56 @@ PositionIKResult KinematicsSolver::solve_position_step(
     // Limit-dominated lock breaker: if the QP reports near-zero joint motion
     // while several joints are saturated, nudge those joints slightly away
     // from hard limits to recover feasible directions.
+    const bool collapsed_primary_scale =
+        !last_vel_result.task_scales.empty() &&
+        std::abs(last_vel_result.task_scales[0]) <= 1e-6;
+    const bool plateau_status =
+        last_vel_result.status == SolverStatus::kNumericalError ||
+        last_vel_result.status == SolverStatus::kInfeasible ||
+        collapsed_primary_scale;
+    const int plateau_stall_steps =
+        stall_handler_enabled() ? stall_state_.consecutive_stall_steps : 0;
+    const bool plateau_escape =
+        plateau_status &&
+        plateau_stall_steps >= kJointLimitDesaturationPlateauThreshold;
+    std::vector<int> desaturation_candidates = last_vel_result.saturated_joints;
+    auto [q_min, q_max] = robot_->get_joint_limits();
+    if (plateau_escape) {
+      for (int vi = 0;
+           vi < static_cast<int>(velocity_to_config_index.size()); ++vi) {
+        if (std::find(desaturation_candidates.begin(),
+                      desaturation_candidates.end(),
+                      vi) != desaturation_candidates.end()) {
+          continue;
+        }
+        const int qi = velocity_to_config_index[vi];
+        if (qi < 0 || qi >= static_cast<int>(q.size()) ||
+            qi >= static_cast<int>(q_min.size()) ||
+            qi >= static_cast<int>(q_max.size())) {
+          continue;
+        }
+        const double margin_low = q[qi] - q_min[qi];
+        const double margin_up = q_max[qi] - q[qi];
+        if ((margin_low >= 0.0 &&
+             margin_low < kJointLimitDesaturationExpandedMargin) ||
+            (margin_up >= 0.0 &&
+             margin_up < kJointLimitDesaturationExpandedMargin)) {
+          desaturation_candidates.push_back(vi);
+        }
+      }
+    }
     if (effective_step_dq_norm < stall_config_.dq_stall_eps &&
-        last_vel_result.saturated_joints.size() >= 4) {
+        (desaturation_candidates.size() >= 4 ||
+         (plateau_escape && !desaturation_candidates.empty()))) {
       Eigen::VectorXd q_candidate = q;
-      auto [q_min, q_max] = robot_->get_joint_limits();
       bool changed = false;
-      for (int vi : last_vel_result.saturated_joints) {
+      const double desaturation_margin =
+          plateau_escape ? kJointLimitDesaturationExpandedMargin
+                         : kJointLimitDesaturationMargin;
+      const double desaturation_step =
+          plateau_escape ? kJointLimitDesaturationBoostStep
+                         : kJointLimitDesaturationStep;
+      for (int vi : desaturation_candidates) {
         if (vi < 0 || vi >= static_cast<int>(velocity_to_config_index.size())) {
           continue;
         }
@@ -4764,11 +4811,11 @@ PositionIKResult KinematicsSolver::solve_position_step(
         }
         const double margin_low = q_candidate[qi] - q_min[qi];
         const double margin_up = q_max[qi] - q_candidate[qi];
-        if (margin_low >= 0.0 && margin_low < kJointLimitDesaturationMargin) {
-          q_candidate[qi] += kJointLimitDesaturationStep;
+        if (margin_low >= 0.0 && margin_low < desaturation_margin) {
+          q_candidate[qi] += desaturation_step;
           changed = true;
-        } else if (margin_up >= 0.0 && margin_up < kJointLimitDesaturationMargin) {
-          q_candidate[qi] -= kJointLimitDesaturationStep;
+        } else if (margin_up >= 0.0 && margin_up < desaturation_margin) {
+          q_candidate[qi] -= desaturation_step;
           changed = true;
         }
       }
@@ -5422,12 +5469,56 @@ PositionIKResult KinematicsSolver::solve_position_step(
     // Limit-dominated lock breaker: if the QP reports near-zero joint motion
     // while several joints are saturated, nudge those joints slightly away
     // from hard limits to recover feasible directions.
+    const bool collapsed_primary_scale =
+        !last_vel_result.task_scales.empty() &&
+        std::abs(last_vel_result.task_scales[0]) <= 1e-6;
+    const bool plateau_status =
+        last_vel_result.status == SolverStatus::kNumericalError ||
+        last_vel_result.status == SolverStatus::kInfeasible ||
+        collapsed_primary_scale;
+    const int plateau_stall_steps =
+        stall_handler_enabled() ? stall_state_.consecutive_stall_steps : 0;
+    const bool plateau_escape =
+        plateau_status &&
+        plateau_stall_steps >= kJointLimitDesaturationPlateauThreshold;
+    std::vector<int> desaturation_candidates = last_vel_result.saturated_joints;
+    auto [q_min, q_max] = robot_->get_joint_limits();
+    if (plateau_escape) {
+      for (int vi = 0;
+           vi < static_cast<int>(velocity_to_config_index.size()); ++vi) {
+        if (std::find(desaturation_candidates.begin(),
+                      desaturation_candidates.end(),
+                      vi) != desaturation_candidates.end()) {
+          continue;
+        }
+        const int qi = velocity_to_config_index[vi];
+        if (qi < 0 || qi >= static_cast<int>(q.size()) ||
+            qi >= static_cast<int>(q_min.size()) ||
+            qi >= static_cast<int>(q_max.size())) {
+          continue;
+        }
+        const double margin_low = q[qi] - q_min[qi];
+        const double margin_up = q_max[qi] - q[qi];
+        if ((margin_low >= 0.0 &&
+             margin_low < kJointLimitDesaturationExpandedMargin) ||
+            (margin_up >= 0.0 &&
+             margin_up < kJointLimitDesaturationExpandedMargin)) {
+          desaturation_candidates.push_back(vi);
+        }
+      }
+    }
     if (effective_step_dq_norm < stall_config_.dq_stall_eps &&
-        last_vel_result.saturated_joints.size() >= 4) {
+        (desaturation_candidates.size() >= 4 ||
+         (plateau_escape && !desaturation_candidates.empty()))) {
       Eigen::VectorXd q_candidate = q;
-      auto [q_min, q_max] = robot_->get_joint_limits();
       bool changed = false;
-      for (int vi : last_vel_result.saturated_joints) {
+      const double desaturation_margin =
+          plateau_escape ? kJointLimitDesaturationExpandedMargin
+                         : kJointLimitDesaturationMargin;
+      const double desaturation_step =
+          plateau_escape ? kJointLimitDesaturationBoostStep
+                         : kJointLimitDesaturationStep;
+      for (int vi : desaturation_candidates) {
         if (vi < 0 || vi >= static_cast<int>(velocity_to_config_index.size())) {
           continue;
         }
@@ -5439,11 +5530,11 @@ PositionIKResult KinematicsSolver::solve_position_step(
         }
         const double margin_low = q_candidate[qi] - q_min[qi];
         const double margin_up = q_max[qi] - q_candidate[qi];
-        if (margin_low >= 0.0 && margin_low < kJointLimitDesaturationMargin) {
-          q_candidate[qi] += kJointLimitDesaturationStep;
+        if (margin_low >= 0.0 && margin_low < desaturation_margin) {
+          q_candidate[qi] += desaturation_step;
           changed = true;
-        } else if (margin_up >= 0.0 && margin_up < kJointLimitDesaturationMargin) {
-          q_candidate[qi] -= kJointLimitDesaturationStep;
+        } else if (margin_up >= 0.0 && margin_up < desaturation_margin) {
+          q_candidate[qi] -= desaturation_step;
           changed = true;
         }
       }
