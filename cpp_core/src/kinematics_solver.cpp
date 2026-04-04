@@ -58,7 +58,7 @@ constexpr std::array<double, 4> kCollisionRejectionBackoffFractions = {
 constexpr double kJointLimitDesaturationMargin = 5e-4;
 constexpr double kJointLimitDesaturationStep = 2e-4;
 constexpr double kJointLimitDesaturationExpandedMargin = 2e-3;
-constexpr double kJointLimitDesaturationBoostStep = 1e-3;
+constexpr double kJointLimitDesaturationBoostStep = 5e-3;
 constexpr int kJointLimitDesaturationPlateauThreshold = 3;
 // Conservative bound gate constants (Proxima-inspired).
 constexpr double kCollisionBoundRotationRadius = 1.5; // meters
@@ -1501,7 +1501,9 @@ void KinematicsSolver::elastic_band_update(
       result.task_scales.empty() ? 1.0 : result.task_scales[0];
   const bool explicit_task_error =
       !result.task_errors.empty() && result.task_errors[0] > 1e-4;
-  const bool has_task_error = explicit_task_error;
+  const bool has_task_error =
+      explicit_task_error ||
+      (primary_scale < 1e-6 && !result.saturated_joints.empty());
   const bool scale_is_low = primary_scale < 0.5 && has_task_error;
 
   // Build saturated joint set.
