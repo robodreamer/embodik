@@ -720,7 +720,7 @@ def run_teleop(cfg: RobotConfig, args: argparse.Namespace) -> None:
         ee_mode_dropdown = server.gui.add_dropdown(
             "EE Solve Mode",
             options=("SCALE", "SCALE_ELASTIC", "MIN_ERROR"),
-            initial_value="SCALE",
+            initial_value="SCALE_ELASTIC",
         )
         ee_fallback_checkbox = server.gui.add_checkbox(
             "Allow SCALE fallback to MIN_ERROR",
