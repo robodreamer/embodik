@@ -418,10 +418,8 @@ class embodiKBackend:
         ee_fallback: bool = False,
         max_steps: int = 1,
     ) -> embodiKResult:
-        self.frame_task.solve_mode = (
-            embodik.TaskSolveMode.MIN_ERROR
-            if ee_mode == "MIN_ERROR"
-            else embodik.TaskSolveMode.SCALE
+        self.frame_task.solve_mode = getattr(
+            embodik.TaskSolveMode, ee_mode, embodik.TaskSolveMode.SCALE
         )
         self.frame_task.allow_min_error_fallback = bool(ee_fallback)
 
@@ -604,7 +602,7 @@ def run_gui(cfg: RobotConfig, args: argparse.Namespace) -> None:
         )
         ee_mode_dropdown = server.gui.add_dropdown(
             "EE Solve Mode",
-            options=("SCALE", "MIN_ERROR"),
+            options=("SCALE", "SCALE_ELASTIC", "MIN_ERROR"),
             initial_value="SCALE",
         )
         ee_fallback_checkbox = server.gui.add_checkbox(

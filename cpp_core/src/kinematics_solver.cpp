@@ -57,6 +57,9 @@ constexpr std::array<double, 4> kCollisionRejectionBackoffFractions = {
     0.5, 0.25, 0.1, 0.05};
 constexpr double kJointLimitDesaturationMargin = 5e-4;
 constexpr double kJointLimitDesaturationStep = 2e-4;
+constexpr double kJointLimitDesaturationExpandedMargin = 2e-3;
+constexpr double kJointLimitDesaturationBoostStep = 5e-3;
+constexpr int kJointLimitDesaturationPlateauThreshold = 3;
 // Conservative bound gate constants (Proxima-inspired).
 constexpr double kCollisionBoundRotationRadius = 1.5; // meters
 constexpr double kCollisionBoundSafetyMargin = 5e-3; // meters
@@ -77,6 +80,10 @@ constexpr double kTorsoBoundSlackEpsTrans = 1e-4; // 0.1 mm
 constexpr double kTorsoBoundSlackEpsRot = 1e-3;   // ~0.057 deg
 // Large finite bound used where a constraint side is intentionally inactive.
 constexpr double kUnboundedConstraintLimit = 1e10;
+// Elastic band: margin (rad) within which a joint is considered "at limit".
+constexpr double kElasticAtLimitMargin = 1e-3; // 1 mrad
+// Elastic band: collision warm-start slack below actual clearance (meters).
+constexpr double kElasticWarmStartSlack = 0.002; // 2mm
 
 struct HalfspaceBoundResult {
   Eigen::VectorXd lower;
@@ -1376,6 +1383,205 @@ double KinematicsSolver::stall_handler_current_min_distance() const {
 
 int KinematicsSolver::stall_handler_consecutive_stall_steps() const {
   return stall_state_.consecutive_stall_steps;
+}
+
+// ============================================================
+// Elastic band joint limit expansion
+// ============================================================
+
+void KinematicsSolver::enable_elastic_band(double delta_max) {
+  if (elastic_band_config_.enabled) {
+    elastic_band_config_.delta_max = std::max(0.0, delta_max);
+    return;
+  }
+  elastic_band_config_.enabled = true;
+  elastic_band_config_.delta_max = std::max(0.0, delta_max);
+  const int nv = robot_->nv();
+  elastic_band_state_.delta = Eigen::VectorXd::Zero(nv);
+  elastic_band_state_.consecutive_stall_steps = 0;
+  elastic_band_state_.total_expansion_steps = 0;
+
+  // Pre-seed expansion for joints that are at or very near their limits.
+  // This avoids the initial stall when the seed configuration has joints
+  // sitting exactly on a limit boundary (common with zero-config seeds).
+  const auto &v2c = velocity_to_config_index_cache();
+  auto [q_min, q_max] = robot_->get_joint_limits();
+  const Eigen::VectorXd q_cur = robot_->get_current_configuration();
+  const double seed_delta = std::min(elastic_band_config_.expand_rate,
+                                     elastic_band_config_.delta_max);
+  for (int i = 0; i < nv; ++i) {
+    const int q_idx =
+        (i < static_cast<int>(v2c.size())) ? v2c[i] : kVelocityToConfigUnmapped;
+    if (q_idx == kVelocityToConfigUnmapped || q_idx >= q_cur.size()) {
+      continue;
+    }
+    if (!std::isfinite(q_min[q_idx]) || !std::isfinite(q_max[q_idx])) {
+      continue;
+    }
+    const double margin_lo = q_cur[q_idx] - q_min[q_idx];
+    const double margin_hi = q_max[q_idx] - q_cur[q_idx];
+    if (margin_lo < kElasticAtLimitMargin || margin_hi < kElasticAtLimitMargin) {
+      elastic_band_state_.delta[i] = seed_delta;
+    }
+  }
+
+  // Warm-start collision margin: if the initial config already violates
+  // the collision min_distance (but is not penetrating), temporarily relax
+  // the collision margin to the actual clearance so the solver isn't stuck
+  // from step 0.  The stall handler's restore logic will gradually bring
+  // it back to nominal as the robot gains clearance.
+  //
+  // Only warm-start when the violation is significant enough to actually
+  // block the solver (actual clearance < 50% of nominal).  Small violations
+  // are handled by the normal stall handler without needing a warm-start.
+  if (elastic_band_config_.warm_start_collision_margin &&
+      collision_constraint_.has_value() && collision_constraint_->enabled) {
+    const double nominal_min = collision_constraint_->min_distance;
+    auto actual_min = evaluate_min_collision_distance();
+    if (actual_min.has_value() && *actual_min >= 0.0 &&
+        *actual_min < nominal_min * 0.5) {
+      const double warm_start_min =
+          std::max(0.0, *actual_min - kElasticWarmStartSlack);
+      set_collision_min_distance(warm_start_min);
+
+      if (!stall_config_.enabled) {
+        enable_stall_handler(nominal_min);
+      }
+      stall_state_.current_min_distance = warm_start_min;
+    }
+  }
+}
+
+void KinematicsSolver::disable_elastic_band() {
+  elastic_band_config_.enabled = false;
+  elastic_band_state_.delta.setZero();
+  elastic_band_state_.consecutive_stall_steps = 0;
+}
+
+bool KinematicsSolver::elastic_band_enabled() const {
+  return elastic_band_config_.enabled;
+}
+
+void KinematicsSolver::configure_elastic_band(double delta_max,
+                                               double expand_rate,
+                                               double decay_rate,
+                                               int stall_threshold,
+                                               bool expand_only_saturated) {
+  elastic_band_config_.delta_max = std::max(0.0, delta_max);
+  elastic_band_config_.expand_rate = std::max(0.0, expand_rate);
+  elastic_band_config_.decay_rate = std::clamp(decay_rate, 0.0, 1.0);
+  elastic_band_config_.stall_threshold = std::max(1, stall_threshold);
+  elastic_band_config_.expand_only_saturated = expand_only_saturated;
+}
+
+double KinematicsSolver::elastic_band_max_delta() const {
+  if (!elastic_band_config_.enabled ||
+      elastic_band_state_.delta.size() == 0) {
+    return 0.0;
+  }
+  return elastic_band_state_.delta.maxCoeff();
+}
+
+Eigen::VectorXd KinematicsSolver::elastic_band_deltas() const {
+  if (!elastic_band_config_.enabled ||
+      elastic_band_state_.delta.size() == 0) {
+    return Eigen::VectorXd::Zero(robot_->nv());
+  }
+  return elastic_band_state_.delta;
+}
+
+bool KinematicsSolver::elastic_band_is_expanded() const {
+  return elastic_band_config_.enabled &&
+         elastic_band_state_.delta.size() > 0 &&
+         elastic_band_state_.delta.maxCoeff() > 1e-10;
+}
+
+void KinematicsSolver::elastic_band_update(
+    const VelocitySolverResult &result) {
+  if (!elastic_band_config_.enabled) {
+    return;
+  }
+
+  const auto &cfg = elastic_band_config_;
+  auto &st = elastic_band_state_;
+  const int nv = robot_->nv();
+
+  // Ensure delta vector is sized correctly.
+  if (st.delta.size() != nv) {
+    st.delta = Eigen::VectorXd::Zero(nv);
+  }
+
+  // --- Proactive proximity-based expansion ---
+  // Instead of waiting for stalls, expand margins proactively when:
+  //   1. A joint is saturated (at its velocity limit), AND
+  //   2. The task scale is low (solver is struggling)
+  // This prevents the stop-start oscillation of reactive expansion.
+
+  const double primary_scale =
+      result.task_scales.empty() ? 1.0 : result.task_scales[0];
+  const bool explicit_task_error =
+      !result.task_errors.empty() && result.task_errors[0] > 1e-4;
+  const bool has_task_error =
+      explicit_task_error || primary_scale < 1e-6;
+  const bool scale_is_low = primary_scale < 0.5 && has_task_error;
+
+  // Build saturated joint set.
+  std::vector<bool> is_saturated(nv, false);
+  for (int idx : result.saturated_joints) {
+    if (idx >= 0 && idx < nv) {
+      is_saturated[idx] = true;
+    }
+  }
+
+
+  // Expansion: proportional to how constrained we are.
+  // - Scale = 0 (infeasible) → boost to delta_max/2 immediately
+  // - Scale near 0 → expand at full rate
+  // - Scale near 0.5 → expand at half rate
+  // - No saturated joints or scale >= 0.5 → no expansion
+  if (scale_is_low &&
+      (!result.saturated_joints.empty() || primary_scale < 1e-6)) {
+    const double expansion_factor =
+        std::max(0.0, 1.0 - 2.0 * primary_scale);
+    const double step_expand = cfg.expand_rate * expansion_factor;
+    // When completely infeasible, boost immediately to reduce the number
+    // of stalled steps needed to reach useful expansion.
+    const double boost_floor =
+        (primary_scale < 1e-6) ? cfg.delta_max * 0.5 : 0.0;
+
+    for (int i = 0; i < nv; ++i) {
+      const bool eligible =
+          !cfg.expand_only_saturated || is_saturated[i] ||
+          (primary_scale < 1e-6 && result.saturated_joints.empty());
+      if (eligible) {
+        const double new_delta = std::max(st.delta[i] + step_expand, boost_floor);
+        st.delta[i] = std::min(new_delta, cfg.delta_max);
+      }
+    }
+    st.total_expansion_steps++;
+  }
+
+  // --- Decay: shrink deltas for joints that are NOT saturated ---
+  // Only decay joints that have room — saturated joints keep their expansion
+  // to avoid the oscillation between expand/decay at the limit boundary.
+  for (int i = 0; i < nv; ++i) {
+    if (st.delta[i] > 0.0 && !is_saturated[i]) {
+      st.delta[i] *= (1.0 - cfg.decay_rate);
+      if (st.delta[i] < 1e-8) {
+        st.delta[i] = 0.0;
+      }
+    }
+  }
+
+  // Global decay when task is satisfied (no error) — all joints.
+  if (!has_task_error) {
+    for (int i = 0; i < nv; ++i) {
+      st.delta[i] *= (1.0 - cfg.decay_rate);
+      if (st.delta[i] < 1e-8) {
+        st.delta[i] = 0.0;
+      }
+    }
+  }
 }
 
 void KinematicsSolver::stall_handler_update(VelocitySolverResult &result) {
@@ -2732,6 +2938,14 @@ void KinematicsSolver::clamp_jacobians_near_joint_limits(
       continue;
     }
 
+    // Skip Jacobian clamping for joints with active elastic band expansion.
+    // The elastic zone explicitly allows motion near/beyond nominal limits.
+    if (elastic_band_config_.enabled &&
+        i < elastic_band_state_.delta.size() &&
+        elastic_band_state_.delta[i] > kJointLimitClampMargin) {
+      continue;
+    }
+
     const double margin_lower = q_cur_clamp[q_idx] - q_min_clamp[q_idx];
     const double margin_upper = q_max_clamp[q_idx] - q_cur_clamp[q_idx];
     const bool clamp_lower =
@@ -2824,6 +3038,31 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
     }
   }
 
+  // Keep the stored robot configuration aligned with the solve seed before any
+  // startup helpers inspect get_current_configuration() (notably elastic-band
+  // pre-seeding on the first SCALE_ELASTIC tick).
+  if (current_q.size() > 0) {
+    robot_->update_configuration(current_q);
+  }
+
+  // Auto-enable elastic band when any task uses SCALE_ELASTIC mode.
+  {
+    bool any_scale_elastic = false;
+    for (const auto &task : tasks_) {
+      if (task && task->isActive() &&
+          task->getSolveMode() == TaskSolveMode::kScaleElastic) {
+        any_scale_elastic = true;
+        break;
+      }
+    }
+    if (any_scale_elastic && !elastic_band_config_.enabled) {
+      enable_elastic_band(0.05);
+      configure_elastic_band(/*delta_max=*/0.05, /*expand_rate=*/0.01,
+                             /*decay_rate=*/0.2, /*stall_threshold=*/3,
+                             /*expand_only_saturated=*/true);
+    }
+  }
+
   // Sort tasks by priority
   sort_tasks_by_priority();
 
@@ -2871,7 +3110,9 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
 
     bool all_scale_no_fallback = true;
     for (const auto &task : group_tasks) {
-      if (task->getSolveMode() != TaskSolveMode::kScale ||
+      const auto mode = task->getSolveMode();
+      if ((mode != TaskSolveMode::kScale &&
+           mode != TaskSolveMode::kScaleElastic) ||
           task->getAllowMinErrorFallback()) {
         all_scale_no_fallback = false;
         break;
@@ -2907,9 +3148,15 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
         const auto &task = group_tasks[i];
         goals.push_back(group_goals[i]);
         jacobians.push_back(group_jacobians[i]);
+        // SCALE_ELASTIC is treated as SCALE in the SNS solver;
+        // the elastic band mechanism handles the limit expansion.
+        const auto effective_mode =
+            (task->getSolveMode() == TaskSolveMode::kScaleElastic)
+                ? TaskSolveMode::kScale
+                : task->getSolveMode();
         objective_configs.push_back(ObjectiveSolveConfig{
             task->getPriority(),
-            task->getSolveMode(),
+            effective_mode,
             task->getAllowMinErrorFallback(),
         });
         objective_tasks.push_back(task);
@@ -3188,6 +3435,28 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
     // post-solve clamp (below) still prevents actual limit violations.
     constexpr double margin_limit = 1e-4;
 
+    // Elastic band: compute effective limits with expansion.
+    Eigen::VectorXd q_min_eff = q_min;
+    Eigen::VectorXd q_max_eff = q_max;
+    const bool elastic_active = elastic_band_config_.enabled &&
+                                elastic_band_state_.delta.size() == robot_->nv();
+    if (elastic_active) {
+      for (int i = 0; i < robot_->nv(); ++i) {
+        const int q_idx =
+            (i < static_cast<int>(velocity_to_config_index.size()))
+                ? velocity_to_config_index[i]
+                : kVelocityToConfigUnmapped;
+        if (q_idx == kVelocityToConfigUnmapped || q_idx >= q_min.size()) {
+          continue;
+        }
+        if (!std::isfinite(q_min[q_idx]) || !std::isfinite(q_max[q_idx])) {
+          continue;
+        }
+        q_min_eff[q_idx] -= elastic_band_state_.delta[i];
+        q_max_eff[q_idx] += elastic_band_state_.delta[i];
+      }
+    }
+
     if (robot_->is_floating_base()) {
       // Handle floating-base constraints (first 6 DoFs)
       // Get current base pose error if bounds are set
@@ -3259,9 +3528,9 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
           continue;
         }
 
-        // Calculate margins to limits
-        double lower_margin = q_current[q_idx] - q_min[q_idx] - margin_limit;
-        double upper_margin = q_max[q_idx] - q_current[q_idx] - margin_limit;
+        // Calculate margins to limits (elastic band expands effective limits)
+        double lower_margin = q_current[q_idx] - q_min_eff[q_idx] - margin_limit;
+        double upper_margin = q_max_eff[q_idx] - q_current[q_idx] - margin_limit;
 
         auto [lower_limit, upper_limit] = calculate_velocity_box_constraint(
             lower_margin, upper_margin, vel_limits[i], accel_limits[i], dt_);
@@ -3288,9 +3557,9 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
           continue;
         }
 
-        // Calculate margins to limits
-        double lower_margin = q_current[q_idx] - q_min[q_idx] - margin_limit;
-        double upper_margin = q_max[q_idx] - q_current[q_idx] - margin_limit;
+        // Calculate margins to limits (elastic band expands effective limits)
+        double lower_margin = q_current[q_idx] - q_min_eff[q_idx] - margin_limit;
+        double upper_margin = q_max_eff[q_idx] - q_current[q_idx] - margin_limit;
 
         auto [lower_limit, upper_limit] = calculate_velocity_box_constraint(
             lower_margin, upper_margin, vel_limits[i], accel_limits[i], dt_);
@@ -3430,6 +3699,7 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
   }
 
   stall_handler_update(result);
+  elastic_band_update(result);
 
   return result;
 }
@@ -3641,6 +3911,14 @@ PositionIKResult KinematicsSolver::solve_position(
     enable_stall_handler(nominal);
   }
 
+  if (options.elastic_band && !elastic_band_config_.enabled) {
+    robot_->update_configuration(seed_q);
+    enable_elastic_band(0.05);
+    configure_elastic_band(/*delta_max=*/0.05, /*expand_rate=*/0.01,
+                           /*decay_rate=*/0.2, /*stall_threshold=*/3,
+                           /*expand_only_saturated=*/true);
+  }
+
   Eigen::VectorXd q_current = seed_q;
   const Eigen::VectorXd q_reference = seed_q;
   const auto &velocity_to_config_index = velocity_to_config_index_cache();
@@ -3758,8 +4036,13 @@ PositionIKResult KinematicsSolver::solve_position(
 
     goals.push_back(v_desired);
     jacobians.push_back(frame_task->getJacobian());
+    // SCALE_ELASTIC is treated as SCALE in the SNS solver.
+    const auto effective_primary_mode =
+        (options.primary_solve_mode == TaskSolveMode::kScaleElastic)
+            ? TaskSolveMode::kScale
+            : options.primary_solve_mode;
     objective_configs.push_back(
-        ObjectiveSolveConfig{0, options.primary_solve_mode,
+        ObjectiveSolveConfig{0, effective_primary_mode,
                              options.primary_allow_min_error_fallback});
 
     if (torso_task) {
@@ -4176,6 +4459,14 @@ PositionIKResult KinematicsSolver::solve_position_step(
     enable_stall_handler(nominal);
   }
 
+  if (options.elastic_band && !elastic_band_config_.enabled) {
+    robot_->update_configuration(current_q);
+    enable_elastic_band(0.05);
+    configure_elastic_band(/*delta_max=*/0.05, /*expand_rate=*/0.01,
+                           /*decay_rate=*/0.2, /*stall_threshold=*/3,
+                           /*expand_only_saturated=*/true);
+  }
+
   Eigen::VectorXd q = current_q;
   const Eigen::VectorXd q_reference = current_q;
   robot_->update_configuration(q);
@@ -4518,12 +4809,56 @@ PositionIKResult KinematicsSolver::solve_position_step(
     // Limit-dominated lock breaker: if the QP reports near-zero joint motion
     // while several joints are saturated, nudge those joints slightly away
     // from hard limits to recover feasible directions.
+    const bool collapsed_primary_scale =
+        !last_vel_result.task_scales.empty() &&
+        std::abs(last_vel_result.task_scales[0]) <= 1e-6;
+    const bool plateau_status =
+        last_vel_result.status == SolverStatus::kNumericalError ||
+        last_vel_result.status == SolverStatus::kInfeasible ||
+        collapsed_primary_scale;
+    const int plateau_stall_steps =
+        stall_handler_enabled() ? stall_state_.consecutive_stall_steps : 0;
+    const bool plateau_escape =
+        plateau_status &&
+        plateau_stall_steps >= kJointLimitDesaturationPlateauThreshold;
+    std::vector<int> desaturation_candidates = last_vel_result.saturated_joints;
+    auto [q_min, q_max] = robot_->get_joint_limits();
+    if (plateau_escape) {
+      for (int vi = 0;
+           vi < static_cast<int>(velocity_to_config_index.size()); ++vi) {
+        if (std::find(desaturation_candidates.begin(),
+                      desaturation_candidates.end(),
+                      vi) != desaturation_candidates.end()) {
+          continue;
+        }
+        const int qi = velocity_to_config_index[vi];
+        if (qi < 0 || qi >= static_cast<int>(q.size()) ||
+            qi >= static_cast<int>(q_min.size()) ||
+            qi >= static_cast<int>(q_max.size())) {
+          continue;
+        }
+        const double margin_low = q[qi] - q_min[qi];
+        const double margin_up = q_max[qi] - q[qi];
+        if ((margin_low >= 0.0 &&
+             margin_low < kJointLimitDesaturationExpandedMargin) ||
+            (margin_up >= 0.0 &&
+             margin_up < kJointLimitDesaturationExpandedMargin)) {
+          desaturation_candidates.push_back(vi);
+        }
+      }
+    }
     if (effective_step_dq_norm < stall_config_.dq_stall_eps &&
-        last_vel_result.saturated_joints.size() >= 4) {
+        (desaturation_candidates.size() >= 4 ||
+         (plateau_escape && !desaturation_candidates.empty()))) {
       Eigen::VectorXd q_candidate = q;
-      auto [q_min, q_max] = robot_->get_joint_limits();
       bool changed = false;
-      for (int vi : last_vel_result.saturated_joints) {
+      const double desaturation_margin =
+          plateau_escape ? kJointLimitDesaturationExpandedMargin
+                         : kJointLimitDesaturationMargin;
+      const double desaturation_step =
+          plateau_escape ? kJointLimitDesaturationBoostStep
+                         : kJointLimitDesaturationStep;
+      for (int vi : desaturation_candidates) {
         if (vi < 0 || vi >= static_cast<int>(velocity_to_config_index.size())) {
           continue;
         }
@@ -4535,11 +4870,11 @@ PositionIKResult KinematicsSolver::solve_position_step(
         }
         const double margin_low = q_candidate[qi] - q_min[qi];
         const double margin_up = q_max[qi] - q_candidate[qi];
-        if (margin_low >= 0.0 && margin_low < kJointLimitDesaturationMargin) {
-          q_candidate[qi] += kJointLimitDesaturationStep;
+        if (margin_low >= 0.0 && margin_low < desaturation_margin) {
+          q_candidate[qi] += desaturation_step;
           changed = true;
-        } else if (margin_up >= 0.0 && margin_up < kJointLimitDesaturationMargin) {
-          q_candidate[qi] -= kJointLimitDesaturationStep;
+        } else if (margin_up >= 0.0 && margin_up < desaturation_margin) {
+          q_candidate[qi] -= desaturation_step;
           changed = true;
         }
       }
@@ -4792,6 +5127,13 @@ PositionIKResult KinematicsSolver::solve_position_step(
     const double nominal =
         get_collision_min_distance() > 0.0 ? get_collision_min_distance() : 0.0;
     enable_stall_handler(nominal);
+  }
+
+  if (options.elastic_band && !elastic_band_config_.enabled) {
+    enable_elastic_band(0.05);
+    configure_elastic_band(/*delta_max=*/0.05, /*expand_rate=*/0.01,
+                           /*decay_rate=*/0.2, /*stall_threshold=*/3,
+                           /*expand_only_saturated=*/true);
   }
 
   Eigen::VectorXd q = current_q;
@@ -5186,12 +5528,56 @@ PositionIKResult KinematicsSolver::solve_position_step(
     // Limit-dominated lock breaker: if the QP reports near-zero joint motion
     // while several joints are saturated, nudge those joints slightly away
     // from hard limits to recover feasible directions.
+    const bool collapsed_primary_scale =
+        !last_vel_result.task_scales.empty() &&
+        std::abs(last_vel_result.task_scales[0]) <= 1e-6;
+    const bool plateau_status =
+        last_vel_result.status == SolverStatus::kNumericalError ||
+        last_vel_result.status == SolverStatus::kInfeasible ||
+        collapsed_primary_scale;
+    const int plateau_stall_steps =
+        stall_handler_enabled() ? stall_state_.consecutive_stall_steps : 0;
+    const bool plateau_escape =
+        plateau_status &&
+        plateau_stall_steps >= kJointLimitDesaturationPlateauThreshold;
+    std::vector<int> desaturation_candidates = last_vel_result.saturated_joints;
+    auto [q_min, q_max] = robot_->get_joint_limits();
+    if (plateau_escape) {
+      for (int vi = 0;
+           vi < static_cast<int>(velocity_to_config_index.size()); ++vi) {
+        if (std::find(desaturation_candidates.begin(),
+                      desaturation_candidates.end(),
+                      vi) != desaturation_candidates.end()) {
+          continue;
+        }
+        const int qi = velocity_to_config_index[vi];
+        if (qi < 0 || qi >= static_cast<int>(q.size()) ||
+            qi >= static_cast<int>(q_min.size()) ||
+            qi >= static_cast<int>(q_max.size())) {
+          continue;
+        }
+        const double margin_low = q[qi] - q_min[qi];
+        const double margin_up = q_max[qi] - q[qi];
+        if ((margin_low >= 0.0 &&
+             margin_low < kJointLimitDesaturationExpandedMargin) ||
+            (margin_up >= 0.0 &&
+             margin_up < kJointLimitDesaturationExpandedMargin)) {
+          desaturation_candidates.push_back(vi);
+        }
+      }
+    }
     if (effective_step_dq_norm < stall_config_.dq_stall_eps &&
-        last_vel_result.saturated_joints.size() >= 4) {
+        (desaturation_candidates.size() >= 4 ||
+         (plateau_escape && !desaturation_candidates.empty()))) {
       Eigen::VectorXd q_candidate = q;
-      auto [q_min, q_max] = robot_->get_joint_limits();
       bool changed = false;
-      for (int vi : last_vel_result.saturated_joints) {
+      const double desaturation_margin =
+          plateau_escape ? kJointLimitDesaturationExpandedMargin
+                         : kJointLimitDesaturationMargin;
+      const double desaturation_step =
+          plateau_escape ? kJointLimitDesaturationBoostStep
+                         : kJointLimitDesaturationStep;
+      for (int vi : desaturation_candidates) {
         if (vi < 0 || vi >= static_cast<int>(velocity_to_config_index.size())) {
           continue;
         }
@@ -5203,11 +5589,11 @@ PositionIKResult KinematicsSolver::solve_position_step(
         }
         const double margin_low = q_candidate[qi] - q_min[qi];
         const double margin_up = q_max[qi] - q_candidate[qi];
-        if (margin_low >= 0.0 && margin_low < kJointLimitDesaturationMargin) {
-          q_candidate[qi] += kJointLimitDesaturationStep;
+        if (margin_low >= 0.0 && margin_low < desaturation_margin) {
+          q_candidate[qi] += desaturation_step;
           changed = true;
-        } else if (margin_up >= 0.0 && margin_up < kJointLimitDesaturationMargin) {
-          q_candidate[qi] -= kJointLimitDesaturationStep;
+        } else if (margin_up >= 0.0 && margin_up < desaturation_margin) {
+          q_candidate[qi] -= desaturation_step;
           changed = true;
         }
       }

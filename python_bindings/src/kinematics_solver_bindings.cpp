@@ -436,6 +436,37 @@ void bind_kinematics_solver(nb::module_ &m) {
            &KinematicsSolver::stall_handler_consecutive_stall_steps,
            "Return the number of consecutive stall steps.")
 
+      // Elastic band joint limit expansion
+      .def("enable_elastic_band",
+           &KinematicsSolver::enable_elastic_band,
+           nb::arg("delta_max") = 0.05,
+           "Enable elastic band joint limit expansion for limit-dominated "
+           "stalls. Temporarily expands joint limit margins to keep more DOFs "
+           "active in the SNS solver.")
+      .def("disable_elastic_band",
+           &KinematicsSolver::disable_elastic_band,
+           "Disable elastic band and reset expansion state.")
+      .def("elastic_band_enabled",
+           &KinematicsSolver::elastic_band_enabled,
+           "Return True if elastic band is enabled.")
+      .def("configure_elastic_band",
+           &KinematicsSolver::configure_elastic_band,
+           nb::arg("delta_max") = 0.05,
+           nb::arg("expand_rate") = 0.01,
+           nb::arg("decay_rate") = 0.2,
+           nb::arg("stall_threshold") = 3,
+           nb::arg("expand_only_saturated") = true,
+           "Configure elastic band tuning parameters.")
+      .def("elastic_band_max_delta",
+           &KinematicsSolver::elastic_band_max_delta,
+           "Return the maximum delta currently active across all joints.")
+      .def("elastic_band_deltas",
+           &KinematicsSolver::elastic_band_deltas,
+           "Return per-joint delta vector (size == nv).")
+      .def("elastic_band_is_expanded",
+           &KinematicsSolver::elastic_band_is_expanded,
+           "Return True if any joint has nonzero expansion.")
+
       // CoM support-polygon constraint
       .def(
           "configure_com_constraint",
@@ -505,6 +536,19 @@ void bind_kinematics_solver(nb::module_ &m) {
            nb::arg("current_q") = Eigen::VectorXd(),
            "Evaluate collisions at the provided configuration and return debug "
            "info (side-effect free).")
+
+      .def("evaluate_post_step_collision_distance",
+           &KinematicsSolver::evaluate_post_step_collision_distance,
+           nb::arg("current_q"),
+           "Evaluate the scalar collision distance used by post-step safety "
+           "checks. Prefers cached / targeted collision data before falling "
+           "back to a global scan.")
+
+      .def("evaluate_min_collision_distance",
+           &KinematicsSolver::evaluate_min_collision_distance,
+           nb::arg("current_q") = Eigen::VectorXd(),
+           "Evaluate minimum collision distance at the given configuration. "
+           "If current_q is empty, uses the current configuration.")
 
       .def("get_active_collision_pairs",
            &KinematicsSolver::get_active_collision_pairs,
