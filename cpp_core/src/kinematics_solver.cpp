@@ -1499,8 +1499,9 @@ void KinematicsSolver::elastic_band_update(
 
   const double primary_scale =
       result.task_scales.empty() ? 1.0 : result.task_scales[0];
-  const bool has_task_error =
+  const bool explicit_task_error =
       !result.task_errors.empty() && result.task_errors[0] > 1e-4;
+  const bool has_task_error = explicit_task_error;
   const bool scale_is_low = primary_scale < 0.5 && has_task_error;
 
   // Build saturated joint set.
@@ -1510,6 +1511,7 @@ void KinematicsSolver::elastic_band_update(
       is_saturated[idx] = true;
     }
   }
+
 
   // Expansion: proportional to how constrained we are.
   // - Scale = 0 (infeasible) → boost to delta_max/2 immediately
@@ -1526,7 +1528,8 @@ void KinematicsSolver::elastic_band_update(
         (primary_scale < 1e-6) ? cfg.delta_max * 0.5 : 0.0;
 
     for (int i = 0; i < nv; ++i) {
-      if (!cfg.expand_only_saturated || is_saturated[i]) {
+      const bool eligible = !cfg.expand_only_saturated || is_saturated[i];
+      if (eligible) {
         const double new_delta = std::max(st.delta[i] + step_expand, boost_floor);
         st.delta[i] = std::min(new_delta, cfg.delta_max);
       }
@@ -2989,6 +2992,13 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
     }
   }
 
+  // Keep the stored robot configuration aligned with the solve seed before any
+  // startup helpers inspect get_current_configuration() (notably elastic-band
+  // pre-seeding on the first SCALE_ELASTIC tick).
+  if (current_q.size() > 0) {
+    robot_->update_configuration(current_q);
+  }
+
   // Auto-enable elastic band when any task uses SCALE_ELASTIC mode.
   {
     bool any_scale_elastic = false;
@@ -3855,6 +3865,7 @@ PositionIKResult KinematicsSolver::solve_position(
   }
 
   if (options.elastic_band && !elastic_band_config_.enabled) {
+    robot_->update_configuration(seed_q);
     enable_elastic_band(0.05);
     configure_elastic_band(/*delta_max=*/0.05, /*expand_rate=*/0.01,
                            /*decay_rate=*/0.2, /*stall_threshold=*/3,
@@ -4402,6 +4413,7 @@ PositionIKResult KinematicsSolver::solve_position_step(
   }
 
   if (options.elastic_band && !elastic_band_config_.enabled) {
+    robot_->update_configuration(current_q);
     enable_elastic_band(0.05);
     configure_elastic_band(/*delta_max=*/0.05, /*expand_rate=*/0.01,
                            /*decay_rate=*/0.2, /*stall_threshold=*/3,
