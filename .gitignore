@@ -68,9 +68,6 @@ reachability_maps/
 robot_models_urdf/
 tmp_reach_test/
 
-# Internal maintainer notes (not published; keep local only)
-private maintainer notes/
-
 # Documentation build artifacts
 docs/_build/
 docs/.doctrees/
@@ -86,6 +83,7 @@ site/
 *.md
 !README.md
 !docs/**/*.md
+!private maintainer notes/**/*.md
 !plan_docs/**/*.md
 !CHANGELOG.md
 !CONTRIBUTING.md
