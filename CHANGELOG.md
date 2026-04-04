@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-04-04
+
+### Added
+- **Sphere broadphase collision culling**: native AABB-derived bounding spheres skip expensive GJK/EPA distance queries for far-apart collision pairs. Achieves 30x collision speedup in isolation, 5790x combined with lazy reuse. New API: `solver.enable_sphere_broadphase(True)`, `result.collision_sphere_culled_pairs`. Enabled by default in `kSpeed` and `kBalanced` tuning modes.
+- **Lazy constraint reuse**: skip collision recomputation when joint velocity is near-zero and previous distance is safe. Eliminates 99%+ of collision steps in smooth trajectories.
+- **Post-step collision rejection**: targeted safety check after integration prevents penetration without full-scan overhead.
+- **Elastic band joint limit expansion**: temporary joint limit widening for overconstrained solver stalls. New `SCALE_ELASTIC` task solve mode auto-enables elastic band.
+- **`evaluate_min_collision_distance()` Python binding**: public API for querying collision distance at arbitrary configurations.
+- **`/release` slash command**: Claude Code slash command for version bump, changelog, and PyPI publish workflow.
+
+### Changed
+- **Default solve mode**: examples 01-09 now default to `SCALE_ELASTIC` instead of `SCALE`.
+- **Collision tuning presets**: `kSpeed` and `kBalanced` modes now enable sphere broadphase automatically.
+- **Example 02 defaults**: self-collision and collision debug visualization enabled by default.
+- **Collision constraint reuse**: coalesced nearest-points queries and added lazy constraint reuse — when joint velocity is near-zero and cached distance is safe, the entire collision constraint computation is skipped. Reuse is bounded by the cache refresh interval to guarantee periodic full scans.
+- **Position-step collision hot path**: eliminated redundant full-scan collision overhead in position-step recovery paths; targeted pair evaluation replaces global distance scans during stall-escape and post-step rejection.
+- **Collision debug state preservation**: lazy constraint reuse now preserves collision debug info (closest pair, nearest points) from the previous full computation, ensuring debug visualization remains available during reuse steps.
+
+### Removed
+- **Collision warm-start**: removed unused `warm_start_collision_margin` feature from elastic band config (stall handler's reactive relaxation is preferred).
+
 ## [0.18.9] - 2026-03-29
 
 ### Added
