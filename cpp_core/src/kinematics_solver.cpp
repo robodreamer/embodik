@@ -1145,6 +1145,7 @@ void KinematicsSolver::set_collision_tuning_mode(CollisionTuningMode mode) {
     set_collision_refinement_time_budget_us(0);
     set_proximity_gated_collision_activation_enabled(false);
     set_collision_constraint_activation_multiplier(0.0);
+    enable_sphere_broadphase(false);
     break;
   case CollisionTuningMode::kBalanced:
     // Conservative compromise:
@@ -1158,6 +1159,7 @@ void KinematicsSolver::set_collision_tuning_mode(CollisionTuningMode mode) {
     // Optional proximity-gated activation: rows are emitted only near
     // min_distance, with a conservative activation band.
     set_collision_constraint_activation_multiplier(5.0);
+    enable_sphere_broadphase(true);
     break;
   case CollisionTuningMode::kSpeed:
   default:
@@ -1169,6 +1171,7 @@ void KinematicsSolver::set_collision_tuning_mode(CollisionTuningMode mode) {
     set_proximity_gated_collision_activation_enabled(true);
     // Tighter activation band than BALANCED for lower steady-state overhead.
     set_collision_constraint_activation_multiplier(3.0);
+    enable_sphere_broadphase(true);
     break;
   }
 }
