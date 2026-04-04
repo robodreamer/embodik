@@ -128,24 +128,24 @@ Both auto-enable elastic band with proven defaults. All 6 Viser examples expose 
 | Y infeasible | 168 | 21 | **88% reduction** |
 | Y return error | 0.0028 | 0.0000 | **100% improvement** |
 
-### Alpha Wheelbase — Right Arm (120 steps, 4 offsets, with collision perf fix + pre-seed)
+### Alpha Wheelbase — Right Arm (120 steps, 4 offsets, final build)
 
 | Mode | Success | Infeasible | Stalls | Mean Scale | EE Distance |
 |------|---------|-----------|--------|------------|-------------|
 | SCALE (baseline) | 72 | 168 | 408 | 0.15 | 0.184 |
-| **SCALE_ELASTIC** | **192** | **49** | **319** | **0.40** | **0.328** |
+| **SCALE_ELASTIC** | **182** | **60** | **321** | **0.38** | **0.327** |
 | min_error_fallback | 121 | 119 | 387 | 0.19 | 0.206 |
 
-**Improvement over baseline**: +167% success, -71% infeasible, +167% mean scale, +78% EE distance
+**Improvement over baseline**: +153% success, -64% infeasible, +153% mean scale, +78% EE distance
 
-**Improvement over min_error**: +59% success, -59% infeasible, +113% mean scale, +59% EE distance
+**Improvement over min_error**: +50% success, -50% infeasible, +100% mean scale, +59% EE distance
 
 #### Per-offset breakdown (right arm):
 
 | Offset | Mode | Success | Infeasible | Mean Scale | EE Dist |
 |--------|------|---------|-----------|------------|---------|
 | X +0.05 | SCALE | 1 | 119 | 0.008 | 0.007 |
-| X +0.05 | **SCALE_ELASTIC** | **90** | **28** | **0.750** | **0.148** |
+| X +0.05 | **SCALE_ELASTIC** | **83** | **36** | **0.687** | **0.147** |
 | X +0.05 | min_error | 1 | 119 | 0.008 | 0.007 |
 | Y +0.05 | SCALE | 0 | 0 | 0.000 | 0.000 |
 | Y +0.05 | **SCALE_ELASTIC** | **1** | **2** | **0.008** | **0.007** |
@@ -154,31 +154,56 @@ Both auto-enable elastic band with proven defaults. All 6 Viser examples expose 
 | Z -0.05 | SCALE_ELASTIC | 0 | 0 | 0.000 | 0.000 |
 | Z -0.05 | min_error | 0 | 0 | 0.000 | 0.000 |
 | Diagonal | SCALE | 71 | 49 | 0.584 | 0.177 |
-| Diagonal | **SCALE_ELASTIC** | **101** | **19** | **0.832** | **0.173** |
+| Diagonal | **SCALE_ELASTIC** | **98** | **22** | **0.807** | **0.173** |
 | Diagonal | min_error | 120 | 0 | 0.743 | 0.199 |
 
 Note: Y and Z offsets from zero config are limited by torso joints (`base_pitch`, `knee_pitch`, `hip_pitch`) that have zero range in one direction at the zero configuration. The pre-seed fix resolved the NUMERICAL_ERROR (was 120 steps of NUMERICAL_ERROR, now at least attempts solving), but the kinematic workspace is fundamentally constrained in those directions from this seed. The diagonal offset, which combines all axes, shows the strongest SCALE_ELASTIC improvement.
 
 ## Interactive GUI Validation
 
-Tested in example 02 (collision-aware IK) with Panda:
-- SCALE: sluggish near limits, frequent stalls
-- SCALE_ELASTIC: smooth continuous motion near limits, no perceptible stalling
-- MIN_ERROR: smooth but can overshoot and produce jerky direction changes
+Tested in example 02 (collision-aware IK) with Panda and alpha wheelbase viser:
+- **SCALE**: sluggish near limits, frequent stalls, stop-start pattern
+- **SCALE_ELASTIC**: smooth continuous motion near limits, no perceptible stalling
+- **MIN_ERROR**: smooth but can overshoot and produce jerky direction changes
 
 SCALE_ELASTIC provides the best subjective experience: smooth like MIN_ERROR but task-aligned like SCALE.
 
+## Hardware Startup Robustness
+
+Tested scenarios where the robot starts from violated states (simulating hardware power-on from arbitrary configurations):
+
+### Joint limit violations
+- **Joints beyond limits**: elastic band produces motion immediately, no crash
+- **Joint recovery**: violation of 0.015 rad recovered to 0.000 rad within 100 steps
+- **Extreme violations**: 5 joints 0.05 rad beyond limits — no NaN, no divergence
+
+### Collision margin violations at startup
+At the alpha wheelbase zero config, 6 collision pairs violate the 0.04m min_distance (closest: 0.0065m). Investigation of three approaches:
+
+1. **Collision warm-start** (set min_distance to initial clearance): **Rejected**. Reduced collision awareness globally, causing diagonal offset regression (101→64 success). The stall handler's reactive relaxation already handles collision-dominated stalls well.
+
+2. **Elastic band joint expansion only** (keep collision margin intact): **Accepted**. The elastic band expands joint limits to give the solver more DOFs, allowing it to find tangential directions that satisfy collision constraints while making task progress. X offset: 1→83 success without any collision margin changes.
+
+3. **Infeasibility boost** (jump to delta_max/2 on scale=0): **Accepted**. When the solver reports complete infeasibility (scale=0), immediately boost elastic band expansion instead of incrementally growing. Reduces stalled steps from ~5 to ~1.
+
+**Key finding**: For overconstrained startup scenarios with both collision + joint limit violations, expanding joint limits (elastic band) is more effective than relaxing collision margins. The collision constraint provides valuable guidance for moving away from self-collision, while the joint limit expansion provides the DOFs needed to follow that guidance.
+
+### Very narrow limits
+- Infeasible count: 45 → 1 with elastic band (98% reduction)
+- Delta convergence: peak → 0.000 after target is reached
+
 ## Safety Validation
 
-- **Nominal limit compliance**: All configurations stay within `get_joint_limits()` across all tests (23 tests)
+- **Nominal limit compliance**: All configurations stay within `get_joint_limits()` across all tests (28 tests)
 - **Very narrow limits** (+/- 0.05 rad): No NaN, no divergence, delta bounded
 - **Extreme parameters** (delta_max=0.2): Bounded behavior, no crashes
+- **Extreme initial violations** (5 joints 0.05 rad beyond limits): No NaN, no crash
 - **Regression**: Disabled elastic band produces identical results to baseline
 - **Coexistence**: Elastic band + collision stall handler work independently without interference
 
 ## Test Coverage
 
-23 tests across 6 test classes:
+28 tests across 8 test classes (+ 2 skipped for Panda without collision geometry):
 
 1. **TestApproachAHypothesis** (4 tests): Hypothesis validation with set_joint_limits proxy
 2. **TestElasticBandStateDynamics** (4 tests): State grows on stall, decays when healthy, respects max, per-joint gating
@@ -186,17 +211,22 @@ SCALE_ELASTIC provides the best subjective experience: smooth like MIN_ERROR but
 4. **TestElasticBandRoundTrip** (5 tests): Stall count reduction, convergence, oscillation comparison
 5. **TestElasticBandSafety** (4 tests): Limit compliance, divergence, regression, coexistence
 6. **TestScaleElasticMode** (3 tests): Auto-enable, infeasible reduction, PositionStepOptions
+7. **TestCollisionWarmStart** (2 tests, skipped on Panda): Collision margin warm-start
+8. **TestHardwareStartup** (5 tests): Joint violations, combined violations, gradual recovery, extreme state
 
-Plus diagnostic script: `test/test_elastic_band_sluggish_repro.py`
+Plus diagnostic scripts:
+- `test/test_elastic_band_sluggish_repro.py`: Scale/velocity trace comparison
+- `examples/elastic_band_ik_benchmark.py` (hmnd_robot): Alpha wheelbase benchmark
 
 ## Default Parameters
 
 | Parameter | Default | Rationale |
 |-----------|---------|-----------|
 | `delta_max` | 0.05 rad (~3°) | Small enough to be safe, large enough to unstick the solver |
-| `expand_rate` | 0.01 rad/step | Proactive expansion reaches max in ~5 low-scale steps |
+| `expand_rate` | 0.01 rad/step | Proactive expansion; boost to delta_max/2 on infeasibility |
 | `decay_rate` | 0.2 | ~5 healthy steps to halve, ~15 to reach near-zero |
 | `expand_only_saturated` | true | Minimal perturbation to unsaturated joints |
+| `warm_start_collision_margin` | false | Collision margin relaxation hurts free-motion cases; stall handler handles reactively |
 
 ## Build & Install Workflow
 
@@ -230,9 +260,22 @@ cd <hmnd_robot>
 pixi run python ros/platforms/hmnd_robots/examples/elastic_band_ik_benchmark.py
 ```
 
+## Design Decisions & Lessons Learned
+
+1. **Proactive > Reactive**: The initial reactive expansion (wait for stall threshold, then expand) caused stop-start sluggishness. Proactive expansion based on task scale eliminates this.
+
+2. **Selective decay**: Only decaying unsaturated joints prevents the expand/decay oscillation at limit boundaries. Saturated joints keep their expansion until they move away from the limit.
+
+3. **Infeasibility boost**: Jumping to delta_max/2 immediately on scale=0 (vs incremental growth) reduces wasted stall steps from ~5 to ~1.
+
+4. **Collision warm-start is counterproductive**: Directly reducing collision min_distance removes collision guidance that the solver needs. The elastic band approach of expanding joint limits (the "easier" constraint) while keeping collision constraints intact is more effective.
+
+5. **Pre-seed for joints at limits**: Initializing delta for joints at their limits on `enable_elastic_band()` avoids the NUMERICAL_ERROR stall at step 0 for zero-config seeds.
+
 ## Next Steps
 
 1. Merge `elastic-band-joint-limits` branch into main after final review
 2. Update hmnd_robot teleop to use `SCALE_ELASTIC` as default solve mode
 3. Monitor teleop sessions for any edge cases not covered by the benchmark offsets
 4. Consider adding `SCALE_ELASTIC` as the recommended mode in embodik documentation
+5. Investigate whether the collision warm-start could work if applied only to specific collision pairs that are actively blocking (rather than globally reducing min_distance)
