@@ -428,6 +428,9 @@ class IKResult:
     position_error: float
     rotation_error: float
     elapsed_ms: float
+    collision_time_ms: float = 0.0
+    collision_sphere_culled: int = 0
+    collision_exact_queries: int = 0
 
 
 class TeleopIKBackend:
@@ -448,6 +451,10 @@ class TeleopIKBackend:
         self.solver.set_tolerance(0.1)
         self._collision_tuning_mode = "speed"
         _apply_collision_tuning_mode(self.solver, self._collision_tuning_mode)
+        try:
+            self.solver.enable_timing_breakdown(True)
+        except Exception:
+            pass
 
         self.arm_dofs = len(cfg.joint_names)
         self.full_dofs = self.robot.nq
@@ -581,6 +588,9 @@ class TeleopIKBackend:
             position_error=float(result.position_error),
             rotation_error=float(result.orientation_error),
             elapsed_ms=elapsed_ms,
+            collision_time_ms=float(getattr(result, "collision_constraint_time_ms", 0.0)),
+            collision_sphere_culled=int(getattr(result, "collision_sphere_culled_pairs", 0)),
+            collision_exact_queries=int(getattr(result, "collision_exact_distance_queries", 0)),
         )
 
     def reset(self) -> pin.SE3:
@@ -1104,7 +1114,10 @@ def run_teleop(cfg: RobotConfig, args: argparse.Namespace) -> None:
 
                 # Update status periodically
                 if frame_count % 100 == 0:
-                    status_text.value = f"IK: {result.status} | pos_err={result.position_error*1e3:.1f}mm"
+                    status_text.value = (
+                        f"IK: {result.status} | pos_err={result.position_error*1e3:.1f}mm | "
+                        f"col={result.collision_time_ms:.2f}ms"
+                    )
 
             frame_count += 1
             time.sleep(0.001)
