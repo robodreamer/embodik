@@ -1502,8 +1502,7 @@ void KinematicsSolver::elastic_band_update(
   const bool explicit_task_error =
       !result.task_errors.empty() && result.task_errors[0] > 1e-4;
   const bool has_task_error =
-      explicit_task_error ||
-      (primary_scale < 1e-6 && !result.saturated_joints.empty());
+      explicit_task_error || primary_scale < 1e-6;
   const bool scale_is_low = primary_scale < 0.5 && has_task_error;
 
   // Build saturated joint set.
@@ -1520,7 +1519,8 @@ void KinematicsSolver::elastic_band_update(
   // - Scale near 0 → expand at full rate
   // - Scale near 0.5 → expand at half rate
   // - No saturated joints or scale >= 0.5 → no expansion
-  if (scale_is_low && !result.saturated_joints.empty()) {
+  if (scale_is_low &&
+      (!result.saturated_joints.empty() || primary_scale < 1e-6)) {
     const double expansion_factor =
         std::max(0.0, 1.0 - 2.0 * primary_scale);
     const double step_expand = cfg.expand_rate * expansion_factor;
@@ -1530,7 +1530,9 @@ void KinematicsSolver::elastic_band_update(
         (primary_scale < 1e-6) ? cfg.delta_max * 0.5 : 0.0;
 
     for (int i = 0; i < nv; ++i) {
-      const bool eligible = !cfg.expand_only_saturated || is_saturated[i];
+      const bool eligible =
+          !cfg.expand_only_saturated || is_saturated[i] ||
+          (primary_scale < 1e-6 && result.saturated_joints.empty());
       if (eligible) {
         const double new_delta = std::max(st.delta[i] + step_expand, boost_floor);
         st.delta[i] = std::min(new_delta, cfg.delta_max);
