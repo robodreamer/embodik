@@ -126,7 +126,10 @@ NB_MODULE(_embodik_impl, m) {
               "Number of pairs culled by conservative bounds this solve")
       .def_ro("collision_budget_exhausted",
               &eik::VelocitySolverResult::collision_budget_exhausted,
-              "Whether the collision refinement budget was exhausted");
+              "Whether the collision refinement budget was exhausted")
+      .def_ro("collision_sphere_culled_pairs",
+              &eik::VelocitySolverResult::collision_sphere_culled_pairs,
+              "Number of collision pairs culled by sphere broadphase.");
 
   nb::class_<eik::VelocityBoxHeadroomPolicy>(
       m, "VelocityBoxHeadroomPolicy",

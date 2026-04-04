@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <embodik/dual_arm_ects.hpp>
 #include <embodik/robot_model.hpp>
+#include <embodik/sphere_broadphase.hpp>
 #include <embodik/tasks.hpp>
 #include <embodik/types.hpp>
 #include <limits>
@@ -513,6 +514,9 @@ public:
   void set_collision_tuning_mode(CollisionTuningMode mode);
   CollisionTuningMode get_collision_tuning_mode() const;
 
+  void enable_sphere_broadphase(bool enable);
+  bool sphere_broadphase_enabled() const { return sphere_broadphase_enabled_; }
+
   // ========== Stall Handler ==========
 
   /**
@@ -918,6 +922,9 @@ private:
   std::optional<CollisionConstraintResult> last_collision_constraint_result_;
   Eigen::VectorXd last_collision_constraint_q_;
   CollisionTuningMode collision_tuning_mode_ = CollisionTuningMode::kSpeed;
+  SphereBroadphase sphere_broadphase_;
+  bool sphere_broadphase_enabled_ = false;
+  std::uint64_t last_collision_sphere_culled_pairs_ = 0;
   // Track solver stagnation near collision boundary for stronger recovery (per-pair).
   double last_solution_dq_norm_ = 0.0;
   std::unordered_map<std::size_t, int> collision_stuck_counters_;

@@ -37,6 +37,8 @@ def make_solver(
     solver.set_damping(0.1)
     solver.enable_position_limits(True)
     solver.enable_timing_breakdown(True)
+    if hasattr(solver, "enable_sphere_broadphase"):
+        solver.enable_sphere_broadphase(True)
     if hasattr(solver, "enable_collision_pair_cache"):
         solver.enable_collision_pair_cache(enable_cache, refresh_interval, 0.03, 128)
     solver.configure_collision_constraint(
@@ -73,6 +75,7 @@ def run_trace(enable_cache: bool, refresh_interval: int, steps: int) -> dict:
     pairs_considered: list[float] = []
     exact_queries: list[float] = []
     bound_culled: list[float] = []
+    sphere_culled: list[float] = []
     budget_exhausted: list[float] = []
     for step in range(steps):
         update_target(step)
@@ -84,6 +87,7 @@ def run_trace(enable_cache: bool, refresh_interval: int, steps: int) -> dict:
         pairs_considered.append(float(getattr(res, "collision_pairs_considered", 0.0)))
         exact_queries.append(float(getattr(res, "collision_exact_distance_queries", 0.0)))
         bound_culled.append(float(getattr(res, "collision_bound_culled_pairs", 0.0)))
+        sphere_culled.append(float(getattr(res, "collision_sphere_culled_pairs", 0)))
         budget_exhausted.append(
             1.0 if bool(getattr(res, "collision_budget_exhausted", False)) else 0.0
         )
@@ -97,6 +101,7 @@ def run_trace(enable_cache: bool, refresh_interval: int, steps: int) -> dict:
         "collision_pairs_considered": pairs_considered,
         "collision_exact_distance_queries": exact_queries,
         "collision_bound_culled_pairs": bound_culled,
+        "collision_sphere_culled_pairs": sphere_culled,
         "collision_budget_exhausted": budget_exhausted,
     }
 
@@ -140,6 +145,12 @@ def main() -> None:
         "total_exact_distance_queries_cached": float(np.sum(np.array(cached["collision_exact_distance_queries"], dtype=float))),
         "total_bound_culled_pairs_baseline": float(np.sum(np.array(baseline["collision_bound_culled_pairs"], dtype=float))),
         "total_bound_culled_pairs_cached": float(np.sum(np.array(cached["collision_bound_culled_pairs"], dtype=float))),
+        "median_sphere_culled_pairs_baseline": float(np.median(np.array(baseline["collision_sphere_culled_pairs"], dtype=float))),
+        "median_sphere_culled_pairs_cached": float(np.median(np.array(cached["collision_sphere_culled_pairs"], dtype=float))),
+        "mean_sphere_culled_pairs_baseline": float(np.mean(np.array(baseline["collision_sphere_culled_pairs"], dtype=float))),
+        "mean_sphere_culled_pairs_cached": float(np.mean(np.array(cached["collision_sphere_culled_pairs"], dtype=float))),
+        "total_sphere_culled_pairs_baseline": float(np.sum(np.array(baseline["collision_sphere_culled_pairs"], dtype=float))),
+        "total_sphere_culled_pairs_cached": float(np.sum(np.array(cached["collision_sphere_culled_pairs"], dtype=float))),
         "budget_exhausted_steps_baseline": float(np.sum(np.array(baseline["collision_budget_exhausted"], dtype=float))),
         "budget_exhausted_steps_cached": float(np.sum(np.array(cached["collision_budget_exhausted"], dtype=float))),
     }
