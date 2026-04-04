@@ -99,6 +99,7 @@ struct VelocitySolverResult : public SolverResult {
   std::uint64_t collision_exact_distance_queries = 0;
   std::uint64_t collision_bound_culled_pairs = 0;
   bool collision_budget_exhausted = false;
+  std::uint64_t collision_sphere_culled_pairs = 0;
 };
 
 // Configuration for regularized matrix inversion

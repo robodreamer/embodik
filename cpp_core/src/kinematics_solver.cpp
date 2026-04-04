@@ -866,9 +866,13 @@ void KinematicsSolver::configure_collision_constraint(
     last_collision_pairs_considered_ = 0;
     last_collision_exact_distance_queries_ = 0;
     last_collision_bound_culled_pairs_ = 0;
+    last_collision_sphere_culled_pairs_ = 0;
     last_collision_budget_exhausted_ = false;
     collision_stuck_counters_.clear();
     collision_stuck_last_distances_.clear();
+  }
+  if (sphere_broadphase_enabled_ && !sphere_broadphase_.is_built()) {
+    sphere_broadphase_.build(*collision_model_ptr);
   }
 #else
   (void)min_distance;
@@ -1116,6 +1120,7 @@ void KinematicsSolver::enable_collision_pair_cache(
   last_collision_pairs_considered_ = 0;
   last_collision_exact_distance_queries_ = 0;
   last_collision_bound_culled_pairs_ = 0;
+  last_collision_sphere_culled_pairs_ = 0;
   last_collision_budget_exhausted_ = false;
 }
 
@@ -1172,6 +1177,17 @@ CollisionTuningMode KinematicsSolver::get_collision_tuning_mode() const {
   return collision_tuning_mode_;
 }
 
+void KinematicsSolver::enable_sphere_broadphase(bool enable) {
+#ifdef PINOCCHIO_WITH_HPP_FCL
+  sphere_broadphase_enabled_ = enable;
+  if (enable && !sphere_broadphase_.is_built() && robot_->has_collision_geometry()) {
+    sphere_broadphase_.build(*robot_->collision_model());
+  }
+#else
+  (void)enable;
+#endif
+}
+
 double KinematicsSolver::get_collision_min_distance() const {
   if (!collision_constraint_.has_value() || !collision_constraint_->enabled) {
     return -1.0;
@@ -1195,6 +1211,7 @@ void KinematicsSolver::clear_collision_constraint() {
   last_collision_pairs_considered_ = 0;
   last_collision_exact_distance_queries_ = 0;
   last_collision_bound_culled_pairs_ = 0;
+  last_collision_sphere_culled_pairs_ = 0;
   last_collision_budget_exhausted_ = false;
   collision_stuck_counters_.clear();
   collision_stuck_last_distances_.clear();
@@ -1752,6 +1769,7 @@ KinematicsSolver::compute_collision_constraint() {
   last_collision_pairs_considered_ = 0;
   last_collision_exact_distance_queries_ = 0;
   last_collision_bound_culled_pairs_ = 0;
+  last_collision_sphere_culled_pairs_ = 0;
   last_collision_budget_exhausted_ = false;
   last_collision_debug_.reset();
   last_collision_debug_list_.clear();
@@ -1950,6 +1968,27 @@ KinematicsSolver::compute_collision_constraint() {
                     collision_pair_cache_distance_margin_
               : std::numeric_limits<double>::infinity();
       if (std::isfinite(lower_bound) && lower_bound > candidate_cutoff) {
+        bound_culled = true;
+      }
+    }
+    // Sphere broadphase culling: skip computeDistance() if sphere-sphere
+    // lower bound exceeds the activation threshold + safety margin.
+    // Safety: AABB sphere strictly contains mesh, so sphere_dist <= true_dist.
+    if (!bound_culled && sphere_broadphase_enabled_ &&
+        sphere_broadphase_.is_built() && constraint_active) {
+      const double candidate_cutoff =
+          collision_constraint_.has_value()
+              ? collision_constraint_->min_distance +
+                    collision_pair_cache_distance_margin_ +
+                    sphere_broadphase_.safety_margin
+              : std::numeric_limits<double>::infinity();
+
+      const double sphere_lb = sphere_broadphase_.compute_pair_lower_bound(
+          pair.first, pair.second,
+          transform_a.translation(), transform_a.rotation(),
+          transform_b.translation(), transform_b.rotation());
+      if (std::isfinite(sphere_lb) && sphere_lb > candidate_cutoff) {
+        last_collision_sphere_culled_pairs_++;
         bound_culled = true;
       }
     }
@@ -2773,6 +2812,7 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
     result.collision_exact_distance_queries =
         last_collision_exact_distance_queries_;
     result.collision_bound_culled_pairs = last_collision_bound_culled_pairs_;
+    result.collision_sphere_culled_pairs = last_collision_sphere_culled_pairs_;
     result.collision_budget_exhausted = last_collision_budget_exhausted_;
   }
   if (collision_constraint_result.has_value() && !excluded_union.empty()) {
