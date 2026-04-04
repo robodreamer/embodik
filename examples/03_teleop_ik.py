@@ -543,10 +543,8 @@ class TeleopIKBackend:
         This uses the registered ``ee_task`` / ``posture_task`` stack, same pattern as
         ``examples/02_collision_aware_IK.py``, not ``solve_position``.
         """
-        self.frame_task.solve_mode = (
-            embodik.TaskSolveMode.MIN_ERROR
-            if ee_mode == "MIN_ERROR"
-            else embodik.TaskSolveMode.SCALE
+        self.frame_task.solve_mode = getattr(
+            embodik.TaskSolveMode, ee_mode, embodik.TaskSolveMode.SCALE
         )
         self.frame_task.allow_min_error_fallback = bool(ee_fallback)
 
@@ -721,7 +719,7 @@ def run_teleop(cfg: RobotConfig, args: argparse.Namespace) -> None:
         iterations_slider = server.gui.add_slider("IK Iterations", min=1, max=20, initial_value=1, step=1)
         ee_mode_dropdown = server.gui.add_dropdown(
             "EE Solve Mode",
-            options=("SCALE", "MIN_ERROR"),
+            options=("SCALE", "SCALE_ELASTIC", "MIN_ERROR"),
             initial_value="SCALE",
         )
         ee_fallback_checkbox = server.gui.add_checkbox(
