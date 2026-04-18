@@ -406,7 +406,17 @@ NB_MODULE(_embodik_impl, m) {
               "no-progress detection")
       .def_rw("no_progress_dq_norm_tolerance",
               &eik::PositionStepOptions::no_progress_dq_norm_tolerance,
-              "Threshold on ||dq|| used by no-progress detection");
+              "Threshold on ||dq|| used by no-progress detection")
+      .def_rw("adaptive_dt", &eik::PositionStepOptions::adaptive_dt,
+              "Enable adaptive integration timestep. Scales dt by "
+              "(position_error / reference_distance), clamped to [1x, max_scale]. "
+              "Improves large-jump convergence without requiring gain tuning.")
+      .def_rw("adaptive_dt_max_scale",
+              &eik::PositionStepOptions::adaptive_dt_max_scale,
+              "Maximum dt multiplier when adaptive_dt=True (default 5.0)")
+      .def_rw("adaptive_dt_reference_distance",
+              &eik::PositionStepOptions::adaptive_dt_reference_distance,
+              "Position error (m) at which dt scale = 1.0 (default 0.05)");
 
   nb::class_<eik::TaskTarget>(
       m, "TaskTarget",
