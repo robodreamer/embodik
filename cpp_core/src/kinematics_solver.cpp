@@ -4611,8 +4611,20 @@ PositionIKResult KinematicsSolver::solve_position_step(
 
     Eigen::VectorXd q_pre_step = q;
     bool step_collision_rejected = false;
+    // Adaptive dt: scale integration step proportional to current position
+    // error so large-jump approach is faster; reverts to base dt near target.
+    double step_dt_eff = step_dt;
+    if (options.adaptive_dt &&
+        options.adaptive_dt_reference_distance > 1e-9 &&
+        options.adaptive_dt_max_scale > 1.0) {
+      const double pos_err = error.head<3>().norm();
+      double scale = pos_err / options.adaptive_dt_reference_distance;
+      scale = std::min(scale, options.adaptive_dt_max_scale);
+      scale = std::max(scale, 1.0);
+      step_dt_eff = step_dt * scale;
+    }
     q = pinocchio::integrate(robot_->model(), q,
-                             step_dt * last_vel_result.joint_velocities);
+                             step_dt_eff * last_vel_result.joint_velocities);
     robot_->update_configuration(q);
 
     // Skip expensive post-step checks when integration produced no motion.
@@ -4656,7 +4668,7 @@ PositionIKResult KinematicsSolver::solve_position_step(
           }
           bool accepted_backoff = false;
           const Eigen::VectorXd dq_nominal =
-              step_dt * last_vel_result.joint_velocities;
+              step_dt_eff * last_vel_result.joint_velocities;
           for (double frac : kCollisionRejectionBackoffFractions) {
             Eigen::VectorXd q_backoff = pinocchio::integrate(
                 robot_->model(), q_pre_step, frac * dq_nominal);
