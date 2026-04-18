@@ -363,9 +363,14 @@ void bind_kinematics_solver(nb::module_ &m) {
       .def("set_collision_pair_min_distance",
            &KinematicsSolver::set_collision_pair_min_distance,
            nb::arg("link_a"), nb::arg("link_b"), nb::arg("min_distance"),
+           nb::arg("activate_when_clear") = true,
            "Set a custom minimum distance for all collision geometry pairs whose\n"
-           "parent frame name contains link_a and link_b respectively.\n"
-           "Overrides the global min_distance for those pairs only.\n"
+           "parent frame name contains link_a and link_b respectively.\n\n"
+           "activate_when_clear=True (default): the override is pending until the\n"
+           "pair first achieves the desired clearance during a solve, then latches\n"
+           "on permanently. Safe to call from any starting configuration.\n\n"
+           "activate_when_clear=False: override takes effect immediately (use when\n"
+           "the robot is already above the threshold and you need instant effect).\n\n"
            "Call after configure_collision_constraint().")
       .def("clear_collision_pair_min_distance",
            &KinematicsSolver::clear_collision_pair_min_distance,
