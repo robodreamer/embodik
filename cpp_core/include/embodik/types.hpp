@@ -59,7 +59,11 @@ enum class SolverStatus {
   kConstraintBoundsMismatch = 5,
   kNonFiniteInput = 6,
   kInfeasible = 7,
-  kNoProgress = 8
+  kNoProgress = 8,
+  // Returned by solve_position_step when the input q was collision-safe but no
+  // integration step (including backoffs) could maintain min_distance.
+  // q_solution is set to the input q (safe position held).
+  kCollisionViolated = 9
 };
 
 struct BasicSolverConfig {

@@ -56,7 +56,8 @@ NB_MODULE(_embodik_impl, m) {
              eik::SolverStatus::kConstraintBoundsMismatch)
       .value("NON_FINITE_INPUT", eik::SolverStatus::kNonFiniteInput)
       .value("INFEASIBLE", eik::SolverStatus::kInfeasible)
-      .value("NO_PROGRESS", eik::SolverStatus::kNoProgress);
+      .value("NO_PROGRESS", eik::SolverStatus::kNoProgress)
+      .value("COLLISION_VIOLATED", eik::SolverStatus::kCollisionViolated);
 
   nb::enum_<eik::CollisionTuningMode>(
       m, "CollisionTuningMode",
