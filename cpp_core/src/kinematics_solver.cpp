@@ -4653,19 +4653,70 @@ PositionIKResult KinematicsSolver::solve_position_step(
     // Skip expensive post-step checks when integration produced no motion.
     const bool step_moved =
         (q - q_pre_step).squaredNorm() > kCollisionEscapeNormEps;
+
+    // Broadphase-expanded evaluator: when adaptive_dt used a non-trivial scale,
+    // the integration may bring previously-far pairs into collision.  The normal
+    // targeted evaluator only checks cached pairs (pre-step candidates) and has a
+    // Tier-1 early exit that returns pre-step distance without inspecting q_post.
+    // This helper expands the candidate set using sphere-broadphase AABB bounds at
+    // q_eval (cheap), then runs exact GJK only on the survivors + existing cache.
+    // Cost: O(n_allowed_pairs) AABB checks + O(survivors+cached) GJK calls.
+    // With sphere broadphase enabled (BALANCED mode): sub-ms, similar to targeted.
+    // Without sphere broadphase: equivalent to full scan (fallback).
+    auto eval_broadphase_expanded = [&](const Eigen::VectorXd &q_eval)
+        -> std::optional<double> {
+      // Start from the existing targeted set (cached pre-step candidates).
+      auto expanded = get_post_step_rejection_pair_indices();
+      std::unordered_set<std::size_t> in_set(expanded.begin(), expanded.end());
+
+      const auto *geom_model = robot_->collision_model();
+      if (geom_model) {
+        const auto &pairs = geom_model->collisionPairs;
+        const auto &oMf = robot_->data().oMf;  // populated by update_configuration
+        const double cutoff =
+            collision_constraint_.has_value()
+                ? collision_constraint_->min_distance +
+                      collision_pair_cache_distance_margin_ +
+                      (sphere_broadphase_enabled_ ? sphere_broadphase_.safety_margin : 0.0)
+                : std::numeric_limits<double>::infinity();
+
+        for (std::size_t pi = 0; pi < pairs.size(); ++pi) {
+          if (in_set.count(pi)) continue;  // already included
+          if (!collision_allowed_pair_mask_.empty() &&
+              pi < collision_allowed_pair_mask_.size() &&
+              !collision_allowed_pair_mask_[pi]) continue;  // excluded
+
+          if (sphere_broadphase_enabled_ && sphere_broadphase_.is_built()) {
+            // Fast AABB-sphere lower bound: skip if definitely far enough.
+            const auto &cp = pairs[pi];
+            const auto fa = geom_model->geometryObjects[cp.first].parentFrame;
+            const auto fb = geom_model->geometryObjects[cp.second].parentFrame;
+            if (fa < static_cast<pinocchio::FrameIndex>(oMf.size()) &&
+                fb < static_cast<pinocchio::FrameIndex>(oMf.size())) {
+              const double sphere_lb = sphere_broadphase_.compute_pair_lower_bound(
+                  cp.first, cp.second,
+                  oMf[fa].translation(), oMf[fa].rotation(),
+                  oMf[fb].translation(), oMf[fb].rotation());
+              if (std::isfinite(sphere_lb) && sphere_lb > cutoff) continue;
+            }
+          }
+          // Pair survived broadphase (or no broadphase): add for exact GJK.
+          expanded.push_back(pi);
+          in_set.insert(pi);
+        }
+      }
+      return evaluate_min_collision_distance_targeted(q_eval, expanded);
+    };
+
     // Post-solve collision rejection (same logic as multi-target overload).
     if (step_moved && collision_constraint_.has_value() &&
         collision_constraint_->enabled) {
       // Use min_distance as the violation threshold so that q_solution is
       // guaranteed collision-safe (not merely penetration-free).
       const double violation_threshold = collision_constraint_->min_distance;
-      // When adaptive_dt used a large scale, the integration step may bring
-      // previously-far pairs into collision. The targeted post-step evaluator
-      // has a Tier-1 early exit and a cached-pair Tier-2 that both miss newly-
-      // close pairs.  Force a full scan so any pair that violates is caught.
       std::optional<double> post_dist_debug =
           adaptive_step_large
-          ? evaluate_min_collision_distance(q)
+          ? eval_broadphase_expanded(q)
           : evaluate_post_step_collision_distance(q);
       if (post_dist_debug.has_value() &&
           std::isfinite(*post_dist_debug) &&
@@ -4703,12 +4754,12 @@ PositionIKResult KinematicsSolver::solve_position_step(
             Eigen::VectorXd q_backoff = pinocchio::integrate(
                 robot_->model(), q_pre_step, frac * dq_nominal);
             robot_->update_configuration(q_backoff);
-            // Use same evaluation level as initial check: full scan when the
-            // initial post-step scan was full (adaptive_step_large), so newly-
-            // entered pairs are also checked at each backoff position.
+            // Use same evaluation level as initial check: broadphase-expanded
+            // when adaptive_step_large so newly-entered pairs are checked at
+            // each backoff position without a full GJK scan.
             auto backoff_dist_debug =
                 adaptive_step_large
-                ? evaluate_min_collision_distance(q_backoff)
+                ? eval_broadphase_expanded(q_backoff)
                 : evaluate_post_step_collision_distance(q_backoff);
             if (backoff_dist_debug.has_value() &&
                 std::isfinite(*backoff_dist_debug) &&
