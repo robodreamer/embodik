@@ -198,7 +198,7 @@ def main() -> None:
         print(f"[demo] ViserUrdf unavailable ({exc}); visualization will be skipped")
         urdf_vis = None
 
-        def update_vis(q_full: np.ndarray) -> None:  # type: ignore[misc]
+        def update_vis(_q: np.ndarray) -> None:  # type: ignore[misc]
             pass
 
     # Initial EE pose for transform controls
@@ -380,6 +380,7 @@ def main() -> None:
             col_line_handle = server.scene.add_line_segments(
                 f"{collision_root}/link",
                 points=seg_points,
+                colors=np.array([[255, 100, 0]], dtype=np.uint8),
                 line_width=3.0,
                 visible=True,
             )
