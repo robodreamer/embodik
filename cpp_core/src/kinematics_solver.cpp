@@ -3411,9 +3411,125 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
   // separately
   int num_constraints = robot_->nv(); // Velocity constraints
 
-  // Add position-based velocity constraints if enabled
+  // Sparse position-limit pre-pass: compute per-joint bounds and keep only
+  // rows where position limits actually tighten beyond the velocity limit.
+  // For joints deep in their range the bound equals [-vel, +vel] and the row
+  // is redundant. Omitting it reduces the QP matrix significantly.
+  //
+  // Performance design: use dense arrays and cheap early-exit to avoid
+  // calculate_velocity_box_constraint calls for far-from-limit joints.
+  struct SparsePosLimitEntry { int nv_idx; double lower; double upper; };
+  std::vector<SparsePosLimitEntry> sparse_pos_limits;
+  // Dense per-joint bounds for post-QP clamping and saturation detection.
+  // Initialized to "not active" sentinel; filled for active joints only.
+  const int nv_sp = robot_->nv();
+  constexpr double kNoPosBound = std::numeric_limits<double>::infinity();
+  std::vector<double> dense_pos_lower_sp(nv_sp,  kNoPosBound);
+  std::vector<double> dense_pos_upper_sp(nv_sp, -kNoPosBound);
+
   if (apply_limits && use_position_limits_) {
-    num_constraints += robot_->nv(); // Position constraints
+    // 0.1% of vel_limit — preserves borderline near-limit joints.
+    constexpr double kPosBoundActiveFraction = 1e-3;
+    constexpr double margin_limit_sp = 1e-4;
+    auto [q_min_sp, q_max_sp] = robot_->get_joint_limits();
+    Eigen::VectorXd q_cur_sp = robot_->get_current_configuration();
+    const auto &vel_limits_sp = robot_->get_velocity_limits();
+    const auto &accel_limits_sp = robot_->get_acceleration_limits();
+    // Elastic band effective limits.
+    Eigen::VectorXd q_min_eff_sp = q_min_sp;
+    Eigen::VectorXd q_max_eff_sp = q_max_sp;
+    const bool elastic_sp = elastic_band_config_.enabled &&
+                            elastic_band_state_.delta.size() == robot_->nv();
+    if (elastic_sp) {
+      for (int i = 0; i < nv_sp; ++i) {
+        const int qi = (i < static_cast<int>(velocity_to_config_index.size()))
+                       ? velocity_to_config_index[i] : kVelocityToConfigUnmapped;
+        if (qi == kVelocityToConfigUnmapped || qi >= q_min_sp.size()) continue;
+        if (!std::isfinite(q_min_sp[qi]) || !std::isfinite(q_max_sp[qi])) continue;
+        q_min_eff_sp[qi] -= elastic_band_state_.delta[i];
+        q_max_eff_sp[qi] += elastic_band_state_.delta[i];
+      }
+    }
+    // Dense locked-joint flag (avoid hash lookup per iteration).
+    std::vector<bool> is_locked_sp(nv_sp, false);
+    for (int idx : pending_velocity_lock_indices_) {
+      if (idx >= 0 && idx < nv_sp) is_locked_sp[idx] = true;
+    }
+    const int fb_dof = robot_->is_floating_base() ? 6 : 0;
+    const double dt_safe = std::max(dt_, 1e-6);
+
+    for (int i = 0; i < nv_sp; ++i) {
+      double vl = (i < static_cast<int>(vel_limits_sp.size()))
+                  ? vel_limits_sp[i] : kUnboundedConstraintLimit;
+      double al = (i < static_cast<int>(accel_limits_sp.size()))
+                  ? accel_limits_sp[i] : kUnboundedConstraintLimit;
+      bool is_locked = is_locked_sp[i];
+
+      if (i < fb_dof) {
+        // Floating base: only add when explicit base bounds are set.
+        bool has_bound = false;
+        double lm = 0.0, um = 0.0;
+        if (i < 3 && base_position_lower_.has_value() && base_position_upper_.has_value()) {
+          lm = q_cur_sp[i] - base_position_lower_.value()[i] - margin_limit_sp;
+          um = base_position_upper_.value()[i] - q_cur_sp[i] - margin_limit_sp;
+          has_bound = true;
+        } else if (i >= 3 && i < 6 &&
+                   base_orientation_lower_.has_value() && base_orientation_upper_.has_value()) {
+          lm = q_cur_sp[i] - base_orientation_lower_.value()[i-3] - margin_limit_sp;
+          um = base_orientation_upper_.value()[i-3] - q_cur_sp[i] - margin_limit_sp;
+          has_bound = true;
+        }
+        if (!has_bound && !is_locked) continue;
+        double lo = -vl, hi = vl;
+        if (has_bound) {
+          auto [ll, ul] = calculate_velocity_box_constraint(lm, um, vl, al, dt_);
+          lo = ll; hi = ul;
+        }
+        if (is_locked) { lo = 0.0; hi = 0.0; }
+        const double tol = kPosBoundActiveFraction * vl;
+        if ((lo > -vl + tol) || (hi < vl - tol) || is_locked) {
+          sparse_pos_limits.push_back({i, lo, hi});
+          dense_pos_lower_sp[i] = lo; dense_pos_upper_sp[i] = hi;
+        }
+      } else {
+        // Regular joint: cheap early-exit before calling calculate_velocity_box_constraint.
+        const int qi = (i < static_cast<int>(velocity_to_config_index.size()))
+                       ? velocity_to_config_index[i] : kVelocityToConfigUnmapped;
+        if (qi == kVelocityToConfigUnmapped || qi >= q_cur_sp.size() ||
+            qi >= q_min_eff_sp.size() || !std::isfinite(q_min_eff_sp[qi]) ||
+            !std::isfinite(q_max_eff_sp[qi])) {
+          if (is_locked) {
+            sparse_pos_limits.push_back({i, 0.0, 0.0});
+            dense_pos_lower_sp[i] = 0.0; dense_pos_upper_sp[i] = 0.0;
+          }
+          continue;
+        }
+        const double lm = q_cur_sp[qi] - q_min_eff_sp[qi] - margin_limit_sp;
+        const double um = q_max_eff_sp[qi] - q_cur_sp[qi] - margin_limit_sp;
+        // Cheap check: if both margins exceed max possible displacement in one step,
+        // bounds = [-vel_limit, vel_limit] → skip (no tightening needed).
+        if (!is_locked) {
+          const double pos_room_l = lm / dt_safe;
+          const double pos_room_u = um / dt_safe;
+          const double accel_room_l = (al > 0.0 && std::isfinite(al))
+              ? std::sqrt(2.0 * al * std::max(0.0, lm)) : vl;
+          const double accel_room_u = (al > 0.0 && std::isfinite(al))
+              ? std::sqrt(2.0 * al * std::max(0.0, um)) : vl;
+          if (pos_room_l >= vl && accel_room_l >= vl &&
+              pos_room_u >= vl && accel_room_u >= vl) {
+            continue;  // definitely [-vel_limit, vel_limit] — skip row
+          }
+        }
+        auto [lo, hi] = calculate_velocity_box_constraint(lm, um, vl, al, dt_);
+        if (is_locked) { lo = 0.0; hi = 0.0; }
+        const double tol = kPosBoundActiveFraction * vl;
+        if ((lo > -vl + tol) || (hi < vl - tol) || is_locked) {
+          sparse_pos_limits.push_back({i, lo, hi});
+          dense_pos_lower_sp[i] = lo; dense_pos_upper_sp[i] = hi;
+        }
+      }
+    }
+    num_constraints += static_cast<int>(sparse_pos_limits.size());
   }
 
   if (collision_constraint_result.has_value()) {
@@ -3463,8 +3579,18 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
   }
   constraint_idx += robot_->nv();
 
-  // Position-based velocity constraints
+  // Position-based velocity constraints (sparse: only joints near their limits)
   if (apply_limits && use_position_limits_) {
+    // sparse_pos_limits was pre-computed above; fill only those rows.
+    for (int k = 0; k < static_cast<int>(sparse_pos_limits.size()); ++k) {
+      const auto &e = sparse_pos_limits[k];
+      C(constraint_idx + k, e.nv_idx) = 1.0;
+      c_lower(constraint_idx + k) = e.lower;
+      c_upper(constraint_idx + k) = e.upper;
+    }
+    constraint_idx += static_cast<int>(sparse_pos_limits.size());
+    // Skip the old dense fill block below (it is now a no-op guarded by false).
+    if (false) {
     auto [q_min, q_max] = robot_->get_joint_limits();
     Eigen::VectorXd q_current = robot_->get_current_configuration();
     auto vel_limits = robot_->get_velocity_limits();
@@ -3627,6 +3753,7 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
       }
     }
     constraint_idx += robot_->nv();
+    }  // end if (false) — old dense position-limit block (disabled)
   }
 
   if (collision_constraint_result.has_value()) {
@@ -3716,8 +3843,21 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
     if (apply_limits && c_lower.size() >= robot_->nv()) {
       Eigen::Map<Eigen::VectorXd> dq(result.solution.data(),
                                      result.solution.size());
+      // Velocity-box clamping (always applies to first nv rows).
       clamp_joint_velocity_solution_in_place(
           dq, c_lower, c_upper, use_position_limits_, robot_->nv());
+      // Sparse position-limit clamping using dense per-joint bounds array.
+      if (use_position_limits_) {
+        const int n_dq = static_cast<int>(dq.size());
+        const int n_dens = static_cast<int>(dense_pos_lower_sp.size());
+        const int n_clamp = std::min(n_dq, n_dens);
+        for (int k = 0; k < n_clamp; ++k) {
+          if (dense_pos_lower_sp[k] < kNoPosBound)
+            dq[k] = std::max(dq[k], dense_pos_lower_sp[k]);
+          if (dense_pos_upper_sp[k] > -kNoPosBound)
+            dq[k] = std::min(dq[k], dense_pos_upper_sp[k]);
+        }
+      }
     }
 
     result.joint_velocities = Eigen::Map<const Eigen::VectorXd>(
@@ -3734,10 +3874,12 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
         double joint_vel = result.joint_velocities[i];
         double lower = c_lower[i];
         double upper = c_upper[i];
-        if (use_position_limits_ &&
-            static_cast<int>(c_lower.size()) >= 2 * robot_->nv()) {
-          lower = std::max(lower, c_lower[robot_->nv() + i]);
-          upper = std::min(upper, c_upper[robot_->nv() + i]);
+        if (use_position_limits_ && i < static_cast<int>(dense_pos_lower_sp.size())) {
+          // Use dense per-joint position bounds (O(1) lookup, no hash overhead).
+          if (dense_pos_lower_sp[i] < kNoPosBound)
+            lower = std::max(lower, dense_pos_lower_sp[i]);
+          if (dense_pos_upper_sp[i] > -kNoPosBound)
+            upper = std::min(upper, dense_pos_upper_sp[i]);
         }
 
         // Check if joint velocity is near its constraint bounds
