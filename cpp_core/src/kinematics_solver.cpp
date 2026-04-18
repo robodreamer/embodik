@@ -3935,6 +3935,7 @@ PositionIKResult KinematicsSolver::solve_position(
   int iter = 0;
   bool converged = false;
   bool stagnation_abort = false;
+  bool collision_violated_flag_mt = false;
   std::vector<Eigen::VectorXd> goals;
   std::vector<Eigen::MatrixXd> jacobians;
   std::vector<ObjectiveSolveConfig> objective_configs;
@@ -4207,17 +4208,18 @@ PositionIKResult KinematicsSolver::solve_position(
     // Post-solve collision rejection (same logic as solve_position_step).
     if (step_moved && collision_constraint_.has_value() &&
         collision_constraint_->enabled) {
+      const double violation_threshold = collision_constraint_->min_distance;
       auto post_dist_debug = evaluate_post_step_collision_distance(q_current);
       if (post_dist_debug.has_value() &&
           std::isfinite(*post_dist_debug) &&
-          *post_dist_debug < kCollisionPenetrationDistanceThreshold) {
+          *post_dist_debug < violation_threshold) {
         auto pre_dist_debug = evaluate_post_step_collision_distance(q_pre_step);
         double pre_dist = (pre_dist_debug.has_value() && std::isfinite(*pre_dist_debug))
                               ? *pre_dist_debug
                               : std::numeric_limits<double>::infinity();
-        bool seed_was_safe = (pre_dist >= kCollisionPenetrationDistanceThreshold);
+        bool seed_was_safe = (pre_dist >= violation_threshold);
         bool deepened =
-            (pre_dist < kCollisionPenetrationDistanceThreshold &&
+            (pre_dist < violation_threshold &&
              *post_dist_debug <
                  pre_dist - kCollisionPenetrationWorsenTolerance);
         const bool hard_jump =
@@ -4228,6 +4230,10 @@ PositionIKResult KinematicsSolver::solve_position(
           q_current = q_pre_step;
           robot_->update_configuration(q_current);
           result.collision_rejection_count++;
+          if (seed_was_safe) {
+            collision_violated_flag_mt = true;
+            break;
+          }
         }
       }
     }
@@ -4258,6 +4264,12 @@ PositionIKResult KinematicsSolver::solve_position(
       result.orientation_error);
   result.status = classified_position.status;
   result.status_message = classified_position.status_message;
+  if (collision_violated_flag_mt) {
+    result.status = SolverStatus::kCollisionViolated;
+    result.status_message =
+        "solve_position: no step could maintain collision min_distance; "
+        "q_solution is the last safe configuration";
+  }
 
   if (position_ik_debug_) {
     std::cout << "[embodiK][IKDebug] solve_position finished with status="
@@ -4459,6 +4471,7 @@ PositionIKResult KinematicsSolver::solve_position_step(
   double prev_combined_error = std::numeric_limits<double>::infinity();
   int no_progress_count = 0;
   bool no_progress_exit = false;
+  bool collision_violated_flag = false;
 
   for (int step = 0; step < steps; ++step) {
     frame_task->update(*robot_);
@@ -4534,17 +4547,20 @@ PositionIKResult KinematicsSolver::solve_position_step(
     // Post-solve collision rejection (same logic as multi-target overload).
     if (step_moved && collision_constraint_.has_value() &&
         collision_constraint_->enabled) {
+      // Use min_distance as the violation threshold so that q_solution is
+      // guaranteed collision-safe (not merely penetration-free).
+      const double violation_threshold = collision_constraint_->min_distance;
       auto post_dist_debug = evaluate_post_step_collision_distance(q);
       if (post_dist_debug.has_value() &&
           std::isfinite(*post_dist_debug) &&
-          *post_dist_debug < kCollisionPenetrationDistanceThreshold) {
+          *post_dist_debug < violation_threshold) {
         auto pre_dist_debug = evaluate_post_step_collision_distance(q_pre_step);
         double pre_dist = (pre_dist_debug.has_value() && std::isfinite(*pre_dist_debug))
                               ? *pre_dist_debug
                               : std::numeric_limits<double>::infinity();
-        bool seed_was_safe = (pre_dist >= kCollisionPenetrationDistanceThreshold);
+        bool seed_was_safe = (pre_dist >= violation_threshold);
         bool deepened =
-            (pre_dist < kCollisionPenetrationDistanceThreshold &&
+            (pre_dist < violation_threshold &&
              *post_dist_debug <
                  pre_dist - kCollisionPenetrationWorsenTolerance);
         const bool hard_jump =
@@ -4552,6 +4568,18 @@ PositionIKResult KinematicsSolver::solve_position_step(
             *post_dist_debug < kCollisionHardPenetrationRejectDistance &&
             *post_dist_debug < pre_dist - kCollisionHardWorsenTolerance;
         if (seed_was_safe || deepened || hard_jump) {
+          // Backoff threshold depends on seed state:
+          //   safe seed   → must restore full safety (>= min_distance)
+          //   violated seed + hard geometry jump → stop geometry penetration
+          //   violated seed + deepened → must not worsen beyond tolerance
+          double backoff_threshold;
+          if (seed_was_safe) {
+            backoff_threshold = violation_threshold;
+          } else if (hard_jump) {
+            backoff_threshold = kCollisionPenetrationDistanceThreshold;
+          } else {
+            backoff_threshold = pre_dist - kCollisionPenetrationWorsenTolerance;
+          }
           bool accepted_backoff = false;
           const Eigen::VectorXd dq_nominal =
               step_dt * last_vel_result.joint_velocities;
@@ -4562,8 +4590,7 @@ PositionIKResult KinematicsSolver::solve_position_step(
             auto backoff_dist_debug = evaluate_post_step_collision_distance(q_backoff);
             if (backoff_dist_debug.has_value() &&
                 std::isfinite(*backoff_dist_debug) &&
-                *backoff_dist_debug >=
-                    kCollisionPenetrationDistanceThreshold) {
+                *backoff_dist_debug >= backoff_threshold) {
               q = q_backoff;
               accepted_backoff = true;
               break;
@@ -4574,6 +4601,13 @@ PositionIKResult KinematicsSolver::solve_position_step(
             robot_->update_configuration(q);
             step_collision_rejected = true;
             result.collision_rejection_count++;
+            if (seed_was_safe) {
+              // Safe seed: no step could maintain min_distance → violation.
+              // Signal after loop; break so we don't attempt further steps.
+              collision_violated_flag = true;
+              break;
+            }
+            // Violated seed: hold at seed, let stall handler relax min_distance.
           }
         }
       }
@@ -4905,6 +4939,12 @@ PositionIKResult KinematicsSolver::solve_position_step(
     result.status_message =
         "solve_position_step exited due to no progress near active bounds/"
         "constraints";
+  }
+  if (collision_violated_flag) {
+    result.status = SolverStatus::kCollisionViolated;
+    result.status_message =
+        "solve_position_step: no step could maintain collision min_distance; "
+        "q_solution is the last safe configuration";
   }
 
   // In teleop-style loops (max_steps=1), stall handling must accumulate across
