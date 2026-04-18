@@ -600,10 +600,10 @@ def run_gui(cfg: RobotConfig, args: argparse.Namespace) -> None:
         iterations_slider = server.gui.add_slider("IK Iterations", min=1, max=20, initial_value=1, step=1)
         adaptive_dt_checkbox = server.gui.add_checkbox("Adaptive dt", initial_value=False)
         adaptive_dt_max_scale_slider = server.gui.add_slider(
-            "Adaptive dt Max Scale", min=1.0, max=10.0, step=0.5, initial_value=5.0
+            "Adaptive dt Max Scale", min=1.0, max=10.0, step=0.5, initial_value=10.0
         )
         adaptive_dt_ref_dist_slider = server.gui.add_slider(
-            "Adaptive dt Ref Dist (m)", min=0.01, max=0.20, step=0.01, initial_value=0.05
+            "Adaptive dt Ref Dist (m)", min=0.01, max=0.20, step=0.01, initial_value=0.02
         )
         nullspace_enabled_checkbox = server.gui.add_checkbox("Enable Nullspace Bias", initial_value=False)
         nullspace_gain = server.gui.add_slider("Nullspace Gain", min=0.0, max=2.0, initial_value=DEFAULT_NULLSPACE_GAIN, step=0.05)
