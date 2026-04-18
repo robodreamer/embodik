@@ -1332,7 +1332,8 @@ void KinematicsSolver::clear_collision_constraint() {
 
 void KinematicsSolver::set_collision_pair_min_distance(const std::string &link_a,
                                                         const std::string &link_b,
-                                                        double min_distance) {
+                                                        double min_distance,
+                                                        bool activate_when_clear) {
   const auto *geom_model = robot_->collision_model();
   if (!geom_model) return;
 
@@ -1357,8 +1358,18 @@ void KinematicsSolver::set_collision_pair_min_distance(const std::string &link_a
     if (fwd || rev) {
       const auto &name_a = geom_model->geometryObjects[cp.first].name;
       const auto &name_b = geom_model->geometryObjects[cp.second].name;
-      per_pair_min_distance_overrides_[canonical_pair_key(name_a, name_b)] =
-          min_distance;
+      const std::string key = canonical_pair_key(name_a, name_b);
+      if (activate_when_clear) {
+        // Deferred: store as pending; compute_bounds_for_pair promotes to active
+        // the first time signed_distance >= min_distance (latch-on semantics).
+        // Prevents immediate stall when called from inside the threshold.
+        per_pair_deferred_overrides_[key] = min_distance;
+        per_pair_min_distance_overrides_.erase(key);  // not active yet
+      } else {
+        // Immediate: override takes effect on the next solve tick.
+        per_pair_min_distance_overrides_[key] = min_distance;
+        per_pair_deferred_overrides_.erase(key);
+      }
     }
   }
 }
@@ -1388,7 +1399,9 @@ void KinematicsSolver::clear_collision_pair_min_distance(const std::string &link
     if (fwd || rev) {
       const auto &name_a = geom_model->geometryObjects[cp.first].name;
       const auto &name_b = geom_model->geometryObjects[cp.second].name;
-      per_pair_min_distance_overrides_.erase(canonical_pair_key(name_a, name_b));
+      const std::string key = canonical_pair_key(name_a, name_b);
+      per_pair_min_distance_overrides_.erase(key);
+      per_pair_deferred_overrides_.erase(key);
     }
   }
 }
@@ -1396,9 +1409,13 @@ void KinematicsSolver::clear_collision_pair_min_distance(const std::string &link
 std::vector<std::pair<std::string, double>>
 KinematicsSolver::get_collision_pair_min_distance_overrides() const {
   std::vector<std::pair<std::string, double>> result;
-  result.reserve(per_pair_min_distance_overrides_.size());
+  result.reserve(per_pair_min_distance_overrides_.size() +
+                 per_pair_deferred_overrides_.size());
   for (const auto &kv : per_pair_min_distance_overrides_) {
     result.emplace_back(kv.first, kv.second);
+  }
+  for (const auto &kv : per_pair_deferred_overrides_) {
+    result.emplace_back(kv.first, kv.second);  // pending (not yet active)
   }
   return result;
 }
@@ -2672,16 +2689,32 @@ KinematicsSolver::compute_collision_constraint() {
                                      double signed_distance,
                                      bool *stuck_out) -> std::pair<double, double> {
     const double target_min_distance = config.min_distance;
-    // Apply per-pair override if set for this geometry pair.
+    // Apply per-pair override (active or newly promoted from deferred).
     double effective_min_distance = target_min_distance;
-    if (!per_pair_min_distance_overrides_.empty()) {
+    {
       const auto &pa = pairs[pair_idx];
       const auto &name_a = collision_model->geometryObjects[pa.first].name;
       const auto &name_b = collision_model->geometryObjects[pa.second].name;
-      const auto oit =
-          per_pair_min_distance_overrides_.find(canonical_pair_key(name_a, name_b));
-      if (oit != per_pair_min_distance_overrides_.end()) {
-        effective_min_distance = oit->second;
+      const std::string pair_key = canonical_pair_key(name_a, name_b);
+      // Check deferred (pending) overrides first: promote when pair achieves
+      // the desired clearance for the first time (latch-on semantics).
+      if (!per_pair_deferred_overrides_.empty()) {
+        const auto dit = per_pair_deferred_overrides_.find(pair_key);
+        if (dit != per_pair_deferred_overrides_.end()) {
+          if (signed_distance >= dit->second) {
+            // Pair achieved desired clearance → promote to active.
+            per_pair_min_distance_overrides_[pair_key] = dit->second;
+            per_pair_deferred_overrides_.erase(dit);
+          }
+          // Else: pair is below threshold — use global min_distance, not override.
+        }
+      }
+      // Apply active override (possibly just promoted above).
+      if (!per_pair_min_distance_overrides_.empty()) {
+        const auto oit = per_pair_min_distance_overrides_.find(pair_key);
+        if (oit != per_pair_min_distance_overrides_.end()) {
+          effective_min_distance = oit->second;
+        }
       }
     }
 
