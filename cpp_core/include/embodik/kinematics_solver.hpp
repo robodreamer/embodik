@@ -457,6 +457,30 @@ public:
   void clear_collision_constraint();
 
   /**
+   * @brief Set a custom minimum distance for all collision pairs involving
+   * geometries parented to link_a and link_b (matched by frame name substring).
+   * Overrides the global min_distance for those pairs only; all other pairs
+   * continue to use the global limit. Call after configure_collision_constraint().
+   */
+  void set_collision_pair_min_distance(const std::string &link_a,
+                                       const std::string &link_b,
+                                       double min_distance);
+
+  /**
+   * @brief Remove per-pair min_distance overrides for geometries involving
+   * link_a and link_b. Affected pairs revert to the global min_distance.
+   */
+  void clear_collision_pair_min_distance(const std::string &link_a,
+                                         const std::string &link_b);
+
+  /**
+   * @brief Return all active per-pair min_distance overrides as a list of
+   * (canonical_pair_key, min_distance) pairs.
+   */
+  std::vector<std::pair<std::string, double>>
+  get_collision_pair_min_distance_overrides() const;
+
+  /**
    * @brief Enable/disable cached collision pair candidate evaluation.
    *
    * When enabled, collision distance queries are evaluated on a conservative
@@ -984,6 +1008,10 @@ private:
   std::optional<RelativePoseConstraintResult> compute_relative_pose_constraint();
 
   std::optional<CollisionConstraintConfig> collision_constraint_;
+  // Per-geometry-pair min_distance overrides. Key is canonical_pair_key(geom_a, geom_b).
+  // Set via set_collision_pair_min_distance(link_a, link_b, distance) which resolves
+  // link names to geometry names at call time. Survives configure_collision_constraint().
+  std::unordered_map<std::string, double> per_pair_min_distance_overrides_;
   std::optional<CollisionDebugInfo> last_collision_debug_;
   // All active constraint pairs (up to max_constraints), populated after each solve.
   std::vector<CollisionDebugInfo> last_collision_debug_list_;

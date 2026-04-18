@@ -1327,6 +1327,79 @@ void KinematicsSolver::clear_collision_constraint() {
   collision_stuck_last_distances_.clear();
 }
 
+void KinematicsSolver::set_collision_pair_min_distance(const std::string &link_a,
+                                                        const std::string &link_b,
+                                                        double min_distance) {
+  const auto *geom_model = robot_->collision_model();
+  if (!geom_model) return;
+
+  // Collect geometry indices whose parent frame name contains link_a or link_b.
+  std::vector<std::size_t> geoms_a, geoms_b;
+  for (std::size_t gi = 0; gi < geom_model->ngeoms; ++gi) {
+    const auto &go = geom_model->geometryObjects[gi];
+    const std::string &frame_name =
+        robot_->model().frames[go.parentFrame].name;
+    if (frame_name.find(link_a) != std::string::npos) geoms_a.push_back(gi);
+    if (frame_name.find(link_b) != std::string::npos) geoms_b.push_back(gi);
+  }
+
+  for (std::size_t pi = 0; pi < geom_model->collisionPairs.size(); ++pi) {
+    const auto &cp = geom_model->collisionPairs[pi];
+    const bool fwd =
+        std::find(geoms_a.begin(), geoms_a.end(), cp.first) != geoms_a.end() &&
+        std::find(geoms_b.begin(), geoms_b.end(), cp.second) != geoms_b.end();
+    const bool rev =
+        std::find(geoms_b.begin(), geoms_b.end(), cp.first) != geoms_b.end() &&
+        std::find(geoms_a.begin(), geoms_a.end(), cp.second) != geoms_a.end();
+    if (fwd || rev) {
+      const auto &name_a = geom_model->geometryObjects[cp.first].name;
+      const auto &name_b = geom_model->geometryObjects[cp.second].name;
+      per_pair_min_distance_overrides_[canonical_pair_key(name_a, name_b)] =
+          min_distance;
+    }
+  }
+}
+
+void KinematicsSolver::clear_collision_pair_min_distance(const std::string &link_a,
+                                                          const std::string &link_b) {
+  const auto *geom_model = robot_->collision_model();
+  if (!geom_model) return;
+
+  std::vector<std::size_t> geoms_a, geoms_b;
+  for (std::size_t gi = 0; gi < geom_model->ngeoms; ++gi) {
+    const auto &go = geom_model->geometryObjects[gi];
+    const std::string &frame_name =
+        robot_->model().frames[go.parentFrame].name;
+    if (frame_name.find(link_a) != std::string::npos) geoms_a.push_back(gi);
+    if (frame_name.find(link_b) != std::string::npos) geoms_b.push_back(gi);
+  }
+
+  for (std::size_t pi = 0; pi < geom_model->collisionPairs.size(); ++pi) {
+    const auto &cp = geom_model->collisionPairs[pi];
+    const bool fwd =
+        std::find(geoms_a.begin(), geoms_a.end(), cp.first) != geoms_a.end() &&
+        std::find(geoms_b.begin(), geoms_b.end(), cp.second) != geoms_b.end();
+    const bool rev =
+        std::find(geoms_b.begin(), geoms_b.end(), cp.first) != geoms_b.end() &&
+        std::find(geoms_a.begin(), geoms_a.end(), cp.second) != geoms_a.end();
+    if (fwd || rev) {
+      const auto &name_a = geom_model->geometryObjects[cp.first].name;
+      const auto &name_b = geom_model->geometryObjects[cp.second].name;
+      per_pair_min_distance_overrides_.erase(canonical_pair_key(name_a, name_b));
+    }
+  }
+}
+
+std::vector<std::pair<std::string, double>>
+KinematicsSolver::get_collision_pair_min_distance_overrides() const {
+  std::vector<std::pair<std::string, double>> result;
+  result.reserve(per_pair_min_distance_overrides_.size());
+  for (const auto &kv : per_pair_min_distance_overrides_) {
+    result.emplace_back(kv.first, kv.second);
+  }
+  return result;
+}
+
 // ============================================================
 // Stall handler
 // ============================================================
@@ -2596,7 +2669,18 @@ KinematicsSolver::compute_collision_constraint() {
                                      double signed_distance,
                                      bool *stuck_out) -> std::pair<double, double> {
     const double target_min_distance = config.min_distance;
-    const double effective_min_distance = target_min_distance;
+    // Apply per-pair override if set for this geometry pair.
+    double effective_min_distance = target_min_distance;
+    if (!per_pair_min_distance_overrides_.empty()) {
+      const auto &pa = pairs[pair_idx];
+      const auto &name_a = collision_model->geometryObjects[pa.first].name;
+      const auto &name_b = collision_model->geometryObjects[pa.second].name;
+      const auto oit =
+          per_pair_min_distance_overrides_.find(canonical_pair_key(name_a, name_b));
+      if (oit != per_pair_min_distance_overrides_.end()) {
+        effective_min_distance = oit->second;
+      }
+    }
 
     // Detect stuck: non-penetrating but significantly inside min_distance for
     // multiple consecutive cycles AND the previous dq was near-zero.
