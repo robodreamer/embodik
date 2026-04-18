@@ -66,6 +66,9 @@ constexpr double kCollisionBoundRotationRadius = 1.5; // meters
 constexpr double kCollisionBoundSafetyMargin = 5e-3; // meters
 // Post-step rejection: safe margin above penetration threshold for early-exit.
 constexpr double kPostStepSafeMargin = 0.01; // 1cm
+// Adaptive dt proximity cap: assumed max EE approach speed when options.max_linear_speed
+// is not set. Used to bound how large a dt_eff can safely be near a collision boundary.
+constexpr double kAdaptiveDtFallbackMaxEESpeed = 1.0; // m/s
 // Lazy constraint reuse: skip recomputation when dq is tiny and distance is safe.
 constexpr double kLazyReuseMaxDqSqNorm = 1e-6;  // ~0.001 rad change
 constexpr double kLazyReuseMinDistMargin = 0.005; // 5mm safety margin
@@ -4613,6 +4616,8 @@ PositionIKResult KinematicsSolver::solve_position_step(
     bool step_collision_rejected = false;
     // Adaptive dt: scale integration step proportional to current position
     // error so large-jump approach is faster; reverts to base dt near target.
+    // Proximity-aware cap: limit scale so the integration step cannot overshoot
+    // past min_distance in one tick (scale * step_dt * max_ee_speed <= clearance).
     double step_dt_eff = step_dt;
     if (options.adaptive_dt &&
         options.adaptive_dt_reference_distance > 1e-9 &&
@@ -4621,6 +4626,23 @@ PositionIKResult KinematicsSolver::solve_position_step(
       double scale = pos_err / options.adaptive_dt_reference_distance;
       scale = std::min(scale, options.adaptive_dt_max_scale);
       scale = std::max(scale, 1.0);
+      // Collision-proximity cap: when near a collision boundary, reduce scale so
+      // the maximum integration step < clearance, preventing overshoot → stall.
+      if (collision_constraint_.has_value() && collision_constraint_->enabled &&
+          std::isfinite(last_constraint_min_distance_)) {
+        const double min_dist = collision_constraint_->min_distance;
+        const double clearance = last_constraint_min_distance_ - min_dist;
+        if (clearance <= 0.0) {
+          scale = 1.0;  // already in violation zone: no adaptive scaling
+        } else {
+          // cap scale so that scale * step_dt * max_ee_vel <= clearance
+          const double max_ee_vel =
+              (options.max_linear_speed > 0.0) ? options.max_linear_speed
+                                               : kAdaptiveDtFallbackMaxEESpeed;
+          const double max_safe_scale = clearance / (step_dt * max_ee_vel);
+          scale = std::min(scale, std::max(max_safe_scale, 1.0));
+        }
+      }
       step_dt_eff = step_dt * scale;
     }
     q = pinocchio::integrate(robot_->model(), q,
@@ -4983,9 +5005,16 @@ PositionIKResult KinematicsSolver::solve_position_step(
         auto curr_dist = evaluate_post_step_collision_distance(q);
         robot_->update_configuration(q_candidate);
         auto cand_dist = evaluate_post_step_collision_distance(q_candidate);
+        // Use min_distance as the safe threshold so desaturation nudges cannot
+        // silently land inside the collision margin (within kCollisionPenetration-
+        // WorsenTolerance of min_distance).
+        const double desat_safe_threshold =
+            (collision_constraint_.has_value() && collision_constraint_->enabled)
+            ? collision_constraint_->min_distance
+            : kCollisionPenetrationDistanceThreshold;
         const bool safe_candidate =
             (!cand_dist.has_value() || !std::isfinite(*cand_dist) ||
-             *cand_dist >= kCollisionPenetrationDistanceThreshold);
+             *cand_dist >= desat_safe_threshold);
         const bool not_worse = (!curr_dist.has_value() || !cand_dist.has_value() ||
                                 !std::isfinite(*curr_dist) ||
                                 !std::isfinite(*cand_dist) ||
@@ -5259,6 +5288,7 @@ PositionIKResult KinematicsSolver::solve_position_step(
   double prev_combined_error = std::numeric_limits<double>::infinity();
   int no_progress_count = 0;
   bool no_progress_exit = false;
+  bool collision_violated_flag_mts = false;  // multi-target solve_position_step
 
   for (int step = 0; step < steps; ++step) {
     double combined_error = 0.0;
@@ -5369,26 +5399,37 @@ PositionIKResult KinematicsSolver::solve_position_step(
     // Skip expensive post-step checks when integration produced no motion.
     const bool step_moved =
         (q - q_pre_step).squaredNorm() > kCollisionEscapeNormEps;
-    // Post-solve collision rejection: if collision is configured and the
-    // integration step created new penetration or deepened existing
-    // penetration past a safety threshold, revert to pre-step config.
+    // Post-solve collision rejection: use min_distance as the violation
+    // threshold (mirrors single-target overload fix).
     if (step_moved && collision_constraint_.has_value() &&
         collision_constraint_->enabled) {
+      const double violation_threshold = collision_constraint_->min_distance;
       auto post_dist_debug = evaluate_post_step_collision_distance(q);
       if (post_dist_debug.has_value() &&
           std::isfinite(*post_dist_debug) &&
-          *post_dist_debug < kCollisionPenetrationDistanceThreshold) {
-        // Check pre-step distance to decide if this step caused the problem.
+          *post_dist_debug < violation_threshold) {
         auto pre_dist_debug = evaluate_post_step_collision_distance(q_pre_step);
         double pre_dist = (pre_dist_debug.has_value() && std::isfinite(*pre_dist_debug))
                               ? *pre_dist_debug
                               : std::numeric_limits<double>::infinity();
-        bool seed_was_safe = (pre_dist >= kCollisionPenetrationDistanceThreshold);
+        bool seed_was_safe = (pre_dist >= violation_threshold);
         bool deepened =
-            (pre_dist < kCollisionPenetrationDistanceThreshold &&
+            (pre_dist < violation_threshold &&
              *post_dist_debug <
                  pre_dist - kCollisionPenetrationWorsenTolerance);
-        if (seed_was_safe || deepened) {
+        const bool hard_jump =
+            std::isfinite(pre_dist) &&
+            *post_dist_debug < kCollisionHardPenetrationRejectDistance &&
+            *post_dist_debug < pre_dist - kCollisionHardWorsenTolerance;
+        if (seed_was_safe || deepened || hard_jump) {
+          double backoff_threshold;
+          if (seed_was_safe) {
+            backoff_threshold = violation_threshold;
+          } else if (hard_jump) {
+            backoff_threshold = kCollisionPenetrationDistanceThreshold;
+          } else {
+            backoff_threshold = pre_dist - kCollisionPenetrationWorsenTolerance;
+          }
           bool accepted_backoff = false;
           const Eigen::VectorXd dq_nominal =
               step_dt * last_vel_result.joint_velocities;
@@ -5399,8 +5440,7 @@ PositionIKResult KinematicsSolver::solve_position_step(
             auto backoff_dist_debug = evaluate_post_step_collision_distance(q_backoff);
             if (backoff_dist_debug.has_value() &&
                 std::isfinite(*backoff_dist_debug) &&
-                *backoff_dist_debug >=
-                    kCollisionPenetrationDistanceThreshold) {
+                *backoff_dist_debug >= backoff_threshold) {
               q = q_backoff;
               accepted_backoff = true;
               break;
@@ -5411,6 +5451,10 @@ PositionIKResult KinematicsSolver::solve_position_step(
             robot_->update_configuration(q);
             step_collision_rejected = true;
             result.collision_rejection_count++;
+            if (seed_was_safe) {
+              collision_violated_flag_mts = true;
+              break;
+            }
           }
         }
       }
@@ -5708,9 +5752,13 @@ PositionIKResult KinematicsSolver::solve_position_step(
         auto curr_dist = evaluate_post_step_collision_distance(q);
         robot_->update_configuration(q_candidate);
         auto cand_dist = evaluate_post_step_collision_distance(q_candidate);
+        const double desat_safe_threshold_mt =
+            (collision_constraint_.has_value() && collision_constraint_->enabled)
+            ? collision_constraint_->min_distance
+            : kCollisionPenetrationDistanceThreshold;
         const bool safe_candidate =
             (!cand_dist.has_value() || !std::isfinite(*cand_dist) ||
-             *cand_dist >= kCollisionPenetrationDistanceThreshold);
+             *cand_dist >= desat_safe_threshold_mt);
         const bool not_worse = (!curr_dist.has_value() || !cand_dist.has_value() ||
                                 !std::isfinite(*curr_dist) ||
                                 !std::isfinite(*cand_dist) ||
@@ -5778,6 +5826,12 @@ PositionIKResult KinematicsSolver::solve_position_step(
     result.status_message =
         "solve_position_step exited due to no progress near active bounds/"
         "constraints";
+  }
+  if (collision_violated_flag_mts) {
+    result.status = SolverStatus::kCollisionViolated;
+    result.status_message =
+        "solve_position_step (multi-target): no step could maintain collision "
+        "min_distance; q_solution is the last safe configuration";
   }
 
   // In teleop-style loops (max_steps=1), stall handling must accumulate across

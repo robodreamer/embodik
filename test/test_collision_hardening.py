@@ -381,3 +381,160 @@ class TestAdaptiveDtReducesApproachCycles:
                 f"adaptive final error ({adaptive_final_error:.4f}) should be "
                 f"smaller than baseline ({baseline_final_error:.4f})"
             )
+
+
+class TestAdaptiveDtCollisionStall:
+    """Adaptive dt must not cause collision-overshoot stalls near min_distance.
+
+    When adaptive_dt is enabled with a large max_scale, the integration step grows
+    proportionally to position error.  Without the proximity cap, a large step can
+    overshoot past min_distance when clearance is small, triggering COLLISION_VIOLATED
+    on every tick and causing a permanent stall.  The proximity cap reduces scale near
+    collision boundaries so the integration step stays within the available clearance.
+    """
+
+    # Exclusion helper: skip adjacent links and finger/hand pairs
+    @staticmethod
+    def _make_exclusion_pairs(robot):
+        import re
+        all_pairs = robot.get_collision_pair_names()
+        excl = []
+        for a, b in all_pairs:
+            if any(x in n for x in ("finger", "hand") for n in (a, b)):
+                excl.append((a, b))
+                continue
+            na = re.findall(r"link(\d+)", a)
+            nb = re.findall(r"link(\d+)", b)
+            if na and nb and abs(int(na[0]) - int(nb[0])) <= 1:
+                excl.append((a, b))
+        return excl
+
+    def test_adaptive_dt_proximity_cap_prevents_collision_stall(
+        self, panda_robot, panda_solver
+    ):
+        """With proximity cap: adaptive_dt must not enter a COLLISION_VIOLATED stall.
+
+        Without the cap, large adaptive steps overshoot the ~2 mm clearance above
+        min_distance, producing kCollisionViolated every tick and freezing the robot.
+        The proximity cap reduces scale when clearance < step_dt * max_ee_speed,
+        keeping the integration step within bounds.
+        """
+        excl = self._make_exclusion_pairs(panda_robot)
+        min_dist = 0.020  # ~2 mm below the natural panda_link5/link7 distance of ~22 mm
+        panda_solver.configure_collision_constraint(
+            min_distance=min_dist,
+            max_constraints=3,
+            exclude_pairs=excl,
+        )
+
+        panda_solver.clear_tasks()
+        task = panda_solver.add_frame_task("ee_task", "panda_hand")
+        task.priority = 0
+        task.weight = 1.0
+
+        q0 = _PANDA_DEFAULT_Q.copy()
+        panda_robot.update_configuration(q0)
+        seed_dist = panda_solver.evaluate_min_collision_distance(q0)
+        if seed_dist < min_dist:
+            pytest.skip(
+                f"Default panda q already inside min_distance "
+                f"({seed_dist:.4f} < {min_dist}); cannot test stall."
+            )
+
+        hand_pose = panda_robot.get_frame_pose("panda_hand")
+        # Drive toward a target that requires the arm to sweep near link5/link7
+        target = np.eye(4, dtype=float)
+        target[:3, :3] = np.asarray(hand_pose.rotation, dtype=float)
+        target[:3, 3] = np.asarray(hand_pose.translation, dtype=float) + np.array(
+            [0.0, 0.3, -0.3]
+        )
+
+        opts = embodik.PositionStepOptions()
+        opts.max_steps = 1
+        opts.position_gain = 10.0
+        opts.adaptive_dt = True
+        opts.adaptive_dt_max_scale = 10.0
+        opts.adaptive_dt_reference_distance = 0.02
+        opts.stall_recovery = False
+
+        max_cycles = 200
+        violation_count = 0
+        consecutive_violations = 0
+        max_consecutive = 0
+
+        q = q0.copy()
+        for _ in range(max_cycles):
+            result = panda_solver.solve_position_step(q, target, "ee_task", opts)
+            if result.status == embodik.SolverStatus.COLLISION_VIOLATED:
+                violation_count += 1
+                consecutive_violations += 1
+                max_consecutive = max(max_consecutive, consecutive_violations)
+            else:
+                consecutive_violations = 0
+            q = np.asarray(result.q_solution, dtype=float)
+            panda_robot.update_configuration(q)
+
+        # With the proximity cap the robot should make forward progress and not
+        # get locked in a COLLISION_VIOLATED stall (>10 consecutive violations).
+        assert max_consecutive < 10, (
+            f"Adaptive dt caused a COLLISION_VIOLATED stall: "
+            f"{max_consecutive} consecutive violations over {max_cycles} cycles. "
+            f"Total violations: {violation_count}"
+        )
+
+    def test_without_adaptive_dt_no_stall(self, panda_robot, panda_solver):
+        """Baseline: normal dt must not stall via COLLISION_VIOLATED stall either.
+
+        Verifies that the desaturation and multi-target rejection fixes also prevent
+        violations at normal dt (no adaptive scaling).
+        """
+        excl = self._make_exclusion_pairs(panda_robot)
+        min_dist = 0.020
+        panda_solver.configure_collision_constraint(
+            min_distance=min_dist,
+            max_constraints=3,
+            exclude_pairs=excl,
+        )
+
+        panda_solver.clear_tasks()
+        task = panda_solver.add_frame_task("ee_task", "panda_hand")
+        task.priority = 0
+        task.weight = 1.0
+
+        q0 = _PANDA_DEFAULT_Q.copy()
+        panda_robot.update_configuration(q0)
+        seed_dist = panda_solver.evaluate_min_collision_distance(q0)
+        if seed_dist < min_dist:
+            pytest.skip(f"Seed dist {seed_dist:.4f} < min_dist {min_dist}")
+
+        hand_pose = panda_robot.get_frame_pose("panda_hand")
+        target = np.eye(4, dtype=float)
+        target[:3, :3] = np.asarray(hand_pose.rotation, dtype=float)
+        target[:3, 3] = np.asarray(hand_pose.translation, dtype=float) + np.array(
+            [0.0, 0.3, -0.3]
+        )
+
+        opts = embodik.PositionStepOptions()
+        opts.max_steps = 1
+        opts.position_gain = 10.0
+        opts.adaptive_dt = False
+        opts.stall_recovery = False
+
+        max_cycles = 200
+        consecutive_violations = 0
+        max_consecutive = 0
+        q = q0.copy()
+        for _ in range(max_cycles):
+            result = panda_solver.solve_position_step(q, target, "ee_task", opts)
+            if result.status == embodik.SolverStatus.COLLISION_VIOLATED:
+                consecutive_violations += 1
+                max_consecutive = max(max_consecutive, consecutive_violations)
+            else:
+                consecutive_violations = 0
+            q = np.asarray(result.q_solution, dtype=float)
+            panda_robot.update_configuration(q)
+
+        assert max_consecutive < 10, (
+            f"Normal dt produced COLLISION_VIOLATED stall: "
+            f"{max_consecutive} consecutive violations"
+        )
