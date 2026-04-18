@@ -459,12 +459,18 @@ public:
   /**
    * @brief Set a custom minimum distance for all collision pairs involving
    * geometries parented to link_a and link_b (matched by frame name substring).
-   * Overrides the global min_distance for those pairs only; all other pairs
-   * continue to use the global limit. Call after configure_collision_constraint().
+   * Overrides the global min_distance for those pairs only.
+   *
+   * @param activate_when_clear  If true (default), the override is stored as
+   *   "pending" and activates the first time the pair achieves the desired
+   *   clearance during a solve — preventing immediate stall when called from
+   *   a configuration already inside the threshold (latch-on semantics).
+   *   If false, the override takes effect immediately (legacy behaviour).
    */
   void set_collision_pair_min_distance(const std::string &link_a,
                                        const std::string &link_b,
-                                       double min_distance);
+                                       double min_distance,
+                                       bool activate_when_clear = true);
 
   /**
    * @brief Remove per-pair min_distance overrides for geometries involving
@@ -1011,7 +1017,11 @@ private:
   // Per-geometry-pair min_distance overrides. Key is canonical_pair_key(geom_a, geom_b).
   // Set via set_collision_pair_min_distance(link_a, link_b, distance) which resolves
   // link names to geometry names at call time. Survives configure_collision_constraint().
+  // Active per-pair overrides: applied immediately every solve tick.
   std::unordered_map<std::string, double> per_pair_min_distance_overrides_;
+  // Pending (deferred) overrides: promoted to active the first time the pair
+  // achieves the desired clearance (latch-on). Set via activate_when_clear=true.
+  std::unordered_map<std::string, double> per_pair_deferred_overrides_;
   std::optional<CollisionDebugInfo> last_collision_debug_;
   // All active constraint pairs (up to max_constraints), populated after each solve.
   std::vector<CollisionDebugInfo> last_collision_debug_list_;
