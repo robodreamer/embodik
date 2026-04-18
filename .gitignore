@@ -1,3 +1,6 @@
+# Git worktrees
+.worktrees/
+
 # Python build artifacts
 python_bindings/*.cmake
 python_bindings/CMakeFiles/
