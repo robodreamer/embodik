@@ -360,6 +360,21 @@ void bind_kinematics_solver(nb::module_ &m) {
       .def("clear_collision_constraint",
            &KinematicsSolver::clear_collision_constraint,
            "Disable collision avoidance constraint.")
+      .def("set_collision_pair_min_distance",
+           &KinematicsSolver::set_collision_pair_min_distance,
+           nb::arg("link_a"), nb::arg("link_b"), nb::arg("min_distance"),
+           "Set a custom minimum distance for all collision geometry pairs whose\n"
+           "parent frame name contains link_a and link_b respectively.\n"
+           "Overrides the global min_distance for those pairs only.\n"
+           "Call after configure_collision_constraint().")
+      .def("clear_collision_pair_min_distance",
+           &KinematicsSolver::clear_collision_pair_min_distance,
+           nb::arg("link_a"), nb::arg("link_b"),
+           "Remove per-pair min_distance overrides for link_a/link_b geometry pairs.\n"
+           "Affected pairs revert to the global min_distance.")
+      .def("get_collision_pair_min_distance_overrides",
+           &KinematicsSolver::get_collision_pair_min_distance_overrides,
+           "Return list of (pair_key, min_distance) tuples for all active per-pair overrides.")
       .def("enable_collision_pair_cache",
            &KinematicsSolver::enable_collision_pair_cache,
            nb::arg("enable"),
