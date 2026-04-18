@@ -4645,6 +4645,7 @@ PositionIKResult KinematicsSolver::solve_position_step(
       }
       step_dt_eff = step_dt * scale;
     }
+    const bool adaptive_step_large = (step_dt_eff > step_dt * 1.01);
     q = pinocchio::integrate(robot_->model(), q,
                              step_dt_eff * last_vel_result.joint_velocities);
     robot_->update_configuration(q);
@@ -4658,7 +4659,14 @@ PositionIKResult KinematicsSolver::solve_position_step(
       // Use min_distance as the violation threshold so that q_solution is
       // guaranteed collision-safe (not merely penetration-free).
       const double violation_threshold = collision_constraint_->min_distance;
-      auto post_dist_debug = evaluate_post_step_collision_distance(q);
+      // When adaptive_dt used a large scale, the integration step may bring
+      // previously-far pairs into collision. The targeted post-step evaluator
+      // has a Tier-1 early exit and a cached-pair Tier-2 that both miss newly-
+      // close pairs.  Force a full scan so any pair that violates is caught.
+      std::optional<double> post_dist_debug =
+          adaptive_step_large
+          ? evaluate_min_collision_distance(q)
+          : evaluate_post_step_collision_distance(q);
       if (post_dist_debug.has_value() &&
           std::isfinite(*post_dist_debug) &&
           *post_dist_debug < violation_threshold) {
