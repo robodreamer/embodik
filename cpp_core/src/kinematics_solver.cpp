@@ -4703,7 +4703,13 @@ PositionIKResult KinematicsSolver::solve_position_step(
             Eigen::VectorXd q_backoff = pinocchio::integrate(
                 robot_->model(), q_pre_step, frac * dq_nominal);
             robot_->update_configuration(q_backoff);
-            auto backoff_dist_debug = evaluate_post_step_collision_distance(q_backoff);
+            // Use same evaluation level as initial check: full scan when the
+            // initial post-step scan was full (adaptive_step_large), so newly-
+            // entered pairs are also checked at each backoff position.
+            auto backoff_dist_debug =
+                adaptive_step_large
+                ? evaluate_min_collision_distance(q_backoff)
+                : evaluate_post_step_collision_distance(q_backoff);
             if (backoff_dist_debug.has_value() &&
                 std::isfinite(*backoff_dist_debug) &&
                 *backoff_dist_debug >= backoff_threshold) {
