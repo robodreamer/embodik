@@ -35,7 +35,8 @@ constexpr double kCollisionMaxSeparationSpeed = 0.5;
 constexpr double kCollisionMaxSeparationSpeedNonPenetration = 0.15;
 constexpr double kCollisionPairSwitchHysteresis = 2e-3;
 constexpr double kCollisionRepulsionDeadband = 3e-3;
-constexpr double kCollisionViolationDeadband = 1e-3;
+// kCollisionViolationDeadband removed: recovery ramp now activates at the
+// exact min_distance boundary so violations never get zero recovery force.
 constexpr double kCollisionMinRecoverySpeed = 0.05;
 constexpr double kCollisionRecoveryScale = 0.2;
 constexpr double kCollisionStuckBand = 3e-3;
@@ -2631,20 +2632,9 @@ KinematicsSolver::compute_collision_constraint() {
     } else if (signed_distance >= effective_min_distance) {
       lower_bound = 0.0;
     } else {
-      if (signed_distance >=
-          (effective_min_distance - kCollisionViolationDeadband)) {
-        // Small violation dead-zone to reduce chatter at the active boundary.
-        lower_bound = 0.0;
-        const double upper_bound =
-            (config.upper_distance - config.tolerance + signed_distance) / dt;
-        return {lower_bound, upper_bound};
-      }
-      // Violated region: uniform continuous recovery ramp for both
-      // slightly-inside and deeper violations. The old "gentle_scale = 0.01"
-      // for the slightly-inside case produced ~0.005 m/s which was too weak
-      // to overcome typical EE task pulls. Using kCollisionRecoveryScale
-      // uniformly provides a meaningful push at all violation depths while
-      // remaining capped for stability.
+      // Violated region: uniform continuous recovery ramp from the moment
+      // signed_distance drops below min_distance. No dead-zone — recovery
+      // force is active at all violation depths.
       const double desired =
           (effective_min_distance + config.tolerance - signed_distance) / dt;
       if (signed_distance >= 0.0) {
