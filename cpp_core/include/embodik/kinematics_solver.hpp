@@ -1037,7 +1037,10 @@ private:
   std::unordered_map<std::string, double> per_pair_min_distance_overrides_;
   // Tunable collision boundary behaviour (default values mirror the file-scope
   // constexpr constants; exposed via Python for runtime sweep / autoresearch).
-  double collision_repulsion_deadband_           = 3e-3;  // m above min_dist: lb=0 zone
+  // Default changed from 3e-3 to 0: the 3mm deadband created a 0.145 m/s
+  // step-jump in lb at dist=min_dist+3mm, causing boundary-bounce oscillation.
+  // With 0, lb is continuous everywhere → smooth deceleration at boundary.
+  double collision_repulsion_deadband_           = 0.0;   // m above min_dist: lb=0 zone
   double collision_recovery_scale_               = 0.2;   // fraction of desired recovery vel
   double collision_max_sep_speed_nonpen_         = 0.15;  // m/s cap for non-penetrating recovery
   // Pending (deferred) overrides: promoted to active the first time the pair

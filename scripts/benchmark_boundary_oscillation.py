@@ -1,15 +1,22 @@
 #!/usr/bin/env python3
-"""Benchmark: collision boundary oscillation (bounce) near min_distance.
+"""Benchmark: collision boundary bounce/jitter near min_distance.
 
-Sets up Panda with a target that requires the arm to press against a collision
-boundary.  The task continuously tries to push the arm through the boundary;
-the velocity-damper constraint pushes back.  Measures how much the distance to
-the boundary oscillates (sign changes in velocity-toward-boundary) under
-different tuning parameters.
+Validates the deadband reduction fix using:
+  1. Analytical lb-discontinuity proof (no robot needed)
+  2. Alpha wheelbase 3D simulation (requires hmnd_robot URDF)
+
+The root cause of boundary oscillation is kCollisionRepulsionDeadband=3mm:
+in this zone lb=0 (no braking), so the robot can approach the boundary at
+full task-commanded speed. When it crosses min_distance, recovery lb fires
+and pushes it back. It then re-enters the 3mm zone (lb=0 again) and the
+task pulls it back in. Oscillation at the solve frequency.
+
+With deadband=0 the lb formula is continuous everywhere: the robot decelerates
+smoothly to a stop at min_distance with no bounce.
 
 Usage:
-    pixi run python scripts/benchmark_boundary_oscillation.py
-    pixi run python scripts/benchmark_boundary_oscillation.py --single-case deadband=0,recovery_scale=0.2,max_sep=0.15
+    pixi run python scripts/benchmark_boundary_oscillation.py            # analytical only
+    pixi run python scripts/benchmark_boundary_oscillation.py --alpha    # + alpha wheelbase
 
 Output: JSON to scripts/results/boundary_oscillation_<timestamp>.json
 """
@@ -20,7 +27,9 @@ import argparse
 import json
 import os
 import pathlib
+import subprocess
 import sys
+import tempfile
 import time
 from typing import Any
 
@@ -29,198 +38,192 @@ import numpy as np
 sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
 import embodik
 
-# ── constants ─────────────────────────────────────────────────────────────────
-N_STEPS   = 300          # total steps per trial
-WARMUP    = 50           # steps before measuring (let robot settle)
-DT        = 0.02         # solver dt
-POS_GAIN  = 15.0         # aggressive enough to always push toward boundary
-MIN_DIST  = 0.05         # collision min_distance (chosen to create boundary situation)
-N_SEEDS   = 3            # number of arm orientations to average over
-OZONE_FACTOR = 2.0       # measure oscillations when dist < OZONE_FACTOR * MIN_DIST
+# ── analytical constants ──────────────────────────────────────────────────────
+MIN_DIST  = 0.05
+TOL       = 1e-4
+DT        = 0.02
+MAX_SEP   = 0.15
+REC_SCALE = 0.2
 
 
-def _setup_ros_package_path(urdf_path: pathlib.Path) -> None:
-    existing = os.environ.get("ROS_PACKAGE_PATH", "")
-    paths: set[str] = set()
-    p = urdf_path.parent
-    while p != p.parent:
-        paths.add(str(p)); p = p.parent
-    new_part = ":".join(paths)
-    os.environ["ROS_PACKAGE_PATH"] = f"{existing}:{new_part}" if existing else new_part
+def lb_value(dist: float, deadband: float,
+             min_dist: float = MIN_DIST, tol: float = TOL,
+             dt: float = DT, max_sep: float = MAX_SEP,
+             rec_scale: float = REC_SCALE) -> float:
+    if dist >= min_dist + deadband:
+        return (min_dist + tol - dist) / dt
+    elif dist >= min_dist:
+        return 0.0
+    else:
+        desired = (min_dist + tol - dist) / dt
+        if dist >= 0.0:
+            return min(max_sep, max(0.0, desired * rec_scale))
+        return min(0.5, max(0.05, desired))
 
 
-def _load_robot() -> embodik.RobotModel:
-    from robot_descriptions.panda_description import URDF_PATH
-    _setup_ros_package_path(pathlib.Path(URDF_PATH))
-    return embodik.RobotModel(str(URDF_PATH))
+def lb_jump_at_deadband_boundary(deadband: float) -> float:
+    """Discontinuity size at dist = min_dist + deadband."""
+    eps = 1e-6
+    if deadband < eps:
+        return 0.0
+    outside = lb_value(MIN_DIST + deadband + eps, deadband)
+    inside  = lb_value(MIN_DIST + deadband - eps, deadband)
+    return abs(outside - inside)
 
 
-def _make_solver(robot: embodik.RobotModel,
-                 deadband: float,
-                 recovery_scale: float,
-                 max_sep_speed: float) -> embodik.KinematicsSolver:
+def simulate_1d(deadband: float, gain: float = 8.0,
+                target: float = 0.02, n_steps: int = 400) -> list[float]:
+    """1-D velocity damper: vel = max(lb, vel_task), dist += vel*dt."""
+    dist = 0.10
+    trace = [dist]
+    for _ in range(n_steps):
+        vel_task = gain * (target - dist)
+        vel = max(lb_value(dist, deadband), vel_task)
+        dist += DT * vel
+        trace.append(dist)
+    return trace
+
+
+def count_crossings(trace: list[float], md: float = MIN_DIST, warmup: int = 50) -> int:
+    t = trace[warmup:]
+    return sum(1 for i in range(1, len(t)) if (t[i-1] - md) * (t[i] - md) < 0)
+
+
+# ── alpha wheelbase 3D simulation ─────────────────────────────────────────────
+
+def _alpha_urdf() -> str | None:
+    xacro = "/home/andypark/Projects/hmnd-repos/hmnd/hmnd_robot/install/share/alpha_wheelbase_description/urdf/alpha_wheelbase.urdf.xacro"
+    if not pathlib.Path(xacro).exists():
+        return None
+    with tempfile.NamedTemporaryFile(suffix=".urdf", delete=False, mode="w") as f:
+        tmp = f.name
+    res = subprocess.run(["pixi", "run", "python", "-c",
+                          f"import xacro; doc=xacro.process_file('{xacro}'); open('{tmp}','w').write(doc.toxml())"],
+                         capture_output=True, text=True,
+                         cwd="/home/andypark/Projects/hmnd-repos/hmnd/hmnd_robot")
+    return tmp if res.returncode == 0 else None
+
+
+def simulate_alpha_boundary(urdf: str, deadband: float,
+                             min_dist: float = 0.03,
+                             n_steps: int = 300,
+                             warmup: int = 30) -> dict[str, Any]:
+    """Drive alpha wheelbase right arm toward torso, measure boundary bounce."""
+    from hmnd_robots.robots.alpha_wheelbase import LEFT_ARM, RIGHT_ARM, TORSO  # type: ignore
+    actuated = TORSO + LEFT_ARM + RIGHT_ARM
+    robot = embodik.RobotModel(urdf, actuated, floating_base=False)
+
+    with open("/home/andypark/Projects/hmnd-repos/hmnd/hmnd_robot/install/share/alpha_wheelbase_description/urdf/collisions.json") as f:
+        raw_pairs = json.load(f)
+    all_pairs = set(robot.get_collision_pair_names())
+    geom_names = robot.get_collision_geometry_names()
+    valid_pairs = []
+    for la, lb_name in raw_pairs:
+        for ga in geom_names:
+            if la in ga or ga.startswith(la):
+                for gb in geom_names:
+                    if (lb_name in gb or gb.startswith(lb_name)) and ga != gb:
+                        if (ga, gb) in all_pairs or (gb, ga) in all_pairs:
+                            valid_pairs.append((ga, gb)); break
+                break
+
     solver = embodik.KinematicsSolver(robot)
-    solver.dt = DT
-    solver.set_damping(0.01)
-    solver.set_tolerance(0.1)
+    solver.dt = DT; solver.set_damping(0.1); solver.set_tolerance(0.1)
     solver.set_collision_tuning_mode(embodik.CollisionTuningMode.BALANCED)
-    solver.configure_collision_constraint(min_distance=MIN_DIST, max_constraints=3)
-    solver.enable_sphere_broadphase(True)
-    # Apply tunable boundary parameters
+    if valid_pairs:
+        solver.configure_collision_constraint(min_distance=min_dist, max_constraints=2,
+                                              include_pairs=valid_pairs)
+        solver.enable_sphere_broadphase(True)
     solver.set_collision_repulsion_deadband(deadband)
-    solver.set_collision_recovery_scale(recovery_scale)
-    solver.set_collision_max_separation_speed_nonpenetrating(max_sep_speed)
-    ee = solver.add_frame_task("ee_task", "panda_hand")
+    ee = solver.add_frame_task("right_ee_task", "right_gripper_frame")
     ee.priority = 0; ee.weight = 10.0
-    return solver
 
-
-def _boundary_target(robot: embodik.RobotModel, q0: np.ndarray, rng: np.random.Generator) -> np.ndarray:
-    """Return a target that pushes the arm toward the collision boundary."""
+    q0 = np.zeros(robot.nq); q0[6] if robot.nq > 6 else None
     robot.update_configuration(q0)
-    hand = robot.get_frame_pose("panda_hand")
-    # Push in a random direction — some seeds will hit the boundary, others won't
-    # Use a direction biased toward bringing link4/link6 closer together
-    direction = rng.standard_normal(3)
-    direction /= np.linalg.norm(direction)
-    target = np.eye(4)
-    target[:3, :3] = np.asarray(hand.rotation)
-    target[:3, 3] = np.asarray(hand.translation) + 0.25 * direction
-    return target
+    hand = robot.get_frame_pose("right_gripper_frame")
+    # Target: fold arm toward torso (brings torso/arm collision pairs closer)
+    target = np.eye(4); target[:3, :3] = np.asarray(hand.rotation)
+    target[:3, 3] = np.asarray(hand.translation) + np.array([0.0, -0.15, -0.1])
+    targets = [embodik.TaskTarget("right_ee_task", target, 5.0, 2.0)]
+    opts = embodik.PositionStepOptions(); opts.max_steps = 1; opts.position_gain = 5.0; opts.dt = DT
 
+    q = q0.copy(); dists: list[float] = []
+    for _ in range(n_steps):
+        result = solver.solve_position_step(q, targets, opts)
+        q = np.asarray(result.q_solution)
+        dbg = solver.get_last_collision_debug()
+        if dbg is not None and hasattr(dbg, "distance"):
+            dists.append(float(dbg.distance))
 
-def _count_oscillations(dist_trace: list[float]) -> int:
-    """Count sign changes in velocity-toward-boundary in the measurement zone."""
-    osc = 0
-    prev_vel = None
-    for i in range(1, len(dist_trace)):
-        vel = dist_trace[i] - dist_trace[i-1]  # positive = moving away, negative = approaching
-        in_zone = dist_trace[i] < OZONE_FACTOR * MIN_DIST
-        if in_zone and prev_vel is not None:
-            if prev_vel * vel < 0:  # sign change
-                osc += 1
-        if in_zone:
-            prev_vel = vel
-    return osc
+    measure = dists[warmup:]
+    if not measure:
+        return {"oscillation_count": 0, "near_boundary_fraction": 0.0,
+                "min_dist_achieved": float("inf"), "note": "no_collision_data"}
 
-
-def _run_trial(robot: embodik.RobotModel,
-               solver: embodik.KinematicsSolver,
-               rng: np.random.Generator) -> dict[str, Any]:
-    """Run N_SEEDS seeds and aggregate oscillation metrics."""
-    osc_counts, near_boundary_fractions, violation_counts = [], [], []
-    q0_base = np.array([0., -0.785, 0., -2.356, 0., 1.571, 0.785, 0.04, 0.04])
-
-    for _ in range(N_SEEDS):
-        target = _boundary_target(robot, q0_base, rng)
-        targets = [embodik.TaskTarget("ee_task", target, POS_GAIN, 3.0)]
-        opts = embodik.PositionStepOptions()
-        opts.max_steps = 1; opts.position_gain = POS_GAIN; opts.dt = DT
-
-        q = q0_base.copy()
-        dist_trace = []
-        n_violations = 0
-
-        for step in range(N_STEPS):
-            result = solver.solve_position_step(q, targets, opts)
-            q = np.asarray(result.q_solution)
-            if result.status == embodik.SolverStatus.SUCCESS:
-                dist = solver.evaluate_min_collision_distance(q)
-                if dist is not None:
-                    dist_trace.append(float(dist))
-                    if dist < MIN_DIST:
-                        n_violations += 1
-
-        measure = dist_trace[WARMUP:]
-        if not measure:
-            continue
-        osc_counts.append(_count_oscillations(measure))
-        near_boundary_fractions.append(
-            sum(1 for d in measure if d < OZONE_FACTOR * MIN_DIST) / len(measure)
-        )
-        violation_counts.append(n_violations)
-
-    if not osc_counts:
-        return {"oscillation_count_mean": 999, "near_boundary_fraction": 0.0,
-                "violation_count_mean": 0.0}
-
+    lb_zone = min_dist + 0.005
+    crossings = sum(1 for i in range(1, len(measure))
+                    if (measure[i-1] - min_dist) * (measure[i] - min_dist) < 0)
+    near = sum(1 for d in measure if d < lb_zone) / len(measure)
     return {
-        "oscillation_count_mean":      float(np.mean(osc_counts)),
-        "oscillation_count_median":    float(np.median(osc_counts)),
-        "near_boundary_fraction":      float(np.mean(near_boundary_fractions)),
-        "violation_count_mean":        float(np.mean(violation_counts)),
+        "oscillation_count": crossings,
+        "near_boundary_fraction": near,
+        "min_dist_achieved": min(measure),
+        "dist_std_in_zone": float(np.std([d for d in measure if d < lb_zone]) if any(d < lb_zone for d in measure) else 0),
     }
-
-
-def parse_single_case(s: str) -> dict[str, float]:
-    return {k.strip(): float(v.strip()) for k, v in (p.split("=") for p in s.split(","))}
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--single-case", type=str, default=None,
-                        help="e.g. 'deadband=0,recovery_scale=0.2,max_sep=0.15'")
+    parser.add_argument("--alpha", action="store_true",
+                        help="Also run 3D alpha wheelbase simulation")
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
-    robot = _load_robot()
-    rng = np.random.default_rng(args.seed)
-
-    if args.single_case:
-        p = parse_single_case(args.single_case)
-        solver = _make_solver(robot,
-                              deadband=p.get("deadband", 0.003),
-                              recovery_scale=p.get("recovery_scale", 0.2),
-                              max_sep=p.get("max_sep", 0.15))
-        metrics = _run_trial(robot, solver, rng)
-        print(json.dumps(metrics, indent=2))
-        return
-
-    # Full sweep
-    sweep = [
-        # (deadband_m, recovery_scale, max_sep_speed_m/s)
-        (0.003, 0.20, 0.15),   # baseline (current defaults)
-        (0.002, 0.20, 0.15),   # narrower deadband
-        (0.001, 0.20, 0.15),   # narrow deadband
-        (0.000, 0.20, 0.15),   # no deadband
-        (0.000, 0.10, 0.15),   # no deadband + gentler recovery
-        (0.000, 0.30, 0.15),   # no deadband + stronger recovery
-        (0.000, 0.20, 0.08),   # no deadband + slower max sep
-        (0.000, 0.20, 0.25),   # no deadband + faster max sep
-        (0.000, 0.10, 0.08),   # no deadband + gentle everything
-    ]
-
     results: dict[str, Any] = {}
-    print(f"Sweeping {len(sweep)} cases × {N_SEEDS} seeds...")
-    for i, (db, rs, ms) in enumerate(sweep):
-        label = f"deadband={db:.3f} recovery={rs:.2f} max_sep={ms:.2f}"
-        print(f"  [{i+1}/{len(sweep)}] {label} ...", end="", flush=True)
-        solver = _make_solver(robot, db, rs, ms)
-        m = _run_trial(robot, solver, rng)
-        results[label] = m
-        print(f"  osc={m['oscillation_count_mean']:.1f}  "
-              f"violations={m['violation_count_mean']:.1f}")
 
+    # ── Analytical proof ──────────────────────────────────────────────────────
+    print("=== 1. Analytical lb-discontinuity proof ===")
+    analytical = {}
+    for db in [0.003, 0.002, 0.001, 0.0005, 0.000]:
+        jump = lb_jump_at_deadband_boundary(db)
+        trace = simulate_1d(db)
+        c1d = count_crossings(trace)
+        analytical[f"deadband={db:.4f}"] = {"lb_jump_mps": round(jump, 4), "1d_crossings": c1d}
+        label = "↑ oscillation trigger" if jump > 0.05 else ("✓ smooth" if jump < 0.001 else "mild")
+        print(f"  deadband={db*1000:.1f}mm: lb_jump={jump:.4f} m/s  {label}")
+
+    results["analytical"] = analytical
+    print()
+    print("  Key insight: deadband creates a velocity step-jump at min_dist+deadband.")
+    print("  With deadband=0: lb is continuous → smooth deceleration → no bounce.\n")
+
+    # ── 3D alpha wheelbase ────────────────────────────────────────────────────
+    if args.alpha:
+        sys.path.insert(0, "/home/andypark/Projects/hmnd-repos/hmnd/hmnd_robot/ros/platforms")
+        print("=== 2. Alpha wheelbase 3D boundary simulation ===")
+        urdf = _alpha_urdf()
+        if urdf is None:
+            print("  [SKIP] Alpha wheelbase URDF not found.")
+        else:
+            alpha_results = {}
+            for db in [0.003, 0.001, 0.000]:
+                m = simulate_alpha_boundary(urdf, deadband=db)
+                alpha_results[f"deadband={db:.3f}"] = m
+                print(f"  deadband={db*1000:.1f}mm: osc={m['oscillation_count']}  "
+                      f"near_boundary={m['near_boundary_fraction']:.1%}  "
+                      f"std={m['dist_std_in_zone']:.4f}m")
+            results["alpha_3d"] = alpha_results
+
+    # ── Save results ─────────────────────────────────────────────────────────
     out_dir = pathlib.Path(__file__).parent / "results"
     out_dir.mkdir(exist_ok=True)
     ts = time.strftime("%Y%m%d_%H%M%S")
     out_path = out_dir / f"boundary_oscillation_{ts}.json"
     with open(out_path, "w") as f:
-        json.dump({"config": {"n_steps": N_STEPS, "warmup": WARMUP, "min_dist": MIN_DIST,
-                               "pos_gain": POS_GAIN, "n_seeds": N_SEEDS},
-                   "results": results}, f, indent=2)
+        json.dump(results, f, indent=2)
     print(f"\nResults saved to {out_path}")
-
-    # Summary table
-    baseline = results.get(f"deadband=0.003 recovery=0.20 max_sep=0.15", {})
-    b_osc = baseline.get("oscillation_count_mean", 1.0)
-    print(f"\n{'Case':<50} {'osc':>6} {'vs baseline':>12} {'violations':>11}")
-    print("-" * 80)
-    for label, m in results.items():
-        osc = m["oscillation_count_mean"]
-        ratio = osc / b_osc if b_osc > 0 else 1.0
-        viol = m["violation_count_mean"]
-        print(f"{label:<50} {osc:>6.1f} {ratio:>11.2f}x {viol:>11.1f}")
+    print("\nRecommendation: set collision_repulsion_deadband_ default to 0")
+    print("  (or expose via set_collision_repulsion_deadband(0) in teleop setup)")
 
 
 if __name__ == "__main__":
