@@ -486,6 +486,22 @@ public:
   std::vector<std::pair<std::string, double>>
   get_collision_pair_min_distance_overrides() const;
 
+  // ---- Tunable collision boundary behaviour --------------------------------
+  /** Width (metres) of the no-braking zone above min_distance.  Default 3 mm.
+   *  Set to 0 to eliminate the discontinuity that causes boundary oscillation. */
+  void   set_collision_repulsion_deadband(double metres) { collision_repulsion_deadband_ = std::max(0.0, metres); }
+  double get_collision_repulsion_deadband() const        { return collision_repulsion_deadband_; }
+
+  /** Fraction of desired recovery velocity applied when inside min_distance.
+   *  Default 0.2.  Lower = gentler push-back; higher = faster escape. */
+  void   set_collision_recovery_scale(double scale) { collision_recovery_scale_ = std::clamp(scale, 0.01, 2.0); }
+  double get_collision_recovery_scale() const       { return collision_recovery_scale_; }
+
+  /** Maximum separation speed (m/s) for non-penetrating recovery.
+   *  Default 0.15 m/s. */
+  void   set_collision_max_separation_speed_nonpenetrating(double mps) { collision_max_sep_speed_nonpen_ = std::max(0.0, mps); }
+  double get_collision_max_separation_speed_nonpenetrating() const     { return collision_max_sep_speed_nonpen_; }
+
   /**
    * @brief Enable/disable cached collision pair candidate evaluation.
    *
@@ -1019,6 +1035,11 @@ private:
   // link names to geometry names at call time. Survives configure_collision_constraint().
   // Active per-pair overrides: applied immediately every solve tick.
   std::unordered_map<std::string, double> per_pair_min_distance_overrides_;
+  // Tunable collision boundary behaviour (default values mirror the file-scope
+  // constexpr constants; exposed via Python for runtime sweep / autoresearch).
+  double collision_repulsion_deadband_           = 3e-3;  // m above min_dist: lb=0 zone
+  double collision_recovery_scale_               = 0.2;   // fraction of desired recovery vel
+  double collision_max_sep_speed_nonpen_         = 0.15;  // m/s cap for non-penetrating recovery
   // Pending (deferred) overrides: promoted to active the first time the pair
   // achieves the desired clearance (latch-on). Set via activate_when_clear=true.
   std::unordered_map<std::string, double> per_pair_deferred_overrides_;
