@@ -2208,12 +2208,30 @@ KinematicsSolver::compute_collision_constraint() {
   // Fast path: when the cache is warm and previous step confirmed all pairs
   // are well clear of the activation threshold, skip the expensive geometry
   // update entirely and return an empty constraint (no active rows).
+  //
+  // Two guards prevent stale data from permanently silencing the constraint:
+  //   1. Refresh interval — forces a full scan every N steps (catches gradual
+  //      approach that was missed while all pairs appeared far away).
+  //   2. Delta-q threshold — if the robot moved significantly since the last
+  //      full scan, last_constraint_min_distance_ may no longer reflect reality
+  //      (e.g., arm folded from extended clear-space back toward the torso).
+  //      In that case skip the fast path and recompute.
+  // Guard 2 for fast-path: robot must not have moved substantially since the
+  // last full scan (last_constraint_min_distance_ might be stale otherwise).
+  // kFastPathMaxDqSqNorm ≈ 0.1 rad total joint change.
+  constexpr double kFastPathMaxDqSqNorm = 0.01;
+  const bool robot_q_stable =
+      last_collision_constraint_q_.size() == robot_->nq() &&
+      (robot_->get_current_configuration() - last_collision_constraint_q_)
+              .squaredNorm() <= kFastPathMaxDqSqNorm;
+
   if (constraint_active && collision_pair_cache_enabled_ &&
-      collision_pair_cache_has_full_scan_ &&
+      collision_pair_cache_has_full_scan_ && robot_q_stable &&
       !last_collision_budget_exhausted_ &&
       std::isfinite(last_constraint_min_distance_) &&
       collision_constraint_->constraint_activation_enabled &&
-      collision_constraint_->constraint_activation_margin > 0.0) {
+      collision_constraint_->constraint_activation_margin > 0.0 &&
+      collision_pair_cache_steps_since_refresh_ < collision_pair_cache_refresh_interval_) {
     const double activation_threshold =
         collision_constraint_->min_distance +
         collision_constraint_->constraint_activation_margin;
