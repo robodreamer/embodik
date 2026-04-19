@@ -380,6 +380,23 @@ void bind_kinematics_solver(nb::module_ &m) {
       .def("get_collision_pair_min_distance_overrides",
            &KinematicsSolver::get_collision_pair_min_distance_overrides,
            "Return list of (pair_key, min_distance) tuples for all active per-pair overrides.")
+      // ---- Tunable collision boundary parameters (for sweep / autoresearch) ----
+      .def("set_collision_repulsion_deadband",
+           &KinematicsSolver::set_collision_repulsion_deadband, nb::arg("metres"),
+           "Width (m) of the no-braking zone above min_distance.  Default 0.003 m.\n"
+           "Set to 0 to eliminate the discontinuity that causes boundary oscillation.")
+      .def("get_collision_repulsion_deadband",
+           &KinematicsSolver::get_collision_repulsion_deadband)
+      .def("set_collision_recovery_scale",
+           &KinematicsSolver::set_collision_recovery_scale, nb::arg("scale"),
+           "Fraction of desired recovery velocity applied inside min_distance.  Default 0.2.")
+      .def("get_collision_recovery_scale",
+           &KinematicsSolver::get_collision_recovery_scale)
+      .def("set_collision_max_separation_speed_nonpenetrating",
+           &KinematicsSolver::set_collision_max_separation_speed_nonpenetrating, nb::arg("mps"),
+           "Max separation speed (m/s) for non-penetrating recovery.  Default 0.15 m/s.")
+      .def("get_collision_max_separation_speed_nonpenetrating",
+           &KinematicsSolver::get_collision_max_separation_speed_nonpenetrating)
       .def("enable_collision_pair_cache",
            &KinematicsSolver::enable_collision_pair_cache,
            nb::arg("enable"),

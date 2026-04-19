@@ -2745,8 +2745,14 @@ KinematicsSolver::compute_collision_constraint() {
     // - outside deadband: allow approach up to the damper limit (negative lb)
     // - inside deadband (min <= d < min+deadband): no-approach (lb=0)
     // - violated (d < min): continuous recovery ramp without discrete tiers
+    // Note: collision_repulsion_deadband_ defaults to kCollisionRepulsionDeadband
+    // (3mm) but is tunable at runtime via set_collision_repulsion_deadband().
+    // Setting it to 0 removes the discontinuity that causes boundary oscillation.
+    const double repulsion_deadband  = collision_repulsion_deadband_;
+    const double recovery_scale      = collision_recovery_scale_;
+    const double max_sep_speed_nonpen = collision_max_sep_speed_nonpen_;
     double lower_bound = 0.0;
-    if (signed_distance >= (effective_min_distance + kCollisionRepulsionDeadband)) {
+    if (signed_distance >= (effective_min_distance + repulsion_deadband)) {
       lower_bound =
           (effective_min_distance + config.tolerance - signed_distance) / dt;
     } else if (signed_distance >= effective_min_distance) {
@@ -2759,8 +2765,8 @@ KinematicsSolver::compute_collision_constraint() {
           (effective_min_distance + config.tolerance - signed_distance) / dt;
       if (signed_distance >= 0.0) {
         // Non-penetrating: proportional recovery, capped.
-        lower_bound = std::min(kCollisionMaxSeparationSpeedNonPenetration,
-                               std::max(0.0, desired * kCollisionRecoveryScale));
+        lower_bound = std::min(max_sep_speed_nonpen,
+                               std::max(0.0, desired * recovery_scale));
       } else {
         // Penetrating: enforce a minimum recovery speed, still capped.
         lower_bound = std::min(kCollisionMaxSeparationSpeed, desired);
@@ -2774,9 +2780,9 @@ KinematicsSolver::compute_collision_constraint() {
           (effective_min_distance + config.tolerance - signed_distance) / dt;
       lower_bound = std::max(
           lower_bound,
-          std::min(kCollisionMaxSeparationSpeedNonPenetration,
+          std::min(max_sep_speed_nonpen,
                    std::max(kCollisionStuckRecoverySpeed,
-                            desired * kCollisionRecoveryScale)));
+                            desired * recovery_scale)));
     }
 
     const double upper_bound =
