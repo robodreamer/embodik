@@ -783,6 +783,19 @@ public:
       const Eigen::VectorXd &q);
 
   /**
+   * @brief Check per-pair override violations at q.
+   *
+   * For each pair that has an active per-pair min_distance override, computes
+   * the exact signed distance and subtracts the override threshold.  Returns
+   * the worst (most negative) margin across all such pairs, or nullopt if there
+   * are no active overrides.  A negative return means at least one custom pair
+   * is inside its override threshold even if the global min_distance is not
+   * violated — this is the "gap" the global post-step check misses.
+   */
+  std::optional<double> evaluate_per_pair_override_violations(
+      const Eigen::VectorXd &q);
+
+  /**
    * @brief Evaluate minimum collision distance at the given configuration.
    * @param current_q Configuration to evaluate (empty = use current).
    * @return Minimum distance, or nullopt if no collision geometry.
