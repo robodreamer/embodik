@@ -1135,6 +1135,46 @@ KinematicsSolver::evaluate_post_step_collision_distance(
   return evaluate_min_collision_distance(q);
 }
 
+std::optional<double>
+KinematicsSolver::evaluate_per_pair_override_violations(const Eigen::VectorXd &q) {
+#ifdef PINOCCHIO_WITH_HPP_FCL
+  if (per_pair_min_distance_overrides_.empty()) return std::nullopt;
+  const auto *geom_model = robot_->collision_model();
+  if (!geom_model) return std::nullopt;
+
+  double worst_margin = std::numeric_limits<double>::infinity();
+  bool any_checked = false;
+  const auto &pairs = geom_model->collisionPairs;
+
+  for (std::size_t pi = 0; pi < pairs.size(); ++pi) {
+    // Skip excluded pairs.
+    if (!collision_allowed_pair_mask_.empty() &&
+        pi < collision_allowed_pair_mask_.size() &&
+        !collision_allowed_pair_mask_[pi]) continue;
+
+    const auto &cp = pairs[pi];
+    const auto &name_a = geom_model->geometryObjects[cp.first].name;
+    const auto &name_b = geom_model->geometryObjects[cp.second].name;
+    const auto oit =
+        per_pair_min_distance_overrides_.find(canonical_pair_key(name_a, name_b));
+    if (oit == per_pair_min_distance_overrides_.end()) continue;
+
+    // This pair has an active override — compute its exact distance.
+    auto dist_opt = evaluate_min_collision_distance_targeted(q, {pi});
+    if (!dist_opt.has_value() || !std::isfinite(*dist_opt)) continue;
+
+    const double margin = *dist_opt - oit->second;  // negative → violated
+    worst_margin = std::min(worst_margin, margin);
+    any_checked = true;
+  }
+
+  return any_checked ? std::make_optional(worst_margin) : std::nullopt;
+#else
+  (void)q;
+  return std::nullopt;
+#endif
+}
+
 void KinematicsSolver::add_collision_constraint(
     const std::vector<std::pair<std::string, std::string>> &link_pairs,
     double min_distance) {
@@ -4484,6 +4524,12 @@ PositionIKResult KinematicsSolver::solve_position(
     // Post-solve collision rejection (same logic as solve_position_step).
     if (step_moved && collision_constraint_.has_value() &&
         collision_constraint_->enabled) {
+      // violation_threshold: use global min_distance as the base.
+      // Per-pair overrides can have higher (stricter) thresholds; those are
+      // checked separately below via evaluate_per_pair_override_violations()
+      // so that custom pairs cannot penetrate past their individual limits
+      // even when the global threshold is more lenient (e.g. after stall
+      // handler relaxation or when global < per-pair override).
       const double violation_threshold = collision_constraint_->min_distance;
       auto post_dist_debug = evaluate_post_step_collision_distance(q_current);
       if (post_dist_debug.has_value() &&
@@ -4509,6 +4555,26 @@ PositionIKResult KinematicsSolver::solve_position(
           if (seed_was_safe) {
             collision_violated_flag_mt = true;
             break;
+          }
+        }
+      } else if (!per_pair_min_distance_overrides_.empty() && step_moved) {
+        // Global check passed but per-pair overrides can be stricter.
+        // Check whether any custom pair is inside its individual threshold.
+        const auto pp_post = evaluate_per_pair_override_violations(q_current);
+        if (pp_post.has_value() && *pp_post < 0.0) {
+          const auto pp_pre = evaluate_per_pair_override_violations(q_pre_step);
+          const double pre_margin = pp_pre.value_or(std::numeric_limits<double>::infinity());
+          const bool seed_safe_pp = (pre_margin >= 0.0);
+          const bool deepened_pp = (pre_margin < 0.0 &&
+              *pp_post < pre_margin - kCollisionPenetrationWorsenTolerance);
+          if (seed_safe_pp || deepened_pp) {
+            q_current = q_pre_step;
+            robot_->update_configuration(q_current);
+            result.collision_rejection_count++;
+            if (seed_safe_pp) {
+              collision_violated_flag_mt = true;
+              break;
+            }
           }
         }
       }
@@ -4912,6 +4978,12 @@ PositionIKResult KinematicsSolver::solve_position_step(
         collision_constraint_->enabled) {
       // Use min_distance as the violation threshold so that q_solution is
       // guaranteed collision-safe (not merely penetration-free).
+      // violation_threshold: use global min_distance as the base.
+      // Per-pair overrides can have higher (stricter) thresholds; those are
+      // checked separately below via evaluate_per_pair_override_violations()
+      // so that custom pairs cannot penetrate past their individual limits
+      // even when the global threshold is more lenient (e.g. after stall
+      // handler relaxation or when global < per-pair override).
       const double violation_threshold = collision_constraint_->min_distance;
       std::optional<double> post_dist_debug =
           adaptive_step_large
@@ -4980,6 +5052,26 @@ PositionIKResult KinematicsSolver::solve_position_step(
               break;
             }
             // Violated seed: hold at seed, let stall handler relax min_distance.
+          }
+        }
+      } else if (!per_pair_min_distance_overrides_.empty() && step_moved) {
+        // Global check passed but per-pair overrides may be stricter.
+        const auto pp_post = evaluate_per_pair_override_violations(q);
+        if (pp_post.has_value() && *pp_post < 0.0) {
+          const auto pp_pre = evaluate_per_pair_override_violations(q_pre_step);
+          const double pre_margin = pp_pre.value_or(std::numeric_limits<double>::infinity());
+          const bool seed_safe_pp = (pre_margin >= 0.0);
+          const bool deepened_pp = (pre_margin < 0.0 &&
+              *pp_post < pre_margin - kCollisionPenetrationWorsenTolerance);
+          if (seed_safe_pp || deepened_pp) {
+            q = q_pre_step;
+            robot_->update_configuration(q);
+            step_collision_rejected = true;
+            result.collision_rejection_count++;
+            if (seed_safe_pp) {
+              collision_violated_flag = true;
+              break;
+            }
           }
         }
       }
@@ -5667,6 +5759,12 @@ PositionIKResult KinematicsSolver::solve_position_step(
     // threshold (mirrors single-target overload fix).
     if (step_moved && collision_constraint_.has_value() &&
         collision_constraint_->enabled) {
+      // violation_threshold: use global min_distance as the base.
+      // Per-pair overrides can have higher (stricter) thresholds; those are
+      // checked separately below via evaluate_per_pair_override_violations()
+      // so that custom pairs cannot penetrate past their individual limits
+      // even when the global threshold is more lenient (e.g. after stall
+      // handler relaxation or when global < per-pair override).
       const double violation_threshold = collision_constraint_->min_distance;
       auto post_dist_debug = evaluate_post_step_collision_distance(q);
       if (post_dist_debug.has_value() &&
@@ -5716,6 +5814,26 @@ PositionIKResult KinematicsSolver::solve_position_step(
             step_collision_rejected = true;
             result.collision_rejection_count++;
             if (seed_was_safe) {
+              collision_violated_flag_mts = true;
+              break;
+            }
+          }
+        }
+      } else if (!per_pair_min_distance_overrides_.empty() && step_moved) {
+        // Per-pair override check (same pattern as other overloads).
+        const auto pp_post = evaluate_per_pair_override_violations(q);
+        if (pp_post.has_value() && *pp_post < 0.0) {
+          const auto pp_pre = evaluate_per_pair_override_violations(q_pre_step);
+          const double pre_margin = pp_pre.value_or(std::numeric_limits<double>::infinity());
+          const bool seed_safe_pp = (pre_margin >= 0.0);
+          const bool deepened_pp = (pre_margin < 0.0 &&
+              *pp_post < pre_margin - kCollisionPenetrationWorsenTolerance);
+          if (seed_safe_pp || deepened_pp) {
+            q = q_pre_step;
+            robot_->update_configuration(q);
+            step_collision_rejected = true;
+            result.collision_rejection_count++;
+            if (seed_safe_pp) {
               collision_violated_flag_mts = true;
               break;
             }
