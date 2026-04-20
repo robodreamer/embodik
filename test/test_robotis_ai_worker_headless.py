@@ -12,7 +12,7 @@ import pytest
 embodik = pytest.importorskip("embodik")
 
 from examples.incubating.example_helpers.robotis_ai_worker_utils import (  # noqa: E402
-    default_worker_allowed_joint_names,
+    default_worker_ik_joint_names,
     resolve_ai_worker_frames,
     resolve_ffw_urdf_path,
 )
@@ -37,7 +37,7 @@ def _frame_pose_matrix(robot, frame_name: str) -> np.ndarray:
 
 def _build_locked_velocity_indices(robot) -> list[int]:
     joint_names = list(robot.get_joint_names())
-    allowed_joint_names = default_worker_allowed_joint_names(joint_names)
+    allowed_joint_names = set(default_worker_ik_joint_names(joint_names))
     locked: list[int] = []
     for joint_name in joint_names:
         if joint_name in allowed_joint_names:
@@ -47,6 +47,22 @@ def _build_locked_velocity_indices(robot) -> list[int]:
         for offset in range(max(nv_joint, 1)):
             locked.append(idx_v + offset)
     return sorted(set(locked))
+
+
+def test_reduced_worker_ik_joint_set_excludes_wheels_and_head() -> None:
+    urdf = resolve_ffw_urdf_path("sg2")
+    reduced = embodik.RobotModel(
+        str(urdf),
+        actuated_joint_names=default_worker_ik_joint_names(embodik.RobotModel(str(urdf), floating_base=False).get_joint_names()),
+        floating_base=False,
+    )
+    joint_names = list(reduced.get_joint_names())
+    assert "lift_joint" in joint_names
+    assert any(name.startswith("arm_l_") for name in joint_names)
+    assert any(name.startswith("arm_r_") for name in joint_names)
+    assert not any("wheel_" in name for name in joint_names)
+    assert not any(name.startswith("head_") for name in joint_names)
+    assert not any(name.startswith("gripper_") for name in joint_names)
 
 
 def _solve_single_step(
