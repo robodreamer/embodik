@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import argparse
 import sys
+import tempfile
 import time
 from pathlib import Path
+import xml.etree.ElementTree as ET
 
 import numpy as np
 
@@ -34,6 +36,35 @@ from examples.incubating.g1_port_phase1.robust_ik_runtime import (
     configure_primary_solve_mode,
     robust_solve_position_step,
 )
+
+DEFAULT_SOLVER_DT = 0.01
+DEFAULT_POS_GAIN = 10.0
+DEFAULT_ROT_GAIN = 10.0
+DEFAULT_POSTURE_WEIGHT = 1e-2
+DEFAULT_ARM_NULLSPACE_WEIGHT = 1e-2
+COLLISION_TUNING_OPTIONS = ("speed", "balanced", "precise")
+POSTURE_SLIDER_DEADBAND = 1e-3
+EE_POSITION_DEADBAND = 1e-4
+EE_ROTATION_DEADBAND = 1e-3
+DEFAULT_WORKER_SEED = {
+    "lift_joint": 0.0,
+    "head_joint1": 0.0,
+    "head_joint2": 0.0,
+    "arm_l_joint1": 0.50,
+    "arm_l_joint2": 0.35,
+    "arm_l_joint3": 0.10,
+    "arm_l_joint4": -1.90,
+    "arm_l_joint5": 0.35,
+    "arm_l_joint6": -0.15,
+    "arm_l_joint7": 0.0,
+    "arm_r_joint1": 0.50,
+    "arm_r_joint2": -0.35,
+    "arm_r_joint3": -0.10,
+    "arm_r_joint4": -1.90,
+    "arm_r_joint5": -0.35,
+    "arm_r_joint6": -0.15,
+    "arm_r_joint7": 0.0,
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -63,48 +94,181 @@ def _ctrl_from_pose(ctrl, pose) -> None:
     ctrl.wxyz = (float(q_xyzw[3]), float(q_xyzw[0]), float(q_xyzw[1]), float(q_xyzw[2]))
 
 
+def _rotation_error_rad(R_target: np.ndarray, R_current: np.ndarray) -> float:
+    R_rel = np.asarray(R_target, dtype=float) @ np.asarray(R_current, dtype=float).T
+    cos_theta = float((np.trace(R_rel) - 1.0) * 0.5)
+    cos_theta = float(np.clip(cos_theta, -1.0, 1.0))
+    return float(np.arccos(cos_theta))
+
+
+def _apply_named_joint_seed(
+    q_seed: np.ndarray,
+    joint_name_to_cfg: dict[str, int],
+    q_lo: np.ndarray,
+    q_hi: np.ndarray,
+    joint_values: dict[str, float],
+) -> np.ndarray:
+    q_out = np.asarray(q_seed, dtype=float).copy()
+    for joint_name, value in joint_values.items():
+        idx = joint_name_to_cfg.get(joint_name)
+        if idx is None or idx >= q_out.size:
+            continue
+        q_out[idx] = float(value)
+    return np.clip(q_out, np.asarray(q_lo, dtype=float), np.asarray(q_hi, dtype=float))
+
+
+def _prepare_viewer_urdf_path(urdf_path: Path) -> Path:
+    """Rewrite broken absolute mesh URIs for Viser-only loading when needed."""
+    tree = ET.parse(urdf_path)
+    root = tree.getroot()
+    changed = False
+
+    def _find_local_mesh(name: str) -> Path | None:
+        candidates = [
+            urdf_path.parent / "meshes" / name,
+            urdf_path.parent / name,
+        ]
+        for candidate in candidates:
+            if candidate.is_file():
+                return candidate
+        try:
+            return next(urdf_path.parent.rglob(name))
+        except StopIteration:
+            return None
+
+    for geometry in root.findall(".//geometry"):
+        mesh = geometry.find("mesh")
+        if mesh is None:
+            continue
+        filename = str(mesh.get("filename", "")).strip()
+        if not filename.startswith("file://"):
+            continue
+        mesh_path = Path(filename[len("file://") :])
+        try:
+            if mesh_path.is_file():
+                mesh.set("filename", str(mesh_path))
+                changed = True
+                continue
+        except (OSError, PermissionError):
+            pass
+        replacement = _find_local_mesh(mesh_path.name)
+        if replacement is not None:
+            mesh.set("filename", str(replacement))
+        else:
+            geometry.remove(mesh)
+            ET.SubElement(geometry, "box", size="0.001 0.001 0.001")
+        changed = True
+
+    if not changed:
+        return urdf_path
+
+    tmp = tempfile.NamedTemporaryFile(
+        mode="w",
+        suffix=f"_{urdf_path.stem}_viser.urdf",
+        prefix="embodik_",
+        delete=False,
+    )
+    tree.write(tmp, encoding="unicode")
+    tmp.close()
+    return Path(tmp.name)
+
+
+def _generate_consecutive_collision_exclusions(robot) -> list[tuple[str, str]]:
+    """Exclude likely adjacent link pairs, mirroring the G1 collision demos."""
+    if not hasattr(robot, "get_collision_pair_names") or not hasattr(robot, "get_collision_geometries"):
+        return []
+    try:
+        pair_names = list(robot.get_collision_pair_names())
+        geoms = list(robot.get_collision_geometries())
+    except Exception:
+        return []
+
+    parent_joint_by_geom: dict[str, int] = {}
+    parent_frame_by_geom: dict[str, str] = {}
+    for geom in geoms:
+        name = str(geom.get("name", ""))
+        if not name:
+            continue
+        parent_frame_by_geom[name] = str(geom.get("parent_frame", ""))
+        try:
+            parent_joint_by_geom[name] = int(geom.get("parent_joint", -10_000))
+        except Exception:
+            parent_joint_by_geom[name] = -10_000
+
+    exclusions: list[tuple[str, str]] = []
+    for a, b in pair_names:
+        a = str(a)
+        b = str(b)
+        ja = parent_joint_by_geom.get(a, -10_000)
+        jb = parent_joint_by_geom.get(b, -10_000)
+        fa = parent_frame_by_geom.get(a, "")
+        fb = parent_frame_by_geom.get(b, "")
+        if (fa and fb and fa == fb) or (ja > -9999 and jb > -9999 and abs(ja - jb) <= 1):
+            exclusions.append((a, b))
+    return exclusions
+
+
+def _apply_collision_tuning_mode(solver, mode_label: str) -> None:
+    label = str(mode_label).lower()
+    if hasattr(solver, "set_collision_tuning_mode") and hasattr(embodik, "CollisionTuningMode"):
+        mode_map = {
+            "precise": embodik.CollisionTuningMode.PRECISE,
+            "balanced": embodik.CollisionTuningMode.BALANCED,
+            "speed": embodik.CollisionTuningMode.SPEED,
+        }
+        solver.set_collision_tuning_mode(mode_map.get(label, embodik.CollisionTuningMode.SPEED))
+
+
+def _configure_collision_constraint(
+    solver,
+    *,
+    enabled: bool,
+    min_distance_m: float,
+    tuning_mode: str,
+    exclude_pairs: list[tuple[str, str]],
+) -> None:
+    if not hasattr(solver, "configure_collision_constraint"):
+        return
+    if enabled:
+        _apply_collision_tuning_mode(solver, tuning_mode)
+        try:
+            solver.configure_collision_constraint(
+                min_distance=float(min_distance_m),
+                include_pairs=[],
+                exclude_pairs=list(exclude_pairs),
+            )
+        except Exception:
+            if hasattr(solver, "clear_collision_constraint"):
+                try:
+                    solver.clear_collision_constraint()
+                except Exception:
+                    pass
+    elif hasattr(solver, "clear_collision_constraint"):
+        solver.clear_collision_constraint()
+
+
 def main() -> None:
     args = parse_args()
     urdf_path = resolve_ffw_urdf_path(args.variant)
 
     import viser
-    from robot_descriptions.loaders.yourdfpy import load_robot_description
+    import yourdfpy
     from viser.extras import ViserUrdf
 
     robot = embodik.RobotModel(str(urdf_path), floating_base=False)
     server = viser.ViserServer(port=args.port)
     server.scene.add_grid("/ground", width=4, height=4)
 
-    urdf_vis = ViserUrdf(server, load_robot_description(str(urdf_path)), root_node_name="/robot")
+    viewer_urdf_path = _prepare_viewer_urdf_path(urdf_path)
+    urdf_vis = ViserUrdf(
+        server,
+        yourdfpy.URDF.load(str(viewer_urdf_path), mesh_dir=urdf_path.parent),
+        root_node_name="/robot",
+    )
     map_q = make_visual_config_mapper(robot, urdf_vis)
 
-    q = robot.neutral_configuration()
     q_lo, q_hi = robot.get_joint_limits()
-    robot.update_configuration(q)
-    urdf_vis.update_cfg(map_q(q))
-
-    frame_map = resolve_ai_worker_frames(robot.get_frame_names())
-    print(f"[worker] variant={args.variant} urdf={urdf_path}")
-    print(f"[worker] frames={frame_map}")
-
-    solver = embodik.KinematicsSolver(robot)
-    solver.dt = 0.01
-    solver.set_damping(0.1)
-    solver.enable_position_limits(True)
-    solver.enable_velocity_limits(True)
-
-    right_task = solver.add_frame_task("right_tool_pose", frame_map["right_tool"], embodik.TaskType.FRAME_POSE)
-    left_task = solver.add_frame_task("left_tool_pose", frame_map["left_tool"], embodik.TaskType.FRAME_POSE)
-    right_task.priority = 0
-    left_task.priority = 0
-    right_task.weight = 1.0
-    left_task.weight = 1.0
-
-    posture = solver.add_posture_task("worker_posture")
-    posture.priority = 1
-    posture.weight = 0.02
-    posture.set_target_configuration(q.copy())
-
+    q = robot.neutral_configuration()
     joint_names = list(robot.get_joint_names())
     joint_name_to_cfg = {}
     if hasattr(robot, "get_joint_config_index"):
@@ -113,11 +277,61 @@ def main() -> None:
                 joint_name_to_cfg[name] = int(robot.get_joint_config_index(name))
             except Exception:
                 pass
+    posture_controlled_indices = [
+        idx
+        for name in ("lift_joint", "head_joint1", "head_joint2")
+        if (idx := joint_name_to_cfg.get(name)) is not None
+    ]
+    q = _apply_named_joint_seed(q, joint_name_to_cfg, q_lo, q_hi, DEFAULT_WORKER_SEED)
+    nullspace_bias_q = np.asarray(q, dtype=float).copy()
+    robot.update_configuration(q)
+    urdf_vis.update_cfg(map_q(q))
+
+    frame_map = resolve_ai_worker_frames(robot.get_frame_names())
+    print(f"[worker] variant={args.variant} urdf={urdf_path}")
+    print(f"[worker] frames={frame_map}")
+
+    def _build_solver(q_posture_seed: np.ndarray):
+        solver_local = embodik.KinematicsSolver(robot)
+        solver_local.dt = DEFAULT_SOLVER_DT
+        solver_local.set_damping(0.1)
+        solver_local.set_tolerance(0.1)
+        solver_local.enable_position_limits(True)
+        solver_local.enable_velocity_limits(True)
+
+        right_task_local = solver_local.add_frame_task(
+            "right_tool_pose", frame_map["right_tool"], embodik.TaskType.FRAME_POSE
+        )
+        left_task_local = solver_local.add_frame_task(
+            "left_tool_pose", frame_map["left_tool"], embodik.TaskType.FRAME_POSE
+        )
+        right_task_local.priority = 0
+        left_task_local.priority = 0
+        right_task_local.weight = 1.0
+        left_task_local.weight = 1.0
+
+        posture_local = solver_local.add_posture_task("worker_posture")
+        posture_local.priority = 1
+        posture_local.weight = DEFAULT_POSTURE_WEIGHT
+        posture_local.set_target_configuration(np.asarray(q_posture_seed, dtype=float).copy())
+        if hasattr(posture_local, "set_controlled_joint_indices"):
+            posture_local.set_controlled_joint_indices(list(posture_controlled_indices))
+        arm_nullspace_local = solver_local.add_posture_task("arm_nullspace")
+        arm_nullspace_local.priority = 1
+        arm_nullspace_local.weight = 0.0
+        arm_nullspace_local.set_target_configuration(np.asarray(nullspace_bias_q, dtype=float).copy())
+        return solver_local, right_task_local, left_task_local, posture_local, arm_nullspace_local
+
+    solver, right_task, left_task, posture, arm_nullspace = _build_solver(q)
+
     allowed_joint_names = default_worker_allowed_joint_names(joint_names)
     locked_velocity_indices: list[int] = []
+    left_arm_velocity_indices: list[int] = []
+    right_arm_velocity_indices: list[int] = []
+    lift_velocity_indices: list[int] = []
+    head_velocity_indices: list[int] = []
+    arm_controlled_indices: list[int] = []
     for joint_name in joint_names:
-        if joint_name in allowed_joint_names:
-            continue
         if not hasattr(robot, "get_joint_velocity_index"):
             continue
         idx_v = int(robot.get_joint_velocity_index(joint_name))
@@ -125,9 +339,40 @@ def main() -> None:
             nv_joint = int(robot.get_joint_velocity_size(joint_name))
         else:
             nv_joint = 1
+        target_index_list = None
+        if joint_name.startswith(("arm_l_", "gripper_l_")):
+            target_index_list = left_arm_velocity_indices
+        elif joint_name.startswith(("arm_r_", "gripper_r_")):
+            target_index_list = right_arm_velocity_indices
+        elif joint_name.startswith("lift_"):
+            target_index_list = lift_velocity_indices
+        elif joint_name.startswith("head_"):
+            target_index_list = head_velocity_indices
         for offset in range(max(nv_joint, 1)):
-            locked_velocity_indices.append(idx_v + offset)
+            expanded_idx = idx_v + offset
+            if target_index_list is not None:
+                target_index_list.append(expanded_idx)
+            if joint_name.startswith("arm_"):
+                arm_controlled_indices.append(expanded_idx)
+            if joint_name in allowed_joint_names:
+                continue
+            locked_velocity_indices.append(expanded_idx)
     locked_velocity_indices = sorted(set(locked_velocity_indices))
+    left_arm_velocity_indices = sorted(set(left_arm_velocity_indices))
+    right_arm_velocity_indices = sorted(set(right_arm_velocity_indices))
+    lift_velocity_indices = sorted(set(lift_velocity_indices))
+    head_velocity_indices = sorted(set(head_velocity_indices))
+    arm_controlled_indices = sorted(set(arm_controlled_indices))
+    if hasattr(arm_nullspace, "set_controlled_joint_indices"):
+        arm_nullspace.set_controlled_joint_indices(list(arm_controlled_indices))
+    collision_exclusions = _generate_consecutive_collision_exclusions(robot)
+    collision_cfg = None
+    collision_available = False
+    if hasattr(robot, "has_collision_geometry"):
+        try:
+            collision_available = bool(robot.has_collision_geometry())
+        except Exception:
+            collision_available = False
 
     def frame_pose(frame_name: str) -> np.ndarray:
         pose = robot.get_frame_pose(frame_name)
@@ -136,10 +381,43 @@ def main() -> None:
         T[:3, 3] = np.asarray(pose.translation, dtype=float)
         return T
 
-    right_ctrl = server.scene.add_transform_controls("/target/right_tool", scale=0.14)
-    left_ctrl = server.scene.add_transform_controls("/target/left_tool", scale=0.14)
-    _ctrl_from_pose(right_ctrl, frame_pose(frame_map["right_tool"]))
-    _ctrl_from_pose(left_ctrl, frame_pose(frame_map["left_tool"]))
+    def _current_task_errors() -> tuple[float, float, float, float]:
+        right_pose_now = frame_pose(frame_map["right_tool"])
+        left_pose_now = frame_pose(frame_map["left_tool"])
+        right_target_pose = _pose_from_ctrl(right_ctrl)
+        left_target_pose = _pose_from_ctrl(left_ctrl)
+        right_pos_err = float(np.linalg.norm(right_target_pose[:3, 3] - right_pose_now[:3, 3]))
+        left_pos_err = float(np.linalg.norm(left_target_pose[:3, 3] - left_pose_now[:3, 3]))
+        right_rot_err = _rotation_error_rad(right_target_pose[:3, :3], right_pose_now[:3, :3])
+        left_rot_err = _rotation_error_rad(left_target_pose[:3, :3], left_pose_now[:3, :3])
+        return right_pos_err, left_pos_err, right_rot_err, left_rot_err
+
+    right_pose0 = frame_pose(frame_map["right_tool"])
+    left_pose0 = frame_pose(frame_map["left_tool"])
+    right_wxyz0_xyzw = r2q(right_pose0[:3, :3], order="xyzs")
+    left_wxyz0_xyzw = r2q(left_pose0[:3, :3], order="xyzs")
+    right_ctrl = server.scene.add_transform_controls(
+        "/target/right_tool",
+        scale=0.2,
+        position=tuple(np.asarray(right_pose0[:3, 3], dtype=float)),
+        wxyz=(
+            float(right_wxyz0_xyzw[3]),
+            float(right_wxyz0_xyzw[0]),
+            float(right_wxyz0_xyzw[1]),
+            float(right_wxyz0_xyzw[2]),
+        ),
+    )
+    left_ctrl = server.scene.add_transform_controls(
+        "/target/left_tool",
+        scale=0.2,
+        position=tuple(np.asarray(left_pose0[:3, 3], dtype=float)),
+        wxyz=(
+            float(left_wxyz0_xyzw[3]),
+            float(left_wxyz0_xyzw[0]),
+            float(left_wxyz0_xyzw[1]),
+            float(left_wxyz0_xyzw[2]),
+        ),
+    )
 
     posture_target = q.copy()
 
@@ -149,59 +427,301 @@ def main() -> None:
             return default
         return float(q[idx])
 
+    def _joint_limits(name: str, default_lo: float, default_hi: float) -> tuple[float, float]:
+        idx = joint_name_to_cfg.get(name)
+        if idx is None or idx >= q_lo.size or idx >= q_hi.size:
+            return float(default_lo), float(default_hi)
+        return float(q_lo[idx]), float(q_hi[idx])
+
+    lift_lo, lift_hi = _joint_limits("lift_joint", -0.5, 0.0)
+    head_pitch_lo, head_pitch_hi = _joint_limits("head_joint1", -0.25, 0.7)
+    head_yaw_lo, head_yaw_hi = _joint_limits("head_joint2", -0.5, 0.5)
+
     with server.gui.add_folder("IK Controls"):
-        ik_steps = server.gui.add_slider("IK Steps", 1, 20, 1, 5)
-        pos_gain = server.gui.add_slider("Position Gain", 1.0, 60.0, 0.5, 14.0)
-        ori_gain = server.gui.add_slider("Orientation Gain", 0.1, 60.0, 0.1, 10.0)
+        timing_handle = server.gui.add_number("Elapsed (ms)", 0.001, disabled=True)
+        auto_ik_solve = server.gui.add_checkbox("Auto IK Solve", initial_value=True)
+        enable_left_ee = server.gui.add_checkbox("Enable Left EE", initial_value=True)
+        enable_right_ee = server.gui.add_checkbox("Enable Right EE", initial_value=True)
+        pos_gain = server.gui.add_slider("Position Gain", min=0.1, max=200.0, initial_value=DEFAULT_POS_GAIN, step=0.1)
+        ori_gain = server.gui.add_slider(
+            "Orientation Gain", min=0.1, max=200.0, initial_value=DEFAULT_ROT_GAIN, step=0.1
+        )
+        ik_steps = server.gui.add_slider("IK Iterations", min=1, max=20, initial_value=1, step=1)
+        adaptive_dt = server.gui.add_checkbox("Adaptive dt", initial_value=False)
+        adaptive_dt_max_scale = server.gui.add_slider(
+            "Adaptive dt Max Scale", min=1.0, max=10.0, step=0.5, initial_value=10.0
+        )
+        adaptive_dt_ref_dist = server.gui.add_slider(
+            "Adaptive dt Ref Dist (m)", min=0.01, max=0.20, step=0.01, initial_value=0.02
+        )
         solve_mode = server.gui.add_dropdown(
-            "Solve Mode",
+            "EE Solve Mode",
             options=("SCALE", "SCALE_ELASTIC", "MIN_ERROR"),
             initial_value="SCALE_ELASTIC",
         )
-        allow_fallback = server.gui.add_checkbox("Allow SCALE fallback", initial_value=False)
+        allow_fallback = server.gui.add_checkbox("Allow SCALE fallback to MIN_ERROR", initial_value=False)
         lock_passive = server.gui.add_checkbox("Lock passive joints", initial_value=True)
-        posture_weight = server.gui.add_slider("Posture Weight", 0.0, 0.2, 0.001, 0.02)
+        arm_nullspace_enable = server.gui.add_checkbox("Enable Arm Nullspace Bias", initial_value=True)
+        arm_nullspace_weight = server.gui.add_slider(
+            "Arm Nullspace Gain", min=0.0, max=2.0, initial_value=DEFAULT_ARM_NULLSPACE_WEIGHT, step=0.01
+        )
+        posture_weight = server.gui.add_slider(
+            "Lift/Head Bias Weight", min=0.0, max=2.0, initial_value=DEFAULT_POSTURE_WEIGHT, step=0.01
+        )
+        lock_lift_joint = server.gui.add_checkbox("Lock Lift Joint During IK", initial_value=False)
+        manual_control = server.gui.add_checkbox("Manual Joint Control", initial_value=False)
+
+    with server.gui.add_folder("Collision"):
+        enable_collision = server.gui.add_checkbox(
+            "Enable self-collision constraint",
+            initial_value=hasattr(solver, "configure_collision_constraint") and collision_available,
+            disabled=not hasattr(solver, "configure_collision_constraint") or not collision_available,
+        )
+        collision_min_dist_mm = server.gui.add_slider(
+            "Collision min distance (mm)", 0.0, 120.0, 1.0, 35.0
+        )
+        collision_tuning = server.gui.add_dropdown(
+            "Collision Tuning",
+            options=COLLISION_TUNING_OPTIONS,
+            initial_value="balanced",
+            disabled=not hasattr(solver, "set_collision_tuning_mode"),
+        )
+        exclude_consecutive = server.gui.add_checkbox(
+            "Exclude consecutive links", initial_value=True, disabled=not collision_exclusions
+        )
+        show_collision_debug = server.gui.add_checkbox(
+            "Show collision debug",
+            initial_value=True,
+            disabled=not hasattr(solver, "get_last_collision_debug"),
+        )
+        collision_debug_text = server.gui.add_text("Collision Debug", initial_value="Collision: --")
+        collision_pairs_stats = server.gui.add_text(
+            "Collision Pairs",
+            initial_value=(
+                f"available={collision_available}, "
+                f"total={len(list(robot.get_collision_pair_names())) if hasattr(robot, 'get_collision_pair_names') else 0}, "
+                f"excluded={len(collision_exclusions)}"
+            ),
+        )
 
     with server.gui.add_folder("Worker Posture"):
-        lift_slider = server.gui.add_slider("Lift Joint", -0.5, 0.0, 0.001, _joint_value("lift_joint"))
-        head_pitch = server.gui.add_slider("Head Pitch", -0.2317, 0.6951, 0.001, _joint_value("head_joint1"))
-        head_yaw = server.gui.add_slider("Head Yaw", -0.35, 0.35, 0.001, _joint_value("head_joint2"))
+        lift_slider = server.gui.add_slider("Lift Joint", lift_lo, lift_hi, 0.001, _joint_value("lift_joint"))
+        head_pitch = server.gui.add_slider(
+            "Head Pitch", head_pitch_lo, head_pitch_hi, 0.001, _joint_value("head_joint1")
+        )
+        head_yaw = server.gui.add_slider("Head Yaw", head_yaw_lo, head_yaw_hi, 0.001, _joint_value("head_joint2"))
         snap_targets = server.gui.add_button("Snap Targets to Current Tools")
         reset_pose = server.gui.add_button("Reset Robot + Targets")
 
+    manual_joint_names = [
+        name
+        for name in joint_names
+        if name in allowed_joint_names and not name.startswith("gripper_")
+    ]
+    joint_sliders = []
+    with server.gui.add_folder("Joint Configuration", expand_by_default=False):
+        for joint_name in manual_joint_names:
+            lo, hi = _joint_limits(joint_name, -1.0, 1.0)
+            joint_sliders.append(
+                (
+                    joint_name,
+                    server.gui.add_slider(
+                        joint_name,
+                        min=float(lo),
+                        max=float(hi),
+                        step=0.001,
+                        initial_value=_joint_value(joint_name),
+                    ),
+                )
+            )
+
     with server.gui.add_folder("Diagnostics"):
-        status = server.gui.add_text("Status", initial_value="running")
+        status = server.gui.add_text("Status", initial_value="Status: Ready")
         solve_ms = server.gui.add_text("Solve time (ms)", initial_value="--")
         right_err = server.gui.add_text("Right err", initial_value="--")
         left_err = server.gui.add_text("Left err", initial_value="--")
 
+    dbg_a = server.scene.add_icosphere(
+        "/collision_debug/point_a", radius=0.015, color=(1.0, 0.2, 0.2), visible=False
+    )
+    dbg_b = server.scene.add_icosphere(
+        "/collision_debug/point_b", radius=0.015, color=(0.2, 0.8, 0.2), visible=False
+    )
+    dbg_line = None
+
+    def _update_collision_debug() -> None:
+        nonlocal dbg_line
+        if not show_collision_debug.value or not hasattr(solver, "get_last_collision_debug"):
+            dbg_a.visible = False
+            dbg_b.visible = False
+            if dbg_line is not None:
+                dbg_line.visible = False
+            collision_debug_text.value = "Collision: --"
+            return
+
+        dbg = solver.get_last_collision_debug()
+        if dbg is None:
+            dbg_a.visible = False
+            dbg_b.visible = False
+            if dbg_line is not None:
+                dbg_line.visible = False
+            collision_debug_text.value = "Collision: --"
+            return
+
+        p_a = np.asarray(dbg.point_a_world, dtype=float)
+        p_b = np.asarray(dbg.point_b_world, dtype=float)
+        dbg_a.position = tuple(p_a)
+        dbg_b.position = tuple(p_b)
+        dbg_a.visible = True
+        dbg_b.visible = True
+        if dbg_line is not None:
+            dbg_line.remove()
+        seg = np.zeros((1, 2, 3), dtype=float)
+        seg[0, 0] = p_a
+        seg[0, 1] = p_b
+        colors = np.array([[[1.0, 0.2, 0.2], [0.2, 0.9, 0.2]]], dtype=float)
+        dbg_line = server.scene.add_line_segments(
+            "/collision_debug/segment",
+            points=seg,
+            colors=colors,
+            line_width=3.0,
+            visible=True,
+        )
+        collision_debug_text.value = f"{dbg.object_a} <-> {dbg.object_b} | d={float(dbg.distance):.4f} m"
+
+    def _sync_joint_sliders_from_q(q_now: np.ndarray) -> None:
+        for joint_name, slider in joint_sliders:
+            idx = joint_name_to_cfg.get(joint_name)
+            if idx is not None and idx < q_now.size:
+                slider.value = float(q_now[idx])
+
+    def _sync_posture_sliders_from_q(q_now: np.ndarray) -> None:
+        for joint_name, slider in (
+            ("lift_joint", lift_slider),
+            ("head_joint1", head_pitch),
+            ("head_joint2", head_yaw),
+        ):
+            idx = joint_name_to_cfg.get(joint_name)
+            if idx is not None and idx < q_now.size:
+                slider.value = float(q_now[idx])
+
+    def _apply_manual_joint_configuration(q_seed: np.ndarray) -> np.ndarray:
+        q_manual = np.asarray(q_seed, dtype=float).copy()
+        for joint_name, slider in joint_sliders:
+            idx = joint_name_to_cfg.get(joint_name)
+            if idx is not None and idx < q_manual.size:
+                q_manual[idx] = float(slider.value)
+        return clip_configuration(robot, q_manual, q_lo, q_hi)
+
+    def _sync_targets_from_robot() -> None:
+        right_pose = frame_pose(frame_map["right_tool"])
+        left_pose = frame_pose(frame_map["left_tool"])
+        _ctrl_from_pose(right_ctrl, right_pose)
+        _ctrl_from_pose(left_ctrl, left_pose)
+        for task, pose in ((right_task, right_pose), (left_task, left_pose)):
+            try:
+                task.set_target_pose(pose[:3, 3], pose[:3, :3])
+            except Exception:
+                pass
+        right_err.value = "0.0000 m"
+        left_err.value = "0.0000 m"
+
+    def _reset_solver_state(reason: str) -> None:
+        nonlocal solver, right_task, left_task, posture, arm_nullspace, collision_cfg
+        solver, right_task, left_task, posture, arm_nullspace = _build_solver(posture_target)
+        if hasattr(arm_nullspace, "set_controlled_joint_indices"):
+            arm_nullspace.set_controlled_joint_indices(list(arm_controlled_indices))
+        collision_cfg = None
+        _sync_targets_from_robot()
+        status.value = f"Status: solver reset after {reason}"
+
     @snap_targets.on_click
     def _(_evt) -> None:
-        _ctrl_from_pose(right_ctrl, frame_pose(frame_map["right_tool"]))
-        _ctrl_from_pose(left_ctrl, frame_pose(frame_map["left_tool"]))
+        _sync_targets_from_robot()
+        status.value = "Status: Targets snapped to current EE poses"
 
     @reset_pose.on_click
     def _(_evt) -> None:
         nonlocal q, posture_target
         q = robot.neutral_configuration()
+        q = _apply_named_joint_seed(q, joint_name_to_cfg, q_lo, q_hi, DEFAULT_WORKER_SEED)
         q = clip_configuration(robot, q, q_lo, q_hi)
         posture_target = q.copy()
         robot.update_configuration(q)
         urdf_vis.update_cfg(map_q(q))
-        _ctrl_from_pose(right_ctrl, frame_pose(frame_map["right_tool"]))
-        _ctrl_from_pose(left_ctrl, frame_pose(frame_map["left_tool"]))
+        _reset_solver_state("manual reset")
+        _sync_joint_sliders_from_q(q)
+        _sync_posture_sliders_from_q(q)
+        _update_collision_debug()
+        timing_handle.value = 0.0
+        solve_ms.value = "--"
+        status.value = "Status: Robot and targets reset"
 
     opts = embodik.PositionStepOptions()
+    _sync_joint_sliders_from_q(q)
+    _sync_posture_sliders_from_q(q)
+    _sync_targets_from_robot()
+    prev_manual_state = False
 
     while True:
         q_prev = np.asarray(q, dtype=float).copy()
         clear_all_target_velocities_if_available(solver)
+
+        exclusion_pairs = collision_exclusions if exclude_consecutive.value else []
+        total_pairs = len(list(robot.get_collision_pair_names())) if hasattr(robot, "get_collision_pair_names") else 0
+        collision_pairs_stats.value = (
+            f"total={total_pairs}, excluded={len(exclusion_pairs)}, effective={max(0, total_pairs - len(exclusion_pairs))}"
+        )
+        next_collision_cfg = (
+            bool(enable_collision.value),
+            float(collision_min_dist_mm.value),
+            str(collision_tuning.value),
+            bool(exclude_consecutive.value),
+        )
+        if next_collision_cfg != collision_cfg:
+            _configure_collision_constraint(
+                solver,
+                enabled=bool(enable_collision.value),
+                min_distance_m=float(collision_min_dist_mm.value) * 1e-3,
+                tuning_mode=str(collision_tuning.value),
+                exclude_pairs=list(exclusion_pairs),
+            )
+            collision_cfg = next_collision_cfg
+
+        if manual_control.value:
+            if not prev_manual_state:
+                _sync_joint_sliders_from_q(q)
+            q = _apply_manual_joint_configuration(q)
+            posture_target = q.copy()
+            robot.update_configuration(q)
+            urdf_vis.update_cfg(map_q(q))
+            _sync_posture_sliders_from_q(q)
+            _update_collision_debug()
+            right_now = np.asarray(robot.get_frame_pose(frame_map["right_tool"]).translation, dtype=float)
+            left_now = np.asarray(robot.get_frame_pose(frame_map["left_tool"]).translation, dtype=float)
+            right_err.value = f"{np.linalg.norm(np.asarray(right_ctrl.position, dtype=float) - right_now):.4f} m"
+            left_err.value = f"{np.linalg.norm(np.asarray(left_ctrl.position, dtype=float) - left_now):.4f} m"
+            status.value = "Status: Manual joint control active"
+            timing_handle.value = 0.0
+            solve_ms.value = "--"
+            prev_manual_state = True
+            time.sleep(0.002)
+            continue
 
         active_mode = getattr(
             embodik.TaskSolveMode,
             solve_mode.value,
             embodik.TaskSolveMode.SCALE,
         )
+        if not bool(enable_left_ee.value):
+            right_ctrl.visible = True
+            left_ctrl.visible = False
+        elif not bool(enable_right_ee.value):
+            right_ctrl.visible = False
+            left_ctrl.visible = True
+        else:
+            right_ctrl.visible = True
+            left_ctrl.visible = True
         for task in (right_task, left_task):
             task.solve_mode = active_mode
             task.allow_min_error_fallback = bool(allow_fallback.value)
@@ -214,33 +734,128 @@ def main() -> None:
         ):
             idx = joint_name_to_cfg.get(joint_name)
             if idx is not None and idx < posture_target.size:
-                posture_target[idx] = float(slider.value)
+                slider_value = float(slider.value)
+                if abs(slider_value - float(q[idx])) < POSTURE_SLIDER_DEADBAND:
+                    posture_target[idx] = float(q[idx])
+                else:
+                    posture_target[idx] = slider_value
         posture.set_target_configuration(posture_target)
+        if bool(arm_nullspace_enable.value) and float(arm_nullspace_weight.value) > 0.0:
+            arm_nullspace.set_target_configuration(nullspace_bias_q)
+            if hasattr(arm_nullspace, "set_controlled_joint_indices"):
+                active_arm_indices = []
+                if bool(enable_left_ee.value):
+                    active_arm_indices.extend(left_arm_velocity_indices)
+                if bool(enable_right_ee.value):
+                    active_arm_indices.extend(right_arm_velocity_indices)
+                arm_nullspace.set_controlled_joint_indices(sorted(set(active_arm_indices)))
+            arm_nullspace.weight = float(arm_nullspace_weight.value)
+        else:
+            arm_nullspace.weight = 0.0
+            if hasattr(arm_nullspace, "set_controlled_joint_indices"):
+                arm_nullspace.set_controlled_joint_indices([])
 
-        targets = [
-            embodik.TaskTarget(
-                "right_tool_pose",
-                _pose_from_ctrl(right_ctrl),
-                float(pos_gain.value),
-                float(ori_gain.value),
-            ),
-            embodik.TaskTarget(
-                "left_tool_pose",
-                _pose_from_ctrl(left_ctrl),
-                float(pos_gain.value),
-                float(ori_gain.value),
-            ),
-        ]
+        right_pos_err, left_pos_err, right_rot_err, left_rot_err = _current_task_errors()
+        posture_err = float(np.linalg.norm(np.asarray(posture_target, dtype=float) - np.asarray(q, dtype=float)))
+        right_active = bool(enable_right_ee.value)
+        left_active = bool(enable_left_ee.value)
+
+        right_task.weight = 1.0 if right_active else 0.0
+        left_task.weight = 1.0 if left_active else 0.0
+
+        right_settled = (not right_active) or (
+            right_pos_err <= EE_POSITION_DEADBAND and right_rot_err <= EE_ROTATION_DEADBAND
+        )
+        left_settled = (not left_active) or (
+            left_pos_err <= EE_POSITION_DEADBAND and left_rot_err <= EE_ROTATION_DEADBAND
+        )
+        settled = right_settled and left_settled and posture_err < POSTURE_SLIDER_DEADBAND
+        if settled:
+            robot.update_configuration(q)
+            urdf_vis.update_cfg(map_q(q))
+            _sync_joint_sliders_from_q(q)
+            _sync_posture_sliders_from_q(q)
+            _update_collision_debug()
+            right_err.value = f"{right_pos_err:.4f} m"
+            left_err.value = f"{left_pos_err:.4f} m"
+            status.value = "Status: Holding target"
+            timing_handle.value = 0.0
+            solve_ms.value = "--"
+            prev_manual_state = False
+            time.sleep(0.002)
+            continue
+
+        if not bool(auto_ik_solve.value):
+            robot.update_configuration(q)
+            urdf_vis.update_cfg(map_q(q))
+            _update_collision_debug()
+            _sync_joint_sliders_from_q(q)
+            _sync_posture_sliders_from_q(q)
+            right_err.value = f"{right_pos_err:.4f} m"
+            left_err.value = f"{left_pos_err:.4f} m"
+            status.value = "Status: Auto IK solve disabled"
+            timing_handle.value = 0.0
+            solve_ms.value = "--"
+            prev_manual_state = False
+            time.sleep(0.002)
+            continue
+
+        targets = []
+        if right_active:
+            targets.append(
+                embodik.TaskTarget(
+                    "right_tool_pose",
+                    _pose_from_ctrl(right_ctrl),
+                    float(pos_gain.value),
+                    float(ori_gain.value),
+                )
+            )
+        if left_active:
+            targets.append(
+                embodik.TaskTarget(
+                    "left_tool_pose",
+                    _pose_from_ctrl(left_ctrl),
+                    float(pos_gain.value),
+                    float(ori_gain.value),
+                )
+            )
         opts.max_steps = int(ik_steps.value)
         opts.position_gain = float(pos_gain.value)
         opts.orientation_gain = float(ori_gain.value)
+        opts.adaptive_dt = bool(adaptive_dt.value)
+        opts.adaptive_dt_max_scale = float(adaptive_dt_max_scale.value)
+        opts.adaptive_dt_reference_distance = float(adaptive_dt_ref_dist.value)
         configure_primary_solve_mode(opts, active_mode, bool(allow_fallback.value))
+        dynamic_freeze_indices = []
+        right_task_excluded = list(left_arm_velocity_indices)
+        left_task_excluded = list(right_arm_velocity_indices)
+        if bool(lock_lift_joint.value):
+            right_task_excluded.extend(lift_velocity_indices)
+            left_task_excluded.extend(lift_velocity_indices)
+        if hasattr(right_task, "set_excluded_joint_indices"):
+            if right_active and right_task_excluded:
+                right_task.set_excluded_joint_indices(sorted(set(right_task_excluded)))
+            elif hasattr(right_task, "clear_excluded_joint_indices"):
+                right_task.clear_excluded_joint_indices()
+        if hasattr(left_task, "set_excluded_joint_indices"):
+            if left_active and left_task_excluded:
+                left_task.set_excluded_joint_indices(sorted(set(left_task_excluded)))
+            elif hasattr(left_task, "clear_excluded_joint_indices"):
+                left_task.clear_excluded_joint_indices()
+        if right_active and not left_active:
+            dynamic_freeze_indices.extend(left_arm_velocity_indices)
+        elif left_active and not right_active:
+            dynamic_freeze_indices.extend(right_arm_velocity_indices)
+        if bool(lock_lift_joint.value):
+            dynamic_freeze_indices.extend(lift_velocity_indices)
         if lock_passive.value:
-            opts.excluded_joint_indices = list(locked_velocity_indices)
-            opts.integration_zero_velocity_indices = list(locked_velocity_indices)
+            opts.excluded_joint_indices = sorted(set(list(locked_velocity_indices) + dynamic_freeze_indices))
+            opts.integration_zero_velocity_indices = sorted(
+                set(list(locked_velocity_indices) + dynamic_freeze_indices)
+            )
         else:
-            opts.excluded_joint_indices = []
-            opts.integration_zero_velocity_indices = []
+            opts.excluded_joint_indices = sorted(set(dynamic_freeze_indices))
+            opts.integration_zero_velocity_indices = sorted(set(dynamic_freeze_indices))
 
         step = robust_solve_position_step(
             robot=robot,
@@ -258,8 +873,13 @@ def main() -> None:
         if not np.all(np.isfinite(q)):
             q = q_prev
 
+        result_status_name = getattr(getattr(result, "status", None), "name", str(getattr(result, "status", "")))
+
         robot.update_configuration(q)
         urdf_vis.update_cfg(map_q(q))
+        _sync_joint_sliders_from_q(q)
+        _sync_posture_sliders_from_q(q)
+        _update_collision_debug()
 
         right_now = np.asarray(robot.get_frame_pose(frame_map["right_tool"]).translation, dtype=float)
         left_now = np.asarray(robot.get_frame_pose(frame_map["left_tool"]).translation, dtype=float)
@@ -267,11 +887,21 @@ def main() -> None:
         left_tgt = np.asarray(left_ctrl.position, dtype=float)
         right_err.value = f"{np.linalg.norm(right_tgt - right_now):.4f} m"
         left_err.value = f"{np.linalg.norm(left_tgt - left_now):.4f} m"
-        status.value = (
-            f"{result.status.name}"
-            + (f" | {result.status_message}" if getattr(result, "status_message", "") else "")
-        )
+        if result_status_name == "NO_PROGRESS" and max(right_pos_err, left_pos_err) <= EE_POSITION_DEADBAND:
+            status.value = "Status: Holding target"
+        elif result_status_name == "NO_PROGRESS":
+            status.value = (
+                "Status: weak progress"
+                + (f" | {result.status_message}" if getattr(result, "status_message", "") else "")
+            )
+        else:
+            status.value = (
+                f"Status: {result.status.name}"
+                + (f" | {result.status_message}" if getattr(result, "status_message", "") else "")
+            )
+        timing_handle.value = float(step.elapsed_ms)
         solve_ms.value = f"{step.elapsed_ms:.2f}"
+        prev_manual_state = False
         time.sleep(0.002)
 
 
