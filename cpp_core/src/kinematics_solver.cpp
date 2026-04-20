@@ -332,6 +332,86 @@ static void sanitize_solver_inputs(std::vector<Eigen::VectorXd> &goals,
   }
 }
 
+static void apply_constraint_softening_in_place(
+    Eigen::VectorXd &lower, Eigen::VectorXd &upper,
+    const Eigen::VectorXd &max_softening_factors, double softening_scale = 1.0) {
+  if (lower.size() != upper.size() ||
+      lower.size() != max_softening_factors.size()) {
+    return;
+  }
+  for (Eigen::Index i = 0; i < lower.size(); ++i) {
+    const double max_factor = max_softening_factors(i);
+    if (!std::isfinite(max_factor) || max_factor <= 1.0) {
+      continue;
+    }
+    const double base_half_span = 0.5 * (upper(i) - lower(i));
+    if (!std::isfinite(base_half_span) || base_half_span <= 0.0) {
+      continue;
+    }
+    const double center = 0.5 * (upper(i) + lower(i));
+    const double factor = std::clamp(softening_scale, 1.0, max_factor);
+    lower(i) = center - factor * base_half_span;
+    upper(i) = center + factor * base_half_span;
+  }
+}
+
+static bool has_rowwise_interval_feasibility(
+    const Eigen::MatrixXd &C, const Eigen::VectorXd &c_lower,
+    const Eigen::VectorXd &c_upper, const Eigen::VectorXd &dq_lower_seed,
+    const Eigen::VectorXd &dq_upper_seed, double tol) {
+  if (C.rows() != c_lower.size() || C.rows() != c_upper.size()) {
+    return false;
+  }
+  if (C.cols() != dq_lower_seed.size() || C.cols() != dq_upper_seed.size()) {
+    return false;
+  }
+  Eigen::VectorXd dq_lower = dq_lower_seed;
+  Eigen::VectorXd dq_upper = dq_upper_seed;
+  for (int j = 0; j < C.cols(); ++j) {
+    for (int r = 0; r < C.rows(); ++r) {
+      const double a_j = C(r, j);
+      if (std::abs(a_j) <= 1e-12) {
+        continue;
+      }
+      double others_min = 0.0;
+      double others_max = 0.0;
+      for (int k = 0; k < C.cols(); ++k) {
+        if (k == j) {
+          continue;
+        }
+        const double a_k = C(r, k);
+        if (std::abs(a_k) <= 1e-12) {
+          continue;
+        }
+        const double lk = dq_lower(k);
+        const double uk = dq_upper(k);
+        if (!std::isfinite(lk) || !std::isfinite(uk)) {
+          continue;
+        }
+        if (a_k >= 0.0) {
+          others_min += a_k * lk;
+          others_max += a_k * uk;
+        } else {
+          others_min += a_k * uk;
+          others_max += a_k * lk;
+        }
+      }
+
+      double local_lower = (c_lower(r) - others_max) / a_j;
+      double local_upper = (c_upper(r) - others_min) / a_j;
+      if (a_j < 0.0) {
+        std::swap(local_lower, local_upper);
+      }
+      dq_lower(j) = std::max(dq_lower(j), local_lower);
+      dq_upper(j) = std::min(dq_upper(j), local_upper);
+      if (dq_lower(j) > dq_upper(j) + tol) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
 
 static ClassifiedOutcome classify_velocity_outcome(
     SolverStatus backend_status, const std::string &backend_status_message,
@@ -409,6 +489,48 @@ static bool validate_position_step_joint_index_options(
   if (!validate_nv_index_list(options.integration_zero_velocity_indices, nv,
                               "integration_zero_velocity_indices", err)) {
     return false;
+  }
+  return true;
+}
+
+static bool validate_linear_constraint_triplet(const Eigen::MatrixXd &C,
+                                               const Eigen::VectorXd &lower,
+                                               const Eigen::VectorXd &upper,
+                                               int nv,
+                                               std::string *out_message) {
+  if (C.cols() != nv) {
+    if (out_message != nullptr) {
+      *out_message = "linear constraint matrix C must have " +
+                     std::to_string(nv) + " columns (nv); got " +
+                     std::to_string(C.cols());
+    }
+    return false;
+  }
+  if (C.rows() != lower.size() || C.rows() != upper.size()) {
+    if (out_message != nullptr) {
+      *out_message =
+          "linear constraint bounds must match C rows; got C.rows=" +
+          std::to_string(C.rows()) + ", lower.size=" +
+          std::to_string(lower.size()) + ", upper.size=" +
+          std::to_string(upper.size());
+    }
+    return false;
+  }
+  if (!C.allFinite() || !lower.allFinite() || !upper.allFinite()) {
+    if (out_message != nullptr) {
+      *out_message =
+          "linear constraints require finite C/lower_bounds/upper_bounds";
+    }
+    return false;
+  }
+  for (int i = 0; i < lower.size(); ++i) {
+    if (lower(i) > upper(i)) {
+      if (out_message != nullptr) {
+        *out_message = "linear constraint lower_bounds[" + std::to_string(i) +
+                       "] > upper_bounds[" + std::to_string(i) + "]";
+      }
+      return false;
+    }
   }
   return true;
 }
@@ -661,6 +783,263 @@ void KinematicsSolver::configure_relative_pose_constraint(
 
 void KinematicsSolver::clear_relative_pose_constraint() {
   relative_pose_constraint_.reset();
+}
+
+void KinematicsSolver::set_linear_velocity_constraints(
+    const Eigen::MatrixXd &C, const Eigen::VectorXd &lower_bounds,
+    const Eigen::VectorXd &upper_bounds) {
+  std::string err;
+  if (!validate_linear_constraint_triplet(C, lower_bounds, upper_bounds,
+                                          robot_->nv(), &err)) {
+    throw std::invalid_argument(err);
+  }
+  LinearVelocityConstraintConfig cfg;
+  cfg.enabled = true;
+  cfg.C = C;
+  cfg.lower_bounds = lower_bounds;
+  cfg.upper_bounds = upper_bounds;
+  linear_velocity_constraints_ = std::move(cfg);
+}
+
+void KinematicsSolver::append_linear_velocity_constraints(
+    const Eigen::MatrixXd &C, const Eigen::VectorXd &lower_bounds,
+    const Eigen::VectorXd &upper_bounds) {
+  std::string err;
+  if (!validate_linear_constraint_triplet(C, lower_bounds, upper_bounds,
+                                          robot_->nv(), &err)) {
+    throw std::invalid_argument(err);
+  }
+  if (!linear_velocity_constraints_.has_value() ||
+      !linear_velocity_constraints_->enabled ||
+      linear_velocity_constraints_->C.rows() == 0) {
+    set_linear_velocity_constraints(C, lower_bounds, upper_bounds);
+    return;
+  }
+
+  auto &cfg = *linear_velocity_constraints_;
+  const int old_rows = static_cast<int>(cfg.C.rows());
+  const int add_rows = static_cast<int>(C.rows());
+  Eigen::MatrixXd C_all(old_rows + add_rows, robot_->nv());
+  Eigen::VectorXd lower_all(old_rows + add_rows);
+  Eigen::VectorXd upper_all(old_rows + add_rows);
+  C_all.topRows(old_rows) = cfg.C;
+  C_all.bottomRows(add_rows) = C;
+  lower_all.head(old_rows) = cfg.lower_bounds;
+  lower_all.tail(add_rows) = lower_bounds;
+  upper_all.head(old_rows) = cfg.upper_bounds;
+  upper_all.tail(add_rows) = upper_bounds;
+  cfg.C = std::move(C_all);
+  cfg.lower_bounds = std::move(lower_all);
+  cfg.upper_bounds = std::move(upper_all);
+}
+
+void KinematicsSolver::clear_linear_velocity_constraints() {
+  linear_velocity_constraints_.reset();
+}
+
+int KinematicsSolver::get_linear_velocity_constraint_rows() const {
+  if (!linear_velocity_constraints_.has_value() ||
+      !linear_velocity_constraints_->enabled) {
+    return 0;
+  }
+  return static_cast<int>(linear_velocity_constraints_->C.rows());
+}
+
+void KinematicsSolver::add_tight_frame_pose_constraint(
+    const std::string &frame_name, const Eigen::Matrix4d &target_pose,
+    double position_epsilon, double orientation_epsilon,
+    const Eigen::VectorXd &axis_mask) {
+  if (!robot_->has_frame(frame_name)) {
+    throw std::invalid_argument("unknown frame for tight pose constraint: " +
+                                frame_name);
+  }
+  if (!std::isfinite(position_epsilon) || position_epsilon <= 0.0 ||
+      !std::isfinite(orientation_epsilon) || orientation_epsilon <= 0.0) {
+    throw std::invalid_argument(
+        "tight pose constraint epsilons must be finite and > 0");
+  }
+  TightFramePoseConstraintConfig cfg;
+  cfg.frame_name = frame_name;
+  cfg.target_pose = pinocchio::SE3(target_pose.block<3, 3>(0, 0),
+                                   target_pose.block<3, 1>(0, 3));
+  cfg.position_epsilon = position_epsilon;
+  cfg.orientation_epsilon = orientation_epsilon;
+  if (axis_mask.size() == 0) {
+    cfg.axis_mask = Eigen::VectorXd::Ones(6);
+  } else if (axis_mask.size() == 6 && axis_mask.allFinite()) {
+    cfg.axis_mask = axis_mask;
+  } else {
+    throw std::invalid_argument(
+        "tight pose constraint axis_mask must be empty or finite 6D");
+  }
+  tight_frame_pose_constraints_.push_back(std::move(cfg));
+}
+
+void KinematicsSolver::clear_tight_frame_pose_constraints() {
+  tight_frame_pose_constraints_.clear();
+}
+
+void KinematicsSolver::add_tight_point_constraint(
+    const std::string &frame_name, const Eigen::Vector3d &target_point,
+    double position_epsilon, const Eigen::Vector3d &axis_mask) {
+  if (!robot_->has_frame(frame_name)) {
+    throw std::invalid_argument("unknown frame for tight point constraint: " +
+                                frame_name);
+  }
+  if (!target_point.allFinite()) {
+    throw std::invalid_argument("tight point constraint target must be finite");
+  }
+  if (!std::isfinite(position_epsilon) || position_epsilon <= 0.0) {
+    throw std::invalid_argument(
+        "tight point constraint position_epsilon must be finite and > 0");
+  }
+  if (!axis_mask.allFinite()) {
+    throw std::invalid_argument("tight point constraint axis_mask must be finite");
+  }
+  TightPointConstraintConfig cfg;
+  cfg.frame_name = frame_name;
+  cfg.target_point = target_point;
+  cfg.position_epsilon = position_epsilon;
+  cfg.axis_mask = axis_mask;
+  tight_point_constraints_.push_back(std::move(cfg));
+}
+
+void KinematicsSolver::clear_tight_point_constraints() {
+  tight_point_constraints_.clear();
+}
+
+std::optional<KinematicsSolver::LinearVelocityConstraintResult>
+KinematicsSolver::compute_linear_velocity_constraints() {
+  if (!linear_velocity_constraints_.has_value() ||
+      !linear_velocity_constraints_->enabled ||
+      linear_velocity_constraints_->C.rows() == 0) {
+    return std::nullopt;
+  }
+  LinearVelocityConstraintResult out;
+  out.jacobian = linear_velocity_constraints_->C;
+  out.lower_bounds = linear_velocity_constraints_->lower_bounds;
+  out.upper_bounds = linear_velocity_constraints_->upper_bounds;
+  out.violated_rows = Eigen::ArrayXi::Zero(out.jacobian.rows());
+  return out;
+}
+
+std::optional<KinematicsSolver::LinearVelocityConstraintResult>
+KinematicsSolver::compute_tight_frame_pose_constraints() {
+  if (tight_frame_pose_constraints_.empty()) {
+    return std::nullopt;
+  }
+
+  int total_rows = 0;
+  for (const auto &cfg : tight_frame_pose_constraints_) {
+    for (int i = 0; i < 6; ++i) {
+      if (cfg.axis_mask(i) > 0.5) {
+        ++total_rows;
+      }
+    }
+  }
+  if (total_rows <= 0) {
+    return std::nullopt;
+  }
+
+  LinearVelocityConstraintResult out;
+  out.jacobian = Eigen::MatrixXd::Zero(total_rows, robot_->nv());
+  out.lower_bounds = Eigen::VectorXd::Constant(total_rows, -1e10);
+  out.upper_bounds = Eigen::VectorXd::Constant(total_rows, 1e10);
+  out.violated_rows = Eigen::ArrayXi::Zero(total_rows);
+
+  int row = 0;
+  for (const auto &cfg : tight_frame_pose_constraints_) {
+    const pinocchio::SE3 pose = robot_->get_frame_pose(cfg.frame_name);
+    const Matrix6Xd J = robot_->get_frame_jacobian(cfg.frame_name);
+
+    Eigen::VectorXd err = Eigen::VectorXd::Zero(6);
+    err.head<3>() = pose.translation() - cfg.target_pose.translation();
+    err.tail<3>() =
+        pinocchio::log3(cfg.target_pose.rotation().transpose() * pose.rotation());
+
+    for (int i = 0; i < 6; ++i) {
+      if (cfg.axis_mask(i) <= 0.5) {
+        continue;
+      }
+      const double eps = (i < 3) ? cfg.position_epsilon : cfg.orientation_epsilon;
+      const double slack_lower = err(i) + eps;
+      const double slack_upper = eps - err(i);
+      const double vel_limit = (i < 3) ? 0.5 : 1.0;
+      const double acc_limit = (i < 3) ? 1.0 : 2.0;
+      const double min_headroom = 0.05 * vel_limit;
+      const double activation_margin = 0.5 * eps;
+      auto [lower, upper] = calculate_velocity_box_constraint(
+          slack_lower, slack_upper, vel_limit, acc_limit, dt_, min_headroom,
+          activation_margin);
+      out.jacobian.row(row) = J.row(i);
+      out.lower_bounds(row) = lower;
+      out.upper_bounds(row) = upper;
+      if (slack_lower < -constraint_tolerance_ ||
+          slack_upper < -constraint_tolerance_) {
+        out.violated_rows(row) = 1;
+      }
+      ++row;
+    }
+  }
+
+  return out;
+}
+
+std::optional<KinematicsSolver::LinearVelocityConstraintResult>
+KinematicsSolver::compute_tight_point_constraints() {
+  if (tight_point_constraints_.empty()) {
+    return std::nullopt;
+  }
+
+  int total_rows = 0;
+  for (const auto &cfg : tight_point_constraints_) {
+    for (int i = 0; i < 3; ++i) {
+      if (cfg.axis_mask(i) > 0.5) {
+        ++total_rows;
+      }
+    }
+  }
+  if (total_rows <= 0) {
+    return std::nullopt;
+  }
+
+  LinearVelocityConstraintResult out;
+  out.jacobian = Eigen::MatrixXd::Zero(total_rows, robot_->nv());
+  out.lower_bounds = Eigen::VectorXd::Constant(total_rows, -1e10);
+  out.upper_bounds = Eigen::VectorXd::Constant(total_rows, 1e10);
+  out.violated_rows = Eigen::ArrayXi::Zero(total_rows);
+
+  int row = 0;
+  for (const auto &cfg : tight_point_constraints_) {
+    const pinocchio::SE3 pose = robot_->get_frame_pose(cfg.frame_name);
+    const Matrix6Xd J = robot_->get_frame_jacobian(cfg.frame_name);
+    const Eigen::Vector3d err = pose.translation() - cfg.target_point;
+    for (int i = 0; i < 3; ++i) {
+      if (cfg.axis_mask(i) <= 0.5) {
+        continue;
+      }
+      const double eps = cfg.position_epsilon;
+      const double slack_lower = err(i) + eps;
+      const double slack_upper = eps - err(i);
+      constexpr double kTightPointVelLimit = 0.5;
+      constexpr double kTightPointAccLimit = 1.0;
+      const double min_headroom = 0.05 * kTightPointVelLimit;
+      const double activation_margin = 0.5 * eps;
+      auto [lower, upper] = calculate_velocity_box_constraint(
+          slack_lower, slack_upper, kTightPointVelLimit, kTightPointAccLimit,
+          dt_, min_headroom, activation_margin);
+      out.jacobian.row(row) = J.row(i);
+      out.lower_bounds(row) = lower;
+      out.upper_bounds(row) = upper;
+      if (slack_lower < -constraint_tolerance_ ||
+          slack_upper < -constraint_tolerance_) {
+        out.violated_rows(row) = 1;
+      }
+      ++row;
+    }
+  }
+
+  return out;
 }
 
 std::optional<KinematicsSolver::RelativePoseConstraintResult>
@@ -3477,6 +3856,47 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
         /*outward_is_positive_projection=*/true);
   }
 
+  std::optional<LinearVelocityConstraintResult> linear_constraint_result =
+      compute_linear_velocity_constraints();
+  if (linear_constraint_result.has_value() && !excluded_union.empty()) {
+    for (int idx : excluded_union) {
+      if (idx >= 0 && idx < linear_constraint_result->jacobian.cols()) {
+        linear_constraint_result->jacobian.col(idx).setZero();
+      }
+    }
+  }
+
+  std::optional<LinearVelocityConstraintResult> tight_pose_constraint_result =
+      compute_tight_frame_pose_constraints();
+  if (tight_pose_constraint_result.has_value() && !excluded_union.empty()) {
+    for (int idx : excluded_union) {
+      if (idx >= 0 && idx < tight_pose_constraint_result->jacobian.cols()) {
+        tight_pose_constraint_result->jacobian.col(idx).setZero();
+      }
+    }
+  }
+  if (apply_limits && tight_pose_constraint_result.has_value()) {
+    const auto &tpc = tight_pose_constraint_result.value();
+    project_task_jacobians_away_from_violated_rows(
+        jacobians, tpc.jacobian, tpc.violated_rows,
+        /*outward_is_positive_projection=*/true);
+  }
+
+  std::optional<LinearVelocityConstraintResult> tight_point_constraint_result =
+      compute_tight_point_constraints();
+  if (tight_point_constraint_result.has_value() && !excluded_union.empty()) {
+    for (int idx : excluded_union) {
+      if (idx >= 0 && idx < tight_point_constraint_result->jacobian.cols()) {
+        tight_point_constraint_result->jacobian.col(idx).setZero();
+      }
+    }
+  }
+  if (apply_limits && tight_point_constraint_result.has_value()) {
+    const auto &tpc = tight_point_constraint_result.value();
+    project_task_jacobians_away_from_violated_rows(
+        jacobians, tpc.jacobian, tpc.violated_rows,
+        /*outward_is_positive_projection=*/true);
+  }
   std::optional<ConstraintBlock> step_torso_constraint_result = std::nullopt;
   if (pending_step_torso_constraint_.has_value()) {
     const auto &torso_opts = *pending_step_torso_constraint_;
@@ -3647,10 +4067,24 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
     num_constraints +=
         static_cast<int>(step_torso_constraint_result->jacobian.rows());
   }
+  if (linear_constraint_result.has_value()) {
+    num_constraints +=
+        static_cast<int>(linear_constraint_result->jacobian.rows());
+  }
+  if (tight_pose_constraint_result.has_value()) {
+    num_constraints +=
+        static_cast<int>(tight_pose_constraint_result->jacobian.rows());
+  }
+  if (tight_point_constraint_result.has_value()) {
+    num_constraints +=
+        static_cast<int>(tight_point_constraint_result->jacobian.rows());
+  }
 
   C = Eigen::MatrixXd::Zero(num_constraints, robot_->nv());
   c_lower = Eigen::VectorXd::Zero(num_constraints);
   c_upper = Eigen::VectorXd::Zero(num_constraints);
+  Eigen::VectorXd max_softening_factors =
+      Eigen::VectorXd::Ones(num_constraints);
 
   int constraint_idx = 0;
 
@@ -3883,12 +4317,57 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
         step_torso_constraint_result->lower_bounds,
         step_torso_constraint_result->upper_bounds);
   }
+  if (linear_constraint_result.has_value()) {
+    const auto &lc = linear_constraint_result.value();
+    int rows = static_cast<int>(lc.jacobian.rows());
+    C.block(constraint_idx, 0, rows, robot_->nv()) = lc.jacobian;
+    c_lower.segment(constraint_idx, rows) = lc.lower_bounds;
+    c_upper.segment(constraint_idx, rows) = lc.upper_bounds;
+    constraint_idx += rows;
+  }
+  if (tight_pose_constraint_result.has_value()) {
+    const auto &tpc = tight_pose_constraint_result.value();
+    int rows = static_cast<int>(tpc.jacobian.rows());
+    C.block(constraint_idx, 0, rows, robot_->nv()) = tpc.jacobian;
+    c_lower.segment(constraint_idx, rows) = tpc.lower_bounds;
+    c_upper.segment(constraint_idx, rows) = tpc.upper_bounds;
+    max_softening_factors.segment(constraint_idx, rows).setConstant(4.0);
+    constraint_idx += rows;
+  }
+  if (tight_point_constraint_result.has_value()) {
+    const auto &tpc = tight_point_constraint_result.value();
+    int rows = static_cast<int>(tpc.jacobian.rows());
+    C.block(constraint_idx, 0, rows, robot_->nv()) = tpc.jacobian;
+    c_lower.segment(constraint_idx, rows) = tpc.lower_bounds;
+    c_upper.segment(constraint_idx, rows) = tpc.upper_bounds;
+    max_softening_factors.segment(constraint_idx, rows).setConstant(4.0);
+    constraint_idx += rows;
+  }
 
   if (timing && t_constraint_start.has_value()) {
     result.constraint_setup_time_ms = get_elapsed_ms(*t_constraint_start);
   }
 
   sanitize_solver_inputs(goals, jacobians, C, c_lower, c_upper);
+  const bool has_soft_rows = max_softening_factors.maxCoeff() > 1.0;
+  if (has_soft_rows) {
+    const int nv = robot_->nv();
+    Eigen::VectorXd dq_lower_seed = Eigen::VectorXd::Constant(nv, -1e10);
+    Eigen::VectorXd dq_upper_seed = Eigen::VectorXd::Constant(nv, 1e10);
+    for (int i = 0; i < nv && i < c_lower.size() && i < c_upper.size(); ++i) {
+      dq_lower_seed(i) = c_lower(i);
+      dq_upper_seed(i) = c_upper(i);
+    }
+    if (!has_rowwise_interval_feasibility(C, c_lower, c_upper, dq_lower_seed,
+                                          dq_upper_seed,
+                                          constraint_tolerance_)) {
+      const double pre_relax_scale =
+          std::max(1.0, max_softening_factors.maxCoeff());
+      apply_constraint_softening_in_place(c_lower, c_upper,
+                                          max_softening_factors,
+                                          pre_relax_scale);
+    }
+  }
 
   // Configure solver
   VelocitySolverConfig config;
@@ -3897,12 +4376,62 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
   config.iteration_limit = max_iterations_;
   config.magnitude_limit = norm_threshold_;
   config.stall_detection_count = max_zero_scale_iterations_;
+  if (has_soft_rows) {
+    config.stall_detection_count = std::max(5, max_zero_scale_iterations_);
+  }
   config.regularization_config.epsilon = solver_tolerance_;
   config.regularization_config.regularization_factor = damping_;
 
   // Call the backend solver
+  const bool allow_warm_start = has_soft_rows;
+  const Eigen::VectorXd *softening_ptr = has_soft_rows ? &max_softening_factors : nullptr;
+  const Eigen::MatrixXd *warm_start_selector = nullptr;
+  if (allow_warm_start && warm_start_selector_cache_.has_value() &&
+      warm_start_constraint_rows_ == C.rows() &&
+      warm_start_selector_cache_->rows() == C.rows() &&
+      warm_start_selector_cache_->cols() == C.rows()) {
+    warm_start_selector = &(*warm_start_selector_cache_);
+  } else {
+    warm_start_selector_cache_.reset();
+    warm_start_constraint_rows_ = -1;
+  }
+  Eigen::MatrixXd final_selector;
+  Eigen::MatrixXd *final_selector_out_ptr =
+      allow_warm_start ? &final_selector : nullptr;
   auto backend_result = computeMultiObjectiveVelocitySolutionEigen(
-      goals, jacobians, C, c_lower, c_upper, config, objective_configs);
+      goals, jacobians, C, c_lower, c_upper, config, objective_configs,
+      softening_ptr, warm_start_selector, final_selector_out_ptr);
+  if (allow_warm_start && final_selector.rows() == C.rows() &&
+      final_selector.cols() == C.rows()) {
+    warm_start_selector_cache_ = final_selector;
+    warm_start_constraint_rows_ = C.rows();
+  } else {
+    warm_start_selector_cache_.reset();
+    warm_start_constraint_rows_ = -1;
+  }
+  if (backend_result.status == SolverStatus::kNonFiniteInput) {
+    // Robust fallback: keep control loop stable by returning a zero-velocity
+    // step instead of propagating a hard non-finite status.
+    backend_result.status = SolverStatus::kNoProgress;
+    backend_result.status_message =
+        "backend produced non-finite internal state; using zero velocity step";
+    backend_result.solution.assign(static_cast<size_t>(robot_->nv()), 0.0);
+    backend_result.final_error = 0.0;
+  }
+  bool backend_solution_non_finite = false;
+  for (double v : backend_result.solution) {
+    if (!std::isfinite(v)) {
+      backend_solution_non_finite = true;
+      break;
+    }
+  }
+  if (backend_solution_non_finite) {
+    backend_result.status = SolverStatus::kNoProgress;
+    backend_result.status_message =
+        "backend returned non-finite velocity entries; using zero velocity step";
+    backend_result.solution.assign(static_cast<size_t>(robot_->nv()), 0.0);
+    backend_result.final_error = 0.0;
+  }
   const double primary_goal_norm = goals.empty() ? 0.0 : goals[0].norm();
 
   // Create velocity-specific result
@@ -4374,6 +4903,39 @@ PositionIKResult KinematicsSolver::solve_position(
                             options.excluded_joint_indices);
     }
 
+    std::optional<LinearVelocityConstraintResult> linear_constraint_result =
+        compute_linear_velocity_constraints();
+    if (linear_constraint_result.has_value() &&
+        !options.excluded_joint_indices.empty()) {
+      for (int idx : options.excluded_joint_indices) {
+        if (idx >= 0 && idx < linear_constraint_result->jacobian.cols()) {
+          linear_constraint_result->jacobian.col(idx).setZero();
+        }
+      }
+    }
+
+    std::optional<LinearVelocityConstraintResult> tight_pose_constraint_result =
+        compute_tight_frame_pose_constraints();
+    if (tight_pose_constraint_result.has_value() &&
+        !options.excluded_joint_indices.empty()) {
+      for (int idx : options.excluded_joint_indices) {
+        if (idx >= 0 && idx < tight_pose_constraint_result->jacobian.cols()) {
+          tight_pose_constraint_result->jacobian.col(idx).setZero();
+        }
+      }
+    }
+
+    std::optional<LinearVelocityConstraintResult> tight_point_constraint_result =
+        compute_tight_point_constraints();
+    if (tight_point_constraint_result.has_value() &&
+        !options.excluded_joint_indices.empty()) {
+      for (int idx : options.excluded_joint_indices) {
+        if (idx >= 0 && idx < tight_point_constraint_result->jacobian.cols()) {
+          tight_point_constraint_result->jacobian.col(idx).setZero();
+        }
+      }
+    }
+
     std::optional<ConstraintBlock> torso_constraint_result = std::nullopt;
     if (torso_task && torso_has_pose_bounds) {
       torso_constraint_result = build_torso_pose_bound_rows(
@@ -4394,10 +4956,26 @@ PositionIKResult KinematicsSolver::solve_position(
       num_constraints +=
           static_cast<int>(torso_constraint_result->jacobian.rows());
     }
+    if (linear_constraint_result.has_value()) {
+      num_constraints +=
+          static_cast<int>(linear_constraint_result->jacobian.rows());
+    }
+    if (tight_pose_constraint_result.has_value()) {
+      num_constraints +=
+          static_cast<int>(tight_pose_constraint_result->jacobian.rows());
+    }
+    if (tight_point_constraint_result.has_value()) {
+      num_constraints +=
+          static_cast<int>(tight_point_constraint_result->jacobian.rows());
+    }
 
-    C.setZero(num_constraints, robot_->nv());
-    c_lower.setConstant(num_constraints, -kUnboundedConstraintLimit);
-    c_upper.setConstant(num_constraints, kUnboundedConstraintLimit);
+    Eigen::MatrixXd C = Eigen::MatrixXd::Zero(num_constraints, robot_->nv());
+    Eigen::VectorXd c_lower =
+        Eigen::VectorXd::Constant(num_constraints, -1e10);
+    Eigen::VectorXd c_upper =
+        Eigen::VectorXd::Constant(num_constraints, 1e10);
+    Eigen::VectorXd max_softening_factors =
+        Eigen::VectorXd::Ones(num_constraints);
 
     C.block(0, 0, robot_->nv(), robot_->nv()) =
         Eigen::MatrixXd::Identity(robot_->nv(), robot_->nv());
@@ -4446,6 +5024,52 @@ PositionIKResult KinematicsSolver::solve_position(
           torso_constraint_result->lower_bounds,
           torso_constraint_result->upper_bounds);
     }
+    if (linear_constraint_result.has_value()) {
+      const auto &lc = linear_constraint_result.value();
+      const int rows = static_cast<int>(lc.jacobian.rows());
+      C.block(constraint_idx, 0, rows, robot_->nv()) = lc.jacobian;
+      c_lower.segment(constraint_idx, rows) = lc.lower_bounds;
+      c_upper.segment(constraint_idx, rows) = lc.upper_bounds;
+      constraint_idx += rows;
+    }
+    if (tight_pose_constraint_result.has_value()) {
+      const auto &tpc = tight_pose_constraint_result.value();
+      const int rows = static_cast<int>(tpc.jacobian.rows());
+      C.block(constraint_idx, 0, rows, robot_->nv()) = tpc.jacobian;
+      c_lower.segment(constraint_idx, rows) = tpc.lower_bounds;
+      c_upper.segment(constraint_idx, rows) = tpc.upper_bounds;
+      max_softening_factors.segment(constraint_idx, rows).setConstant(4.0);
+      constraint_idx += rows;
+    }
+    if (tight_point_constraint_result.has_value()) {
+      const auto &tpc = tight_point_constraint_result.value();
+      const int rows = static_cast<int>(tpc.jacobian.rows());
+      C.block(constraint_idx, 0, rows, robot_->nv()) = tpc.jacobian;
+      c_lower.segment(constraint_idx, rows) = tpc.lower_bounds;
+      c_upper.segment(constraint_idx, rows) = tpc.upper_bounds;
+      max_softening_factors.segment(constraint_idx, rows).setConstant(4.0);
+      constraint_idx += rows;
+    }
+
+    const bool has_soft_rows = max_softening_factors.maxCoeff() > 1.0;
+    if (has_soft_rows) {
+      const int nv = robot_->nv();
+      Eigen::VectorXd dq_lower_seed = Eigen::VectorXd::Constant(nv, -1e10);
+      Eigen::VectorXd dq_upper_seed = Eigen::VectorXd::Constant(nv, 1e10);
+      for (int i = 0; i < nv && i < c_lower.size() && i < c_upper.size(); ++i) {
+        dq_lower_seed(i) = c_lower(i);
+        dq_upper_seed(i) = c_upper(i);
+      }
+      if (!has_rowwise_interval_feasibility(C, c_lower, c_upper, dq_lower_seed,
+                                            dq_upper_seed,
+                                            constraint_tolerance_)) {
+        const double pre_relax_scale =
+            std::max(1.0, max_softening_factors.maxCoeff());
+        apply_constraint_softening_in_place(c_lower, c_upper,
+                                            max_softening_factors,
+                                            pre_relax_scale);
+      }
+    }
 
     sanitize_solver_inputs(goals, jacobians, C, c_lower, c_upper);
 
@@ -4455,11 +5079,15 @@ PositionIKResult KinematicsSolver::solve_position(
     config.iteration_limit = max_iterations_;
     config.magnitude_limit = norm_threshold_;
     config.stall_detection_count = max_zero_scale_iterations_;
+    if (has_soft_rows) {
+      config.stall_detection_count = std::max(5, max_zero_scale_iterations_);
+    }
     config.regularization_config.epsilon = solver_tolerance_;
     config.regularization_config.regularization_factor = damping_;
 
     auto vel_result = computeMultiObjectiveVelocitySolutionEigen(
-        goals, jacobians, C, c_lower, c_upper, config, objective_configs);
+        goals, jacobians, C, c_lower, c_upper, config, objective_configs,
+        has_soft_rows ? &max_softening_factors : nullptr, nullptr, nullptr);
 
     if (stall_config_.enabled) {
       double primary_goal_norm =
@@ -4818,7 +5446,43 @@ PositionIKResult KinematicsSolver::solve_position_step(
   for (int step = 0; step < steps; ++step) {
     frame_task->update(*robot_);
     const Eigen::VectorXd &error = frame_task->getError();
-    const double combined_error = error.head<3>().norm() + error.tail<3>().norm();
+    double combined_error = 0.0;
+    if (error.size() == 3) {
+      combined_error = error.head<3>().norm();
+      const bool is_orientation_only =
+          frame_task->getType() == TaskType::FRAME_ORIENTATION;
+      Eigen::VectorXd v3 = (is_orientation_only ? options.orientation_gain
+                                                : options.position_gain) *
+                           error.head<3>();
+      if (is_orientation_only) {
+        if (options.max_angular_speed > 0.0) {
+          const double n = v3.norm();
+          if (n > options.max_angular_speed) {
+            v3 *= options.max_angular_speed / n;
+          }
+        }
+      } else {
+        if (options.max_linear_speed > 0.0) {
+          const double n = v3.norm();
+          if (n > options.max_linear_speed) {
+            v3 *= options.max_linear_speed / n;
+          }
+        }
+      }
+      frame_task->setTargetVelocity(v3);
+    } else if (error.size() >= 6) {
+      combined_error = error.head<3>().norm() + error.tail<3>().norm();
+      vel.head<3>() = options.position_gain * error.head<3>();
+      vel.tail<3>() = options.orientation_gain * error.tail<3>();
+      clamp_spatial_velocity_components(vel, options.max_linear_speed,
+                                        options.max_angular_speed);
+      frame_task->setTargetVelocity(vel);
+    } else {
+      result.status = SolverStatus::kInvalidInput;
+      result.status_message =
+          "frame task has invalid pose error dimension for solve_position_step";
+      break;
+    }
     if (step > 0 && options.no_progress_max_steps > 0 && have_vel_result) {
       const bool low_error_change =
           std::abs(prev_combined_error - combined_error) <=
@@ -4838,11 +5502,6 @@ PositionIKResult KinematicsSolver::solve_position_step(
       }
     }
     prev_combined_error = combined_error;
-    vel.head<3>() = options.position_gain * error.head<3>();
-    vel.tail<3>() = options.orientation_gain * error.tail<3>();
-    clamp_spatial_velocity_components(vel, options.max_linear_speed,
-                                      options.max_angular_speed);
-    frame_task->setTargetVelocity(vel);
 
     pending_velocity_lock_indices_ = step_locked_indices;
     pending_step_torso_constraint_ = step_torso_constraint;
@@ -5394,8 +6053,13 @@ PositionIKResult KinematicsSolver::solve_position_step(
 
   frame_task->update(*robot_);
   const Eigen::VectorXd &final_error = frame_task->getError();
-  result.position_error = final_error.head<3>().norm();
-  result.orientation_error = final_error.tail<3>().norm();
+  if (final_error.size() == 3) {
+    result.position_error = final_error.head<3>().norm();
+    result.orientation_error = 0.0;
+  } else if (final_error.size() >= 6) {
+    result.position_error = final_error.head<3>().norm();
+    result.orientation_error = final_error.tail<3>().norm();
+  }
 
   if (have_vel_result) {
     if (last_vel_result.joint_velocities.size() == robot_->nv()) {
@@ -5674,18 +6338,45 @@ PositionIKResult KinematicsSolver::solve_position_step(
 
       rt.task->update(*robot_);
       const Eigen::VectorXd &error = rt.task->getError();
-      if (error.size() < 6) {
+      if (error.size() == 3) {
+        bool is_orientation_only = false;
+        if (rt.kind == PoseTaskKind::kFrame) {
+          const auto *ft = static_cast<const FrameTask *>(rt.task.get());
+          is_orientation_only = ft->getType() == TaskType::FRAME_ORIENTATION;
+        }
+        Eigen::VectorXd v3 = (is_orientation_only ? target.orientation_gain
+                                                  : target.position_gain) *
+                             error.head<3>();
+        if (is_orientation_only) {
+          if (options.max_angular_speed > 0.0) {
+            const double n = v3.norm();
+            if (n > options.max_angular_speed) {
+              v3 *= options.max_angular_speed / n;
+            }
+          }
+        } else {
+          if (options.max_linear_speed > 0.0) {
+            const double n = v3.norm();
+            if (n > options.max_linear_speed) {
+              v3 *= options.max_linear_speed / n;
+            }
+          }
+        }
+        combined_error += error.head<3>().norm();
+        rt.task->setTargetVelocity(v3);
+      } else if (error.size() >= 6) {
+        combined_error += error.head<3>().norm() + error.tail<3>().norm();
+        vel.head<3>() = target.position_gain * error.head<3>();
+        vel.tail<3>() = target.orientation_gain * error.tail<3>();
+        clamp_spatial_velocity_components(vel, options.max_linear_speed,
+                                          options.max_angular_speed);
+        rt.task->setTargetVelocity(vel);
+      } else {
         task_apply_failed = true;
         task_apply_error =
             "task '" + target.task_name + "' has invalid pose error dimension";
         break;
       }
-      combined_error += error.head<3>().norm() + error.tail<3>().norm();
-      vel.head<3>() = target.position_gain * error.head<3>();
-      vel.tail<3>() = target.orientation_gain * error.tail<3>();
-      clamp_spatial_velocity_components(vel, options.max_linear_speed,
-                                        options.max_angular_speed);
-      rt.task->setTargetVelocity(vel);
     }
 
     if (task_apply_failed) {
@@ -6174,7 +6865,10 @@ PositionIKResult KinematicsSolver::solve_position_step(
   const auto &primary = resolved.front();
   primary.task->update(*robot_);
   const Eigen::VectorXd &final_error = primary.task->getError();
-  if (final_error.size() >= 6) {
+  if (final_error.size() == 3) {
+    result.position_error = final_error.head<3>().norm();
+    result.orientation_error = 0.0;
+  } else if (final_error.size() >= 6) {
     result.position_error = final_error.head<3>().norm();
     result.orientation_error = final_error.tail<3>().norm();
   }
