@@ -9,6 +9,7 @@ embodiK + Viser loop.
 from __future__ import annotations
 
 import argparse
+import collections
 import sys
 import tempfile
 import time
@@ -41,12 +42,13 @@ DEFAULT_SOLVER_DT = 0.01
 DEFAULT_POS_GAIN = 10.0
 DEFAULT_ROT_GAIN = 10.0
 DEFAULT_POSTURE_WEIGHT = 1e-2
-DEFAULT_ARM_NULLSPACE_WEIGHT = 1e-2
+DEFAULT_ARM_NULLSPACE_WEIGHT = 1.0
 COLLISION_TUNING_OPTIONS = ("speed", "balanced", "precise")
 POSTURE_SLIDER_DEADBAND = 1e-3
 EE_POSITION_DEADBAND = 1e-4
 EE_ROTATION_DEADBAND = 1e-3
 LIFT_LIMIT_MARGIN = 1e-3
+DEFAULT_MAX_COLLISION_CONSTRAINTS = 3
 DEFAULT_WORKER_SEED = {
     "lift_joint": -0.1,
     "head_joint1": 0.0,
@@ -197,8 +199,125 @@ def _prepare_viewer_urdf_path(urdf_path: Path) -> Path:
     return Path(tmp.name)
 
 
-def _generate_consecutive_collision_exclusions(robot) -> list[tuple[str, str]]:
-    """Exclude likely adjacent link pairs, mirroring the G1 collision demos."""
+def _build_link_adjacency_graph(urdf_path: Path) -> dict[str, set[str]]:
+    tree = ET.parse(urdf_path)
+    root = tree.getroot()
+    graph: dict[str, set[str]] = collections.defaultdict(set)
+    for joint in root.findall("joint"):
+        parent = joint.find("parent")
+        child = joint.find("child")
+        if parent is None or child is None:
+            continue
+        parent_link = str(parent.get("link", "")).strip()
+        child_link = str(child.get("link", "")).strip()
+        if not parent_link or not child_link:
+            continue
+        graph[parent_link].add(child_link)
+        graph[child_link].add(parent_link)
+    return graph
+
+
+def _collision_object_to_link_name(collision_name: str, link_names: set[str]) -> str | None:
+    name = str(collision_name)
+    if name in link_names:
+        return name
+    for suffix in ("_0", "_1", "_2", "_3"):
+        if name.endswith(suffix):
+            candidate = name[: -len(suffix)]
+            if candidate in link_names:
+                return candidate
+    if name.rsplit("_", 1)[0] in link_names:
+        return name.rsplit("_", 1)[0]
+    return None
+
+
+def _shortest_link_distance(
+    graph: dict[str, set[str]], start: str, goal: str, max_hops: int
+) -> int | None:
+    if start == goal:
+        return 0
+    queue = collections.deque([(start, 0)])
+    visited = {start}
+    while queue:
+        node, dist = queue.popleft()
+        if dist >= max_hops:
+            continue
+        for nxt in graph.get(node, ()):
+            if nxt == goal:
+                return dist + 1
+            if nxt not in visited:
+                visited.add(nxt)
+                queue.append((nxt, dist + 1))
+    return None
+
+
+def _worker_collision_group(name: str) -> str:
+    lower = str(name).lower()
+    if lower.startswith("head_") or lower.startswith("camera_"):
+        return "head"
+    if "_l_" in lower or lower.startswith("arm_l_") or lower.startswith("gripper_l_") or "camera_l_" in lower:
+        return "left"
+    if "_r_" in lower or lower.startswith("arm_r_") or lower.startswith("gripper_r_") or "camera_r_" in lower:
+        return "right"
+    return "core"
+
+
+def _worker_manual_curated_link_pairs() -> list[tuple[str, str]]:
+    """Explicit worker collision whitelist tuned for teleop responsiveness.
+
+    This replaces the broader heuristic filter with a smaller, intentional set:
+    - torso core vs proximal/mid arm links plus gripper base / fingertips
+    - head vs distal forearm / gripper
+    - cross-arm distal forearm / gripper
+    """
+    core_links = ("base_link", "lift_link", "arm_base_link")
+    side_torso_template = (
+        "arm_{side}_link2",
+        "arm_{side}_link3",
+        "arm_{side}_link4",
+        "arm_{side}_link5",
+        "arm_{side}_link6",
+        "gripper_{side}_rh_p12_rn_base",
+        "gripper_{side}_rh_p12_rn_l2",
+        "gripper_{side}_rh_p12_rn_r2",
+    )
+    side_head_template = (
+        "arm_{side}_link6",
+        "arm_{side}_link7",
+        "gripper_{side}_rh_p12_rn_base",
+        "gripper_{side}_rh_p12_rn_l2",
+        "gripper_{side}_rh_p12_rn_r2",
+    )
+    side_cross_template = (
+        "arm_{side}_link5",
+        "arm_{side}_link6",
+        "arm_{side}_link7",
+        "gripper_{side}_rh_p12_rn_base",
+        "gripper_{side}_rh_p12_rn_l2",
+        "gripper_{side}_rh_p12_rn_r2",
+    )
+
+    left_torso = tuple(name.format(side="l") for name in side_torso_template)
+    right_torso = tuple(name.format(side="r") for name in side_torso_template)
+    left_head = tuple(name.format(side="l") for name in side_head_template)
+    right_head = tuple(name.format(side="r") for name in side_head_template)
+    left_cross = tuple(name.format(side="l") for name in side_cross_template)
+    right_cross = tuple(name.format(side="r") for name in side_cross_template)
+
+    pairs: set[tuple[str, str]] = set()
+    for core in core_links:
+        for link in left_torso + right_torso:
+            pairs.add(tuple(sorted((core, link))))
+    for link in left_head + right_head:
+        pairs.add(tuple(sorted(("head_link2", link))))
+    for left in left_cross:
+        for right in right_cross:
+            pairs.add(tuple(sorted((left, right))))
+    return sorted(pairs)
+
+
+def _generate_consecutive_collision_exclusions(robot, urdf_path: Path) -> list[tuple[str, str]]:
+    """Exclude structurally adjacent link pairs using the URDF link graph."""
     if not hasattr(robot, "get_collision_pair_names") or not hasattr(robot, "get_collision_geometries"):
         return []
     try:
@@ -207,29 +326,69 @@ def _generate_consecutive_collision_exclusions(robot) -> list[tuple[str, str]]:
     except Exception:
         return []
 
-    parent_joint_by_geom: dict[str, int] = {}
+    link_graph = _build_link_adjacency_graph(urdf_path)
+    link_names = set(link_graph.keys())
     parent_frame_by_geom: dict[str, str] = {}
     for geom in geoms:
         name = str(geom.get("name", ""))
         if not name:
             continue
         parent_frame_by_geom[name] = str(geom.get("parent_frame", ""))
-        try:
-            parent_joint_by_geom[name] = int(geom.get("parent_joint", -10_000))
-        except Exception:
-            parent_joint_by_geom[name] = -10_000
 
     exclusions: list[tuple[str, str]] = []
     for a, b in pair_names:
         a = str(a)
         b = str(b)
-        ja = parent_joint_by_geom.get(a, -10_000)
-        jb = parent_joint_by_geom.get(b, -10_000)
         fa = parent_frame_by_geom.get(a, "")
         fb = parent_frame_by_geom.get(b, "")
-        if (fa and fb and fa == fb) or (ja > -9999 and jb > -9999 and abs(ja - jb) <= 1):
+        link_a = _collision_object_to_link_name(a, link_names)
+        link_b = _collision_object_to_link_name(b, link_names)
+        distance = None
+        max_allowed_distance = 1
+        if link_a and link_b:
+            group_a = _worker_collision_group(link_a)
+            group_b = _worker_collision_group(link_b)
+            if {group_a, group_b}.issubset({"core", "head"}):
+                max_allowed_distance = 4
+            elif "core" in {group_a, group_b} and ({group_a, group_b} & {"left", "right"}):
+                max_allowed_distance = 2
+            elif group_a == group_b:
+                max_allowed_distance = 2
+            else:
+                max_allowed_distance = 1
+            distance = _shortest_link_distance(link_graph, link_a, link_b, max_hops=max_allowed_distance + 1)
+        if (fa and fb and fa == fb) or (distance is not None and distance <= max_allowed_distance):
             exclusions.append((a, b))
     return exclusions
+
+
+def _generate_worker_collision_include_pairs(
+    robot, urdf_path: Path, exclude_pairs: list[tuple[str, str]]
+) -> list[tuple[str, str]]:
+    """Map the curated worker link-pair whitelist onto geometry-pair names."""
+    if not hasattr(robot, "get_collision_pair_names"):
+        return []
+    try:
+        pair_names = list(robot.get_collision_pair_names())
+    except Exception:
+        return []
+
+    exclude_set = {tuple(p) for p in exclude_pairs}
+    link_graph = _build_link_adjacency_graph(urdf_path)
+    link_names = set(link_graph.keys())
+    curated_link_pairs = set(_worker_manual_curated_link_pairs())
+    include_pairs: list[tuple[str, str]] = []
+    for a, b in pair_names:
+        pair = (str(a), str(b))
+        if pair in exclude_set or (pair[1], pair[0]) in exclude_set:
+            continue
+        link_a = _collision_object_to_link_name(pair[0], link_names)
+        link_b = _collision_object_to_link_name(pair[1], link_names)
+        if not link_a or not link_b:
+            continue
+        if tuple(sorted((link_a, link_b))) in curated_link_pairs:
+            include_pairs.append(pair)
+    return include_pairs
 
 
 def _apply_collision_tuning_mode(solver, mode_label: str) -> None:
@@ -238,9 +397,31 @@ def _apply_collision_tuning_mode(solver, mode_label: str) -> None:
         mode_map = {
             "precise": embodik.CollisionTuningMode.PRECISE,
             "balanced": embodik.CollisionTuningMode.BALANCED,
-            "speed": embodik.CollisionTuningMode.SPEED,
+            # Worker-specific note: the generic SPEED preset performs worse
+            # than BALANCED on this curated convex-pair workload, so keep the
+            # fast UI mode on the lower-latency backend path.
+            "speed": embodik.CollisionTuningMode.BALANCED,
         }
-        solver.set_collision_tuning_mode(mode_map.get(label, embodik.CollisionTuningMode.SPEED))
+        solver.set_collision_tuning_mode(mode_map.get(label, embodik.CollisionTuningMode.BALANCED))
+    if hasattr(solver, "set_proximity_gated_collision_activation_enabled"):
+        solver.set_proximity_gated_collision_activation_enabled(label != "precise")
+    if hasattr(solver, "set_collision_constraint_activation_multiplier"):
+        if label == "precise":
+            solver.set_collision_constraint_activation_multiplier(0.0)
+        elif label == "balanced":
+            solver.set_collision_constraint_activation_multiplier(5.0)
+        else:
+            solver.set_collision_constraint_activation_multiplier(3.0)
+    # Worker-specific override: with the manually curated ~100-pair set, the
+    # generic SPEED refinement budget bookkeeping can cost more than it saves.
+    # Keep broadphase/caching enabled but disable the tiny refinement budget.
+    if label == "speed":
+        if hasattr(solver, "enable_collision_pair_cache"):
+            solver.enable_collision_pair_cache(True, 20, 0.05, 128)
+        if hasattr(solver, "set_collision_refinement_time_budget_us"):
+            solver.set_collision_refinement_time_budget_us(0)
+        if hasattr(solver, "enable_sphere_broadphase"):
+            solver.enable_sphere_broadphase(True)
 
 
 def _configure_collision_constraint(
@@ -248,7 +429,9 @@ def _configure_collision_constraint(
     *,
     enabled: bool,
     min_distance_m: float,
+    max_constraints: int,
     tuning_mode: str,
+    include_pairs: list[tuple[str, str]],
     exclude_pairs: list[tuple[str, str]],
 ) -> None:
     if not hasattr(solver, "configure_collision_constraint"):
@@ -258,17 +441,36 @@ def _configure_collision_constraint(
         try:
             solver.configure_collision_constraint(
                 min_distance=float(min_distance_m),
-                include_pairs=[],
+                max_constraints=int(max_constraints),
+                include_pairs=list(include_pairs),
                 exclude_pairs=list(exclude_pairs),
             )
+            if hasattr(solver, "enable_stall_handler"):
+                solver.enable_stall_handler(float(min_distance_m))
+                if hasattr(solver, "configure_stall_handler"):
+                    solver.configure_stall_handler(
+                        stall_threshold=3,
+                        restore_rate=0.2,
+                        floor_fraction=0.0,
+                    )
         except Exception:
             if hasattr(solver, "clear_collision_constraint"):
                 try:
                     solver.clear_collision_constraint()
                 except Exception:
                     pass
+            if hasattr(solver, "disable_stall_handler"):
+                try:
+                    solver.disable_stall_handler()
+                except Exception:
+                    pass
     elif hasattr(solver, "clear_collision_constraint"):
         solver.clear_collision_constraint()
+        if hasattr(solver, "disable_stall_handler"):
+            try:
+                solver.disable_stall_handler()
+            except Exception:
+                pass
 
 
 def main() -> None:
@@ -388,7 +590,8 @@ def main() -> None:
     arm_controlled_indices = sorted(set(arm_controlled_indices))
     if hasattr(arm_nullspace, "set_controlled_joint_indices"):
         arm_nullspace.set_controlled_joint_indices(list(arm_controlled_indices))
-    collision_exclusions = _generate_consecutive_collision_exclusions(robot)
+    collision_exclusions = _generate_consecutive_collision_exclusions(robot, urdf_path)
+    collision_include_pairs = _generate_worker_collision_include_pairs(robot, urdf_path, collision_exclusions)
     collision_cfg = None
     collision_available = False
     if hasattr(robot, "has_collision_geometry"):
@@ -502,6 +705,13 @@ def main() -> None:
         collision_min_dist_mm = server.gui.add_slider(
             "Collision min distance (mm)", 0.0, 120.0, 1.0, 35.0
         )
+        collision_max_constraints = server.gui.add_slider(
+            "Max Collision Constraints",
+            min=1,
+            max=64,
+            step=1,
+            initial_value=DEFAULT_MAX_COLLISION_CONSTRAINTS,
+        )
         collision_tuning = server.gui.add_dropdown(
             "Collision Tuning",
             options=COLLISION_TUNING_OPTIONS,
@@ -522,6 +732,7 @@ def main() -> None:
             initial_value=(
                 f"available={collision_available}, "
                 f"total={len(list(robot.get_collision_pair_names())) if hasattr(robot, 'get_collision_pair_names') else 0}, "
+                f"included={len(collision_include_pairs)}, "
                 f"excluded={len(collision_exclusions)}"
             ),
         )
@@ -559,53 +770,83 @@ def main() -> None:
         right_err = server.gui.add_text("Right err", initial_value="--")
         left_err = server.gui.add_text("Left err", initial_value="--")
 
-    dbg_a = server.scene.add_icosphere(
-        "/collision_debug/point_a", radius=0.015, color=(1.0, 0.2, 0.2), visible=False
+    debug_colors = (
+        ((1.0, 0.2, 0.2), (0.2, 0.8, 0.2)),
+        ((1.0, 0.5, 0.0), (0.3, 0.7, 1.0)),
+        ((0.9, 0.2, 0.9), (0.2, 0.9, 0.9)),
     )
-    dbg_b = server.scene.add_icosphere(
-        "/collision_debug/point_b", radius=0.015, color=(0.2, 0.8, 0.2), visible=False
-    )
-    dbg_line = None
+    dbg_points_a = [
+        server.scene.add_icosphere(
+            f"/collision_debug/point_a_{i}", radius=0.012, color=color_a, visible=False
+        )
+        for i, (color_a, _color_b) in enumerate(debug_colors)
+    ]
+    dbg_points_b = [
+        server.scene.add_icosphere(
+            f"/collision_debug/point_b_{i}", radius=0.012, color=color_b, visible=False
+        )
+        for i, (_color_a, color_b) in enumerate(debug_colors)
+    ]
+    dbg_lines = [None for _ in debug_colors]
+
+    def _clear_collision_debug() -> None:
+        nonlocal dbg_lines
+        for point in dbg_points_a + dbg_points_b:
+            point.visible = False
+        for line in dbg_lines:
+            if line is not None:
+                line.visible = False
+        collision_debug_text.value = "Collision: --"
 
     def _update_collision_debug() -> None:
-        nonlocal dbg_line
-        if not show_collision_debug.value or not hasattr(solver, "get_last_collision_debug"):
-            dbg_a.visible = False
-            dbg_b.visible = False
-            if dbg_line is not None:
-                dbg_line.visible = False
-            collision_debug_text.value = "Collision: --"
+        nonlocal dbg_lines
+        if (
+            not bool(enable_collision.value)
+            or not show_collision_debug.value
+            or not hasattr(solver, "get_last_collision_debug_list")
+        ):
+            _clear_collision_debug()
             return
 
-        dbg = solver.get_last_collision_debug()
-        if dbg is None:
-            dbg_a.visible = False
-            dbg_b.visible = False
-            if dbg_line is not None:
-                dbg_line.visible = False
-            collision_debug_text.value = "Collision: --"
+        dbg_rows = list(solver.get_last_collision_debug_list())
+        if not dbg_rows and hasattr(solver, "get_last_collision_debug"):
+            dbg = solver.get_last_collision_debug()
+            dbg_rows = [] if dbg is None else [dbg]
+        if not dbg_rows:
+            _clear_collision_debug()
             return
 
-        p_a = np.asarray(dbg.point_a_world, dtype=float)
-        p_b = np.asarray(dbg.point_b_world, dtype=float)
-        dbg_a.position = tuple(p_a)
-        dbg_b.position = tuple(p_b)
-        dbg_a.visible = True
-        dbg_b.visible = True
-        if dbg_line is not None:
-            dbg_line.remove()
-        seg = np.zeros((1, 2, 3), dtype=float)
-        seg[0, 0] = p_a
-        seg[0, 1] = p_b
-        colors = np.array([[[1.0, 0.2, 0.2], [0.2, 0.9, 0.2]]], dtype=float)
-        dbg_line = server.scene.add_line_segments(
-            "/collision_debug/segment",
-            points=seg,
-            colors=colors,
-            line_width=3.0,
-            visible=True,
-        )
-        collision_debug_text.value = f"{dbg.object_a} <-> {dbg.object_b} | d={float(dbg.distance):.4f} m"
+        debug_summaries: list[str] = []
+        for i, row in enumerate(dbg_rows[: len(debug_colors)]):
+            p_a = np.asarray(row.point_a_world, dtype=float)
+            p_b = np.asarray(row.point_b_world, dtype=float)
+            dbg_points_a[i].position = tuple(p_a)
+            dbg_points_b[i].position = tuple(p_b)
+            dbg_points_a[i].visible = True
+            dbg_points_b[i].visible = True
+            if dbg_lines[i] is not None:
+                dbg_lines[i].remove()
+            seg = np.zeros((1, 2, 3), dtype=float)
+            seg[0, 0] = p_a
+            seg[0, 1] = p_b
+            color_a, color_b = debug_colors[i]
+            colors = np.array([[color_a, color_b]], dtype=float)
+            dbg_lines[i] = server.scene.add_line_segments(
+                f"/collision_debug/segment_{i}",
+                points=seg,
+                colors=colors,
+                line_width=3.0,
+                visible=True,
+            )
+            debug_summaries.append(f"{row.object_a} <-> {row.object_b} | d={float(row.distance):.4f} m")
+
+        for i in range(len(dbg_rows), len(debug_colors)):
+            dbg_points_a[i].visible = False
+            dbg_points_b[i].visible = False
+            if dbg_lines[i] is not None:
+                dbg_lines[i].visible = False
+
+        collision_debug_text.value = " || ".join(debug_summaries)
 
     def _sync_joint_sliders_from_q(q_now: np.ndarray) -> None:
         for joint_name, slider in joint_sliders:
@@ -704,13 +945,15 @@ def main() -> None:
         clear_all_target_velocities_if_available(solver)
 
         exclusion_pairs = collision_exclusions if exclude_consecutive.value else []
+        include_pairs = list(collision_include_pairs)
         total_pairs = len(list(robot.get_collision_pair_names())) if hasattr(robot, "get_collision_pair_names") else 0
         collision_pairs_stats.value = (
-            f"total={total_pairs}, excluded={len(exclusion_pairs)}, effective={max(0, total_pairs - len(exclusion_pairs))}"
+            f"total={total_pairs}, included={len(include_pairs)}, excluded={len(exclusion_pairs)}"
         )
         next_collision_cfg = (
             bool(enable_collision.value),
             float(collision_min_dist_mm.value),
+            int(collision_max_constraints.value),
             str(collision_tuning.value),
             bool(exclude_consecutive.value),
         )
@@ -719,10 +962,14 @@ def main() -> None:
                 solver,
                 enabled=bool(enable_collision.value),
                 min_distance_m=float(collision_min_dist_mm.value) * 1e-3,
+                max_constraints=int(collision_max_constraints.value),
                 tuning_mode=str(collision_tuning.value),
+                include_pairs=include_pairs,
                 exclude_pairs=list(exclusion_pairs),
             )
             collision_cfg = next_collision_cfg
+            if not bool(enable_collision.value):
+                _clear_collision_debug()
 
         if manual_control.value:
             if not prev_manual_state:
@@ -861,6 +1108,8 @@ def main() -> None:
         opts.adaptive_dt = bool(adaptive_dt.value)
         opts.adaptive_dt_max_scale = float(adaptive_dt_max_scale.value)
         opts.adaptive_dt_reference_distance = float(adaptive_dt_ref_dist.value)
+        if hasattr(opts, "stall_recovery"):
+            opts.stall_recovery = bool(enable_collision.value)
         configure_primary_solve_mode(opts, active_mode, bool(allow_fallback.value))
         dynamic_freeze_indices = []
         right_task_excluded = list(left_arm_velocity_indices)
@@ -911,6 +1160,8 @@ def main() -> None:
             q = q_prev
 
         result_status_name = getattr(getattr(result, "status", None), "name", str(getattr(result, "status", "")))
+        if bool(enable_collision.value) and result_status_name in {"COLLISION_VIOLATED", "INFEASIBLE"}:
+            q = q_prev.copy()
 
         robot.update_configuration(q)
         urdf_vis.update_cfg(map_q(q))
@@ -924,11 +1175,44 @@ def main() -> None:
         left_tgt = np.asarray(left_ctrl.position, dtype=float)
         right_err.value = f"{np.linalg.norm(right_tgt - right_now):.4f} m"
         left_err.value = f"{np.linalg.norm(left_tgt - left_now):.4f} m"
+        collision_min_distance_m = float(collision_min_dist_mm.value) * 1e-3
+        current_collision_min = None
+        if bool(enable_collision.value):
+            try:
+                if hasattr(solver, "get_last_collision_debug_list"):
+                    debug_rows = list(solver.get_last_collision_debug_list())
+                    if debug_rows:
+                        current_collision_min = min(float(row.distance) for row in debug_rows)
+                if current_collision_min is None and hasattr(solver, "get_last_collision_debug"):
+                    dbg = solver.get_last_collision_debug()
+                    if dbg is not None:
+                        current_collision_min = float(dbg.distance)
+            except Exception:
+                current_collision_min = None
+        boundary_stalled = (
+            bool(enable_collision.value)
+            and result_status_name == "NO_PROGRESS"
+            and current_collision_min is not None
+            and float(current_collision_min) <= collision_min_distance_m + 5e-3
+        )
+
         if result_status_name == "NO_PROGRESS" and max(right_pos_err, left_pos_err) <= EE_POSITION_DEADBAND:
             status.value = "Status: Holding target"
+        elif boundary_stalled:
+            _sync_targets_from_robot()
+            status.value = (
+                "Status: collision limited; targets snapped to current tools"
+                + (f" | {result.status_message}" if getattr(result, "status_message", "") else "")
+            )
         elif result_status_name == "NO_PROGRESS":
             status.value = (
                 "Status: weak progress"
+                + (f" | {result.status_message}" if getattr(result, "status_message", "") else "")
+            )
+        elif bool(enable_collision.value) and result_status_name in {"COLLISION_VIOLATED", "INFEASIBLE"}:
+            _sync_targets_from_robot()
+            status.value = (
+                "Status: collision limited; targets snapped to current tools"
                 + (f" | {result.status_message}" if getattr(result, "status_message", "") else "")
             )
         else:

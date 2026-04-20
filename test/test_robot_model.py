@@ -710,6 +710,58 @@ class TestRobotModel:
             assert model.check_collision() == False
             assert model.check_collision(min_distance=min_dist + 0.01) == True
 
+    def test_collision_geometry_survives_visual_mesh_failure(self, tmp_path):
+        """Collision import should survive unrelated visual mesh failures."""
+        urdf_content = """<?xml version="1.0"?>
+<robot name="broken_visual_valid_collision">
+  <link name="base_link">
+    <inertial>
+      <mass value="1.0"/>
+      <origin xyz="0 0 0"/>
+      <inertia ixx="0.01" ixy="0" ixz="0" iyy="0.01" iyz="0" izz="0.01"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="missing_visual_mesh.stl" scale="1 1 1"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.2 0.2 0.2"/>
+      </geometry>
+    </collision>
+  </link>
+  <link name="link1">
+    <inertial>
+      <mass value="0.5"/>
+      <origin xyz="0 0 0"/>
+      <inertia ixx="0.005" ixy="0" ixz="0" iyy="0.005" iyz="0" izz="0.005"/>
+    </inertial>
+    <collision>
+      <origin xyz="0.0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.2 0.2 0.2"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="joint1" type="revolute">
+    <parent link="base_link"/>
+    <child link="link1"/>
+    <origin xyz="0.05 0 0" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit effort="10" lower="-3.14" upper="3.14" velocity="1.0"/>
+  </joint>
+</robot>"""
+        urdf_path = tmp_path / "broken_visual_valid_collision.urdf"
+        urdf_path.write_text(urdf_content)
+
+        model = embodik.RobotModel(str(urdf_path), floating_base=False)
+        assert model.has_collision_geometry()
+        assert len(model.get_collision_geometry_names()) == 2
+        assert len(model.get_collision_pair_names()) >= 1
+
     # =================================================================
     # Joint index access
     # =================================================================

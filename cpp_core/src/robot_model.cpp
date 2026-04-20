@@ -60,19 +60,22 @@ RobotModel::RobotModel(const std::string &urdf_path, bool floating_base)
   // Create data structure
   data_ = pinocchio::Data(model_);
 
-  // Try to load geometry models (optional - may fail if meshes not found)
-  try {
-    // Extract directory path from URDF path
-    std::string package_dir =
-        urdf_path.substr(0, urdf_path.find_last_of("/\\"));
+  // Try to load geometry models independently so broken visuals do not
+  // suppress collision support.
+  std::string package_dir =
+      urdf_path.substr(0, urdf_path.find_last_of("/\\"));
 
-    // Load visual geometry
+  try {
     visual_model_ = std::make_unique<pinocchio::GeometryModel>();
     pinocchio::urdf::buildGeom(model_, urdf_path, pinocchio::VISUAL,
                                *visual_model_, package_dir);
     visual_data_ = std::make_unique<pinocchio::GeometryData>(*visual_model_);
+  } catch (const std::exception &) {
+    visual_model_.reset();
+    visual_data_.reset();
+  }
 
-    // Load collision geometry
+  try {
     collision_model_ = std::make_unique<pinocchio::GeometryModel>();
     pinocchio::urdf::buildGeom(model_, urdf_path, pinocchio::COLLISION,
                                *collision_model_, package_dir);
@@ -81,10 +84,7 @@ RobotModel::RobotModel(const std::string &urdf_path, bool floating_base)
     }
     collision_data_ =
         std::make_unique<pinocchio::GeometryData>(*collision_model_);
-  } catch (const std::exception &e) {
-    // Geometry loading is optional - continue without it
-    visual_model_.reset();
-    visual_data_.reset();
+  } catch (const std::exception &) {
     collision_model_.reset();
     collision_data_.reset();
   }
@@ -153,54 +153,34 @@ RobotModel::RobotModel(const std::string &urdf_path,
 
   Eigen::VectorXd reference_config = pinocchio::neutral(full_model);
 
-  // Try to build reduced model together with geometry models (preferred).
-  // Falls back to model-only reduction if geometry loading fails.
-  bool geometry_loaded = false;
+  std::string package_dir =
+      urdf_path.substr(0, urdf_path.find_last_of("/\\"));
+  pinocchio::buildReducedModel(full_model, joints_to_lock, reference_config,
+                               model_);
+  data_ = pinocchio::Data(model_);
+
   try {
-    std::string package_dir =
-        urdf_path.substr(0, urdf_path.find_last_of("/\\"));
-
-    pinocchio::GeometryModel full_visual;
-    pinocchio::urdf::buildGeom(full_model, urdf_path, pinocchio::VISUAL,
-                               full_visual, package_dir);
-
-    pinocchio::GeometryModel full_collision;
-    pinocchio::urdf::buildGeom(full_model, urdf_path, pinocchio::COLLISION,
-                               full_collision, package_dir);
-    if (full_collision.collisionPairs.empty()) {
-      full_collision.addAllCollisionPairs();
-    }
-
-    std::vector<pinocchio::GeometryModel> geom_list;
-    geom_list.push_back(std::move(full_visual));
-    geom_list.push_back(std::move(full_collision));
-
-    std::vector<pinocchio::GeometryModel> geom_reduced;
-    pinocchio::buildReducedModel(full_model, geom_list, joints_to_lock,
-                                 reference_config, model_, geom_reduced);
-    data_ = pinocchio::Data(model_);
-
-    visual_model_ = std::make_unique<pinocchio::GeometryModel>(
-        std::move(geom_reduced[0]));
+    visual_model_ = std::make_unique<pinocchio::GeometryModel>();
+    pinocchio::urdf::buildGeom(model_, urdf_path, pinocchio::VISUAL,
+                               *visual_model_, package_dir);
     visual_data_ = std::make_unique<pinocchio::GeometryData>(*visual_model_);
-
-    collision_model_ = std::make_unique<pinocchio::GeometryModel>(
-        std::move(geom_reduced[1]));
-    collision_data_ =
-        std::make_unique<pinocchio::GeometryData>(*collision_model_);
-
-    geometry_loaded = true;
   } catch (const std::exception &) {
     visual_model_.reset();
     visual_data_.reset();
-    collision_model_.reset();
-    collision_data_.reset();
   }
 
-  if (!geometry_loaded) {
-    pinocchio::buildReducedModel(full_model, joints_to_lock, reference_config,
-                                 model_);
-    data_ = pinocchio::Data(model_);
+  try {
+    collision_model_ = std::make_unique<pinocchio::GeometryModel>();
+    pinocchio::urdf::buildGeom(model_, urdf_path, pinocchio::COLLISION,
+                               *collision_model_, package_dir);
+    if (collision_model_->collisionPairs.empty()) {
+      collision_model_->addAllCollisionPairs();
+    }
+    collision_data_ =
+        std::make_unique<pinocchio::GeometryData>(*collision_model_);
+  } catch (const std::exception &) {
+    collision_model_.reset();
+    collision_data_.reset();
   }
 
   // Initialize configuration vectors
