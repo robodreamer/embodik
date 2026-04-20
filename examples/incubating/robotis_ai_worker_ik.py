@@ -46,8 +46,9 @@ COLLISION_TUNING_OPTIONS = ("speed", "balanced", "precise")
 POSTURE_SLIDER_DEADBAND = 1e-3
 EE_POSITION_DEADBAND = 1e-4
 EE_ROTATION_DEADBAND = 1e-3
+LIFT_LIMIT_MARGIN = 1e-3
 DEFAULT_WORKER_SEED = {
-    "lift_joint": 0.0,
+    "lift_joint": -0.1,
     "head_joint1": 0.0,
     "head_joint2": 0.0,
     "arm_l_joint1": 0.50,
@@ -115,6 +116,29 @@ def _apply_named_joint_seed(
             continue
         q_out[idx] = float(value)
     return np.clip(q_out, np.asarray(q_lo, dtype=float), np.asarray(q_hi, dtype=float))
+
+
+def _apply_soft_lift_margin(
+    q_in: np.ndarray,
+    *,
+    joint_name_to_cfg: dict[str, int],
+    q_lo: np.ndarray,
+    q_hi: np.ndarray,
+    margin: float = LIFT_LIMIT_MARGIN,
+) -> np.ndarray:
+    q_out = np.asarray(q_in, dtype=float).copy()
+    lift_idx = joint_name_to_cfg.get("lift_joint")
+    if lift_idx is None or lift_idx >= q_out.size or lift_idx >= q_lo.size or lift_idx >= q_hi.size:
+        return q_out
+    lo = float(q_lo[lift_idx])
+    hi = float(q_hi[lift_idx])
+    eff_lo = lo + float(margin)
+    eff_hi = hi - float(margin)
+    if eff_lo > eff_hi:
+        eff_lo = lo
+        eff_hi = hi
+    q_out[lift_idx] = float(np.clip(q_out[lift_idx], eff_lo, eff_hi))
+    return q_out
 
 
 def _prepare_viewer_urdf_path(urdf_path: Path) -> Path:
@@ -283,6 +307,7 @@ def main() -> None:
         if (idx := joint_name_to_cfg.get(name)) is not None
     ]
     q = _apply_named_joint_seed(q, joint_name_to_cfg, q_lo, q_hi, DEFAULT_WORKER_SEED)
+    q = _apply_soft_lift_margin(q, joint_name_to_cfg=joint_name_to_cfg, q_lo=q_lo, q_hi=q_hi)
     nullspace_bias_q = np.asarray(q, dtype=float).copy()
     robot.update_configuration(q)
     urdf_vis.update_cfg(map_q(q))
@@ -433,7 +458,9 @@ def main() -> None:
             return float(default_lo), float(default_hi)
         return float(q_lo[idx]), float(q_hi[idx])
 
-    lift_lo, lift_hi = _joint_limits("lift_joint", -0.5, 0.0)
+    lift_lo_raw, lift_hi_raw = _joint_limits("lift_joint", -0.5, 0.0)
+    lift_lo = min(lift_lo_raw + LIFT_LIMIT_MARGIN, lift_hi_raw)
+    lift_hi = max(lift_lo_raw, lift_hi_raw - LIFT_LIMIT_MARGIN)
     head_pitch_lo, head_pitch_hi = _joint_limits("head_joint1", -0.25, 0.7)
     head_yaw_lo, head_yaw_hi = _joint_limits("head_joint2", -0.5, 0.5)
 
@@ -605,13 +632,38 @@ def main() -> None:
             if idx is not None and idx < q_now.size:
                 slider.value = float(q_now[idx])
 
+    @manual_control.on_update
+    def _(_evt) -> None:
+        if bool(manual_control.value) and bool(auto_ik_solve.value):
+            auto_ik_solve.value = False
+        if bool(manual_control.value):
+            right_ctrl.visible = False
+            left_ctrl.visible = False
+
+    @auto_ik_solve.on_update
+    def _(_evt) -> None:
+        if bool(auto_ik_solve.value) and bool(manual_control.value):
+            manual_control.value = False
+        if bool(auto_ik_solve.value):
+            right_ctrl.visible = bool(enable_right_ee.value)
+            left_ctrl.visible = bool(enable_left_ee.value)
+
     def _apply_manual_joint_configuration(q_seed: np.ndarray) -> np.ndarray:
         q_manual = np.asarray(q_seed, dtype=float).copy()
         for joint_name, slider in joint_sliders:
             idx = joint_name_to_cfg.get(joint_name)
             if idx is not None and idx < q_manual.size:
                 q_manual[idx] = float(slider.value)
-        return clip_configuration(robot, q_manual, q_lo, q_hi)
+        for joint_name, slider in (
+            ("lift_joint", lift_slider),
+            ("head_joint1", head_pitch),
+            ("head_joint2", head_yaw),
+        ):
+            idx = joint_name_to_cfg.get(joint_name)
+            if idx is not None and idx < q_manual.size:
+                q_manual[idx] = float(slider.value)
+        q_manual = clip_configuration(robot, q_manual, q_lo, q_hi)
+        return _apply_soft_lift_margin(q_manual, joint_name_to_cfg=joint_name_to_cfg, q_lo=q_lo, q_hi=q_hi)
 
     def _sync_targets_from_robot() -> None:
         right_pose = frame_pose(frame_map["right_tool"])
@@ -646,6 +698,7 @@ def main() -> None:
         q = robot.neutral_configuration()
         q = _apply_named_joint_seed(q, joint_name_to_cfg, q_lo, q_hi, DEFAULT_WORKER_SEED)
         q = clip_configuration(robot, q, q_lo, q_hi)
+        q = _apply_soft_lift_margin(q, joint_name_to_cfg=joint_name_to_cfg, q_lo=q_lo, q_hi=q_hi)
         posture_target = q.copy()
         robot.update_configuration(q)
         urdf_vis.update_cfg(map_q(q))
@@ -691,10 +744,15 @@ def main() -> None:
         if manual_control.value:
             if not prev_manual_state:
                 _sync_joint_sliders_from_q(q)
+            right_ctrl.visible = False
+            left_ctrl.visible = False
             q = _apply_manual_joint_configuration(q)
             posture_target = q.copy()
+            posture.weight = float(posture_weight.value)
+            posture.set_target_configuration(posture_target)
             robot.update_configuration(q)
             urdf_vis.update_cfg(map_q(q))
+            _sync_joint_sliders_from_q(q)
             _sync_posture_sliders_from_q(q)
             _update_collision_debug()
             right_now = np.asarray(robot.get_frame_pose(frame_map["right_tool"]).translation, dtype=float)
@@ -713,7 +771,10 @@ def main() -> None:
             solve_mode.value,
             embodik.TaskSolveMode.SCALE,
         )
-        if not bool(enable_left_ee.value):
+        if not bool(auto_ik_solve.value):
+            right_ctrl.visible = False
+            left_ctrl.visible = False
+        elif not bool(enable_left_ee.value):
             right_ctrl.visible = True
             left_ctrl.visible = False
         elif not bool(enable_right_ee.value):
@@ -727,18 +788,10 @@ def main() -> None:
             task.allow_min_error_fallback = bool(allow_fallback.value)
 
         posture.weight = float(posture_weight.value)
-        for joint_name, slider in (
-            ("lift_joint", lift_slider),
-            ("head_joint1", head_pitch),
-            ("head_joint2", head_yaw),
-        ):
+        for joint_name in ("lift_joint", "head_joint1", "head_joint2"):
             idx = joint_name_to_cfg.get(joint_name)
             if idx is not None and idx < posture_target.size:
-                slider_value = float(slider.value)
-                if abs(slider_value - float(q[idx])) < POSTURE_SLIDER_DEADBAND:
-                    posture_target[idx] = float(q[idx])
-                else:
-                    posture_target[idx] = slider_value
+                posture_target[idx] = float(nullspace_bias_q[idx])
         posture.set_target_configuration(posture_target)
         if bool(arm_nullspace_enable.value) and float(arm_nullspace_weight.value) > 0.0:
             arm_nullspace.set_target_configuration(nullspace_bias_q)
@@ -869,6 +922,7 @@ def main() -> None:
             fallback_status_names=("INVALID_INPUT", "NUMERICAL_ERROR"),
         )
         q = step.q_next
+        q = _apply_soft_lift_margin(q, joint_name_to_cfg=joint_name_to_cfg, q_lo=q_lo, q_hi=q_hi)
         result = step.solver_result
         if not np.all(np.isfinite(q)):
             q = q_prev
