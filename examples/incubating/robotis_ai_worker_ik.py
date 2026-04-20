@@ -18,7 +18,7 @@ import numpy as np
 import embodik
 from embodik.utils import q2r, r2q
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
