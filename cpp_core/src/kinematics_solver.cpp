@@ -4382,33 +4382,12 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
   config.regularization_config.epsilon = solver_tolerance_;
   config.regularization_config.regularization_factor = damping_;
 
-  // Call the backend solver
-  const bool allow_warm_start = has_soft_rows;
-  const Eigen::VectorXd *softening_ptr = has_soft_rows ? &max_softening_factors : nullptr;
-  const Eigen::MatrixXd *warm_start_selector = nullptr;
-  if (allow_warm_start && warm_start_selector_cache_.has_value() &&
-      warm_start_constraint_rows_ == C.rows() &&
-      warm_start_selector_cache_->rows() == C.rows() &&
-      warm_start_selector_cache_->cols() == C.rows()) {
-    warm_start_selector = &(*warm_start_selector_cache_);
-  } else {
-    warm_start_selector_cache_.reset();
-    warm_start_constraint_rows_ = -1;
-  }
-  Eigen::MatrixXd final_selector;
-  Eigen::MatrixXd *final_selector_out_ptr =
-      allow_warm_start ? &final_selector : nullptr;
+  // Main's backend owns its selector/fallback state internally; keep the
+  // caller-side cache disabled when using the newer API surface.
+  warm_start_selector_cache_.reset();
+  warm_start_constraint_rows_ = -1;
   auto backend_result = computeMultiObjectiveVelocitySolutionEigen(
-      goals, jacobians, C, c_lower, c_upper, config, objective_configs,
-      softening_ptr, warm_start_selector, final_selector_out_ptr);
-  if (allow_warm_start && final_selector.rows() == C.rows() &&
-      final_selector.cols() == C.rows()) {
-    warm_start_selector_cache_ = final_selector;
-    warm_start_constraint_rows_ = C.rows();
-  } else {
-    warm_start_selector_cache_.reset();
-    warm_start_constraint_rows_ = -1;
-  }
+      goals, jacobians, C, c_lower, c_upper, config, objective_configs);
   if (backend_result.status == SolverStatus::kNonFiniteInput) {
     // Robust fallback: keep control loop stable by returning a zero-velocity
     // step instead of propagating a hard non-finite status.
@@ -5086,8 +5065,7 @@ PositionIKResult KinematicsSolver::solve_position(
     config.regularization_config.regularization_factor = damping_;
 
     auto vel_result = computeMultiObjectiveVelocitySolutionEigen(
-        goals, jacobians, C, c_lower, c_upper, config, objective_configs,
-        has_soft_rows ? &max_softening_factors : nullptr, nullptr, nullptr);
+        goals, jacobians, C, c_lower, c_upper, config, objective_configs);
 
     if (stall_config_.enabled) {
       double primary_goal_norm =
