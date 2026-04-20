@@ -73,12 +73,17 @@ def resolve_ai_worker_frames(frame_names: Iterable[str]) -> dict[str, str]:
     }
 
 
-def default_worker_allowed_joint_names(joint_names: Iterable[str]) -> set[str]:
-    """Return the joints that should stay active in the worker IK demo."""
-    allowed: set[str] = set()
+def default_worker_ik_joint_names(joint_names: Iterable[str]) -> list[str]:
+    """Return the reduced IK joint set for the worker demo."""
+    allowed: list[str] = []
     for joint_name in joint_names:
         if any(token in joint_name for token in ("wheel_", "world_fixed")):
             continue
-        if joint_name.startswith(("arm_", "gripper_", "head_", "lift_")):
-            allowed.add(joint_name)
+        if joint_name.startswith("lift_") or joint_name.startswith("arm_"):
+            allowed.append(joint_name)
     return allowed
+
+
+def default_worker_allowed_joint_names(joint_names: Iterable[str]) -> set[str]:
+    """Backward-compatible alias for the worker demo's active IK joints."""
+    return set(default_worker_ik_joint_names(joint_names))
