@@ -98,4 +98,4 @@ site/
 examples/robot_models*/**
 
 # Local performance tracking artifacts
-.cursor/reports/perf_runs/*
+.cursor/reports/perf_runs/*scripts/results/

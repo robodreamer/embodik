@@ -457,6 +457,52 @@ public:
   void clear_collision_constraint();
 
   /**
+   * @brief Set a custom minimum distance for all collision pairs involving
+   * geometries parented to link_a and link_b (matched by frame name substring).
+   * Overrides the global min_distance for those pairs only.
+   *
+   * @param activate_when_clear  If true (default), the override is stored as
+   *   "pending" and activates the first time the pair achieves the desired
+   *   clearance during a solve — preventing immediate stall when called from
+   *   a configuration already inside the threshold (latch-on semantics).
+   *   If false, the override takes effect immediately (legacy behaviour).
+   */
+  void set_collision_pair_min_distance(const std::string &link_a,
+                                       const std::string &link_b,
+                                       double min_distance,
+                                       bool activate_when_clear = true);
+
+  /**
+   * @brief Remove per-pair min_distance overrides for geometries involving
+   * link_a and link_b. Affected pairs revert to the global min_distance.
+   */
+  void clear_collision_pair_min_distance(const std::string &link_a,
+                                         const std::string &link_b);
+
+  /**
+   * @brief Return all active per-pair min_distance overrides as a list of
+   * (canonical_pair_key, min_distance) pairs.
+   */
+  std::vector<std::pair<std::string, double>>
+  get_collision_pair_min_distance_overrides() const;
+
+  // ---- Tunable collision boundary behaviour --------------------------------
+  /** Width (metres) of the no-braking zone above min_distance.  Default 3 mm.
+   *  Set to 0 to eliminate the discontinuity that causes boundary oscillation. */
+  void   set_collision_repulsion_deadband(double metres) { collision_repulsion_deadband_ = std::max(0.0, metres); }
+  double get_collision_repulsion_deadband() const        { return collision_repulsion_deadband_; }
+
+  /** Fraction of desired recovery velocity applied when inside min_distance.
+   *  Default 0.2.  Lower = gentler push-back; higher = faster escape. */
+  void   set_collision_recovery_scale(double scale) { collision_recovery_scale_ = std::clamp(scale, 0.01, 2.0); }
+  double get_collision_recovery_scale() const       { return collision_recovery_scale_; }
+
+  /** Maximum separation speed (m/s) for non-penetrating recovery.
+   *  Default 0.15 m/s. */
+  void   set_collision_max_separation_speed_nonpenetrating(double mps) { collision_max_sep_speed_nonpen_ = std::max(0.0, mps); }
+  double get_collision_max_separation_speed_nonpenetrating() const     { return collision_max_sep_speed_nonpen_; }
+
+  /**
    * @brief Enable/disable cached collision pair candidate evaluation.
    *
    * When enabled, collision distance queries are evaluated on a conservative
@@ -737,6 +783,19 @@ public:
       const Eigen::VectorXd &q);
 
   /**
+   * @brief Check per-pair override violations at q.
+   *
+   * For each pair that has an active per-pair min_distance override, computes
+   * the exact signed distance and subtracts the override threshold.  Returns
+   * the worst (most negative) margin across all such pairs, or nullopt if there
+   * are no active overrides.  A negative return means at least one custom pair
+   * is inside its override threshold even if the global min_distance is not
+   * violated — this is the "gap" the global post-step check misses.
+   */
+  std::optional<double> evaluate_per_pair_override_violations(
+      const Eigen::VectorXd &q);
+
+  /**
    * @brief Evaluate minimum collision distance at the given configuration.
    * @param current_q Configuration to evaluate (empty = use current).
    * @return Minimum distance, or nullopt if no collision geometry.
@@ -984,6 +1043,22 @@ private:
   std::optional<RelativePoseConstraintResult> compute_relative_pose_constraint();
 
   std::optional<CollisionConstraintConfig> collision_constraint_;
+  // Per-geometry-pair min_distance overrides. Key is canonical_pair_key(geom_a, geom_b).
+  // Set via set_collision_pair_min_distance(link_a, link_b, distance) which resolves
+  // link names to geometry names at call time. Survives configure_collision_constraint().
+  // Active per-pair overrides: applied immediately every solve tick.
+  std::unordered_map<std::string, double> per_pair_min_distance_overrides_;
+  // Tunable collision boundary behaviour (default values mirror the file-scope
+  // constexpr constants; exposed via Python for runtime sweep / autoresearch).
+  // Default changed from 3e-3 to 0: the 3mm deadband created a 0.145 m/s
+  // step-jump in lb at dist=min_dist+3mm, causing boundary-bounce oscillation.
+  // With 0, lb is continuous everywhere → smooth deceleration at boundary.
+  double collision_repulsion_deadband_           = 0.0;   // m above min_dist: lb=0 zone
+  double collision_recovery_scale_               = 0.2;   // fraction of desired recovery vel
+  double collision_max_sep_speed_nonpen_         = 0.15;  // m/s cap for non-penetrating recovery
+  // Pending (deferred) overrides: promoted to active the first time the pair
+  // achieves the desired clearance (latch-on). Set via activate_when_clear=true.
+  std::unordered_map<std::string, double> per_pair_deferred_overrides_;
   std::optional<CollisionDebugInfo> last_collision_debug_;
   // All active constraint pairs (up to max_constraints), populated after each solve.
   std::vector<CollisionDebugInfo> last_collision_debug_list_;
