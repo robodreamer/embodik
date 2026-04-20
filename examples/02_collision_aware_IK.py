@@ -417,6 +417,9 @@ class embodiKBackend:
         ee_mode: str = "SCALE",
         ee_fallback: bool = False,
         max_steps: int = 1,
+        adaptive_dt: bool = False,
+        adaptive_dt_max_scale: float = 5.0,
+        adaptive_dt_reference_distance: float = 0.05,
     ) -> embodiKResult:
         self.frame_task.solve_mode = getattr(
             embodik.TaskSolveMode, ee_mode, embodik.TaskSolveMode.SCALE
@@ -438,6 +441,9 @@ class embodiKBackend:
         self._step_opts.position_gain = pos_gain
         self._step_opts.orientation_gain = rot_gain
         self._step_opts.max_steps = max_steps
+        self._step_opts.adaptive_dt = adaptive_dt
+        self._step_opts.adaptive_dt_max_scale = adaptive_dt_max_scale
+        self._step_opts.adaptive_dt_reference_distance = adaptive_dt_reference_distance
 
         ik_start = time.perf_counter()
         result = self.solver.solve_position_step(
@@ -450,6 +456,11 @@ class embodiKBackend:
             embodik.SolverStatus.INFEASIBLE,
             embodik.SolverStatus.NUMERICAL_ERROR,
         ):
+            self.q = np.clip(np.array(result.q_solution), self.lower, self.upper)
+            self.robot.update_configuration(self.q)
+        # COLLISION_VIOLATED: q_solution is the last safe config — apply it
+        # so the robot holds at the safe position rather than freezing entirely.
+        elif result.status == embodik.SolverStatus.COLLISION_VIOLATED:
             self.q = np.clip(np.array(result.q_solution), self.lower, self.upper)
             self.robot.update_configuration(self.q)
 
@@ -587,6 +598,13 @@ def run_gui(cfg: RobotConfig, args: argparse.Namespace) -> None:
         pos_gain = server.gui.add_slider("Position Gain", min=0.1, max=200.0, initial_value=DEFAULT_POS_GAIN, step=0.1)
         rot_gain = server.gui.add_slider("Orientation Gain", min=0.1, max=200.0, initial_value=DEFAULT_ROT_GAIN, step=0.1)
         iterations_slider = server.gui.add_slider("IK Iterations", min=1, max=20, initial_value=1, step=1)
+        adaptive_dt_checkbox = server.gui.add_checkbox("Adaptive dt", initial_value=False)
+        adaptive_dt_max_scale_slider = server.gui.add_slider(
+            "Adaptive dt Max Scale", min=1.0, max=10.0, step=0.5, initial_value=10.0
+        )
+        adaptive_dt_ref_dist_slider = server.gui.add_slider(
+            "Adaptive dt Ref Dist (m)", min=0.01, max=0.20, step=0.01, initial_value=0.02
+        )
         nullspace_enabled_checkbox = server.gui.add_checkbox("Enable Nullspace Bias", initial_value=False)
         nullspace_gain = server.gui.add_slider("Nullspace Gain", min=0.0, max=2.0, initial_value=DEFAULT_NULLSPACE_GAIN, step=0.05)
         self_collision_checkbox = server.gui.add_checkbox(
@@ -1109,15 +1127,26 @@ def run_gui(cfg: RobotConfig, args: argparse.Namespace) -> None:
                 ee_mode=ee_mode_dropdown.value,
                 ee_fallback=ee_fallback_checkbox.value,
                 max_steps=int(iterations_slider.value),
+                adaptive_dt=bool(adaptive_dt_checkbox.value),
+                adaptive_dt_max_scale=float(adaptive_dt_max_scale_slider.value),
+                adaptive_dt_reference_distance=float(adaptive_dt_ref_dist_slider.value),
             )
             q_current = result.joints
             solver_elapsed_ms = result.elapsed_ms
             col_ms = result.collision_time_ms
+            status_prefix = (
+                "⚠ COLLISION_VIOLATED" if result.status == "COLLISION_VIOLATED"
+                else f"embodiK {result.status}"
+            )
+            adt_suffix = (
+                f" | adt×{adaptive_dt_max_scale_slider.value:.1f}"
+                if adaptive_dt_checkbox.value else ""
+            )
             status_handle.value = (
-                f"Status: embodiK {result.status} | "
+                f"Status: {status_prefix} | "
                 f"pos={result.position_error*1e3:.2f} mm, rot={result.rotation_error:.4f} rad | "
-                f"mode={result.primary_mode}, fb={result.primary_fallback}, scale={result.primary_scale:.3f} | "
-                f"col={col_ms:.2f}ms"
+                f"mode={result.primary_mode}, scale={result.primary_scale:.3f} | "
+                f"col={col_ms:.2f}ms{adt_suffix}"
             )
 
             for slider, value in zip(joint_sliders, q_current):
