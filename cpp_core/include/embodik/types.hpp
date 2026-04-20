@@ -59,7 +59,11 @@ enum class SolverStatus {
   kConstraintBoundsMismatch = 5,
   kNonFiniteInput = 6,
   kInfeasible = 7,
-  kNoProgress = 8
+  kNoProgress = 8,
+  // Returned by solve_position_step when the input q was collision-safe but no
+  // integration step (including backoffs) could maintain min_distance.
+  // q_solution is set to the input q (safe position held).
+  kCollisionViolated = 9
 };
 
 struct BasicSolverConfig {
@@ -300,6 +304,14 @@ struct PositionStepOptions {
   int no_progress_max_steps = 0;
   double no_progress_error_tolerance = 1e-8;
   double no_progress_dq_norm_tolerance = 1e-8;
+  // Adaptive dt: scale the integration timestep proportional to current
+  // position error so large target jumps converge faster without tuning gains.
+  //   effective_dt = clamp(dt * (pos_error / reference_distance), dt, dt * max_scale)
+  // Keeps snappy far-from-target response while reverting to base dt near target.
+  // Only active when adaptive_dt=true and adaptive_dt_reference_distance > 0.
+  bool adaptive_dt = false;
+  double adaptive_dt_max_scale = 5.0;            // Max multiplier on base dt
+  double adaptive_dt_reference_distance = 0.05;  // Distance (m) where scale = 1.0
 };
 
 // Per-task target for multi-task solve_position_step().
