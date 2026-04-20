@@ -19,6 +19,7 @@
 #include <limits>
 #include <memory>
 #include <optional>
+#include <pinocchio/spatial/se3.hpp>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -731,6 +732,87 @@ public:
    */
   void clear_com_constraint();
 
+  /**
+   * @brief Replace user-defined linear velocity constraints.
+   *
+   * Constraints are enforced as:
+   *   lower_bounds <= C * dq <= upper_bounds
+   *
+   * @param C Constraint matrix (m x nv)
+   * @param lower_bounds Lower bounds (m)
+   * @param upper_bounds Upper bounds (m)
+   */
+  void set_linear_velocity_constraints(const Eigen::MatrixXd &C,
+                                       const Eigen::VectorXd &lower_bounds,
+                                       const Eigen::VectorXd &upper_bounds);
+
+  /**
+   * @brief Append user-defined linear velocity constraints.
+   *
+   * @param C Constraint matrix (m x nv)
+   * @param lower_bounds Lower bounds (m)
+   * @param upper_bounds Upper bounds (m)
+   */
+  void append_linear_velocity_constraints(const Eigen::MatrixXd &C,
+                                          const Eigen::VectorXd &lower_bounds,
+                                          const Eigen::VectorXd &upper_bounds);
+
+  /**
+   * @brief Clear all user-defined linear velocity constraints.
+   */
+  void clear_linear_velocity_constraints();
+
+  /**
+   * @brief Number of active user-defined linear velocity constraints.
+   */
+  int get_linear_velocity_constraint_rows() const;
+
+  /**
+   * @brief Add a tight 6D frame pose constraint around a target pose.
+   *
+   * Enforces epsilon-box bounds in task-space around @p target_pose:
+   *   -position_epsilon <= [dx,dy,dz] <= position_epsilon
+   *   -orientation_epsilon <= [rx,ry,rz] <= orientation_epsilon
+   *
+   * @param frame_name Frame to constrain.
+   * @param target_pose Target 4x4 homogeneous pose in world frame.
+   * @param position_epsilon Translation epsilon (meters).
+   * @param orientation_epsilon Orientation epsilon (radians).
+   * @param axis_mask Optional 6D axis mask (empty = all ones).
+   */
+  void add_tight_frame_pose_constraint(
+      const std::string &frame_name, const Eigen::Matrix4d &target_pose,
+      double position_epsilon = 1e-5, double orientation_epsilon = 1e-4,
+      const Eigen::VectorXd &axis_mask = Eigen::VectorXd());
+
+  /**
+   * @brief Clear all tight 6D frame pose constraints.
+   */
+  void clear_tight_frame_pose_constraints();
+
+  /**
+   * @brief Add a tight 3D point constraint on a frame translation.
+   *
+   * Enforces:
+   *   -position_epsilon <= [dx,dy,dz] <= position_epsilon
+   * for masked translational axes.
+   *
+   * @param frame_name Frame to constrain.
+   * @param target_point Target 3D point in world frame.
+   * @param position_epsilon Translation epsilon (meters).
+   * @param axis_mask Optional 3D axis mask (empty = all ones).
+   */
+  void add_tight_point_constraint(const std::string &frame_name,
+                                  const Eigen::Vector3d &target_point,
+                                  double position_epsilon = 1e-5,
+                                  const Eigen::Vector3d &axis_mask =
+                                      Eigen::Vector3d::Ones());
+
+  /**
+   * @brief Clear all tight point constraints.
+   */
+  void clear_tight_point_constraints();
+
   struct CollisionDebugInfo {
     std::string object_a;
     std::string object_b;
@@ -882,6 +964,8 @@ private:
   /// Optional torso constraint rows injected by solve_position_step into the
   /// next solve_velocity() call; cleared at end of solve_velocity().
   std::optional<TorsoPoseConstraintOptions> pending_step_torso_constraint_;
+  std::optional<Eigen::MatrixXd> warm_start_selector_cache_;
+  int warm_start_constraint_rows_ = -1;
 
   /// Cached velocity-index → configuration-index map for the current robot
   /// (rebuilt when the model pointer or ``nv`` changes).
@@ -1041,6 +1125,45 @@ private:
 
   std::optional<RelativePoseConstraintConfig> relative_pose_constraint_;
   std::optional<RelativePoseConstraintResult> compute_relative_pose_constraint();
+
+  struct LinearVelocityConstraintConfig {
+    bool enabled = false;
+    Eigen::MatrixXd C;
+    Eigen::VectorXd lower_bounds;
+    Eigen::VectorXd upper_bounds;
+  };
+
+  struct LinearVelocityConstraintResult {
+    Eigen::MatrixXd jacobian;
+    Eigen::VectorXd lower_bounds;
+    Eigen::VectorXd upper_bounds;
+    Eigen::ArrayXi violated_rows;
+  };
+
+  struct TightFramePoseConstraintConfig {
+    std::string frame_name;
+    pinocchio::SE3 target_pose = pinocchio::SE3::Identity();
+    double position_epsilon = 1e-5;
+    double orientation_epsilon = 1e-4;
+    Eigen::VectorXd axis_mask = Eigen::VectorXd::Ones(6);
+  };
+
+  struct TightPointConstraintConfig {
+    std::string frame_name;
+    Eigen::Vector3d target_point = Eigen::Vector3d::Zero();
+    double position_epsilon = 1e-5;
+    Eigen::Vector3d axis_mask = Eigen::Vector3d::Ones();
+  };
+
+  std::optional<LinearVelocityConstraintConfig> linear_velocity_constraints_;
+  std::vector<TightFramePoseConstraintConfig> tight_frame_pose_constraints_;
+  std::vector<TightPointConstraintConfig> tight_point_constraints_;
+  std::optional<LinearVelocityConstraintResult>
+  compute_linear_velocity_constraints();
+  std::optional<LinearVelocityConstraintResult>
+  compute_tight_frame_pose_constraints();
+  std::optional<LinearVelocityConstraintResult>
+  compute_tight_point_constraints();
 
   std::optional<CollisionConstraintConfig> collision_constraint_;
   // Per-geometry-pair min_distance overrides. Key is canonical_pair_key(geom_a, geom_b).

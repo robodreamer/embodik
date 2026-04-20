@@ -555,6 +555,54 @@ void bind_kinematics_solver(nb::module_ &m) {
       .def("clear_com_constraint", &KinematicsSolver::clear_com_constraint,
            "Disable CoM support-polygon constraint.")
 
+      .def("set_linear_velocity_constraints",
+           &KinematicsSolver::set_linear_velocity_constraints, nb::arg("C"),
+           nb::arg("lower_bounds"), nb::arg("upper_bounds"),
+           "Replace user-defined linear velocity constraints.\n\n"
+           "Enforces lower_bounds <= C @ dq <= upper_bounds.")
+      .def("append_linear_velocity_constraints",
+           &KinematicsSolver::append_linear_velocity_constraints, nb::arg("C"),
+           nb::arg("lower_bounds"), nb::arg("upper_bounds"),
+           "Append user-defined linear velocity constraints.")
+      .def("clear_linear_velocity_constraints",
+           &KinematicsSolver::clear_linear_velocity_constraints,
+           "Clear all user-defined linear velocity constraints.")
+      .def("get_linear_velocity_constraint_rows",
+           &KinematicsSolver::get_linear_velocity_constraint_rows,
+           "Return active user-defined linear constraint row count.")
+      .def(
+          "add_tight_frame_pose_constraint",
+          [](KinematicsSolver &self, const std::string &frame_name,
+             const Eigen::Matrix4d &target_pose, double position_epsilon,
+             double orientation_epsilon, const Eigen::VectorXd &axis_mask) {
+            self.add_tight_frame_pose_constraint(frame_name, target_pose,
+                                                 position_epsilon,
+                                                 orientation_epsilon, axis_mask);
+          },
+          nb::arg("frame_name"), nb::arg("target_pose"),
+          nb::arg("position_epsilon") = 1e-5,
+          nb::arg("orientation_epsilon") = 1e-4,
+          nb::arg("axis_mask") = Eigen::VectorXd(),
+          "Add a tight 6D frame pose epsilon-box constraint.")
+      .def("clear_tight_frame_pose_constraints",
+           &KinematicsSolver::clear_tight_frame_pose_constraints,
+           "Clear all tight frame pose constraints.")
+      .def(
+          "add_tight_point_constraint",
+          [](KinematicsSolver &self, const std::string &frame_name,
+             const Eigen::Vector3d &target_point, double position_epsilon,
+             const Eigen::Vector3d &axis_mask) {
+            self.add_tight_point_constraint(frame_name, target_point,
+                                            position_epsilon, axis_mask);
+          },
+          nb::arg("frame_name"), nb::arg("target_point"),
+          nb::arg("position_epsilon") = 1e-5,
+          nb::arg("axis_mask") = Eigen::Vector3d::Ones(),
+          "Add a tight 3D point epsilon-box constraint.")
+      .def("clear_tight_point_constraints",
+           &KinematicsSolver::clear_tight_point_constraints,
+           "Clear all tight point constraints.")
+
       .def("get_last_collision_debug",
            &KinematicsSolver::get_last_collision_debug,
            "Retrieve debug information for the closest active collision pair "
