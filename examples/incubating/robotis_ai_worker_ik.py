@@ -25,7 +25,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from examples.incubating.example_helpers.robotis_ai_worker_utils import (
-    default_worker_allowed_joint_names,
+    default_worker_ik_joint_names,
     resolve_ai_worker_frames,
     resolve_ffw_urdf_path,
 )
@@ -279,7 +279,9 @@ def main() -> None:
     import yourdfpy
     from viser.extras import ViserUrdf
 
-    robot = embodik.RobotModel(str(urdf_path), floating_base=False)
+    full_robot = embodik.RobotModel(str(urdf_path), floating_base=False)
+    ik_joint_names = default_worker_ik_joint_names(full_robot.get_joint_names())
+    robot = embodik.RobotModel(str(urdf_path), actuated_joint_names=ik_joint_names, floating_base=False)
     server = viser.ViserServer(port=args.port)
     server.scene.add_grid("/ground", width=4, height=4)
 
@@ -303,7 +305,7 @@ def main() -> None:
                 pass
     posture_controlled_indices = [
         idx
-        for name in ("lift_joint", "head_joint1", "head_joint2")
+        for name in ("lift_joint",)
         if (idx := joint_name_to_cfg.get(name)) is not None
     ]
     q = _apply_named_joint_seed(q, joint_name_to_cfg, q_lo, q_hi, DEFAULT_WORKER_SEED)
@@ -349,12 +351,11 @@ def main() -> None:
 
     solver, right_task, left_task, posture, arm_nullspace = _build_solver(q)
 
-    allowed_joint_names = default_worker_allowed_joint_names(joint_names)
+    allowed_joint_names = set(ik_joint_names)
     locked_velocity_indices: list[int] = []
     left_arm_velocity_indices: list[int] = []
     right_arm_velocity_indices: list[int] = []
     lift_velocity_indices: list[int] = []
-    head_velocity_indices: list[int] = []
     arm_controlled_indices: list[int] = []
     for joint_name in joint_names:
         if not hasattr(robot, "get_joint_velocity_index"):
@@ -371,8 +372,6 @@ def main() -> None:
             target_index_list = right_arm_velocity_indices
         elif joint_name.startswith("lift_"):
             target_index_list = lift_velocity_indices
-        elif joint_name.startswith("head_"):
-            target_index_list = head_velocity_indices
         for offset in range(max(nv_joint, 1)):
             expanded_idx = idx_v + offset
             if target_index_list is not None:
@@ -386,7 +385,6 @@ def main() -> None:
     left_arm_velocity_indices = sorted(set(left_arm_velocity_indices))
     right_arm_velocity_indices = sorted(set(right_arm_velocity_indices))
     lift_velocity_indices = sorted(set(lift_velocity_indices))
-    head_velocity_indices = sorted(set(head_velocity_indices))
     arm_controlled_indices = sorted(set(arm_controlled_indices))
     if hasattr(arm_nullspace, "set_controlled_joint_indices"):
         arm_nullspace.set_controlled_joint_indices(list(arm_controlled_indices))
@@ -461,9 +459,6 @@ def main() -> None:
     lift_lo_raw, lift_hi_raw = _joint_limits("lift_joint", -0.5, 0.0)
     lift_lo = min(lift_lo_raw + LIFT_LIMIT_MARGIN, lift_hi_raw)
     lift_hi = max(lift_lo_raw, lift_hi_raw - LIFT_LIMIT_MARGIN)
-    head_pitch_lo, head_pitch_hi = _joint_limits("head_joint1", -0.25, 0.7)
-    head_yaw_lo, head_yaw_hi = _joint_limits("head_joint2", -0.5, 0.5)
-
     with server.gui.add_folder("IK Controls"):
         timing_handle = server.gui.add_number("Elapsed (ms)", 0.001, disabled=True)
         auto_ik_solve = server.gui.add_checkbox("Auto IK Solve", initial_value=True)
@@ -533,10 +528,6 @@ def main() -> None:
 
     with server.gui.add_folder("Worker Posture"):
         lift_slider = server.gui.add_slider("Lift Joint", lift_lo, lift_hi, 0.001, _joint_value("lift_joint"))
-        head_pitch = server.gui.add_slider(
-            "Head Pitch", head_pitch_lo, head_pitch_hi, 0.001, _joint_value("head_joint1")
-        )
-        head_yaw = server.gui.add_slider("Head Yaw", head_yaw_lo, head_yaw_hi, 0.001, _joint_value("head_joint2"))
         snap_targets = server.gui.add_button("Snap Targets to Current Tools")
         reset_pose = server.gui.add_button("Reset Robot + Targets")
 
@@ -623,11 +614,7 @@ def main() -> None:
                 slider.value = float(q_now[idx])
 
     def _sync_posture_sliders_from_q(q_now: np.ndarray) -> None:
-        for joint_name, slider in (
-            ("lift_joint", lift_slider),
-            ("head_joint1", head_pitch),
-            ("head_joint2", head_yaw),
-        ):
+        for joint_name, slider in (("lift_joint", lift_slider),):
             idx = joint_name_to_cfg.get(joint_name)
             if idx is not None and idx < q_now.size:
                 slider.value = float(q_now[idx])
@@ -654,11 +641,7 @@ def main() -> None:
             idx = joint_name_to_cfg.get(joint_name)
             if idx is not None and idx < q_manual.size:
                 q_manual[idx] = float(slider.value)
-        for joint_name, slider in (
-            ("lift_joint", lift_slider),
-            ("head_joint1", head_pitch),
-            ("head_joint2", head_yaw),
-        ):
+        for joint_name, slider in (("lift_joint", lift_slider),):
             idx = joint_name_to_cfg.get(joint_name)
             if idx is not None and idx < q_manual.size:
                 q_manual[idx] = float(slider.value)
@@ -788,7 +771,7 @@ def main() -> None:
             task.allow_min_error_fallback = bool(allow_fallback.value)
 
         posture.weight = float(posture_weight.value)
-        for joint_name in ("lift_joint", "head_joint1", "head_joint2"):
+        for joint_name in ("lift_joint",):
             idx = joint_name_to_cfg.get(joint_name)
             if idx is not None and idx < posture_target.size:
                 posture_target[idx] = float(nullspace_bias_q[idx])

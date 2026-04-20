@@ -56,8 +56,8 @@ def test_default_worker_allowed_joint_names_excludes_wheels() -> None:
         ]
     )
     assert "lift_joint" in allowed
-    assert "head_joint1" in allowed
     assert "arm_r_joint3" in allowed
-    assert "gripper_l_joint2" in allowed
+    assert "head_joint1" not in allowed
+    assert "gripper_l_joint2" not in allowed
     assert "left_wheel_steer" not in allowed
     assert "rear_wheel_drive" not in allowed
