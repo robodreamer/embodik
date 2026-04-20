@@ -16,6 +16,12 @@ from examples.incubating.example_helpers.robotis_ai_worker_utils import (  # noq
     resolve_ai_worker_frames,
     resolve_ffw_urdf_path,
 )
+from examples.incubating.robotis_ai_worker_ik import (  # noqa: E402
+    DEFAULT_WORKER_SEED,
+    _apply_named_joint_seed,
+    _generate_consecutive_collision_exclusions,
+    _generate_worker_collision_include_pairs,
+)
 
 
 def _load_worker_robot():
@@ -63,6 +69,93 @@ def test_reduced_worker_ik_joint_set_excludes_wheels_and_head() -> None:
     assert not any("wheel_" in name for name in joint_names)
     assert not any(name.startswith("head_") for name in joint_names)
     assert not any(name.startswith("gripper_") for name in joint_names)
+
+
+def test_worker_collision_exclusions_include_shoulder_root_pairs() -> None:
+    robot, _frames = _load_worker_robot()
+    urdf = resolve_ffw_urdf_path("sg2")
+    excl = set(tuple(p) for p in _generate_consecutive_collision_exclusions(robot, urdf))
+    assert ("arm_base_link_0", "arm_l_link1_0") in excl or ("arm_l_link1_0", "arm_base_link_0") in excl
+    assert ("arm_base_link_0", "arm_r_link1_0") in excl or ("arm_r_link1_0", "arm_base_link_0") in excl
+
+
+def test_worker_collision_include_pairs_are_curated_for_teleop() -> None:
+    robot, _frames = _load_worker_robot()
+    urdf = resolve_ffw_urdf_path("sg2")
+    excl = _generate_consecutive_collision_exclusions(robot, urdf)
+    include_pairs = _generate_worker_collision_include_pairs(robot, urdf, excl)
+    assert 0 < len(include_pairs) <= 100
+    for a, b in include_pairs:
+        assert "camera_" not in a
+        assert "camera_" not in b
+        if a.startswith("gripper_"):
+            assert a.endswith(("_base_0", "_l2_0", "_r2_0"))
+        if b.startswith("gripper_"):
+            assert b.endswith(("_base_0", "_l2_0", "_r2_0"))
+
+
+def test_worker_self_collision_constraint_stays_feasible_for_inward_reach() -> None:
+    urdf = resolve_ffw_urdf_path("sg2")
+    full = embodik.RobotModel(str(urdf), floating_base=False)
+    robot = embodik.RobotModel(
+        str(urdf),
+        actuated_joint_names=default_worker_ik_joint_names(full.get_joint_names()),
+        floating_base=False,
+    )
+    frames = resolve_ai_worker_frames(robot.get_frame_names())
+    q_lo, q_hi = robot.get_joint_limits()
+    joint_name_to_cfg = {name: int(robot.get_joint_config_index(name)) for name in robot.get_joint_names()}
+    q0 = _apply_named_joint_seed(robot.neutral_configuration(), joint_name_to_cfg, q_lo, q_hi, DEFAULT_WORKER_SEED)
+    robot.update_configuration(q0)
+
+    def _frame_pose_matrix_local(frame_name: str) -> np.ndarray:
+        pose = robot.get_frame_pose(frame_name)
+        T = np.eye(4, dtype=float)
+        T[:3, :3] = np.asarray(pose.rotation, dtype=float)
+        T[:3, 3] = np.asarray(pose.translation, dtype=float)
+        return T
+
+    right_target = _frame_pose_matrix_local(frames["right_tool"])
+    left_target = _frame_pose_matrix_local(frames["left_tool"])
+    right_target[:3, 3] += np.array([-0.18, 0.12, 0.02], dtype=float)
+    left_target[:3, 3] += np.array([-0.18, -0.12, 0.02], dtype=float)
+
+    solver = embodik.KinematicsSolver(robot)
+    solver.dt = 0.01
+    solver.set_damping(0.1)
+    solver.set_tolerance(0.1)
+    solver.enable_position_limits(True)
+    solver.enable_velocity_limits(True)
+    right_task = solver.add_frame_task("right_tool_pose", frames["right_tool"], embodik.TaskType.FRAME_POSE)
+    left_task = solver.add_frame_task("left_tool_pose", frames["left_tool"], embodik.TaskType.FRAME_POSE)
+    for task in (right_task, left_task):
+        task.priority = 0
+        task.weight = 1.0
+        task.solve_mode = embodik.TaskSolveMode.SCALE_ELASTIC
+
+    exclusions = _generate_consecutive_collision_exclusions(robot, urdf)
+    include_pairs = _generate_worker_collision_include_pairs(robot, urdf, exclusions)
+    solver.configure_collision_constraint(
+        min_distance=0.03, include_pairs=include_pairs, exclude_pairs=exclusions, max_constraints=3
+    )
+
+    opts = embodik.PositionStepOptions()
+    opts.max_steps = 20
+    opts.position_gain = 10.0
+    opts.orientation_gain = 10.0
+    result = solver.solve_position_step(
+        q0,
+        [
+            embodik.TaskTarget("right_tool_pose", right_target, 10.0, 10.0),
+            embodik.TaskTarget("left_tool_pose", left_target, 10.0, 10.0),
+        ],
+        opts,
+    )
+    assert result.status.name == "SUCCESS"
+
+    min_dist = solver.evaluate_min_collision_distance(np.asarray(result.q_solution, dtype=float))
+    assert min_dist is not None
+    assert float(min_dist) >= 0.03 - 1e-3
 
 
 def _solve_single_step(
