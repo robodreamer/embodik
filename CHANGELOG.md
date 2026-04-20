@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-04-19
+
+### Added
+- **`SolverStatus.COLLISION_VIOLATED` (= 9)**: returned by `solve_position_step` when the input q was collision-safe but no integration step could maintain `min_distance`. `q_solution` is set to the last safe configuration. Hardware startup recovery (violated seed) never returns this status.
+- **Per-link-pair collision distance overrides**: `solver.set_collision_pair_min_distance(link_a, link_b, dist, activate_when_clear=True)` sets a custom minimum clearance for specific link pairs. Uses deferred-latch activation by default — the override activates the first time the pair achieves the desired clearance, preventing immediate stalls when called from inside the threshold.
+- **`PositionStepOptions.adaptive_dt`**: scales the integration timestep proportional to current position error for faster large-jump convergence without tuning gains. Configurable via `adaptive_dt_max_scale` and `adaptive_dt_reference_distance`. Includes proximity-aware cap to prevent overshoot stalls near collision boundaries.
+- **Collision boundary tuning API**: `set_collision_repulsion_deadband()`, `set_collision_recovery_scale()`, `set_collision_max_separation_speed_nonpenetrating()` for runtime sweep/autoresearch without recompiling.
+- **`evaluate_per_pair_override_violations(q)`**: returns the worst margin across active per-pair override pairs; used internally in post-step rejection.
+- Example `11_collision_hardening_demo.py` (Franka Panda interactive demo with collision status, per-pair sliders, nearest-point visualization).
+- Benchmarks: `benchmark_position_step_responsiveness.py`, `benchmark_boundary_oscillation.py`.
+- Test suite: `test/test_collision_hardening.py` (7 tests covering all new collision guarantees).
+
+### Changed
+- **`collision_repulsion_deadband` default changed from 3 mm to 0**: the 3 mm no-braking zone created a 0.145 m/s velocity discontinuity that drove boundary-bounce oscillation. With 0, the lb formula provides a smooth deceleration ramp all the way to `min_distance` with no bounce.
+- **Sparse position-limit constraint rows**: `solve_velocity` now only adds QP rows for joints where position limits actually tighten beyond the velocity limit. Reduces constraint matrix size significantly for high-DOF floating-base robots (e.g. nv=47 → ~15 active rows at mid-range configuration).
+- **Adaptive dt full-scan for large steps**: when `adaptive_dt` scales the integration step by > 1.01×, the post-step collision check uses a sphere-broadphase-expanded scan to catch pairs that were outside the active set before the jump.
+- `set_collision_pair_min_distance` default changed to `activate_when_clear=True`; use `activate_when_clear=False` for the previous immediate-activation behaviour.
+- `examples/02_collision_aware_IK.py` updated with adaptive_dt controls (max_scale=10, ref_dist=0.02 defaults) and `COLLISION_VIOLATED` hold handling.
+
+### Fixed
+- **Critical**: post-step rejection in both `solve_position_step` overloads previously checked `kCollisionPenetrationDistanceThreshold` (−1e-5) instead of `min_distance`. Solutions violating min_distance were silently returned as `SUCCESS`, requiring client-side collision checks.
+- **Critical**: multi-target `solve_position_step` rejection was never updated from the original −1e-5 threshold (only `solve_position` and single-target were fixed initially).
+- **Critical**: collision constraint permanently silenced in SPEED/BALANCED mode — the proximity-gated fast-path had no refresh-interval guard, causing `last_constraint_min_distance_` to stay stale indefinitely. Fixed with refresh-interval check and delta-q guard (~0.1 rad motion invalidates stale cache immediately).
+- **Critical**: per-pair distance overrides not enforced in post-step rejection. Global `min_distance` was used, allowing custom pairs to penetrate undetected. Now `evaluate_per_pair_override_violations()` is checked at all three rejection sites.
+- Desaturation nudge used `kCollisionPenetrationDistanceThreshold` as safe_candidate threshold; could silently place robot inside `min_distance` within the 0.5 mm `not_worse` tolerance window.
+- Stall escape (Jacobian/normal) did not account for per-pair override thresholds.
+- Removed `kCollisionViolationDeadband` (1 mm dead zone with zero recovery force inside `min_distance`); recovery ramp now activates immediately at the boundary.
+
 ## [0.19.0] - 2026-04-04
 
 ### Added
