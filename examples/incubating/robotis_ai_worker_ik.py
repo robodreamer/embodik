@@ -27,6 +27,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from examples.incubating.example_helpers.robotis_ai_worker_utils import (
     default_worker_ik_joint_names,
+    resolve_generated_ffw_collision_urdf_path,
     resolve_ai_worker_frames,
     resolve_ffw_urdf_path,
 )
@@ -141,6 +142,145 @@ def _apply_soft_lift_margin(
         eff_hi = hi
     q_out[lift_idx] = float(np.clip(q_out[lift_idx], eff_lo, eff_hi))
     return q_out
+
+
+def _joint_velocity_norm(result: object) -> float:
+    dq = getattr(result, "joint_velocities", None)
+    if dq is None:
+        return 0.0
+    try:
+        return float(np.linalg.norm(np.asarray(dq, dtype=float)))
+    except Exception:
+        return 0.0
+
+
+def _is_collision_boundary_stall(
+    *,
+    result: object,
+    collision_enabled: bool,
+    current_collision_min: float | None,
+    collision_min_distance_m: float,
+    distance_slack_m: float = 5e-3,
+    dq_stall_eps: float = 1e-8,
+) -> bool:
+    """Classify zero-motion near-margin exits as collision-limited holds.
+
+    In the worker teleop flow, repeatedly commanding farther into the torso can
+    leave the solver parked at the last safe configuration with statuses like
+    ``INFEASIBLE`` or ``NUMERICAL_ERROR`` instead of ``COLLISION_VIOLATED``.
+    Treat that plateau the same way as a safe collision hold so the UI snaps the
+    target back to the achievable boundary rather than re-requesting the same
+    impossible step every tick.
+    """
+    if not collision_enabled or current_collision_min is None:
+        return False
+
+    status_name = getattr(getattr(result, "status", None), "name", str(getattr(result, "status", "")))
+    if status_name not in {"NO_PROGRESS", "INFEASIBLE", "NUMERICAL_ERROR"}:
+        return False
+
+    if float(current_collision_min) > float(collision_min_distance_m) + float(distance_slack_m):
+        return False
+
+    if _joint_velocity_norm(result) > float(dq_stall_eps):
+        return False
+
+    return True
+
+
+def _attempt_deep_penetration_escape_burst(
+    *,
+    robot,
+    solver,
+    q_current: np.ndarray,
+    targets: list[object],
+    options,
+    q_lo: np.ndarray,
+    q_hi: np.ndarray,
+    zero_velocity_indices: list[int],
+    min_distance_m: float,
+    max_constraints: int,
+    tuning_mode: str,
+    include_pairs: list[tuple[str, str]],
+    exclude_pairs: list[tuple[str, str]],
+    trial_steps: int = 3,
+    improvement_epsilon: float = 1e-4,
+) -> np.ndarray | None:
+    """Try a short unconstrained pull-away burst when already in penetration.
+
+    The worker can enter a deadlocked state when the current configuration is
+    already in contact and the collision-constrained solve returns zero-motion
+    ``INFEASIBLE`` repeatedly. In that case, briefly dropping the collision
+    constraint can let the commanded pull-away motion unwind the configuration.
+    Only accept the burst if the full collision debug distance improves.
+    """
+    if not hasattr(solver, "evaluate_collision_debug") or not hasattr(solver, "clear_collision_constraint"):
+        return None
+
+    try:
+        dbg_before = solver.evaluate_collision_debug(np.asarray(q_current, dtype=float))
+    except Exception:
+        return None
+    if dbg_before is None or not np.isfinite(dbg_before.distance):
+        return None
+
+    before_distance = float(dbg_before.distance)
+    if before_distance > 0.0:
+        return None
+
+    q_seed = np.asarray(q_current, dtype=float).copy()
+    q_trial = q_seed.copy()
+    had_stall_recovery = bool(getattr(options, "stall_recovery", False))
+
+    try:
+        solver.clear_collision_constraint()
+    except Exception:
+        return None
+    if hasattr(solver, "disable_stall_handler"):
+        try:
+            solver.disable_stall_handler()
+        except Exception:
+            pass
+
+    if hasattr(options, "stall_recovery"):
+        options.stall_recovery = False
+
+    try:
+        for _ in range(max(int(trial_steps), 1)):
+            step = robust_solve_position_step(
+                robot=robot,
+                solver=solver,
+                q_current=q_trial,
+                targets=targets,
+                options=options,
+                q_lo=q_lo,
+                q_hi=q_hi,
+                zero_velocity_indices=zero_velocity_indices,
+                fallback_status_names=("INVALID_INPUT", "NUMERICAL_ERROR"),
+            )
+            q_trial = np.asarray(step.q_next, dtype=float).copy()
+            robot.update_configuration(q_trial)
+
+        dbg_after = solver.evaluate_collision_debug(q_trial)
+        if dbg_after is None or not np.isfinite(dbg_after.distance):
+            return None
+        after_distance = float(dbg_after.distance)
+        if after_distance > before_distance + float(improvement_epsilon):
+            return q_trial
+        return None
+    finally:
+        if hasattr(options, "stall_recovery"):
+            options.stall_recovery = had_stall_recovery
+        _configure_collision_constraint(
+            solver,
+            enabled=True,
+            min_distance_m=min_distance_m,
+            max_constraints=max_constraints,
+            tuning_mode=tuning_mode,
+            include_pairs=include_pairs,
+            exclude_pairs=exclude_pairs,
+        )
+        robot.update_configuration(q_seed)
 
 
 def _prepare_viewer_urdf_path(urdf_path: Path) -> Path:
@@ -476,14 +616,15 @@ def _configure_collision_constraint(
 def main() -> None:
     args = parse_args()
     urdf_path = resolve_ffw_urdf_path(args.variant)
+    collision_urdf_path = resolve_generated_ffw_collision_urdf_path(args.variant) or urdf_path
 
     import viser
     import yourdfpy
     from viser.extras import ViserUrdf
 
-    full_robot = embodik.RobotModel(str(urdf_path), floating_base=False)
+    full_robot = embodik.RobotModel(str(collision_urdf_path), floating_base=False)
     ik_joint_names = default_worker_ik_joint_names(full_robot.get_joint_names())
-    robot = embodik.RobotModel(str(urdf_path), actuated_joint_names=ik_joint_names, floating_base=False)
+    robot = embodik.RobotModel(str(collision_urdf_path), actuated_joint_names=ik_joint_names, floating_base=False)
     server = viser.ViserServer(port=args.port)
     server.scene.add_grid("/ground", width=4, height=4)
 
@@ -1152,6 +1293,8 @@ def main() -> None:
             q_hi=q_hi,
             zero_velocity_indices=locked_velocity_indices if lock_passive.value else (),
             fallback_status_names=("INVALID_INPUT", "NUMERICAL_ERROR"),
+            allow_solver_intervention=True,
+            apply_collision_violated_q_solution=True,
         )
         q = step.q_next
         q = _apply_soft_lift_margin(q, joint_name_to_cfg=joint_name_to_cfg, q_lo=q_lo, q_hi=q_hi)
@@ -1160,7 +1303,7 @@ def main() -> None:
             q = q_prev
 
         result_status_name = getattr(getattr(result, "status", None), "name", str(getattr(result, "status", "")))
-        if bool(enable_collision.value) and result_status_name in {"COLLISION_VIOLATED", "INFEASIBLE"}:
+        if bool(enable_collision.value) and result_status_name == "INFEASIBLE":
             q = q_prev.copy()
 
         robot.update_configuration(q)
@@ -1189,15 +1332,58 @@ def main() -> None:
                         current_collision_min = float(dbg.distance)
             except Exception:
                 current_collision_min = None
-        boundary_stalled = (
+        deep_penetration_escape_applied = False
+        if (
             bool(enable_collision.value)
-            and result_status_name == "NO_PROGRESS"
             and current_collision_min is not None
-            and float(current_collision_min) <= collision_min_distance_m + 5e-3
+            and float(current_collision_min) <= 0.0
+            and result_status_name in {"INFEASIBLE", "NUMERICAL_ERROR", "NO_PROGRESS"}
+            and _joint_velocity_norm(result) <= 1e-8
+        ):
+            escaped_q = _attempt_deep_penetration_escape_burst(
+                robot=robot,
+                solver=solver,
+                q_current=q,
+                targets=targets,
+                options=opts,
+                q_lo=q_lo,
+                q_hi=q_hi,
+                zero_velocity_indices=list(getattr(opts, "integration_zero_velocity_indices", []) or []),
+                min_distance_m=collision_min_distance_m,
+                max_constraints=int(collision_max_constraints.value),
+                tuning_mode=str(collision_tuning.value),
+                include_pairs=include_pairs,
+                exclude_pairs=list(exclusion_pairs),
+            )
+            if escaped_q is not None:
+                q = np.asarray(escaped_q, dtype=float)
+                q = _apply_soft_lift_margin(q, joint_name_to_cfg=joint_name_to_cfg, q_lo=q_lo, q_hi=q_hi)
+                robot.update_configuration(q)
+                deep_penetration_escape_applied = True
+                try:
+                    if hasattr(solver, "get_last_collision_debug_list"):
+                        debug_rows = list(solver.get_last_collision_debug_list())
+                        if debug_rows:
+                            current_collision_min = min(float(row.distance) for row in debug_rows)
+                    if current_collision_min is None and hasattr(solver, "get_last_collision_debug"):
+                        dbg = solver.get_last_collision_debug()
+                        if dbg is not None:
+                            current_collision_min = float(dbg.distance)
+                except Exception:
+                    current_collision_min = None
+        boundary_stalled = (
+            _is_collision_boundary_stall(
+                result=result,
+                collision_enabled=bool(enable_collision.value),
+                current_collision_min=current_collision_min,
+                collision_min_distance_m=collision_min_distance_m,
+            )
         )
 
         if result_status_name == "NO_PROGRESS" and max(right_pos_err, left_pos_err) <= EE_POSITION_DEADBAND:
             status.value = "Status: Holding target"
+        elif deep_penetration_escape_applied:
+            status.value = "Status: penetration escape burst accepted"
         elif boundary_stalled:
             _sync_targets_from_robot()
             status.value = (
@@ -1209,7 +1395,13 @@ def main() -> None:
                 "Status: weak progress"
                 + (f" | {result.status_message}" if getattr(result, "status_message", "") else "")
             )
-        elif bool(enable_collision.value) and result_status_name in {"COLLISION_VIOLATED", "INFEASIBLE"}:
+        elif bool(enable_collision.value) and result_status_name == "COLLISION_VIOLATED":
+            _sync_targets_from_robot()
+            status.value = (
+                "Status: collision limited; holding last safe configuration"
+                + (f" | {result.status_message}" if getattr(result, "status_message", "") else "")
+            )
+        elif bool(enable_collision.value) and result_status_name == "INFEASIBLE":
             _sync_targets_from_robot()
             status.value = (
                 "Status: collision limited; targets snapped to current tools"

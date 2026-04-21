@@ -80,6 +80,8 @@ def robust_solve_position_step(
     zero_velocity_indices: Sequence[int] | None = None,
     fallback_status_names: Sequence[str] = (),
     hold_status_names: Sequence[str] = ("NON_FINITE_INPUT",),
+    allow_solver_intervention: bool = False,
+    apply_collision_violated_q_solution: bool = False,
 ) -> RobustStepResult:
     """Run ``solve_position_step`` with consistent example-side recovery."""
     q_prev = np.asarray(q_current, dtype=float).copy()
@@ -91,9 +93,21 @@ def robust_solve_position_step(
     elapsed_ms = (time.perf_counter() - t0) * 1e3
     solver_calls = 1
     status_name = _status_name(result)
+    solver_intervened = (
+        int(getattr(result, "collision_rejection_count", 0)) > 0
+        or int(getattr(result, "stall_escape_count", 0)) > 0
+    )
 
     if status_name in hold_status_names:
         return RobustStepResult(q_next=q_prev, solver_result=result, elapsed_ms=elapsed_ms, solver_calls=solver_calls)
+
+    if allow_solver_intervention and solver_intervened and hasattr(result, "q_solution"):
+        q_next = clip_configuration(robot, np.asarray(result.q_solution, dtype=float), q_lo, q_hi)
+        return RobustStepResult(q_next=q_next, solver_result=result, elapsed_ms=elapsed_ms, solver_calls=solver_calls)
+
+    if apply_collision_violated_q_solution and status_name == "COLLISION_VIOLATED" and hasattr(result, "q_solution"):
+        q_next = clip_configuration(robot, np.asarray(result.q_solution, dtype=float), q_lo, q_hi)
+        return RobustStepResult(q_next=q_next, solver_result=result, elapsed_ms=elapsed_ms, solver_calls=solver_calls)
 
     should_fallback = status_name in set(fallback_status_names)
     if should_fallback:
