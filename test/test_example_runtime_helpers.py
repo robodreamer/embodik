@@ -17,11 +17,22 @@ class _Status:
 
 
 class _Result:
-    def __init__(self, name: str, *, q_solution=None, joint_velocities=None, status_message: str = "") -> None:
+    def __init__(
+        self,
+        name: str,
+        *,
+        q_solution=None,
+        joint_velocities=None,
+        status_message: str = "",
+        collision_rejection_count: int = 0,
+        stall_escape_count: int = 0,
+    ) -> None:
         self.status = _Status(name)
         self.q_solution = q_solution
         self.joint_velocities = joint_velocities
         self.status_message = status_message
+        self.collision_rejection_count = collision_rejection_count
+        self.stall_escape_count = stall_escape_count
 
 
 class _Task:
@@ -134,3 +145,53 @@ def test_robust_solve_position_step_holds_previous_configuration_on_non_finite()
     )
     np.testing.assert_allclose(out.q_next, q_current)
     assert out.solver_calls == 1
+
+
+def test_robust_solve_position_step_accepts_solver_intervention_without_fallback() -> None:
+    solver = _Solver(
+        step_result=_Result(
+            "INFEASIBLE",
+            q_solution=np.array([0.4, -0.2], dtype=float),
+            collision_rejection_count=1,
+        ),
+        velocity_result=_Result("SUCCESS", joint_velocities=np.array([1.0, 1.0], dtype=float)),
+    )
+    robot = _Robot()
+    out = robust_solve_position_step(
+        robot=robot,
+        solver=solver,
+        q_current=np.zeros(2, dtype=float),
+        targets=[_Target()],
+        options=_Options(),
+        q_lo=-np.ones(2, dtype=float),
+        q_hi=np.ones(2, dtype=float),
+        fallback_status_names=("INFEASIBLE",),
+        allow_solver_intervention=True,
+    )
+    np.testing.assert_allclose(out.q_next, np.array([0.4, -0.2], dtype=float))
+    assert out.solver_result.status.name == "INFEASIBLE"
+    assert [call[0] for call in solver.calls] == ["step"]
+
+
+def test_robust_solve_position_step_applies_collision_violated_safe_hold() -> None:
+    solver = _Solver(
+        step_result=_Result(
+            "COLLISION_VIOLATED",
+            q_solution=np.array([0.15, -0.05], dtype=float),
+        ),
+    )
+    robot = _Robot()
+    out = robust_solve_position_step(
+        robot=robot,
+        solver=solver,
+        q_current=np.zeros(2, dtype=float),
+        targets=[_Target()],
+        options=_Options(),
+        q_lo=-np.ones(2, dtype=float),
+        q_hi=np.ones(2, dtype=float),
+        fallback_status_names=("COLLISION_VIOLATED",),
+        apply_collision_violated_q_solution=True,
+    )
+    np.testing.assert_allclose(out.q_next, np.array([0.15, -0.05], dtype=float))
+    assert out.solver_result.status.name == "COLLISION_VIOLATED"
+    assert [call[0] for call in solver.calls] == ["step"]
