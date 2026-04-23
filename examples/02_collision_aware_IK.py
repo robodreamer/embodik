@@ -340,7 +340,7 @@ class embodiKBackend:
         self.solver.dt = DEFAULT_SOLVER_DT
         self.solver.set_damping(0.1)
         self.solver.set_tolerance(0.1)
-        self._collision_tuning_mode = "speed"
+        self._collision_tuning_mode = "balanced"
         _apply_collision_tuning_mode(self.solver, self._collision_tuning_mode)
 
         self.arm_dofs = len(cfg.joint_names)
@@ -615,7 +615,7 @@ def run_gui(cfg: RobotConfig, args: argparse.Namespace) -> None:
         collision_tuning_dropdown = server.gui.add_dropdown(
             "Collision Tuning",
             options=COLLISION_TUNING_OPTIONS,
-            initial_value="speed",
+            initial_value="balanced",
             disabled=not hasattr(backend, "set_collision_tuning_mode"),
         )
         ee_mode_dropdown = server.gui.add_dropdown(
