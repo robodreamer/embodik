@@ -51,6 +51,18 @@ EE_POSITION_DEADBAND = 1e-4
 EE_ROTATION_DEADBAND = 1e-3
 LIFT_LIMIT_MARGIN = 1e-3
 DEFAULT_MAX_COLLISION_CONSTRAINTS = 3
+WORKER_SUPPORT_CONTACT_FRAMES = (
+    "left_wheel_drive_link",
+    "right_wheel_drive_link",
+    "rear_wheel_drive_link",
+)
+COLOR_OUTER_POLY = np.array([[[0.18, 0.80, 0.30], [0.18, 0.80, 0.30]]], dtype=float)
+COLOR_INNER_POLY = np.array([[[1.00, 0.65, 0.12], [1.00, 0.65, 0.12]]], dtype=float)
+COLOR_DROP_LINE = np.array([[[0.25, 0.55, 1.00], [0.25, 0.55, 1.00]]], dtype=float)
+COLOR_CONTACT_POINT = (0.98, 0.90, 0.18)
+COLOR_COM_INSIDE = (0.12, 0.78, 0.32)
+COLOR_COM_NEAR = (1.00, 0.68, 0.10)
+COLOR_COM_OUTSIDE = (0.92, 0.20, 0.24)
 DEFAULT_WORKER_SEED = {
     "lift_joint": -0.1,
     "head_joint1": 0.0,
@@ -104,6 +116,98 @@ def _rotation_error_rad(R_target: np.ndarray, R_current: np.ndarray) -> float:
     cos_theta = float((np.trace(R_rel) - 1.0) * 0.5)
     cos_theta = float(np.clip(cos_theta, -1.0, 1.0))
     return float(np.arccos(cos_theta))
+
+
+def _convex_hull_2d(points_xy: np.ndarray) -> np.ndarray:
+    pts = np.asarray(points_xy, dtype=float).reshape(-1, 2)
+    if pts.shape[0] <= 1:
+        return pts.copy()
+    pts = np.unique(np.round(pts, decimals=9), axis=0)
+    if pts.shape[0] <= 2:
+        return pts.copy()
+    pts = pts[np.lexsort((pts[:, 1], pts[:, 0]))]
+
+    def _cross(o: np.ndarray, a: np.ndarray, b: np.ndarray) -> float:
+        return float((a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]))
+
+    lower: list[np.ndarray] = []
+    for p in pts:
+        while len(lower) >= 2 and _cross(lower[-2], lower[-1], p) <= 0.0:
+            lower.pop()
+        lower.append(p)
+    upper: list[np.ndarray] = []
+    for p in pts[::-1]:
+        while len(upper) >= 2 and _cross(upper[-2], upper[-1], p) <= 0.0:
+            upper.pop()
+        upper.append(p)
+    hull = np.array(lower[:-1] + upper[:-1], dtype=float)
+    return hull
+
+
+def _polygon_edge_pts(poly_xy: np.ndarray, z: float) -> np.ndarray:
+    poly = np.asarray(poly_xy, dtype=float).reshape(-1, 2)
+    if poly.shape[0] < 2:
+        return np.zeros((0, 2, 3), dtype=float)
+    pts3 = np.column_stack([poly, np.full(poly.shape[0], float(z))])
+    return np.array([[pts3[i], pts3[(i + 1) % pts3.shape[0]]] for i in range(pts3.shape[0])], dtype=float)
+
+
+def _shrink_polygon_2d(poly: np.ndarray, margin_frac: float) -> np.ndarray:
+    if margin_frac <= 0.0:
+        return np.asarray(poly, dtype=float).copy()
+    poly = np.asarray(poly, dtype=float).reshape(-1, 2)
+    centroid = poly.mean(axis=0)
+    char_size = float(np.mean(np.linalg.norm(poly - centroid, axis=1)))
+    shrink = float(np.clip(margin_frac, 0.0, 1.0)) * max(0.0, char_size - 1e-9)
+    result = []
+    for vertex in poly:
+        delta = centroid - vertex
+        norm = float(np.linalg.norm(delta))
+        result.append(vertex if norm < 1e-12 else vertex + (shrink / norm) * delta)
+    return np.asarray(result, dtype=float)
+
+
+def _polygon_slack(poly_xy: np.ndarray, point_xy: np.ndarray) -> np.ndarray:
+    poly = np.asarray(poly_xy, dtype=float).reshape(-1, 2)
+    point = np.asarray(point_xy, dtype=float).reshape(2)
+    if poly.shape[0] == 0:
+        return np.zeros((0,), dtype=float)
+    slacks = np.empty(poly.shape[0], dtype=float)
+    for i in range(poly.shape[0]):
+        v0 = poly[i]
+        v1 = poly[(i + 1) % poly.shape[0]]
+        edge = v1 - v0
+        normal = np.array([edge[1], -edge[0]], dtype=float)
+        norm = float(np.linalg.norm(normal))
+        if norm > 1e-12:
+            normal /= norm
+        slacks[i] = float(np.dot(normal, v0 - point))
+    return slacks
+
+
+def _com_color(min_slack: float, near_boundary_threshold: float = 0.02) -> tuple[float, float, float]:
+    if min_slack < 0.0:
+        return COLOR_COM_OUTSIDE
+    if min_slack < float(near_boundary_threshold):
+        return COLOR_COM_NEAR
+    return COLOR_COM_INSIDE
+
+
+def _compute_support_polygon_from_contacts(robot, frame_names: tuple[str, ...]) -> np.ndarray:
+    points_xy: list[np.ndarray] = []
+    for frame_name in frame_names:
+        pose = robot.get_frame_pose(frame_name)
+        translation = np.asarray(pose.translation, dtype=float)
+        points_xy.append(translation[:2].copy())
+    return _convex_hull_2d(np.asarray(points_xy, dtype=float))
+
+
+def _support_contact_points(robot, frame_names: tuple[str, ...]) -> dict[str, np.ndarray]:
+    points: dict[str, np.ndarray] = {}
+    for frame_name in frame_names:
+        pose = robot.get_frame_pose(frame_name)
+        points[frame_name] = np.asarray(pose.translation, dtype=float).copy()
+    return points
 
 
 def _apply_named_joint_seed(
@@ -684,6 +788,7 @@ def main() -> None:
     q = _apply_soft_lift_margin(q, joint_name_to_cfg=joint_name_to_cfg, q_lo=q_lo, q_hi=q_hi)
     nullspace_bias_q = np.asarray(q, dtype=float).copy()
     robot.update_configuration(q)
+    support_polygon = _compute_support_polygon_from_contacts(robot, WORKER_SUPPORT_CONTACT_FRAMES)
     _set_geometry_view("Visual")
     _update_robot_visuals(q)
 
@@ -908,12 +1013,37 @@ def main() -> None:
             ),
         )
 
+    with server.gui.add_folder("CoM Constraint"):
+        enable_com_constraint = server.gui.add_checkbox(
+            "Enable CoM Constraint",
+            initial_value=hasattr(solver, "configure_com_constraint"),
+            disabled=not hasattr(solver, "configure_com_constraint"),
+        )
+        com_margin_pct = server.gui.add_slider(
+            "Safety margin (%)", min=0.0, max=40.0, initial_value=5.0, step=1.0
+        )
+        com_use_proximity = server.gui.add_checkbox("Use proximity activation", initial_value=True)
+        com_prox_display = server.gui.add_number(
+            "Proximity threshold (m)", initial_value=0.0, disabled=True
+        )
+        com_vel_max = server.gui.add_slider(
+            "com_vel_max (m/s)", min=0.05, max=1.0, initial_value=0.4, step=0.05
+        )
+        com_acc_max = server.gui.add_slider(
+            "com_acc_max (m/s²)", min=0.01, max=0.5, initial_value=0.1, step=0.01
+        )
+        com_use_acc_limits = server.gui.add_checkbox("Acceleration limits", initial_value=True)
+
     with server.gui.add_folder("Visualization"):
         geometry_view = server.gui.add_dropdown(
             "Robot Geometry",
             options=GEOMETRY_VIEW_OPTIONS,
             initial_value="Visual",
         )
+        show_support_polygon = server.gui.add_checkbox("Show support polygon", initial_value=True)
+        show_support_contacts = server.gui.add_checkbox("Show support contacts", initial_value=True)
+        show_com_viz = server.gui.add_checkbox("Show CoM", initial_value=True)
+        show_drop_line = server.gui.add_checkbox("Show CoM drop line", initial_value=True)
 
     with server.gui.add_folder("Worker Posture"):
         lift_slider = server.gui.add_slider("Lift Joint", lift_lo, lift_hi, 0.001, _joint_value("lift_joint"))
@@ -966,6 +1096,142 @@ def main() -> None:
         for i, (_color_a, color_b) in enumerate(debug_colors)
     ]
     dbg_lines = [None for _ in debug_colors]
+    com_cfg = None
+    support_polygon_cache = np.asarray(support_polygon, dtype=float).copy()
+    com_outer_poly = server.scene.add_line_segments(
+        "/com_viz/outer_polygon",
+        points=_polygon_edge_pts(support_polygon_cache, z=0.002),
+        colors=np.repeat(COLOR_OUTER_POLY, max(len(support_polygon_cache), 1), axis=0),
+        line_width=4.0,
+        visible=bool(show_support_polygon.value),
+    )
+    com_inner_poly = server.scene.add_line_segments(
+        "/com_viz/inner_polygon",
+        points=_polygon_edge_pts(support_polygon_cache, z=0.003),
+        colors=np.repeat(COLOR_INNER_POLY, max(len(support_polygon_cache), 1), axis=0),
+        line_width=3.0,
+        visible=bool(show_support_polygon.value),
+    )
+    com_sphere = server.scene.add_icosphere(
+        "/com_viz/sphere",
+        radius=0.04,
+        color=COLOR_COM_INSIDE,
+        position=tuple(float(v) for v in robot.get_com_position()),
+        visible=bool(show_com_viz.value),
+    )
+    com_floor_disk = server.scene.add_icosphere(
+        "/com_viz/floor_disk",
+        radius=0.025,
+        color=COLOR_COM_INSIDE,
+        position=(0.0, 0.0, 0.001),
+        visible=bool(show_com_viz.value),
+    )
+    com_drop_line = server.scene.add_line_segments(
+        "/com_viz/drop_line",
+        points=np.zeros((1, 2, 3), dtype=float),
+        colors=COLOR_DROP_LINE,
+        line_width=2.0,
+        visible=bool(show_com_viz.value and show_drop_line.value),
+    )
+    contact_point_handles = {
+        frame_name: server.scene.add_icosphere(
+            f"/com_viz/support_contact/{frame_name}",
+            radius=0.018,
+            color=COLOR_CONTACT_POINT,
+            position=(0.0, 0.0, 0.001),
+            visible=bool(show_support_contacts.value),
+        )
+        for frame_name in WORKER_SUPPORT_CONTACT_FRAMES
+    }
+
+    def _current_support_polygon() -> np.ndarray:
+        return _compute_support_polygon_from_contacts(robot, WORKER_SUPPORT_CONTACT_FRAMES)
+
+    def _margin_frac() -> float:
+        return float(com_margin_pct.value) / 100.0
+
+    def _configure_com_constraint_if_needed(force: bool = False) -> None:
+        nonlocal com_cfg, support_polygon_cache
+        support_polygon_now = _current_support_polygon()
+        enabled = bool(enable_com_constraint.value) and hasattr(solver, "configure_com_constraint")
+        next_cfg = (
+            enabled,
+            round(_margin_frac(), 6),
+            bool(com_use_proximity.value),
+            round(float(com_vel_max.value), 6),
+            round(float(com_acc_max.value), 6),
+            bool(com_use_acc_limits.value),
+            tuple(np.round(support_polygon_now.reshape(-1), 6)),
+        )
+        if not force and next_cfg == com_cfg:
+            return
+        support_polygon_cache = support_polygon_now
+        if not enabled:
+            if hasattr(solver, "clear_com_constraint"):
+                try:
+                    solver.clear_com_constraint()
+                except Exception:
+                    pass
+            com_prox_display.value = 0.0
+            com_cfg = next_cfg
+            return
+        try:
+            solver.configure_com_constraint(
+                support_polygon=support_polygon_now,
+                margin=_margin_frac(),
+                frame_name="base_link",
+                com_vel_max=float(com_vel_max.value),
+                com_acc_max=float(com_acc_max.value),
+                use_acceleration_limits=bool(com_use_acc_limits.value),
+                proximity_fraction=0.05 if bool(com_use_proximity.value) else 0.0,
+            )
+            if hasattr(solver, "get_com_proximity_threshold"):
+                com_prox_display.value = round(float(solver.get_com_proximity_threshold()), 4)
+        except Exception:
+            if hasattr(solver, "clear_com_constraint"):
+                try:
+                    solver.clear_com_constraint()
+                except Exception:
+                    pass
+            enable_com_constraint.value = False
+            com_prox_display.value = 0.0
+        com_cfg = next_cfg
+
+    def _update_com_visualization() -> None:
+        support_polygon_now = _current_support_polygon()
+        support_contacts = _support_contact_points(robot, WORKER_SUPPORT_CONTACT_FRAMES)
+        inner_polygon = _shrink_polygon_2d(support_polygon_now, _margin_frac())
+        com_pos = np.asarray(robot.get_com_position(), dtype=float)
+        com_xy = com_pos[:2]
+        slacks = _polygon_slack(inner_polygon, com_xy)
+        min_slack = float(slacks.min()) if slacks.size else 0.0
+        com_color = _com_color(min_slack)
+
+        com_outer_poly.points = _polygon_edge_pts(support_polygon_now, z=0.002)
+        com_outer_poly.colors = np.repeat(COLOR_OUTER_POLY, max(len(support_polygon_now), 1), axis=0)
+        com_outer_poly.visible = bool(show_support_polygon.value)
+        com_inner_poly.points = _polygon_edge_pts(inner_polygon, z=0.003)
+        com_inner_poly.colors = np.repeat(COLOR_INNER_POLY, max(len(inner_polygon), 1), axis=0)
+        com_inner_poly.visible = bool(show_support_polygon.value) and (_margin_frac() > 0.0)
+
+        for frame_name, handle in contact_point_handles.items():
+            point = support_contacts[frame_name]
+            handle.position = (float(point[0]), float(point[1]), 0.001)
+            handle.visible = bool(show_support_contacts.value)
+
+        com_sphere.position = tuple(float(v) for v in com_pos)
+        com_sphere.color = com_color
+        com_sphere.visible = bool(show_com_viz.value)
+
+        com_floor_disk.position = (float(com_xy[0]), float(com_xy[1]), 0.001)
+        com_floor_disk.color = com_color
+        com_floor_disk.visible = bool(show_com_viz.value)
+
+        com_drop_line.points = np.array(
+            [[[float(com_xy[0]), float(com_xy[1]), float(com_pos[2])], [float(com_xy[0]), float(com_xy[1]), 0.001]]],
+            dtype=float,
+        )
+        com_drop_line.visible = bool(show_com_viz.value) and bool(show_drop_line.value)
 
     def _clear_collision_debug() -> None:
         nonlocal dbg_lines
@@ -1085,12 +1351,14 @@ def main() -> None:
         left_err.value = "0.0000 m"
 
     def _reset_solver_state(reason: str) -> None:
-        nonlocal solver, right_task, left_task, posture, arm_nullspace, collision_cfg
+        nonlocal solver, right_task, left_task, posture, arm_nullspace, collision_cfg, com_cfg
         solver, right_task, left_task, posture, arm_nullspace = _build_solver(posture_target)
         if hasattr(arm_nullspace, "set_controlled_joint_indices"):
             arm_nullspace.set_controlled_joint_indices(list(arm_controlled_indices))
         collision_cfg = None
+        com_cfg = None
         _sync_targets_from_robot()
+        _configure_com_constraint_if_needed(force=True)
         status.value = f"Status: solver reset after {reason}"
 
     @snap_targets.on_click
@@ -1112,11 +1380,13 @@ def main() -> None:
         _sync_joint_sliders_from_q(q)
         _sync_posture_sliders_from_q(q)
         _update_collision_debug()
+        _update_com_visualization()
         timing_handle.value = 0.0
         solve_ms.value = "--"
         status.value = "Status: Robot and targets reset"
 
     opts = embodik.PositionStepOptions()
+    _configure_com_constraint_if_needed(force=True)
     _sync_joint_sliders_from_q(q)
     _sync_posture_sliders_from_q(q)
     _sync_targets_from_robot()
@@ -1152,6 +1422,7 @@ def main() -> None:
             collision_cfg = next_collision_cfg
             if not bool(enable_collision.value):
                 _clear_collision_debug()
+        _configure_com_constraint_if_needed()
 
         if manual_control.value:
             if not prev_manual_state:
@@ -1167,6 +1438,7 @@ def main() -> None:
             _sync_joint_sliders_from_q(q)
             _sync_posture_sliders_from_q(q)
             _update_collision_debug()
+            _update_com_visualization()
             right_now = np.asarray(robot.get_frame_pose(frame_map["right_tool"]).translation, dtype=float)
             left_now = np.asarray(robot.get_frame_pose(frame_map["left_tool"]).translation, dtype=float)
             right_err.value = f"{np.linalg.norm(np.asarray(right_ctrl.position, dtype=float) - right_now):.4f} m"
@@ -1241,6 +1513,7 @@ def main() -> None:
             _sync_joint_sliders_from_q(q)
             _sync_posture_sliders_from_q(q)
             _update_collision_debug()
+            _update_com_visualization()
             right_err.value = f"{right_pos_err:.4f} m"
             left_err.value = f"{left_pos_err:.4f} m"
             status.value = "Status: Holding target"
@@ -1254,6 +1527,7 @@ def main() -> None:
             robot.update_configuration(q)
             _update_robot_visuals(q)
             _update_collision_debug()
+            _update_com_visualization()
             _sync_joint_sliders_from_q(q)
             _sync_posture_sliders_from_q(q)
             right_err.value = f"{right_pos_err:.4f} m"
@@ -1352,6 +1626,7 @@ def main() -> None:
         _sync_joint_sliders_from_q(q)
         _sync_posture_sliders_from_q(q)
         _update_collision_debug()
+        _update_com_visualization()
 
         right_now = np.asarray(robot.get_frame_pose(frame_map["right_tool"]).translation, dtype=float)
         left_now = np.asarray(robot.get_frame_pose(frame_map["left_tool"]).translation, dtype=float)
