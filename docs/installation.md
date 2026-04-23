@@ -63,7 +63,7 @@ Run `bash scripts/install_embodik_macos.sh --help` for all options (`--skip-brew
 Without cloning, you can download the script and run it from an empty project folder (still installs **embodik from PyPI**):
 
 ```bash
-curl -fsSL -O https://gist.githubusercontent.com/robodreamer/adc0b4452d474586c5890877b629005b/raw/ee3213c6f25fda3488913ba065fcccdc8f6e98fb/install_embodik_macos.sh
+curl -fsSL -O https://gist.githubusercontent.com/robodreamer/adc0b4452d474586c5890877b629005b/raw/install_embodik_macos.sh
 bash install_embodik_macos.sh --python python3.12
 ```
 
@@ -153,7 +153,7 @@ Run `bash scripts/install_embodik_linux.sh --help` for all options (`--skip-apt`
 Without cloning, you can download the script and run it from an empty project folder (still installs **embodik from PyPI**):
 
 ```bash
-curl -fsSL -O https://gist.githubusercontent.com/robodreamer/adc0b4452d474586c5890877b629005b/raw/ee3213c6f25fda3488913ba065fcccdc8f6e98fb/install_embodik_linux.sh
+curl -fsSL -O https://gist.githubusercontent.com/robodreamer/adc0b4452d474586c5890877b629005b/raw/install_embodik_linux.sh
 bash install_embodik_linux.sh
 ```
 
