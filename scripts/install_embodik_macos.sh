@@ -177,6 +177,26 @@ else
   "$VENV_DIR/bin/python" -m pip install --no-build-isolation -e "$REPO"
 fi
 
+# On macOS, pre-built embodik wheels embed @loader_path-relative rpaths that do not
+# cover the cmeel.prefix/lib directory where the PyPI `pin` package installs pinocchio
+# dylibs.  Patch the rpath so dlopen can find them without requiring DYLD_LIBRARY_PATH.
+echo ""
+echo "==> Patching rpath for cmeel-installed pinocchio dylibs (macOS binary wheel fix)..."
+EMBODIK_SO="$("$VENV_DIR/bin/python" -c \
+  'import importlib.util, pathlib; \
+   spec = importlib.util.find_spec("embodik._embodik_impl"); \
+   print(spec.origin if spec else "")'  2>/dev/null || true)"
+CMEEL_LIB="$("$VENV_DIR/bin/python" -c \
+  'import pinocchio, pathlib; \
+   print(pathlib.Path(pinocchio.__file__).resolve().parents[4] / "lib")' 2>/dev/null || true)"
+if [[ -n "$EMBODIK_SO" && -f "$EMBODIK_SO" && -n "$CMEEL_LIB" && -d "$CMEEL_LIB" ]]; then
+  # install_name_tool exits non-zero if the rpath already exists; that is fine.
+  install_name_tool -add_rpath "$CMEEL_LIB" "$EMBODIK_SO" 2>/dev/null || true
+  echo "    rpath -> $CMEEL_LIB"
+else
+  echo "    (skipped: EMBODIK_SO='$EMBODIK_SO'  CMEEL_LIB='$CMEEL_LIB')"
+fi
+
 echo ""
 echo "==> Verifying import..."
 "$VENV_DIR/bin/python" -c 'import embodik; print("embodik", embodik.__version__, embodik.RobotModel)'
