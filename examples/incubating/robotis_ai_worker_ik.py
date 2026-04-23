@@ -45,6 +45,7 @@ DEFAULT_ROT_GAIN = 10.0
 DEFAULT_POSTURE_WEIGHT = 1e-2
 DEFAULT_ARM_NULLSPACE_WEIGHT = 1.0
 COLLISION_TUNING_OPTIONS = ("speed", "balanced", "precise")
+GEOMETRY_VIEW_OPTIONS = ("Visual", "Collision", "Both")
 POSTURE_SLIDER_DEADBAND = 1e-3
 EE_POSITION_DEADBAND = 1e-4
 EE_ROTATION_DEADBAND = 1e-3
@@ -629,12 +630,40 @@ def main() -> None:
     server.scene.add_grid("/ground", width=4, height=4)
 
     viewer_urdf_path = _prepare_viewer_urdf_path(urdf_path)
+    collision_viewer_urdf_path = _prepare_viewer_urdf_path(collision_urdf_path)
     urdf_vis = ViserUrdf(
         server,
         yourdfpy.URDF.load(str(viewer_urdf_path), mesh_dir=urdf_path.parent),
-        root_node_name="/robot",
+        root_node_name="/robot_visual",
     )
-    map_q = make_visual_config_mapper(robot, urdf_vis)
+    urdf_collision_vis = ViserUrdf(
+        server,
+        yourdfpy.URDF.load(
+            str(collision_viewer_urdf_path),
+            mesh_dir=collision_urdf_path.parent,
+            build_scene_graph=False,
+            build_collision_scene_graph=True,
+            load_meshes=False,
+            load_collision_meshes=True,
+        ),
+        root_node_name="/robot_collision",
+        load_meshes=False,
+        load_collision_meshes=True,
+    )
+    map_q_visual = make_visual_config_mapper(robot, urdf_vis)
+    map_q_collision = make_visual_config_mapper(robot, urdf_collision_vis)
+
+    def _set_geometry_view(mode: str) -> None:
+        show_visual = str(mode) in {"Visual", "Both"}
+        show_collision = str(mode) in {"Collision", "Both"}
+        urdf_vis.show_visual = show_visual
+        urdf_vis.show_collision = False
+        urdf_collision_vis.show_visual = False
+        urdf_collision_vis.show_collision = show_collision
+
+    def _update_robot_visuals(q_now: np.ndarray) -> None:
+        urdf_vis.update_cfg(map_q_visual(q_now))
+        urdf_collision_vis.update_cfg(map_q_collision(q_now))
 
     q_lo, q_hi = robot.get_joint_limits()
     q = robot.neutral_configuration()
@@ -655,7 +684,8 @@ def main() -> None:
     q = _apply_soft_lift_margin(q, joint_name_to_cfg=joint_name_to_cfg, q_lo=q_lo, q_hi=q_hi)
     nullspace_bias_q = np.asarray(q, dtype=float).copy()
     robot.update_configuration(q)
-    urdf_vis.update_cfg(map_q(q))
+    _set_geometry_view("Visual")
+    _update_robot_visuals(q)
 
     frame_map = resolve_ai_worker_frames(robot.get_frame_names())
     print(f"[worker] variant={args.variant} urdf={urdf_path}")
@@ -878,6 +908,13 @@ def main() -> None:
             ),
         )
 
+    with server.gui.add_folder("Visualization"):
+        geometry_view = server.gui.add_dropdown(
+            "Robot Geometry",
+            options=GEOMETRY_VIEW_OPTIONS,
+            initial_value="Visual",
+        )
+
     with server.gui.add_folder("Worker Posture"):
         lift_slider = server.gui.add_slider("Lift Joint", lift_lo, lift_hi, 0.001, _joint_value("lift_joint"))
         snap_targets = server.gui.add_button("Snap Targets to Current Tools")
@@ -1017,6 +1054,10 @@ def main() -> None:
             right_ctrl.visible = bool(enable_right_ee.value)
             left_ctrl.visible = bool(enable_left_ee.value)
 
+    @geometry_view.on_update
+    def _(_evt) -> None:
+        _set_geometry_view(str(geometry_view.value))
+
     def _apply_manual_joint_configuration(q_seed: np.ndarray) -> np.ndarray:
         q_manual = np.asarray(q_seed, dtype=float).copy()
         for joint_name, slider in joint_sliders:
@@ -1066,7 +1107,7 @@ def main() -> None:
         q = _apply_soft_lift_margin(q, joint_name_to_cfg=joint_name_to_cfg, q_lo=q_lo, q_hi=q_hi)
         posture_target = q.copy()
         robot.update_configuration(q)
-        urdf_vis.update_cfg(map_q(q))
+        _update_robot_visuals(q)
         _reset_solver_state("manual reset")
         _sync_joint_sliders_from_q(q)
         _sync_posture_sliders_from_q(q)
@@ -1122,7 +1163,7 @@ def main() -> None:
             posture.weight = float(posture_weight.value)
             posture.set_target_configuration(posture_target)
             robot.update_configuration(q)
-            urdf_vis.update_cfg(map_q(q))
+            _update_robot_visuals(q)
             _sync_joint_sliders_from_q(q)
             _sync_posture_sliders_from_q(q)
             _update_collision_debug()
@@ -1196,7 +1237,7 @@ def main() -> None:
         settled = right_settled and left_settled and posture_err < POSTURE_SLIDER_DEADBAND
         if settled:
             robot.update_configuration(q)
-            urdf_vis.update_cfg(map_q(q))
+            _update_robot_visuals(q)
             _sync_joint_sliders_from_q(q)
             _sync_posture_sliders_from_q(q)
             _update_collision_debug()
@@ -1211,7 +1252,7 @@ def main() -> None:
 
         if not bool(auto_ik_solve.value):
             robot.update_configuration(q)
-            urdf_vis.update_cfg(map_q(q))
+            _update_robot_visuals(q)
             _update_collision_debug()
             _sync_joint_sliders_from_q(q)
             _sync_posture_sliders_from_q(q)
@@ -1307,7 +1348,7 @@ def main() -> None:
             q = q_prev.copy()
 
         robot.update_configuration(q)
-        urdf_vis.update_cfg(map_q(q))
+        _update_robot_visuals(q)
         _sync_joint_sliders_from_q(q)
         _sync_posture_sliders_from_q(q)
         _update_collision_debug()
