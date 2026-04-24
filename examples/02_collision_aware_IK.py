@@ -43,10 +43,15 @@ DEFAULT_SOLVER_DT = 0.01
 DEFAULT_POS_GAIN = 10.0
 DEFAULT_ROT_GAIN = 10.0
 DEFAULT_NULLSPACE_GAIN = 1e-2
+DEFAULT_NULLSPACE_ENABLED = True
+DEFAULT_ADAPTIVE_DT = True
+DEFAULT_ADAPTIVE_DT_MAX_SCALE = 10.0
+DEFAULT_ADAPTIVE_DT_REFERENCE_DISTANCE = 0.02
 MAX_LINEAR_STEP = 2.0
 MAX_ANGULAR_STEP = 2.0
 DEFAULT_COLLISION_GAIN = 1.0
 COLLISION_TUNING_OPTIONS = ("speed", "balanced", "precise")
+COLLISION_DEBUG_LOG_PERIOD_S = 5.0
 
 _LINK_INDEX_PATTERN = re.compile(r"link_?([0-9]+)")
 
@@ -598,14 +603,25 @@ def run_gui(cfg: RobotConfig, args: argparse.Namespace) -> None:
         pos_gain = server.gui.add_slider("Position Gain", min=0.1, max=200.0, initial_value=DEFAULT_POS_GAIN, step=0.1)
         rot_gain = server.gui.add_slider("Orientation Gain", min=0.1, max=200.0, initial_value=DEFAULT_ROT_GAIN, step=0.1)
         iterations_slider = server.gui.add_slider("IK Iterations", min=1, max=20, initial_value=1, step=1)
-        adaptive_dt_checkbox = server.gui.add_checkbox("Adaptive dt", initial_value=False)
+        adaptive_dt_checkbox = server.gui.add_checkbox("Adaptive dt", initial_value=DEFAULT_ADAPTIVE_DT)
         adaptive_dt_max_scale_slider = server.gui.add_slider(
-            "Adaptive dt Max Scale", min=1.0, max=10.0, step=0.5, initial_value=10.0
+            "Adaptive dt Max Scale",
+            min=1.0,
+            max=10.0,
+            step=0.5,
+            initial_value=DEFAULT_ADAPTIVE_DT_MAX_SCALE,
         )
         adaptive_dt_ref_dist_slider = server.gui.add_slider(
-            "Adaptive dt Ref Dist (m)", min=0.01, max=0.20, step=0.01, initial_value=0.02
+            "Adaptive dt Ref Dist (m)",
+            min=0.01,
+            max=0.20,
+            step=0.01,
+            initial_value=DEFAULT_ADAPTIVE_DT_REFERENCE_DISTANCE,
         )
-        nullspace_enabled_checkbox = server.gui.add_checkbox("Enable Nullspace Bias", initial_value=False)
+        nullspace_enabled_checkbox = server.gui.add_checkbox(
+            "Enable Nullspace Bias",
+            initial_value=DEFAULT_NULLSPACE_ENABLED,
+        )
         nullspace_gain = server.gui.add_slider("Nullspace Gain", min=0.0, max=2.0, initial_value=DEFAULT_NULLSPACE_GAIN, step=0.05)
         self_collision_checkbox = server.gui.add_checkbox(
             "Enable Self-Collision",
@@ -975,8 +991,7 @@ def run_gui(cfg: RobotConfig, args: argparse.Namespace) -> None:
             last_collision_debug is None
             or debug_info.object_a != last_collision_debug.object_a
             or debug_info.object_b != last_collision_debug.object_b
-            or abs(debug_info.distance - last_collision_debug.distance) > 1e-4
-            or now - collision_log_timestamp > 1.0
+            or now - collision_log_timestamp > COLLISION_DEBUG_LOG_PERIOD_S
         ):
             print(
                 "[embodiK] Collision pair:",
