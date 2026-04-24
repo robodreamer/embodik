@@ -101,6 +101,7 @@ pytest-cov = ">=2.0"
 
 [feature.dev.tasks]
 test-cov = "pytest test/ --cov=embodik --cov-report=term-missing"
+demo-advanced-ik = "python examples/advanced_interactive_ik.py basic"
 
 # Teleop feature: Xvisio SDK for Seer controller (requires libxvsdk.so on host)
 [feature.teleop.pypi-dependencies]

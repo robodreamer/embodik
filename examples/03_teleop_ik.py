@@ -12,10 +12,10 @@ Key patterns from teleop_stack:
 - Separate process_input() and send_robot_command() phases
 
 Button Mappings (thor_wireless):
-- Side button (hold)  : keyside_above_threshold → toggle_stream_on
-                       keyside_below_threshold → toggle_stream_off
-- Trigger (hold)      : keytrigger_above_threshold → toggle_grasping_on
-                       keytrigger_below_threshold → toggle_grasping_off
+- Trigger (hold)      : keytrigger_above_threshold → toggle_stream_on
+                       keytrigger_below_threshold → toggle_stream_off
+- Side button (hold)  : keyside_above_threshold → toggle_grasping_on
+                       keyside_below_threshold → toggle_grasping_off
 - Button A            : key_press buttonA → reset_robot_pose
 - Button B            : key_press buttonB → toggle_data_collection
 
@@ -42,7 +42,6 @@ Requirements:
 from __future__ import annotations
 
 import argparse
-import logging
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -56,10 +55,23 @@ from viser.extras import ViserUrdf
 import embodik
 from robot_descriptions.loaders.yourdfpy import load_robot_description
 from embodik import r2q, q2r, Rt
-from utils.robot_models import load_robot_presets
+from example_helpers.ik_common import (
+    COLLISION_DEBUG_LOG_PERIOD_S,
+    COLLISION_TUNING_OPTIONS,
+    DEFAULT_ADAPTIVE_DT,
+    DEFAULT_ADAPTIVE_DT_MAX_SCALE,
+    DEFAULT_ADAPTIVE_DT_REFERENCE_DISTANCE,
+    DEFAULT_COLLISION_TUNING_MODE,
+    DEFAULT_NULLSPACE_GAIN,
+    DEFAULT_POS_GAIN,
+    DEFAULT_ROT_GAIN,
+    DEFAULT_SOLVER_DT,
+    apply_collision_tuning_mode,
+    quiet_websocket_handshake_logs,
+)
+from utils.robot_models import ensure_ros_package_path, load_robot_presets
 
-for _noisy_logger_name in ("websockets.server", "websockets.asyncio.server"):
-    logging.getLogger(_noisy_logger_name).setLevel(logging.CRITICAL)
+quiet_websocket_handshake_logs()
 
 # Try to import xvisio for controller support
 try:
@@ -96,28 +108,17 @@ BUTTON_CONFIG = {
 # - reset_robot_pose: Reset robot to initial pose
 # - toggle_data_collection: Toggle data collection
 WIRELESS_BUTTON_MAPPINGS = {
-    "keyside_above_threshold": "toggle_stream_on",
-    "keyside_below_threshold": "toggle_stream_off",
-    "keytrigger_above_threshold": "toggle_grasping_on",
-    "keytrigger_below_threshold": "toggle_grasping_off",
+    "keyside_above_threshold": "toggle_grasping_on",
+    "keyside_below_threshold": "toggle_grasping_off",
+    "keytrigger_above_threshold": "toggle_stream_on",
+    "keytrigger_below_threshold": "toggle_stream_off",
     "key_press": {
         "buttonA": "reset_robot_pose",
         "buttonB": "toggle_data_collection",
     },
 }
 
-# Default numeric constants
-DEFAULT_SOLVER_DT = 0.01
-DEFAULT_POS_GAIN = 10.0
-DEFAULT_ROT_GAIN = 10.0
-DEFAULT_NULLSPACE_GAIN = 1e-2
 DEFAULT_COLLISION_MIN_DISTANCE = 0.05
-DEFAULT_ADAPTIVE_DT = True
-DEFAULT_ADAPTIVE_DT_MAX_SCALE = 10.0
-DEFAULT_ADAPTIVE_DT_REFERENCE_DISTANCE = 0.02
-DEFAULT_COLLISION_TUNING_MODE = "balanced"
-COLLISION_TUNING_OPTIONS = ("speed", "balanced", "precise")
-COLLISION_DEBUG_LOG_PERIOD_S = 5.0
 
 # Scale factor for translational changes (from TRACKING_CAMERA_INPUT_DEVICE_CONFIG)
 DEFAULT_SCALE_FACTOR = 1.5
@@ -171,59 +172,6 @@ def resolve_robot_configuration(robot_key: str) -> RobotConfig:
     from importlib import import_module
     collision_ik = import_module("02_collision_aware_IK")
     return collision_ik.resolve_robot_configuration(robot_key)
-
-
-def ensure_ros_package_path(urdf_path: Path) -> None:
-    """Ensure ROS_PACKAGE_PATH includes ancestors that contain meshes."""
-    import os
-    resolved = urdf_path.resolve()
-    candidate_roots: List[Path] = []
-    for depth in range(1, 5):
-        if len(resolved.parents) > depth:
-            candidate_roots.append(resolved.parents[depth])
-
-    current = os.environ.get("ROS_PACKAGE_PATH", "")
-    paths = [Path(p) for p in current.split(":") if p]
-    updated = False
-    for root in candidate_roots:
-        if root.is_dir() and root not in paths:
-            paths.insert(0, root)
-            updated = True
-
-    if updated:
-        os.environ["ROS_PACKAGE_PATH"] = ":".join(str(p) for p in paths)
-
-
-def _apply_collision_tuning_mode(
-    solver: embodik.KinematicsSolver,
-    mode_label: str,
-) -> None:
-    label = mode_label.lower()
-    if hasattr(solver, "set_collision_tuning_mode") and hasattr(embodik, "CollisionTuningMode"):
-        enum_map = {
-            "precise": embodik.CollisionTuningMode.PRECISE,
-            "balanced": embodik.CollisionTuningMode.BALANCED,
-            "speed": embodik.CollisionTuningMode.SPEED,
-        }
-        solver.set_collision_tuning_mode(enum_map.get(label, embodik.CollisionTuningMode.BALANCED))
-        return
-
-    # Backward-compatible fallback for older bindings.
-    if label == "precise":
-        if hasattr(solver, "enable_collision_pair_cache"):
-            solver.enable_collision_pair_cache(False, 1, 0.0, 128)
-        if hasattr(solver, "set_collision_refinement_time_budget_us"):
-            solver.set_collision_refinement_time_budget_us(0)
-    elif label == "balanced":
-        if hasattr(solver, "enable_collision_pair_cache"):
-            solver.enable_collision_pair_cache(True, 20, 0.05, 256)
-        if hasattr(solver, "set_collision_refinement_time_budget_us"):
-            solver.set_collision_refinement_time_budget_us(0)
-    else:
-        if hasattr(solver, "enable_collision_pair_cache"):
-            solver.enable_collision_pair_cache(True, 100, 0.03, 128)
-        if hasattr(solver, "set_collision_refinement_time_budget_us"):
-            solver.set_collision_refinement_time_budget_us(300)
 
 
 # -----------------------------------------------------------------------------
@@ -370,26 +318,26 @@ class ControllerInputHandler:
                 # Check if we crossed above threshold
                 if (self.state.prev_keyside <= self._keyside_threshold and
                     c.key_side > self._keyside_threshold):
-                    self._call_action("toggle_stream_on")
-                    self.state.streaming = True
+                    self._call_action("toggle_grasping_on")
+                    self.state.gripper_closed = True
                 # Check if we crossed below threshold
                 elif (self.state.prev_keyside > self._keyside_threshold and
                       c.key_side <= self._keyside_threshold):
-                    self._call_action("toggle_stream_off")
-                    self.state.streaming = False
+                    self._call_action("toggle_grasping_off")
+                    self.state.gripper_closed = False
 
             # Check for keytrigger (trigger button) changes
             if c.key_trigger != self.state.prev_keytrigger:
                 # Check if we crossed above threshold
                 if (self.state.prev_keytrigger <= self._keytrigger_threshold and
                     c.key_trigger > self._keytrigger_threshold):
-                    self._call_action("toggle_grasping_on")
-                    self.state.gripper_closed = True
+                    self._call_action("toggle_stream_on")
+                    self.state.streaming = True
                 # Check if we crossed below threshold
                 elif (self.state.prev_keytrigger > self._keytrigger_threshold and
                       c.key_trigger <= self._keytrigger_threshold):
-                    self._call_action("toggle_grasping_off")
-                    self.state.gripper_closed = False
+                    self._call_action("toggle_stream_off")
+                    self.state.streaming = False
 
             # Check for key (A/B button) presses with debounce
             if c.key != self.state.prev_key and c.key != 0:
@@ -459,7 +407,7 @@ class TeleopIKBackend:
         self.solver.set_damping(0.1)
         self.solver.set_tolerance(0.1)
         self._collision_tuning_mode = DEFAULT_COLLISION_TUNING_MODE
-        _apply_collision_tuning_mode(self.solver, self._collision_tuning_mode)
+        apply_collision_tuning_mode(self.solver, self._collision_tuning_mode)
         try:
             self.solver.enable_timing_breakdown(True)
         except Exception:
@@ -617,7 +565,7 @@ class TeleopIKBackend:
     ) -> None:
         if enable and not self._collision_enabled:
             try:
-                _apply_collision_tuning_mode(
+                apply_collision_tuning_mode(
                     self.solver, getattr(self, "_collision_tuning_mode", DEFAULT_COLLISION_TUNING_MODE)
                 )
                 self.solver.configure_collision_constraint(
@@ -630,7 +578,7 @@ class TeleopIKBackend:
                 print(f"[embodiK] Collision configuration failed: {exc}")
                 self._collision_enabled = False
         elif enable and self._collision_enabled:
-            _apply_collision_tuning_mode(
+            apply_collision_tuning_mode(
                 self.solver, getattr(self, "_collision_tuning_mode", DEFAULT_COLLISION_TUNING_MODE)
             )
             if hasattr(self.solver, "set_collision_min_distance"):
@@ -641,7 +589,7 @@ class TeleopIKBackend:
 
     def set_collision_tuning_mode(self, mode_label: str) -> None:
         self._collision_tuning_mode = mode_label.lower()
-        _apply_collision_tuning_mode(self.solver, self._collision_tuning_mode)
+        apply_collision_tuning_mode(self.solver, self._collision_tuning_mode)
 
 
 # -----------------------------------------------------------------------------
@@ -1042,8 +990,8 @@ def run_teleop(cfg: RobotConfig, args: argparse.Namespace) -> None:
     if controller_connected:
         print("\nSEER WIRELESS CONTROLLER BUTTON MAPPINGS")
         print("-" * 40)
-        print("  Side Button (Hold)  : Start/Stop Streaming")
-        print("  Trigger (Hold)      : Close/Open Gripper")
+        print("  Trigger (Hold)      : Start/Stop Streaming")
+        print("  Side Button (Hold)  : Close/Open Gripper")
         print("  Button A            : Reset Robot Pose")
         print("  Button B            : Toggle Data Collection")
         print("-" * 40)

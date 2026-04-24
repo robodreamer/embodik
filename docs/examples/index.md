@@ -58,11 +58,13 @@ python3 01_basic_ik_simple.py --robot panda
 ```bash
 pixi run install
 pixi run python examples/01_basic_ik_simple.py --robot panda
+pixi run demo-advanced-ik  # clone-only advanced/dev surface
 ```
 
 ## Example Helpers
 
 The `examples/example_helpers/` directory contains reusable utilities:
 
+- `ik_common.py` — Shared defaults and small IK/collision helper functions
 - `dual_arm_ik_helper.py` — Dual-arm IK utilities
 - `limit_profiles/` — Joint limit profile configurations
