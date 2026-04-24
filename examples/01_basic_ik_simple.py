@@ -25,9 +25,21 @@ logging.basicConfig(
     datefmt='%H:%M:%S'
 )
 logger = logging.getLogger(__name__)
+for _noisy_logger_name in ("websockets.server", "websockets.asyncio.server"):
+    logging.getLogger(_noisy_logger_name).setLevel(logging.CRITICAL)
 
 # Get examples directory (parent of this file)
 _EXAMPLES_DIR = Path(__file__).parent
+
+DEFAULT_SOLVER_DT = 0.01
+DEFAULT_POS_GAIN = 10.0
+DEFAULT_ROT_GAIN = 10.0
+DEFAULT_NULLSPACE_GAIN = 1e-2
+DEFAULT_TASK_WEIGHT = 1.0
+DEFAULT_NULLSPACE_ENABLED = True
+DEFAULT_ADAPTIVE_DT = True
+DEFAULT_ADAPTIVE_DT_MAX_SCALE = 10.0
+DEFAULT_ADAPTIVE_DT_REFERENCE_DISTANCE = 0.02
 
 
 
@@ -63,7 +75,7 @@ def main(args: argparse.Namespace):
 
     # Create solver
     solver = embodik.KinematicsSolver(robot)
-    solver.dt = 0.01  # Integration timestep
+    solver.dt = DEFAULT_SOLVER_DT  # Integration timestep
     solver.set_damping(0.1)  # Higher damping can help avoid numerical issues
     solver.set_tolerance(0.1)  # Tolerance for solver convergence
 
@@ -121,19 +133,22 @@ def main(args: argparse.Namespace):
 
     frame_task = solver.add_frame_task("ee_task", target_link_name)
     frame_task.priority = 0
-    frame_task.weight = 1.0
+    frame_task.weight = DEFAULT_TASK_WEIGHT
+    frame_task.solve_mode = embodik.TaskSolveMode.SCALE
+    frame_task.allow_min_error_fallback = False
 
     nullspace_task = solver.add_posture_task("nullspace_bias_task")
     nullspace_task.priority = 1
     nullspace_task.weight = 0.0
+    nullspace_task.solve_mode = embodik.TaskSolveMode.MIN_ERROR
+    nullspace_task.allow_min_error_fallback = False
     nullspace_task.set_target_configuration(q_default)
 
     # GUI elements
     with server.gui.add_folder("IK Controls"):
         timing_handle = server.gui.add_number("Elapsed (ms)", 0.001, disabled=True)
-        task_weight = server.gui.add_slider("Task Weight", min=0.1, max=100, initial_value=1.0, step=0.1)
-        pos_gain_slider = server.gui.add_slider("Position Gain", min=0.1, max=200, initial_value=10.0, step=0.1)
-        rot_gain_slider = server.gui.add_slider("Orientation Gain", min=0.1, max=200, initial_value=10.0, step=0.1)
+        pos_gain_slider = server.gui.add_slider("Position Gain", min=0.1, max=200, initial_value=DEFAULT_POS_GAIN, step=0.1)
+        rot_gain_slider = server.gui.add_slider("Orientation Gain", min=0.1, max=200, initial_value=DEFAULT_ROT_GAIN, step=0.1)
         iterations_slider = server.gui.add_slider("IK Iterations", min=1, max=20, initial_value=1, step=1)
         ee_mode_dropdown = server.gui.add_dropdown(
             "EE Solve Mode",
@@ -145,6 +160,21 @@ def main(args: argparse.Namespace):
             initial_value=False,
         )
         damping_slider = server.gui.add_slider("Solver Damping", min=0.01, max=1.0, initial_value=0.1, step=0.01)
+        adaptive_dt_checkbox = server.gui.add_checkbox("Adaptive dt", initial_value=DEFAULT_ADAPTIVE_DT)
+        adaptive_dt_max_scale_slider = server.gui.add_slider(
+            "Adaptive dt Max Scale",
+            min=1.0,
+            max=10.0,
+            step=0.5,
+            initial_value=DEFAULT_ADAPTIVE_DT_MAX_SCALE,
+        )
+        adaptive_dt_ref_dist_slider = server.gui.add_slider(
+            "Adaptive dt Ref Dist (m)",
+            min=0.01,
+            max=0.20,
+            step=0.01,
+            initial_value=DEFAULT_ADAPTIVE_DT_REFERENCE_DISTANCE,
+        )
 
         # Target control buttons
         snap_target_button = server.gui.add_button("Snap Target to Current EE")
@@ -230,8 +260,8 @@ def main(args: argparse.Namespace):
     # Type hint for GUI handles (accessed through Pinocchio's viewer)
     nullspace_joint_checkboxes: dict[int, Any] = {}
     with server.gui.add_folder("Nullspace Control"):
-        enable_nullspace = server.gui.add_checkbox("Enable Nullspace Bias", initial_value=False)
-        nullspace_gain = server.gui.add_slider("Nullspace Gain", min=0.0, max=2.0, initial_value=1e-2, step=0.1)
+        enable_nullspace = server.gui.add_checkbox("Enable Nullspace Bias", initial_value=DEFAULT_NULLSPACE_ENABLED)
+        nullspace_gain = server.gui.add_slider("Nullspace Gain", min=0.0, max=2.0, initial_value=DEFAULT_NULLSPACE_GAIN, step=0.05)
         bias_to_initial = server.gui.add_button("Bias to Initial Config")
         bias_to_zero = server.gui.add_button("Bias to Zero Config")
         with server.gui.add_folder("Joint Selection"):
@@ -350,7 +380,7 @@ def main(args: argparse.Namespace):
 
         start_time = time.time()
 
-        frame_task.weight = task_weight.value
+        frame_task.weight = DEFAULT_TASK_WEIGHT
         frame_task.solve_mode = getattr(
             embodik.TaskSolveMode, ee_mode_dropdown.value, embodik.TaskSolveMode.SCALE
         )
@@ -375,11 +405,20 @@ def main(args: argparse.Namespace):
         step_opts.position_gain = pos_gain_slider.value
         step_opts.orientation_gain = rot_gain_slider.value
         step_opts.max_steps = int(iterations_slider.value)
+        step_opts.adaptive_dt = bool(adaptive_dt_checkbox.value)
+        step_opts.adaptive_dt_max_scale = float(adaptive_dt_max_scale_slider.value)
+        step_opts.adaptive_dt_reference_distance = float(adaptive_dt_ref_dist_slider.value)
         result = solver.solve_position_step(q_current, target_pose, "ee_task", step_opts)
 
         # Log solver results (debug)
         if should_log_debug:
             logger.info(f"Solver status: {result.status}")
+            logger.info(
+                "Adaptive dt: %s (max_scale=%.1f, ref_dist=%.3f m)",
+                step_opts.adaptive_dt,
+                step_opts.adaptive_dt_max_scale,
+                step_opts.adaptive_dt_reference_distance,
+            )
             logger.info(f"Solver elapsed time: {result.computation_time_ms:.2f} ms")
             if result.status == embodik.SolverStatus.SUCCESS:
                 logger.info(f"Joint velocities norm: {np.linalg.norm(result.joint_velocities):.4f}")
@@ -441,7 +480,7 @@ def main(args: argparse.Namespace):
                 if result.status == embodik.SolverStatus.NUMERICAL_ERROR:
                     logger.warning(f"  Position error: {result.position_error:.4f} m")
                     logger.warning(f"  Orientation error: {result.orientation_error:.4f} rad")
-                    logger.warning(f"  Task weight: {task_weight.value}")
+                    logger.warning(f"  Task weight: {frame_task.weight}")
 
                     try:
                         J = robot.get_frame_jacobian(target_link_name)
