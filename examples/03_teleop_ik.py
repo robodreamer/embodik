@@ -42,6 +42,7 @@ Requirements:
 from __future__ import annotations
 
 import argparse
+import logging
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -56,6 +57,9 @@ import embodik
 from robot_descriptions.loaders.yourdfpy import load_robot_description
 from embodik import r2q, q2r, Rt
 from utils.robot_models import load_robot_presets
+
+for _noisy_logger_name in ("websockets.server", "websockets.asyncio.server"):
+    logging.getLogger(_noisy_logger_name).setLevel(logging.CRITICAL)
 
 # Try to import xvisio for controller support
 try:
@@ -106,9 +110,14 @@ WIRELESS_BUTTON_MAPPINGS = {
 DEFAULT_SOLVER_DT = 0.01
 DEFAULT_POS_GAIN = 10.0
 DEFAULT_ROT_GAIN = 10.0
-DEFAULT_NULLSPACE_GAIN = 1e-3
+DEFAULT_NULLSPACE_GAIN = 1e-2
 DEFAULT_COLLISION_MIN_DISTANCE = 0.05
+DEFAULT_ADAPTIVE_DT = True
+DEFAULT_ADAPTIVE_DT_MAX_SCALE = 10.0
+DEFAULT_ADAPTIVE_DT_REFERENCE_DISTANCE = 0.02
+DEFAULT_COLLISION_TUNING_MODE = "balanced"
 COLLISION_TUNING_OPTIONS = ("speed", "balanced", "precise")
+COLLISION_DEBUG_LOG_PERIOD_S = 5.0
 
 # Scale factor for translational changes (from TRACKING_CAMERA_INPUT_DEVICE_CONFIG)
 DEFAULT_SCALE_FACTOR = 1.5
@@ -196,7 +205,7 @@ def _apply_collision_tuning_mode(
             "balanced": embodik.CollisionTuningMode.BALANCED,
             "speed": embodik.CollisionTuningMode.SPEED,
         }
-        solver.set_collision_tuning_mode(enum_map.get(label, embodik.CollisionTuningMode.SPEED))
+        solver.set_collision_tuning_mode(enum_map.get(label, embodik.CollisionTuningMode.BALANCED))
         return
 
     # Backward-compatible fallback for older bindings.
@@ -449,7 +458,7 @@ class TeleopIKBackend:
         self.solver.dt = DEFAULT_SOLVER_DT
         self.solver.set_damping(0.1)
         self.solver.set_tolerance(0.1)
-        self._collision_tuning_mode = "speed"
+        self._collision_tuning_mode = DEFAULT_COLLISION_TUNING_MODE
         _apply_collision_tuning_mode(self.solver, self._collision_tuning_mode)
         try:
             self.solver.enable_timing_breakdown(True)
@@ -537,6 +546,9 @@ class TeleopIKBackend:
         ee_fallback: bool = False,
         max_steps: int = 1,
         limit_change_from_seed: bool = False,
+        adaptive_dt: bool = DEFAULT_ADAPTIVE_DT,
+        adaptive_dt_max_scale: float = DEFAULT_ADAPTIVE_DT_MAX_SCALE,
+        adaptive_dt_reference_distance: float = DEFAULT_ADAPTIVE_DT_REFERENCE_DISTANCE,
     ) -> IKResult:
         """Solve one IK step using ``solve_position_step`` (stepping velocity IK).
 
@@ -564,6 +576,9 @@ class TeleopIKBackend:
         self._step_opts.orientation_gain = float(rot_gain)
         self._step_opts.max_steps = int(max_steps)
         self._step_opts.limit_change_from_seed = bool(limit_change_from_seed)
+        self._step_opts.adaptive_dt = bool(adaptive_dt)
+        self._step_opts.adaptive_dt_max_scale = float(adaptive_dt_max_scale)
+        self._step_opts.adaptive_dt_reference_distance = float(adaptive_dt_reference_distance)
 
         ik_start = time.perf_counter()
         result = self.solver.solve_position_step(
@@ -603,7 +618,7 @@ class TeleopIKBackend:
         if enable and not self._collision_enabled:
             try:
                 _apply_collision_tuning_mode(
-                    self.solver, getattr(self, "_collision_tuning_mode", "speed")
+                    self.solver, getattr(self, "_collision_tuning_mode", DEFAULT_COLLISION_TUNING_MODE)
                 )
                 self.solver.configure_collision_constraint(
                     min_distance=float(min_distance),
@@ -616,7 +631,7 @@ class TeleopIKBackend:
                 self._collision_enabled = False
         elif enable and self._collision_enabled:
             _apply_collision_tuning_mode(
-                self.solver, getattr(self, "_collision_tuning_mode", "speed")
+                self.solver, getattr(self, "_collision_tuning_mode", DEFAULT_COLLISION_TUNING_MODE)
             )
             if hasattr(self.solver, "set_collision_min_distance"):
                 self.solver.set_collision_min_distance(float(min_distance))
@@ -715,7 +730,7 @@ def run_teleop(cfg: RobotConfig, args: argparse.Namespace) -> None:
         scale_slider = server.gui.add_slider("Position Scale", min=0.5, max=3.0, initial_value=args.scale, step=0.1)
         pos_gain = server.gui.add_slider("Position Gain", min=0.1, max=200.0, initial_value=DEFAULT_POS_GAIN, step=0.1)
         rot_gain = server.gui.add_slider("Orientation Gain", min=0.1, max=200.0, initial_value=DEFAULT_ROT_GAIN, step=0.1)
-        nullspace_gain = server.gui.add_slider("Nullspace Gain", min=0.0, max=1.0, initial_value=DEFAULT_NULLSPACE_GAIN, step=0.0005)
+        nullspace_gain = server.gui.add_slider("Nullspace Gain", min=0.0, max=2.0, initial_value=DEFAULT_NULLSPACE_GAIN, step=0.05)
         iterations_slider = server.gui.add_slider("IK Iterations", min=1, max=20, initial_value=1, step=1)
         ee_mode_dropdown = server.gui.add_dropdown(
             "EE Solve Mode",
@@ -730,6 +745,21 @@ def run_teleop(cfg: RobotConfig, args: argparse.Namespace) -> None:
             "Limit change from seed q (per step)",
             initial_value=False,
         )
+        adaptive_dt_checkbox = server.gui.add_checkbox("Adaptive dt", initial_value=DEFAULT_ADAPTIVE_DT)
+        adaptive_dt_max_scale_slider = server.gui.add_slider(
+            "Adaptive dt Max Scale",
+            min=1.0,
+            max=10.0,
+            step=0.5,
+            initial_value=DEFAULT_ADAPTIVE_DT_MAX_SCALE,
+        )
+        adaptive_dt_ref_dist_slider = server.gui.add_slider(
+            "Adaptive dt Ref Dist (m)",
+            min=0.01,
+            max=0.20,
+            step=0.01,
+            initial_value=DEFAULT_ADAPTIVE_DT_REFERENCE_DISTANCE,
+        )
         self_collision_checkbox = server.gui.add_checkbox(
             "Enable Self-Collision",
             initial_value=not args.no_collision,
@@ -737,7 +767,7 @@ def run_teleop(cfg: RobotConfig, args: argparse.Namespace) -> None:
         collision_tuning_dropdown = server.gui.add_dropdown(
             "Collision Tuning",
             options=COLLISION_TUNING_OPTIONS,
-            initial_value="speed",
+            initial_value=DEFAULT_COLLISION_TUNING_MODE,
             disabled=not hasattr(backend, "set_collision_tuning_mode"),
         )
         collision_min_dist_slider = server.gui.add_slider(
@@ -866,8 +896,7 @@ def run_teleop(cfg: RobotConfig, args: argparse.Namespace) -> None:
             last_collision_debug is None
             or debug_info.object_a != last_collision_debug.object_a
             or debug_info.object_b != last_collision_debug.object_b
-            or abs(debug_info.distance - last_collision_debug.distance) > 1e-4
-            or now - collision_log_timestamp > 1.0
+            or now - collision_log_timestamp > COLLISION_DEBUG_LOG_PERIOD_S
         ):
             if verbose:
                 print(
@@ -1100,6 +1129,9 @@ def run_teleop(cfg: RobotConfig, args: argparse.Namespace) -> None:
                     ee_fallback=ee_fallback_checkbox.value,
                     max_steps=int(iterations_slider.value),
                     limit_change_from_seed=limit_change_from_seed_checkbox.value,
+                    adaptive_dt=bool(adaptive_dt_checkbox.value),
+                    adaptive_dt_max_scale=float(adaptive_dt_max_scale_slider.value),
+                    adaptive_dt_reference_distance=float(adaptive_dt_ref_dist_slider.value),
                 )
 
                 # Update visualization
@@ -1112,9 +1144,13 @@ def run_teleop(cfg: RobotConfig, args: argparse.Namespace) -> None:
 
                 # Update status periodically
                 if frame_count % 100 == 0:
+                    adt_suffix = (
+                        f" | adt×{adaptive_dt_max_scale_slider.value:.1f}"
+                        if adaptive_dt_checkbox.value else ""
+                    )
                     status_text.value = (
                         f"IK: {result.status} | pos_err={result.position_error*1e3:.1f}mm | "
-                        f"col={result.collision_time_ms:.2f}ms"
+                        f"col={result.collision_time_ms:.2f}ms{adt_suffix}"
                     )
 
             frame_count += 1
