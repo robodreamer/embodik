@@ -124,6 +124,7 @@ pip install "embodik[examples]"
 embodik-examples --copy
 cd embodik_examples
 python 01_basic_ik_simple.py --robot panda
+python 03_teleop_ik.py --robot panda  # browser fallback works without controller
 ```
 
 ### Troubleshooting
@@ -273,8 +274,9 @@ The repository includes several example scripts:
 
 | Script | Description |
 |--------|-------------|
-| `01_basic_ik_simple.py` | Basic IK solving with interactive visualization |
-| `02_collision_aware_IK.py` | Collision-aware IK with self-collision avoidance + GPU benchmark panel |
+| `01_basic_ik_simple.py` | Minimal interactive IK for bringing up a fixed-base robot preset |
+| `02_collision_aware_IK.py` | Collision-aware IK behavior demo with self-collision avoidance + GPU benchmark panel |
+| `03_teleop_ik.py` | Minimal teleop input adapter into the same stepping IK pattern |
 | `04_gpu_batch_ik.py` | GPU-accelerated batched velocity IK benchmark |
 | `05_gpu_collision_batch.py` | GPU-accelerated batch collision detection |
 | `06_gpu_solver_demo.py` | Comprehensive GPU solver demonstration and benchmark |
@@ -301,6 +303,7 @@ embodik-examples --copy
 cd embodik_examples
 python 01_basic_ik_simple.py --robot panda
 python 02_collision_aware_IK.py --robot panda
+python 03_teleop_ik.py --robot panda
 ```
 
 **For developers (from repository):**
@@ -313,6 +316,13 @@ pixi run python examples/01_basic_ik_simple.py
 
 # Run collision-aware IK example
 pixi run python examples/02_collision_aware_IK.py --robot panda
+
+# Run minimal teleop adapter example (browser fallback if no controller is connected)
+pixi run python examples/03_teleop_ik.py --robot panda
+
+# Run clone-only advanced/dev IK surfaces
+pixi run demo-advanced-ik
+pixi run python dev_examples/advanced_interactive_ik.py teleop -- --robot panda
 
 # Run GPU examples (requires cuda environment)
 pixi run -e cuda demo-gpu          # GPU solver benchmark
@@ -602,7 +612,9 @@ embodik/
 ├── examples/              # Example scripts
 │   ├── 01_basic_ik_simple.py
 │   ├── 02_collision_aware_IK.py
+│   ├── 03_teleop_ik.py
 │   └── robot_models/     # Robot URDF files
+├── dev_examples/          # Clone-only advanced/dev example launchers
 ├── docs/                  # Documentation (MkDocs)
 └── test/                  # Test suite
 ```
@@ -641,4 +653,3 @@ The MIT License is a permissive license that allows for:
 - Private use
 
 While providing liability protection for the authors. This makes it ideal for open-source projects that want to encourage widespread adoption and contribution.
-

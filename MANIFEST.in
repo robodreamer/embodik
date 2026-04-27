@@ -14,6 +14,7 @@ recursive-include python/embodik *.py
 
 # Include examples directory (will be installed as package data)
 graft examples
+prune dev_examples
 
 # Exclude build artifacts
 global-exclude *.pyc

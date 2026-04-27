@@ -8,7 +8,6 @@ Use --gpu flag and --casadi-path to enable GPU mode.
 from __future__ import annotations
 
 import argparse
-import os
 import re
 import time
 from dataclasses import dataclass
@@ -23,7 +22,20 @@ from viser.extras import ViserUrdf
 import embodik
 from robot_descriptions.loaders.yourdfpy import load_robot_description
 from embodik import r2q, q2r, Rt
-from utils.robot_models import load_robot_presets
+from example_helpers.ik_common import (
+    COLLISION_DEBUG_LOG_PERIOD_S,
+    COLLISION_TUNING_OPTIONS,
+    DEFAULT_ADAPTIVE_DT,
+    DEFAULT_ADAPTIVE_DT_MAX_SCALE,
+    DEFAULT_ADAPTIVE_DT_REFERENCE_DISTANCE,
+    DEFAULT_NULLSPACE_ENABLED,
+    DEFAULT_NULLSPACE_GAIN,
+    DEFAULT_POS_GAIN,
+    DEFAULT_ROT_GAIN,
+    DEFAULT_SOLVER_DT,
+    apply_collision_tuning_mode,
+)
+from utils.robot_models import ensure_ros_package_path, load_robot_presets
 
 # Check GPU availability
 try:
@@ -39,14 +51,9 @@ except ImportError:
 # Default numeric constants
 # -----------------------------------------------------------------------------
 
-DEFAULT_SOLVER_DT = 0.01
-DEFAULT_POS_GAIN = 10.0
-DEFAULT_ROT_GAIN = 10.0
-DEFAULT_NULLSPACE_GAIN = 1e-2
 MAX_LINEAR_STEP = 2.0
 MAX_ANGULAR_STEP = 2.0
 DEFAULT_COLLISION_GAIN = 1.0
-COLLISION_TUNING_OPTIONS = ("speed", "balanced", "precise")
 
 _LINK_INDEX_PATTERN = re.compile(r"link_?([0-9]+)")
 
@@ -258,59 +265,6 @@ def resolve_robot_configuration(robot_key: str) -> RobotConfig:
     )
 
 
-def ensure_ros_package_path(urdf_path: Path) -> None:
-    """Ensure ROS_PACKAGE_PATH includes ancestors that contain meshes."""
-
-    resolved = urdf_path.resolve()
-    candidate_roots: List[Path] = []
-    for depth in range(1, 5):
-        if len(resolved.parents) > depth:
-            candidate_roots.append(resolved.parents[depth])
-
-    current = os.environ.get("ROS_PACKAGE_PATH", "")
-    paths = [Path(p) for p in current.split(":") if p]
-    updated = False
-    for root in candidate_roots:
-        if root.is_dir() and root not in paths:
-            paths.insert(0, root)
-            updated = True
-
-    if updated:
-        os.environ["ROS_PACKAGE_PATH"] = ":".join(str(p) for p in paths)
-
-
-def _apply_collision_tuning_mode(
-    solver: embodik.KinematicsSolver,
-    mode_label: str,
-) -> None:
-    label = mode_label.lower()
-    if hasattr(solver, "set_collision_tuning_mode") and hasattr(embodik, "CollisionTuningMode"):
-        enum_map = {
-            "precise": embodik.CollisionTuningMode.PRECISE,
-            "balanced": embodik.CollisionTuningMode.BALANCED,
-            "speed": embodik.CollisionTuningMode.SPEED,
-        }
-        solver.set_collision_tuning_mode(enum_map.get(label, embodik.CollisionTuningMode.SPEED))
-        return
-
-    # Backward-compatible fallback for older bindings.
-    if label == "precise":
-        if hasattr(solver, "enable_collision_pair_cache"):
-            solver.enable_collision_pair_cache(False, 1, 0.0, 128)
-        if hasattr(solver, "set_collision_refinement_time_budget_us"):
-            solver.set_collision_refinement_time_budget_us(0)
-    elif label == "balanced":
-        if hasattr(solver, "enable_collision_pair_cache"):
-            solver.enable_collision_pair_cache(True, 20, 0.05, 256)
-        if hasattr(solver, "set_collision_refinement_time_budget_us"):
-            solver.set_collision_refinement_time_budget_us(0)
-    else:
-        if hasattr(solver, "enable_collision_pair_cache"):
-            solver.enable_collision_pair_cache(True, 100, 0.03, 128)
-        if hasattr(solver, "set_collision_refinement_time_budget_us"):
-            solver.set_collision_refinement_time_budget_us(300)
-
-
 # -----------------------------------------------------------------------------
 # embodiK backend
 # -----------------------------------------------------------------------------
@@ -341,7 +295,7 @@ class embodiKBackend:
         self.solver.set_damping(0.1)
         self.solver.set_tolerance(0.1)
         self._collision_tuning_mode = "balanced"
-        _apply_collision_tuning_mode(self.solver, self._collision_tuning_mode)
+        apply_collision_tuning_mode(self.solver, self._collision_tuning_mode)
 
         self.arm_dofs = len(cfg.joint_names)
         self.full_dofs = self.robot.nq
@@ -501,7 +455,7 @@ class embodiKBackend:
 
         if enable and not self._collision_enabled:
             try:
-                _apply_collision_tuning_mode(
+                apply_collision_tuning_mode(
                     self.solver, getattr(self, "_collision_tuning_mode", "speed")
                 )
                 self.solver.configure_collision_constraint(
@@ -519,7 +473,7 @@ class embodiKBackend:
 
     def set_collision_tuning_mode(self, mode_label: str) -> None:
         self._collision_tuning_mode = mode_label.lower()
-        _apply_collision_tuning_mode(self.solver, self._collision_tuning_mode)
+        apply_collision_tuning_mode(self.solver, self._collision_tuning_mode)
 
 
 # -----------------------------------------------------------------------------
@@ -598,14 +552,25 @@ def run_gui(cfg: RobotConfig, args: argparse.Namespace) -> None:
         pos_gain = server.gui.add_slider("Position Gain", min=0.1, max=200.0, initial_value=DEFAULT_POS_GAIN, step=0.1)
         rot_gain = server.gui.add_slider("Orientation Gain", min=0.1, max=200.0, initial_value=DEFAULT_ROT_GAIN, step=0.1)
         iterations_slider = server.gui.add_slider("IK Iterations", min=1, max=20, initial_value=1, step=1)
-        adaptive_dt_checkbox = server.gui.add_checkbox("Adaptive dt", initial_value=False)
+        adaptive_dt_checkbox = server.gui.add_checkbox("Adaptive dt", initial_value=DEFAULT_ADAPTIVE_DT)
         adaptive_dt_max_scale_slider = server.gui.add_slider(
-            "Adaptive dt Max Scale", min=1.0, max=10.0, step=0.5, initial_value=10.0
+            "Adaptive dt Max Scale",
+            min=1.0,
+            max=10.0,
+            step=0.5,
+            initial_value=DEFAULT_ADAPTIVE_DT_MAX_SCALE,
         )
         adaptive_dt_ref_dist_slider = server.gui.add_slider(
-            "Adaptive dt Ref Dist (m)", min=0.01, max=0.20, step=0.01, initial_value=0.02
+            "Adaptive dt Ref Dist (m)",
+            min=0.01,
+            max=0.20,
+            step=0.01,
+            initial_value=DEFAULT_ADAPTIVE_DT_REFERENCE_DISTANCE,
         )
-        nullspace_enabled_checkbox = server.gui.add_checkbox("Enable Nullspace Bias", initial_value=False)
+        nullspace_enabled_checkbox = server.gui.add_checkbox(
+            "Enable Nullspace Bias",
+            initial_value=DEFAULT_NULLSPACE_ENABLED,
+        )
         nullspace_gain = server.gui.add_slider("Nullspace Gain", min=0.0, max=2.0, initial_value=DEFAULT_NULLSPACE_GAIN, step=0.05)
         self_collision_checkbox = server.gui.add_checkbox(
             "Enable Self-Collision",
@@ -975,8 +940,7 @@ def run_gui(cfg: RobotConfig, args: argparse.Namespace) -> None:
             last_collision_debug is None
             or debug_info.object_a != last_collision_debug.object_a
             or debug_info.object_b != last_collision_debug.object_b
-            or abs(debug_info.distance - last_collision_debug.distance) > 1e-4
-            or now - collision_log_timestamp > 1.0
+            or now - collision_log_timestamp > COLLISION_DEBUG_LOG_PERIOD_S
         ):
             print(
                 "[embodiK] Collision pair:",
