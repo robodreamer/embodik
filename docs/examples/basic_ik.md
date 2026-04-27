@@ -1,85 +1,99 @@
 # Basic IK Example
 
-Simple example demonstrating velocity-based inverse kinematics with EmbodiK.
+Minimal interactive IK for bringing up a fixed-base robot preset.
 
 ## Overview
 
-This example follows the same control pattern used in `examples/01_basic_ik_simple.py`:
+`examples/01_basic_ik_simple.py` is intentionally small. It shows the shortest
+path for trying EmbodiK on a robot model:
 
-- Add a high-priority frame task for end-effector motion
-- Add a low-priority posture task as nullspace regularization
-- Run a velocity IK loop with `solve_velocity()` and integrate joint updates
+- load a robot preset and default posture
+- create a `KinematicsSolver`
+- add one end-effector frame task and one posture/nullspace task
+- drag a Viser target transform
+- call `solve_position_step()` and visualize the returned configuration
 
-## Code
+Detailed tuning panels, joint sliders, diagnostics, and limit-scaling controls
+are kept out of this public example. From a git clone, use the clone-only dev
+surface instead:
+
+```bash
+pixi run demo-advanced-ik
+```
+
+## Code Pattern
+
+The public script follows this structure:
 
 ```python
-import embodik
-import numpy as np
-from embodik import Rt
-from embodik.utils import compute_pose_error, limit_task_velocity
-from utils.robot_models import resolve_robot_configuration
-
-# 1. Load robot (run from examples/ directory)
 config = resolve_robot_configuration("panda")
-model = config["robot"]
+robot = config["robot"]
 target_link = config["target_link"]
 q_default = config["default_configuration"]
 
-# 2. Create solver and tasks
-solver = embodik.KinematicsSolver(model)
+solver = embodik.KinematicsSolver(robot)
 solver.dt = 0.01
 solver.set_damping(0.1)
+solver.set_tolerance(0.1)
 
-frame_task = solver.add_frame_task("ee_task", target_link)
-frame_task.priority = 0
-frame_task.weight = 1.0
+ee_task = solver.add_frame_task("ee_task", target_link)
+ee_task.priority = 0
+ee_task.weight = 1.0
+ee_task.solve_mode = embodik.TaskSolveMode.SCALE_ELASTIC
+ee_task.allow_min_error_fallback = False
 
-posture_task = solver.add_posture_task("posture")
+posture_task = solver.add_posture_task("posture_bias")
 posture_task.priority = 1
-posture_task.weight = 0.01
+posture_task.weight = 1e-2
+posture_task.solve_mode = embodik.TaskSolveMode.MIN_ERROR
 posture_task.set_target_configuration(q_default)
 
-# 3. Set goal
-q_current = q_default.copy()
-target_pose = Rt(R=np.eye(3), t=np.array([0.5, 0.2, 0.3]))
-pos_gain, rot_gain = 60.0, 60.0
+opts = embodik.PositionStepOptions()
+opts.position_gain = 10.0
+opts.orientation_gain = 10.0
+opts.max_steps = 1
+opts.adaptive_dt = True
+opts.adaptive_dt_max_scale = 10.0
+opts.adaptive_dt_reference_distance = 0.02
 
-# 4. Velocity IK loop
-for _ in range(500):
-    model.update_configuration(q_current)
-    current_ee = model.get_frame_pose(target_link)
-    pose_error = compute_pose_error(current_ee, target_pose)
-
-    if np.linalg.norm(pose_error) < 5e-4:
-        break
-
-    target_velocity = np.concatenate([
-        pos_gain * pose_error[:3],
-        rot_gain * pose_error[3:],
-    ])
-    target_velocity = limit_task_velocity(target_velocity, 0.5, 0.5)
-    frame_task.set_target_velocity(target_velocity)
-
-    result = solver.solve_velocity(q_current, apply_limits=True)
-    if result.status != embodik.SolverStatus.SUCCESS:
-        break
-
-    dq = result.joint_velocities * solver.dt
-    q_lower, q_upper = model.get_joint_limits()
-    q_current = np.clip(q_current + dq, q_lower, q_upper)
-
-print(f"✓ Basic IK converged: q = {q_current}")
+result = solver.solve_position_step(q_current, target_pose, "ee_task", opts)
+q_current = result.q_solution
 ```
 
-## Explanation
+## Running
 
-1. **Frame task** (priority 0): Drives the end-effector toward the pose target.
-2. **Posture task** (priority 1): Keeps motion near a preferred joint configuration in nullspace.
-3. **Velocity solve**: `solve_velocity()` computes joint velocities that satisfy tasks and active constraints.
-4. **Integration**: Update with `q += dt * dq`, then clamp to joint limits.
+For pip-installed users:
+
+```bash
+pip install "embodik[examples]"
+embodik-examples --copy
+cd embodik_examples
+python 01_basic_ik_simple.py --robot panda
+```
+
+For repository development:
+
+```bash
+pixi run python examples/01_basic_ik_simple.py --robot panda
+```
+
+## Adding a New Robot
+
+To try a new fixed-base robot, add or override a preset in
+`examples/robot_models/robot_presets.yaml` with:
+
+- the URDF source (`urdf_path` or `robot_descriptions` import)
+- the target end-effector link
+- a default configuration
+
+Then run:
+
+```bash
+python 01_basic_ik_simple.py --robot <your-key>
+```
 
 ## Next Steps
 
-- [Multi-Task Multi-Constraints IK Example](multi_task_ik.md) — Frame + posture + CoM constraint
-- [Collision-Aware IK Example](collision_aware_ik.md) — Self-collision avoidance
-- [API Reference](../api/index.md) — Detailed API documentation
+- [Collision-Aware IK Example](collision_aware_ik.md) — add self-collision constraints
+- [Teleop IK Example](teleop_ik.md) — connect controller input to the same stepping IK call
+- [Multi-Task Multi-Constraints IK Example](multi_task_ik.md) — hierarchy plus CoM constraints
