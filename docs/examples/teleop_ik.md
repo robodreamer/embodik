@@ -1,27 +1,59 @@
-# Teleop IK Example Overview
+# Teleop IK Example
 
-Overview for `examples/03_teleop_ik.py`.
+Minimal teleop input to EmbodiK IK.
 
 ## What It Demonstrates
 
-- Real-time teleoperation with a Seer wireless controller
-- Frame-task target updates from controller pose deltas
-- Optional collision-aware IK while teleoperating
-- Fixed-base arm IK via `solve_position_step` (same task stack as `02_collision_aware_IK.py`)
-- Nullspace bias toward the default pose with optional per-joint weights
-- GUI fallback mode when no controller is connected
+`examples/03_teleop_ik.py` is a public adapter example. It keeps the IK setup
+hidden in `examples/example_helpers/teleop_ik_backend.py` so the script can focus
+on the important teleop wiring:
 
-Torso / floating-base pose bounds are **not** part of this script; use
-`examples/10_floating_base_torso_hierarchy.py` for that.
+1. Read a relative controller pose.
+2. Convert the controller delta into an end-effector target pose.
+3. Call `backend.solve_step(goal_pose)`.
+4. Visualize or send the returned joint positions.
 
-## Key Controls
+If no Seer controller is connected, the same IK path runs from the draggable
+`/ik_target` transform in the browser.
 
-- Side button hold: stream on/off
-- Trigger hold: grasping on/off
-- Button A: reset robot pose
-- Button B: toggle data collection
+## Button Mapping
 
-## Run
+- Trigger hold: stream controller motion into IK.
+- Side button hold: update gripper status.
+- Button A: reset robot and controller reference.
+- Button B: toggle data-collection status.
+
+## Core Pattern
+
+The example intentionally leaves detailed IK tuning outside the public script:
+
+```python
+backend = TeleopIKBackend(cfg, enable_collision=True)
+controller = SeerController("/dev/ttyUSB0")
+controller.connect()
+
+arm_stream_start_pose = backend.get_pose()
+
+while True:
+    controller.process_buttons()
+
+    if controller.streaming:
+        delta_pos, delta_wxyz = controller.relative_pose()
+        goal_pose = apply_controller_delta(
+            arm_stream_start_pose,
+            delta_pos,
+            delta_wxyz,
+            scale=1.5,
+        )
+        result = backend.solve_step(goal_pose)
+        q_command = result.joints
+```
+
+The backend uses the same stepping IK pattern as the other examples:
+`solve_position_step()` with a frame task, posture bias, adaptive dt, and optional
+self-collision constraints.
+
+## Running
 
 ```bash
 pixi run -e teleop demo-teleop
@@ -29,75 +61,30 @@ pixi run -e teleop demo-teleop
 pixi run -e teleop python examples/03_teleop_ik.py --robot panda
 ```
 
+Useful flags:
+
+```bash
+pixi run -e teleop python examples/03_teleop_ik.py --robot panda --controller-port /dev/ttyUSB1
+pixi run -e teleop python examples/03_teleop_ik.py --robot panda --no-collision
+```
+
+## Advanced Teleop Surface
+
+The public teleop example avoids detailed IK controls. From a git clone, use the
+clone-only advanced launcher when you need solver tuning/debug panels:
+
+```bash
+pixi run python examples/advanced_interactive_ik.py teleop -- --robot panda
+```
+
+The advanced launcher is not part of the pip-facing `embodik-examples --copy`
+workflow.
+
 ## Notes
 
-- Requires `xvisio` and host runtime support for Seer controller.
-- Use `--no-collision` to disable collision constraints for debugging.
-- With self-collision enabled, turn on **Show Collision Debug** in the UI to mirror
-  `examples/02_collision_aware_IK.py`: closest pair, distance, and segment between
-  `point_a` / `point_b` (updates after each IK step). Console `[embodiK] Collision pair:` lines
-  are suppressed unless you pass **`--verbose`** / **`-v`**.
-- Use `--nullspace-joint-weights` for explicit per-joint nullspace weighting.
-- Install the library into the `teleop` Pixi env once: `pixi run -e teleop install`
-  (separate solve-group from `default`).
-- For floating-base torso-oriented validation, run `examples/10_floating_base_torso_hierarchy.py`
-  (default: **Viser** UI — drag the EE target; sliders adjust torso pose box half-ranges, vel/acc
-  limits, torso bound softening, and IK gains; **Re-anchor** updates the fixed
-  `pose_bounds_reference_pose`).
-- Example 10 includes profile presets (`Responsive`, `Stable`, `StrictBounds`) for quick tuning.
-  Start with `Stable` for bounded-mode teleop, then switch to `Responsive` for faster target motion.
-- In bounded mode, use the `Constraint pressure` indicator (`Low/Medium/High`) to diagnose when hard
-  torso bounds and rapid target changes are likely to trigger infeasible/hold behavior.
-- Use `scripts/benchmark_example10_torso_modes.py` for scripted analysis; it reports
-  per-status timing/error buckets, iteration distributions, and jump-vs-no-jump / max-iteration
-  sweep matrices to isolate responsiveness bottlenecks.
-
-## Example 10 Torso Pose Motion Bounds (Detailed)
-
-`examples/10_floating_base_torso_hierarchy.py` exposes torso bounds as a 6D box in
-`[x, y, z, rx, ry, rz]` relative motion space (`m, m, m, rad, rad, rad`).
-
-- **Anchor model**: Bounds are enforced against a fixed reference pose
-  (`pose_bounds_reference_pose`). The reference is set when bounds are enabled,
-  after reset, or when `Re-anchor bounds to current torso` is clicked.
-- **Box limits**: The `±x/±y/±z/±rx/±ry/±rz` sliders define half-ranges around
-  the anchor. The solver enforces `pose_lower_bounds`/`pose_upper_bounds` with
-  per-axis velocity and acceleration limits.
-- **Translation/rotation toggles**: Unchecking `Enable translation bounds` or
-  `Enable rotation bounds` does not remove the corresponding rows; it applies an
-  epsilon half-range lock (`1e-4 m` translational, `1e-3 rad` rotational) so
-  those axes are effectively fixed.
-- **Secondary torso task vs hard bounds**: `Enable torso secondary orientation task`
-  controls a separate orientation objective (independent from the box rows). This
-  lets you test box constraints alone, orientation shaping alone, or both together.
-- **Constraint-faithful default**: `Optimize full lock with base joint lock
-  (fixed-base emulation)` is opt-in and defaults off. With it off, full 6D locks
-  are tested through torso constraint rows; with it on, full lock can map to base
-  joint exclusion (`excluded_joint_indices`) for fixed-base-like behavior.
-- **Velocity-box headroom policy and numerical robustness**:
-  - Preferred API: `torso_constraint.velocity_box_headroom` with:
-    - `enabled`
-    - `fraction` (minimum headroom as a fraction of per-axis `velocity_limits`)
-    - `activation_margin` (minimum slack before headroom is injected)
-  - This policy now uses the same shared velocity-box helper path as other
-    limit constraints, rather than a torso-specific post-processing block.
-  - Legacy aliases (`pose_bound_softening_enabled`,
-    `pose_bound_softening_fraction`) are still accepted for backward
-    compatibility and map to the shared headroom policy.
-  - Solver-side slack dead-zones (`1e-4 m`, `1e-3 rad`) suppress boundary chatter.
-- **Operational diagnostics**:
-  - `Torso box min slack` reports signed margin to the nearest box face.
-  - `Constraint pressure` summarizes runtime stress (`Low/Medium/High`) from slack
-    and infeasible streak trends.
-  - Near-target infeasible streaks are damped so close-enough constrained states
-    do not accumulate misleading stall counters.
-
-### Tuning tips
-
-- Start from `Stable` when validating new torso ranges, then move to `Responsive`
-  for faster teleop motions.
-- If target jumps are large, keep torso bounds active but reduce jump severity
-  (`Limit target step per frame`) before increasing gains aggressively.
-- If full 6D lock appears too stiff for your use case, compare constraint-faithful
-  mode against fixed-base emulation and benchmark both with
-  `scripts/benchmark_example10_torso_modes.py`.
+- Requires `xvisio` and host runtime support for Seer controllers.
+- Install the teleop Pixi environment once with `pixi install -e teleop`.
+- With no controller connected, drag `/ik_target` in the browser to exercise the
+  same `backend.solve_step(goal_pose)` path.
+- For floating-base torso-oriented validation, use
+  `examples/10_floating_base_torso_hierarchy.py`.
