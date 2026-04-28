@@ -19,7 +19,7 @@ Example code and tutorials for EmbodiK.
 - [`03_teleop_ik.py`](teleop_ik.md) — Seer-controller teleoperation with collision-aware IK
 - [`08_com_constraint_example.py`](com_constraint_ik.md) — CoM support-polygon constraint demo in Viser
 - [`09_dual_arm_ects.py`](dual_arm_ects.md) — Dual-arm ECTS/Orthogonal coordination with collision handling
-- [`incubating/robotis_ai_worker_ik.py`](../../examples/incubating/robotis_ai_worker_ik.py) — Viser-based dual-arm ROBOTIS AI worker IK demo for local FFW SG2/BG2 URDFs
+- [`12_ai_worker_constraint_teleop.py`](robotis_ai_worker_ik.md) — Dual-arm ROBOTIS AI Worker constraint teleop with CoM and collision handling
 
 ### GPU and Batch
 
@@ -32,14 +32,6 @@ Example code and tutorials for EmbodiK.
 
 - [`robot_model_example.py`](robot_model_usage.md) — RobotModel API walkthrough (FK/Jacobians/CoM)
 - [`visualization_example.py`](visualization_examples.md) — Visualization and interactive marker usage
-
-### Incubating Ports
-
-- [`incubating/g1_port_phase1/README.md`](../../examples/incubating/g1_port_phase1/README.md) — Behavior-parity matrix and porting intent
-- [`incubating/g1_port_phase1/04_g1_ik_site_counterpart_viser.py`](../../examples/incubating/g1_port_phase1/04_g1_ik_site_counterpart_viser.py) — Dual-mode site IK (`G1 3-point` vs `EmbodiK 6D`) with retargeting presets
-- [`incubating/g1_port_phase1/05_g1_base_ik_counterpart_viser.py`](../../examples/incubating/g1_port_phase1/05_g1_base_ik_counterpart_viser.py) — Floating-base full-body IK with 6D feet mode, CoM polygon controls, and retargeting presets
-- [`incubating/g1_port_phase1/06_g1_collision_constraint_counterpart_viser.py`](../../examples/incubating/g1_port_phase1/06_g1_collision_constraint_counterpart_viser.py) — Collision-constrained IK with arm-only mode and closest-pair diagnostics
-- [`incubating/g1_port_phase1/07_g1_dual_hand_grounded_com_viser.py`](../../examples/incubating/g1_port_phase1/07_g1_dual_hand_grounded_com_viser.py) — Reimagined G1 demo: grounded floating base, dual-hand 6D gizmos, CoM support-polygon constraint, and solver-native tight feet epsilon-box constraints
 
 ## Running Examples
 
