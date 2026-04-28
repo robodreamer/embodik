@@ -147,6 +147,9 @@ install(DIRECTORY examples/
         PATTERN "*.py"
         PATTERN "*.yaml"
         PATTERN "*.md"
+        PATTERN "*.urdf"
+        PATTERN "*.stl"
+        PATTERN "*.json"
     PATTERN "__pycache__" EXCLUDE
     PATTERN "*.pyc" EXCLUDE
 )

@@ -3,8 +3,8 @@
 
 from __future__ import annotations
 
-from examples.incubating.example_helpers.robotis_ai_worker_utils import (
-    default_worker_allowed_joint_names,
+from examples.example_helpers.ai_worker_model_utils import (
+    default_ai_worker_allowed_joint_names,
     resolve_ai_worker_frames,
 )
 
@@ -44,8 +44,8 @@ def test_resolve_ai_worker_frames_falls_back_to_link7_and_camera() -> None:
     assert frame_map["left_tool"] == "camera_l_link"
 
 
-def test_default_worker_allowed_joint_names_excludes_wheels() -> None:
-    allowed = default_worker_allowed_joint_names(
+def test_default_ai_worker_allowed_joint_names_excludes_wheels() -> None:
+    allowed = default_ai_worker_allowed_joint_names(
         [
             "lift_joint",
             "head_joint1",

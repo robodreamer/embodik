@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Runtime helpers for interactive IK examples.
+"""Generic runtime helpers for interactive IK examples.
 
-These utilities keep the example loops compact and make solver-status handling
-consistent across hardware-oriented demos.
+These helpers are intentionally example-agnostic so public examples can share
+consistent constrained-solve behavior.
 """
 
 from __future__ import annotations
@@ -30,9 +30,9 @@ def clip_configuration(robot, q: np.ndarray, q_lo: np.ndarray, q_hi: np.ndarray)
     if getattr(robot, "is_floating_base", False) and q_out.size >= 7:
         q_out[7:] = np.clip(q_out[7:], np.asarray(q_lo[7:], dtype=float), np.asarray(q_hi[7:], dtype=float))
         quat = q_out[3:7]
-        n = float(np.linalg.norm(quat))
-        if np.isfinite(n) and n > 1e-12:
-            q_out[3:7] = quat / n
+        norm = float(np.linalg.norm(quat))
+        if np.isfinite(norm) and norm > 1e-12:
+            q_out[3:7] = quat / norm
         else:
             q_out[3:7] = np.array([0.0, 0.0, 0.0, 1.0], dtype=float)
         return q_out
@@ -51,7 +51,7 @@ def _status_name(result: object) -> str:
 
 
 def _apply_targets_to_solver_tasks(solver, targets: Iterable[object]) -> None:
-    """Mirror TaskTarget payloads onto solver task state for velocity fallback."""
+    """Mirror ``TaskTarget`` payloads onto solver tasks for velocity fallback."""
     for target in targets:
         task = solver.get_task(target.task_name)
         pose = np.asarray(target.target_pose, dtype=float)
@@ -109,15 +109,13 @@ def robust_solve_position_step(
         q_next = clip_configuration(robot, np.asarray(result.q_solution, dtype=float), q_lo, q_hi)
         return RobustStepResult(q_next=q_next, solver_result=result, elapsed_ms=elapsed_ms, solver_calls=solver_calls)
 
-    should_fallback = status_name in set(fallback_status_names)
-    if should_fallback:
+    if status_name in set(fallback_status_names):
         _apply_targets_to_solver_tasks(solver, targets)
         t1 = time.perf_counter()
         vel_result = solver.solve_velocity(q_prev, apply_limits=True)
         elapsed_ms += (time.perf_counter() - t1) * 1e3
         solver_calls += 1
-        vel_status_name = _status_name(vel_result)
-        if vel_status_name == "SUCCESS":
+        if _status_name(vel_result) == "SUCCESS":
             dq = np.asarray(vel_result.joint_velocities, dtype=float).copy()
             if zero_velocity_indices:
                 dq[zero_velocity_indices] = 0.0
