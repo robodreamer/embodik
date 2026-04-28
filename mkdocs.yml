@@ -101,6 +101,7 @@ nav:
       - CoM Constraint: examples/com_constraint_ik.md
       - Dual-Arm ECTS: examples/dual_arm_ects.md
       - Teleop IK: examples/teleop_ik.md
+      - ROBOTIS AI Worker IK: examples/robotis_ai_worker_ik.md
     - GPU & Batch:
       - GPU Batch IK: examples/gpu_batch_ik.md
       - GPU Collision Batch: examples/gpu_collision_batch.md

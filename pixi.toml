@@ -1,6 +1,6 @@
 [workspace]
 name = "embodik"
-version = "0.20.1"
+version = "0.20.2"
 description = "High-performance inverse kinematics solver optimized for cross-embodiment VLA/AI applications"
 authors = ["Andy Park <andypark.purdue@gmail.com>"]
 channels = ["conda-forge"]
@@ -54,17 +54,17 @@ warp-lang = ">=1.0.0"
 patch-qhull = "python scripts/patch_qhull_cmake.py"
 clean-dist = "bash -lc 'shopt -s nullglob; rm -f dist/*.tar.gz dist/*.whl'"
 # Development install with automatic rebuild on import (2025 best practice)
-install = { cmd = "pip install -e . --no-build-isolation", depends-on = [
+install = { cmd = "python -m pip install -e . --no-build-isolation", depends-on = [
     "patch-qhull",
 ] }
-install-rebuild = { cmd = "pip install -C editable.rebuild=true -e . --no-build-isolation", depends-on = [
+install-rebuild = { cmd = "python -m pip install -C editable.rebuild=true -e . --no-build-isolation", depends-on = [
     "patch-qhull",
 ] }
-build = { cmd = "pip install --no-build-isolation .", depends-on = [
+build = { cmd = "python -m pip install --no-build-isolation .", depends-on = [
     "patch-qhull",
 ] }
-test = "pytest test/"
-test-verbose = "pytest test/ -v"
+test = "python -m pytest test/"
+test-verbose = "python -m pytest test/ -v"
 verify-agent = "python scripts/verify_changed.py --run"
 verify-ai-worker = "python scripts/verify_ai_worker_robustness.py --scenario all --output-json /tmp/ai_worker_metrics.json"
 # GPU solver tests (requires CUDA)

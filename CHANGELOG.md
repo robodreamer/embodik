@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.2] - 2026-04-28
+
+### Added
+- Public ROBOTIS AI Worker constrained dual-arm teleop example (`examples/12_ai_worker_constraint_teleop.py`) with cached public URDF resolution and reduced collision assets.
+- Shared `embodik.interactive_ik` runtime helpers for robust interactive IK stepping, constrained last-safe restoration, and boundary stall classification.
+- AI Worker robustness harness and headless regression coverage for collision/CoM boundary behavior.
+
+### Changed
+- Merged the simplified public example defaults from `main` and kept adaptive dt, nullspace bias, and balanced collision tuning as the default interactive behavior.
+- Simplified public-facing example/runtime code by moving detailed constrained-step handling out of the example layer.
+- Updated Pixi test/build tasks to use `python -m pytest` and `python -m pip` so release workflow commands run reliably in the Pixi environment.
+
+### Fixed
+- Hardened collision and CoM boundary handling around constrained teleop stalls, including target resync and safe-pose restoration.
+- Preserved AI Worker visual meshes while using generated reduced collision geometry for IK collision checks.
+- Cleaned up stale/order-dependent regression tests and documented removed expectations in maintainer context.
+
 ## [0.20.0] - 2026-04-19
 
 ### Added
