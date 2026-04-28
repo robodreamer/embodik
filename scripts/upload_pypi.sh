@@ -33,19 +33,19 @@ echo "Using source distribution: $CURRENT_SDIST"
 if [ -f "$HOME/.pypirc" ]; then
     if [ "$REPO" = "testpypi" ]; then
         echo "Uploading source distribution to TestPyPI..."
-        twine upload --repository testpypi --config-file "$HOME/.pypirc" "$CURRENT_SDIST"
+        python -m twine upload --repository testpypi --config-file "$HOME/.pypirc" "$CURRENT_SDIST"
     else
         echo "Uploading source distribution to PyPI..."
         echo "(Note: this script uploads only sdist; use cibuildwheel workflow artifacts for wheels)"
-        twine upload --config-file "$HOME/.pypirc" "$CURRENT_SDIST"
+        python -m twine upload --config-file "$HOME/.pypirc" "$CURRENT_SDIST"
     fi
 else
     echo "Warning: ~/.pypirc not found. Using environment variables if set."
     echo "Set TWINE_USERNAME=__token__ and TWINE_PASSWORD=<token> if needed."
     if [ "$REPO" = "testpypi" ]; then
-        twine upload --repository testpypi "$CURRENT_SDIST"
+        python -m twine upload --repository testpypi "$CURRENT_SDIST"
     else
-        twine upload "$CURRENT_SDIST"
+        python -m twine upload "$CURRENT_SDIST"
     fi
 fi
 
