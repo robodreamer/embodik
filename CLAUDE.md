@@ -82,6 +82,18 @@ When modifying features, ensure changes span the full stack:
 - `RobotVisualizer` has no `visualize_com` — use Viser scene API directly (`add_icosphere`, `add_line_segments`)
 - `drake:acceleration` namespace warning: `dual_iiwa_urdf.py` strips `drake:*` attributes
 
+## Git Worktrees
+
+Worktrees live at `~/Projects/git-worktrees/embodik-<feature-name>`:
+
+```bash
+git worktree add ~/Projects/git-worktrees/embodik-<feature> -b <branch-name>
+cd ~/Projects/git-worktrees/embodik-<feature>
+pixi run install   # must build in each worktree separately
+```
+
+Existing worktrees are listed in `~/Projects/git-worktrees/`.
+
 ## Further Context
 
 See AGENTS.md for agent workflow, coding guardrails, CoM/ECTS best practices, and internal notes policy.

@@ -1,6 +1,6 @@
 [workspace]
 name = "embodik"
-version = "0.20.0"
+version = "0.20.1"
 description = "High-performance inverse kinematics solver optimized for cross-embodiment VLA/AI applications"
 authors = ["Andy Park <andypark.purdue@gmail.com>"]
 channels = ["conda-forge"]
@@ -102,6 +102,7 @@ pytest-cov = ">=2.0"
 
 [feature.dev.tasks]
 test-cov = "pytest test/ --cov=embodik --cov-report=term-missing"
+demo-advanced-ik = "python dev_examples/advanced_interactive_ik.py basic"
 
 # Teleop feature: Xvisio SDK for Seer controller (requires libxvsdk.so on host)
 [feature.teleop.pypi-dependencies]
