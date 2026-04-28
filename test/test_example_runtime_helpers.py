@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from examples.incubating.sungjoon_port_phase1.robust_ik_runtime import (
+from examples.example_helpers.robust_ik_runtime import (
     clip_configuration,
     robust_solve_position_step,
 )

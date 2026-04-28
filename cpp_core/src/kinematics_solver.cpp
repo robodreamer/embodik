@@ -1679,10 +1679,12 @@ void KinematicsSolver::set_collision_tuning_mode(CollisionTuningMode mode) {
   case CollisionTuningMode::kBalanced:
     // Conservative compromise:
     // - keep cache enabled to skip obviously far pairs in clear space
+    // - refresh frequently enough to catch newly critical pairs in dense
+    //   self-collision models before they can drift through the clearance shell
     // - but keep budget disabled (0), so once candidate pairs are selected we
     //   avoid early termination and preserve higher collision-distance fidelity
     //   than the speed preset.
-    enable_collision_pair_cache(true, 20, 0.05, 256);
+    enable_collision_pair_cache(true, 5, 0.05, 256);
     set_collision_refinement_time_budget_us(0);
     set_proximity_gated_collision_activation_enabled(true);
     // Optional proximity-gated activation: rows are emitted only near

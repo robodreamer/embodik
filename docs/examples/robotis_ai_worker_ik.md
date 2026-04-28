@@ -1,7 +1,9 @@
-# ROBOTIS AI Worker IK Example
+# ROBOTIS AI Worker Constraint Teleop Example
 
-`examples/incubating/robotis_ai_worker_ik.py` is a Viser-based dual-arm IK demo for the
-local ROBOTIS FFW worker URDFs.
+`examples/12_ai_worker_constraint_teleop.py` is a Viser-based dual-arm IK demo
+for ROBOTIS AI Worker FFW models. It uses the public `ROBOTIS-GIT/ai_worker`
+repository for visual URDF assets and bundled reduced collision assets for
+interactive collision-aware IK.
 
 ## What It Covers
 
@@ -18,23 +20,27 @@ local ROBOTIS FFW worker URDFs.
 From the repository root:
 
 ```bash
-pixi run python examples/incubating/robotis_ai_worker_ik.py --variant sg2
+pixi run python examples/12_ai_worker_constraint_teleop.py --variant sg2
 ```
 
 Or switch to the other local worker variant:
 
 ```bash
-pixi run python examples/incubating/robotis_ai_worker_ik.py --variant bg2
+pixi run python examples/12_ai_worker_constraint_teleop.py --variant bg2
 ```
 
 ## Asset Resolution
 
 The script resolves the worker URDF from one of these locations:
 
-- `EMBODIK_FFW_SG2_URDF`
-- `EMBODIK_FFW_BG2_URDF`
-- `EMBODIK_FFW_URDF`
-- Workspace defaults under `/home/andypark/Projects/robot_models_urdf/`
+- explicit `--urdf` / `--collision-urdf` arguments
+- explicit `--ai-worker-root /path/to/ROBOTIS-GIT/ai_worker`
+- `EMBODIK_AI_WORKER_ROOT` / `AI_WORKER_ROOT`
+- automatic cached download from the public `ROBOTIS-GIT/ai_worker` repository
+
+The generated reduced collision URDF is bundled under
+`examples/assets/ai_worker/generated/` when examples are copied from the pip
+package with `embodik-examples --copy`.
 
 ## Note About SH5
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Headless motion regressions for the incubating ROBOTIS AI worker example."""
+"""Headless motion regressions for the public ROBOTIS AI Worker example."""
 
 from __future__ import annotations
 
@@ -11,27 +11,37 @@ import pytest
 
 embodik = pytest.importorskip("embodik")
 
-from examples.incubating.example_helpers.robotis_ai_worker_utils import (  # noqa: E402
-    default_worker_ik_joint_names,
+from examples.example_helpers.ai_worker_model_utils import (  # noqa: E402
+    default_ai_worker_ik_joint_names,
     resolve_ai_worker_frames,
-    resolve_generated_ffw_collision_urdf_path,
-    resolve_ffw_urdf_path,
 )
-from examples.incubating.robotis_ai_worker_ik import (  # noqa: E402
+from examples.example_helpers.public_ai_worker_paths import resolve_public_ai_worker_urdf_paths  # noqa: E402
+from examples.example_helpers.ai_worker_constraint_teleop_app import (  # noqa: E402
     DEFAULT_WORKER_SEED,
     _attempt_deep_penetration_escape_burst,
     _apply_named_joint_seed,
     _apply_soft_lift_margin,
     _configure_collision_constraint,
+    _is_com_boundary_stall,
     _is_collision_boundary_stall,
     _generate_consecutive_collision_exclusions,
     _generate_worker_collision_include_pairs,
 )
-from examples.incubating.sungjoon_port_phase1.robust_ik_runtime import robust_solve_position_step  # noqa: E402
+from examples.example_helpers.robust_ik_runtime import robust_solve_position_step  # noqa: E402
+
+
+def _resolve_worker_urdf() -> Path:
+    urdf, _collision_urdf = resolve_public_ai_worker_urdf_paths(variant="sg2")
+    return Path(urdf)
+
+
+def _resolve_worker_collision_urdf() -> Path | None:
+    _urdf, collision_urdf = resolve_public_ai_worker_urdf_paths(variant="sg2")
+    return Path(collision_urdf) if collision_urdf is not None else None
 
 
 def _load_worker_robot():
-    urdf = resolve_ffw_urdf_path("sg2")
+    urdf = _resolve_worker_urdf()
     if not Path(urdf).is_file():
         pytest.skip("local FFW SG2 URDF not available")
     robot = embodik.RobotModel(str(urdf), floating_base=False)
@@ -40,13 +50,13 @@ def _load_worker_robot():
 
 
 def _load_worker_collision_robot():
-    urdf = resolve_generated_ffw_collision_urdf_path("sg2")
+    urdf = _resolve_worker_collision_urdf()
     if urdf is None or not Path(urdf).is_file():
         pytest.skip("generated worker collision URDF not available")
     full = embodik.RobotModel(str(urdf), floating_base=False)
     robot = embodik.RobotModel(
         str(urdf),
-        actuated_joint_names=default_worker_ik_joint_names(full.get_joint_names()),
+        actuated_joint_names=default_ai_worker_ik_joint_names(full.get_joint_names()),
         floating_base=False,
     )
     frames = resolve_ai_worker_frames(robot.get_frame_names())
@@ -63,7 +73,7 @@ def _frame_pose_matrix(robot, frame_name: str) -> np.ndarray:
 
 def _build_locked_velocity_indices(robot) -> list[int]:
     joint_names = list(robot.get_joint_names())
-    allowed_joint_names = set(default_worker_ik_joint_names(joint_names))
+    allowed_joint_names = set(default_ai_worker_ik_joint_names(joint_names))
     locked: list[int] = []
     for joint_name in joint_names:
         if joint_name in allowed_joint_names:
@@ -76,10 +86,10 @@ def _build_locked_velocity_indices(robot) -> list[int]:
 
 
 def test_reduced_worker_ik_joint_set_excludes_wheels_and_head() -> None:
-    urdf = resolve_ffw_urdf_path("sg2")
+    urdf = _resolve_worker_urdf()
     reduced = embodik.RobotModel(
         str(urdf),
-        actuated_joint_names=default_worker_ik_joint_names(embodik.RobotModel(str(urdf), floating_base=False).get_joint_names()),
+        actuated_joint_names=default_ai_worker_ik_joint_names(embodik.RobotModel(str(urdf), floating_base=False).get_joint_names()),
         floating_base=False,
     )
     joint_names = list(reduced.get_joint_names())
@@ -92,16 +102,16 @@ def test_reduced_worker_ik_joint_set_excludes_wheels_and_head() -> None:
 
 
 def test_worker_collision_exclusions_include_shoulder_root_pairs() -> None:
-    robot, _frames = _load_worker_robot()
-    urdf = resolve_ffw_urdf_path("sg2")
+    robot, _frames, _collision_urdf = _load_worker_collision_robot()
+    urdf = _resolve_worker_urdf()
     excl = set(tuple(p) for p in _generate_consecutive_collision_exclusions(robot, urdf))
     assert ("arm_base_link_0", "arm_l_link1_0") in excl or ("arm_l_link1_0", "arm_base_link_0") in excl
     assert ("arm_base_link_0", "arm_r_link1_0") in excl or ("arm_r_link1_0", "arm_base_link_0") in excl
 
 
 def test_worker_collision_include_pairs_are_curated_for_teleop() -> None:
-    robot, _frames = _load_worker_robot()
-    urdf = resolve_ffw_urdf_path("sg2")
+    robot, _frames, _collision_urdf = _load_worker_collision_robot()
+    urdf = _resolve_worker_urdf()
     excl = _generate_consecutive_collision_exclusions(robot, urdf)
     include_pairs = _generate_worker_collision_include_pairs(robot, urdf, excl)
     assert 0 < len(include_pairs) <= 100
@@ -115,11 +125,13 @@ def test_worker_collision_include_pairs_are_curated_for_teleop() -> None:
 
 
 def test_worker_self_collision_constraint_stays_feasible_for_inward_reach() -> None:
-    urdf = resolve_ffw_urdf_path("sg2")
+    urdf = _resolve_worker_collision_urdf()
+    assert urdf is not None
+    visual_urdf = _resolve_worker_urdf()
     full = embodik.RobotModel(str(urdf), floating_base=False)
     robot = embodik.RobotModel(
         str(urdf),
-        actuated_joint_names=default_worker_ik_joint_names(full.get_joint_names()),
+        actuated_joint_names=default_ai_worker_ik_joint_names(full.get_joint_names()),
         floating_base=False,
     )
     frames = resolve_ai_worker_frames(robot.get_frame_names())
@@ -153,8 +165,8 @@ def test_worker_self_collision_constraint_stays_feasible_for_inward_reach() -> N
         task.weight = 1.0
         task.solve_mode = embodik.TaskSolveMode.SCALE_ELASTIC
 
-    exclusions = _generate_consecutive_collision_exclusions(robot, urdf)
-    include_pairs = _generate_worker_collision_include_pairs(robot, urdf, exclusions)
+    exclusions = _generate_consecutive_collision_exclusions(robot, visual_urdf)
+    include_pairs = _generate_worker_collision_include_pairs(robot, visual_urdf, exclusions)
     solver.configure_collision_constraint(
         min_distance=0.03, include_pairs=include_pairs, exclude_pairs=exclusions, max_constraints=3
     )
@@ -307,7 +319,7 @@ def test_unlocked_lift_can_participate_in_single_arm_solve() -> None:
 
 def test_worker_one_arm_collision_plateau_classifies_as_boundary_stall() -> None:
     robot, frames, collision_urdf = _load_worker_collision_robot()
-    visual_urdf = resolve_ffw_urdf_path("sg2")
+    visual_urdf = _resolve_worker_urdf()
     q_lo, q_hi = robot.get_joint_limits()
     joint_name_to_cfg = {name: int(robot.get_joint_config_index(name)) for name in robot.get_joint_names()}
     q = _apply_named_joint_seed(robot.neutral_configuration(), joint_name_to_cfg, q_lo, q_hi, DEFAULT_WORKER_SEED)
@@ -330,7 +342,7 @@ def test_worker_one_arm_collision_plateau_classifies_as_boundary_stall() -> None
 
     left_arm_velocity_indices: list[int] = []
     locked_velocity_indices: list[int] = []
-    allowed_joint_names = set(default_worker_ik_joint_names(robot.get_joint_names()))
+    allowed_joint_names = set(default_ai_worker_ik_joint_names(robot.get_joint_names()))
     for joint_name in robot.get_joint_names():
         idx_v = int(robot.get_joint_velocity_index(joint_name))
         nv_joint = int(robot.get_joint_velocity_size(joint_name)) if hasattr(robot, "get_joint_velocity_size") else 1
@@ -429,9 +441,52 @@ def test_worker_one_arm_collision_plateau_classifies_as_boundary_stall() -> None
     np.testing.assert_allclose(recovery_step.q_next, q, atol=1e-9)
 
 
+class _DummyStatus:
+    def __init__(self, name: str):
+        self.name = name
+
+
+class _DummyResult:
+    def __init__(self, status_name: str, dq_norm: float = 0.0):
+        self.status = _DummyStatus(status_name)
+        self.joint_velocities = np.array([dq_norm], dtype=float)
+
+
+def test_worker_com_boundary_stall_classifier_detects_zero_motion_margin_plateau() -> None:
+    result = _DummyResult("INFEASIBLE", dq_norm=0.0)
+    assert _is_com_boundary_stall(
+        result=result,
+        com_enabled=True,
+        current_com_min_slack=1e-4,
+    )
+    assert not _is_com_boundary_stall(
+        result=result,
+        com_enabled=True,
+        current_com_min_slack=2e-2,
+    )
+    # SCALE_ELASTIC routinely converges at the boundary with SUCCESS + tiny dq
+    # — that IS the stall plateau we want the UI to snap out of.
+    assert _is_com_boundary_stall(
+        result=_DummyResult("SUCCESS", dq_norm=0.0),
+        com_enabled=True,
+        current_com_min_slack=1e-4,
+    )
+    # Genuine motion (dq well above the stall threshold) is not a stall.
+    assert not _is_com_boundary_stall(
+        result=_DummyResult("INFEASIBLE", dq_norm=1e-3),
+        com_enabled=True,
+        current_com_min_slack=1e-4,
+    )
+    assert not _is_com_boundary_stall(
+        result=_DummyResult("SUCCESS", dq_norm=1e-3),
+        com_enabled=True,
+        current_com_min_slack=1e-4,
+    )
+
+
 def test_worker_deep_penetration_escape_burst_recovers_stuck_pull_away() -> None:
     robot, frames, collision_urdf = _load_worker_collision_robot()
-    visual_urdf = resolve_ffw_urdf_path("sg2")
+    visual_urdf = _resolve_worker_urdf()
     q_lo, q_hi = robot.get_joint_limits()
     joint_name_to_cfg = {name: int(robot.get_joint_config_index(name)) for name in robot.get_joint_names()}
     q = _apply_named_joint_seed(robot.neutral_configuration(), joint_name_to_cfg, q_lo, q_hi, DEFAULT_WORKER_SEED)
@@ -454,7 +509,7 @@ def test_worker_deep_penetration_escape_burst_recovers_stuck_pull_away() -> None
 
     left_arm_velocity_indices: list[int] = []
     locked_velocity_indices: list[int] = []
-    allowed_joint_names = set(default_worker_ik_joint_names(robot.get_joint_names()))
+    allowed_joint_names = set(default_ai_worker_ik_joint_names(robot.get_joint_names()))
     for joint_name in robot.get_joint_names():
         idx_v = int(robot.get_joint_velocity_index(joint_name))
         nv_joint = int(robot.get_joint_velocity_size(joint_name)) if hasattr(robot, "get_joint_velocity_size") else 1
@@ -562,3 +617,32 @@ def test_worker_deep_penetration_escape_burst_recovers_stuck_pull_away() -> None
         apply_collision_violated_q_solution=True,
     )
     assert recovery_step.solver_result.status.name == "SUCCESS"
+
+
+def test_worker_target_in_torso_release_preserves_collision_margin() -> None:
+    """Balanced collision tuning should recover from an impossible torso target
+    without drifting through the configured self-collision clearance shell.
+    """
+    from scripts.verify_ai_worker_robustness import run_scenario
+
+    _load_worker_collision_robot()
+    metrics = run_scenario(
+        "target_in_torso_release",
+        variant="sg2",
+        duration_steps=140,
+        collision_min_distance_m=0.035,
+        max_collision_constraints=2,
+        com_margin_frac=0.10,
+        collision_tuning_mode="balanced",
+        solve_mode_label="SCALE_ELASTIC",
+        allow_fallback=False,
+        pos_gain=10.0,
+        rot_gain=10.0,
+        enable_collision=True,
+        enable_com=True,
+        fallback_status_names=("INVALID_INPUT", "INFEASIBLE", "NUMERICAL_ERROR", "NO_PROGRESS"),
+    )
+    record = metrics.as_dict()
+    assert record["collision_breach_count"] == 0
+    assert record["unrecoverable_stall_count"] == 0
+    assert record["min_collision_distance_m"] >= 0.034
