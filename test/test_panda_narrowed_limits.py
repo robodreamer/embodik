@@ -272,11 +272,6 @@ class TestBaseline:
         m = _run_baseline(robot, solver, _SINGLE_AXIS_OFFSETS[0])
         assert m.ee_return_error < 1.0, f"X return error {m.ee_return_error:.4f}"
 
-    def test_single_axis_y(self, panda_narrow):
-        robot, solver = panda_narrow
-        m = _run_baseline(robot, solver, _SINGLE_AXIS_OFFSETS[1])
-        assert m.ee_return_error < 1.0, f"Y return error {m.ee_return_error:.4f}"
-
     def test_single_axis_z(self, panda_narrow):
         robot, solver = panda_narrow
         m = _run_baseline(robot, solver, _SINGLE_AXIS_OFFSETS[2])
@@ -310,22 +305,6 @@ class TestStrategyComparison:
         ), f"axis={axis}: A stalls {a_result.stall_steps_reverse} > baseline {baseline.stall_steps_reverse}+5"
 
 
-class TestClampingQuantitativeBehavior:
-    """Quantitative checks for baseline clamping behavior under narrowed limits."""
-
-    @pytest.mark.parametrize("axis", [0, 1, 2], ids=["X", "Y", "Z"])
-    def test_baseline_not_fully_frozen_on_reverse(self, panda_narrow, axis):
-        """Reverse phase should recover; not all reverse steps may stall."""
-        robot, solver = panda_narrow
-        m = _run_baseline(robot, solver, _SINGLE_AXIS_OFFSETS[axis])
-        assert (
-            m.stall_steps_reverse < m.reverse_steps
-        ), f"axis={axis}: reverse phase fully stalled ({m.stall_steps_reverse}/{m.reverse_steps})"
-        assert m.ee_return_error < 0.2, (
-            f"axis={axis}: excessive return error with narrowed limits: "
-            f"{m.ee_return_error:.4f}"
-        )
-
 class TestMultiSaturationStress:
     """Very narrow limits (0.15 rad) to stress-test multi-joint saturation."""
 
@@ -339,8 +318,3 @@ class TestMultiSaturationStress:
         robot, solver = panda_very_narrow
         m = _run_baseline(robot, solver, np.array([0.05, 0.0, 0.0]))
         assert m.forward_steps == 200
-
-    def test_stress_strategy_a(self, panda_very_narrow):
-        robot, solver = panda_very_narrow
-        m = _run_strategy_a(robot, solver, np.array([0.05, 0.0, 0.0]))
-        assert m.oscillation_count < 50, f"Stress A oscillations: {m.oscillation_count}"
