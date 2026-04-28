@@ -598,7 +598,7 @@ def run_gui(cfg: RobotConfig, args: argparse.Namespace) -> None:
         pos_gain = server.gui.add_slider("Position Gain", min=0.1, max=200.0, initial_value=DEFAULT_POS_GAIN, step=0.1)
         rot_gain = server.gui.add_slider("Orientation Gain", min=0.1, max=200.0, initial_value=DEFAULT_ROT_GAIN, step=0.1)
         iterations_slider = server.gui.add_slider("IK Iterations", min=1, max=20, initial_value=1, step=1)
-        adaptive_dt_checkbox = server.gui.add_checkbox("Adaptive dt", initial_value=False)
+        adaptive_dt_checkbox = server.gui.add_checkbox("Adaptive dt", initial_value=True)
         adaptive_dt_max_scale_slider = server.gui.add_slider(
             "Adaptive dt Max Scale", min=1.0, max=10.0, step=0.5, initial_value=10.0
         )
