@@ -1,6 +1,6 @@
-"""Example helper modules for reachability analysis.
+"""Example helper modules.
 
-This package contains shared modules used across reachability analysis examples.
+This package contains shared modules used across examples.
 """
 
 __all__ = []

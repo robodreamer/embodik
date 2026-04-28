@@ -1,11 +1,42 @@
 # Installation
 
-EmbodiK requires Python 3.10+ and is distributed via PyPI as a source distribution (sdist).
+EmbodiK requires Python 3.10+ and is distributed via PyPI.
+
+## Quick Start (macOS / Linux)
+
+The fastest way to install is with the one-shot script — no cloning required:
+
+=== "macOS"
+
+    ```bash
+    curl -fsSL -O https://gist.githubusercontent.com/robodreamer/adc0b4452d474586c5890877b629005b/raw/install_embodik_macos.sh
+    bash install_embodik_macos.sh --python python3.12
+    ```
+
+=== "Linux (Debian/Ubuntu)"
+
+    ```bash
+    curl -fsSL -O https://gist.githubusercontent.com/robodreamer/adc0b4452d474586c5890877b629005b/raw/install_embodik_linux.sh
+    bash install_embodik_linux.sh
+    ```
+
+The script creates a `.venv` in the current directory, installs all dependencies, and verifies the import.  Activate it and run the examples:
+
+```bash
+source .venv/bin/activate
+pip install "embodik[examples]"
+embodik-examples --copy
+cd embodik_examples
+python 02_collision_aware_IK.py --robot panda
+```
+
+That's all you need to get started.  The rest of this page covers manual steps, options, and troubleshooting.
+
+---
 
 > **Note (v0.4.0+)**: EmbodiK no longer requires the Python `pin` package at runtime.
 > All Pinocchio functionality is exposed through native C++ bindings. The `pin` package
-> is only needed at build time to locate Pinocchio's CMake config. This change resolves
-> numpy dependency conflicts when using EmbodiK with other packages.
+> is only needed at build time to locate Pinocchio's CMake config.
 
 ## macOS (Homebrew): pip / sdist builds
 
@@ -32,7 +63,7 @@ Run `bash scripts/install_embodik_macos.sh --help` for all options (`--skip-brew
 Without cloning, you can download the script and run it from an empty project folder (still installs **embodik from PyPI**):
 
 ```bash
-curl -fsSL -O https://gist.githubusercontent.com/robodreamer/adc0b4452d474586c5890877b629005b/raw/ee3213c6f25fda3488913ba065fcccdc8f6e98fb/install_embodik_macos.sh
+curl -fsSL -O https://gist.githubusercontent.com/robodreamer/adc0b4452d474586c5890877b629005b/raw/install_embodik_macos.sh
 bash install_embodik_macos.sh --python python3.12
 ```
 
@@ -122,7 +153,7 @@ Run `bash scripts/install_embodik_linux.sh --help` for all options (`--skip-apt`
 Without cloning, you can download the script and run it from an empty project folder (still installs **embodik from PyPI**):
 
 ```bash
-curl -fsSL -O https://gist.githubusercontent.com/robodreamer/adc0b4452d474586c5890877b629005b/raw/ee3213c6f25fda3488913ba065fcccdc8f6e98fb/install_embodik_linux.sh
+curl -fsSL -O https://gist.githubusercontent.com/robodreamer/adc0b4452d474586c5890877b629005b/raw/install_embodik_linux.sh
 bash install_embodik_linux.sh
 ```
 

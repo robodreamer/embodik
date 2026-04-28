@@ -46,7 +46,7 @@ solver.configure_com_constraint(
     com_acc_max=0.1,
 )
 
-# 4. Velocity IK loop (like 01_basic_ik_simple.py and 08_com_constraint_example.py)
+# 4. Velocity IK loop (same lower-level pattern used by the CoM example)
 q_current = q_default.copy()
 target_pose = Rt(R=np.eye(3), t=np.array([0.5, 0.2, 0.3]))
 pos_gain, rot_gain = 60.0, 60.0
