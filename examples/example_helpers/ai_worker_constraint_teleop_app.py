@@ -19,6 +19,15 @@ import xml.etree.ElementTree as ET
 import numpy as np
 
 import embodik
+from embodik.interactive_ik import (
+    ConstraintBoundary,
+    ConstrainedStepGuard,
+    clear_all_target_velocities_if_available,
+    clip_configuration,
+    configure_primary_solve_mode,
+    joint_velocity_norm,
+    robust_solve_position_step,
+)
 from embodik.utils import q2r, r2q
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -30,12 +39,6 @@ from examples.example_helpers.ai_worker_model_utils import (
     resolve_ai_worker_frames,
 )
 from examples.example_helpers.visualization_helpers import make_visual_config_mapper
-from examples.example_helpers.robust_ik_runtime import (
-    clear_all_target_velocities_if_available,
-    clip_configuration,
-    configure_primary_solve_mode,
-    robust_solve_position_step,
-)
 
 DEFAULT_SOLVER_DT = 0.01
 DEFAULT_POS_GAIN = 10.0
@@ -255,84 +258,6 @@ def _apply_soft_lift_margin(
         eff_hi = hi
     q_out[lift_idx] = float(np.clip(q_out[lift_idx], eff_lo, eff_hi))
     return q_out
-
-
-def _joint_velocity_norm(result: object) -> float:
-    dq = getattr(result, "joint_velocities", None)
-    if dq is None:
-        return 0.0
-    try:
-        return float(np.linalg.norm(np.asarray(dq, dtype=float)))
-    except Exception:
-        return 0.0
-
-
-def _is_collision_boundary_stall(
-    *,
-    result: object,
-    collision_enabled: bool,
-    current_collision_min: float | None,
-    collision_min_distance_m: float,
-    distance_slack_m: float = 5e-3,
-    dq_stall_eps: float = 1e-5,
-) -> bool:
-    """Classify zero-motion near-margin plateaus as collision-limited holds.
-
-    In the worker teleop flow, repeatedly commanding farther into the torso can
-    leave the solver parked at the last safe configuration with statuses like
-    ``INFEASIBLE`` or ``NUMERICAL_ERROR`` instead of ``COLLISION_VIOLATED``.
-    SCALE_ELASTIC can also converge at the boundary with ``SUCCESS`` but a
-    near-zero ``joint_velocities`` vector — visually a frozen arm with a floating
-    target gizmo. Treat any of those plateaus as a safe collision hold so the UI
-    snaps the target back to the achievable boundary rather than re-requesting
-    the same impossible step every tick.
-    """
-    if not collision_enabled or current_collision_min is None:
-        return False
-
-    status_name = getattr(getattr(result, "status", None), "name", str(getattr(result, "status", "")))
-    if status_name not in {"NO_PROGRESS", "INFEASIBLE", "NUMERICAL_ERROR", "SUCCESS"}:
-        return False
-
-    if float(current_collision_min) > float(collision_min_distance_m) + float(distance_slack_m):
-        return False
-
-    if _joint_velocity_norm(result) > float(dq_stall_eps):
-        return False
-
-    return True
-
-
-def _is_com_boundary_stall(
-    *,
-    result: object,
-    com_enabled: bool,
-    current_com_min_slack: float | None,
-    boundary_slack_m: float = 5e-3,
-    dq_stall_eps: float = 1e-5,
-) -> bool:
-    """Classify zero-motion near-margin plateaus as CoM-limited holds.
-
-    Treat ``SUCCESS`` with tiny ``joint_velocities`` the same as INFEASIBLE /
-    NO_PROGRESS: SCALE_ELASTIC regularly converges at the support-polygon edge
-    with a near-zero ``dq`` while the target demands more torso lean than the
-    CoM constraint allows. Without this, the app never snaps the target to the
-    achievable pose and the arm appears permanently frozen.
-    """
-    if not com_enabled or current_com_min_slack is None:
-        return False
-
-    status_name = getattr(getattr(result, "status", None), "name", str(getattr(result, "status", "")))
-    if status_name not in {"NO_PROGRESS", "INFEASIBLE", "NUMERICAL_ERROR", "SUCCESS"}:
-        return False
-
-    if float(current_com_min_slack) > float(boundary_slack_m):
-        return False
-
-    if _joint_velocity_norm(result) > float(dq_stall_eps):
-        return False
-
-    return True
 
 
 def _attempt_deep_penetration_escape_burst(
@@ -908,7 +833,7 @@ def main() -> None:
     )
     _set_geometry_view(default_geometry_view)
     _update_robot_visuals(q)
-    last_safe_q = np.asarray(q, dtype=float).copy()
+    constraint_guard = ConstrainedStepGuard(q)
 
     frame_map = resolve_ai_worker_frames(robot.get_frame_names())
     print(f"[worker] variant={args.variant} urdf={urdf_path}")
@@ -1100,7 +1025,7 @@ def main() -> None:
             "Orientation Gain", min=0.1, max=200.0, initial_value=DEFAULT_ROT_GAIN, step=0.1
         )
         ik_steps = server.gui.add_slider("IK Iterations", min=1, max=20, initial_value=1, step=1)
-        adaptive_dt = server.gui.add_checkbox("Adaptive dt", initial_value=False)
+        adaptive_dt = server.gui.add_checkbox("Adaptive dt", initial_value=True)
         adaptive_dt_max_scale = server.gui.add_slider(
             "Adaptive dt Max Scale", min=1.0, max=10.0, step=0.5, initial_value=10.0
         )
@@ -1503,13 +1428,13 @@ def main() -> None:
         left_err.value = "0.0000 m"
 
     def _reset_solver_state(reason: str) -> None:
-        nonlocal solver, right_task, left_task, posture, arm_nullspace, collision_cfg, com_cfg, last_safe_q
+        nonlocal solver, right_task, left_task, posture, arm_nullspace, collision_cfg, com_cfg
         solver, right_task, left_task, posture, arm_nullspace = _build_solver(posture_target)
         if hasattr(arm_nullspace, "set_controlled_joint_indices"):
             arm_nullspace.set_controlled_joint_indices(list(arm_controlled_indices))
         collision_cfg = None
         com_cfg = None
-        last_safe_q = np.asarray(q, dtype=float).copy()
+        constraint_guard.reset(q)
         _sync_targets_from_robot()
         _configure_com_constraint_if_needed(force=True)
         status.value = f"Status: solver reset after {reason}"
@@ -1544,7 +1469,6 @@ def main() -> None:
     _sync_posture_sliders_from_q(q)
     _sync_targets_from_robot()
     prev_manual_state = False
-    constrained_zero_motion_count = 0
 
     while True:
         q_prev = np.asarray(q, dtype=float).copy()
@@ -1801,24 +1725,32 @@ def main() -> None:
         collision_min_distance_m = float(collision_min_dist_mm.value) * 1e-3
         current_collision_min = _current_collision_min_distance()
         current_com_min_slack = _current_com_min_slack()
-        boundary_guard_applied = False
-        boundary_guard_labels: list[str] = []
-        collision_clearance_violation = (
-            bool(enable_collision.value)
-            and current_collision_min is not None
-            and float(current_collision_min) < collision_min_distance_m - 1e-5
+        boundaries = [
+            ConstraintBoundary(
+                "collision",
+                current_collision_min,
+                collision_min_distance_m,
+                enabled=bool(enable_collision.value),
+                violation_tolerance=1e-5,
+            ),
+            ConstraintBoundary(
+                "CoM",
+                current_com_min_slack,
+                0.0,
+                enabled=bool(enable_com_constraint.value),
+                violation_tolerance=1e-4,
+            ),
+        ]
+        guard_decision = constraint_guard.evaluate(
+            q_candidate=q,
+            result=result,
+            max_task_error=max(right_pos_err, left_pos_err),
+            boundaries=boundaries,
+            task_deadband=EE_POSITION_DEADBAND,
+            constraints_enabled=bool(enable_collision.value or enable_com_constraint.value),
         )
-        com_clearance_violation = (
-            bool(enable_com_constraint.value)
-            and current_com_min_slack is not None
-            and float(current_com_min_slack) < -1e-4
-        )
-        if collision_clearance_violation:
-            boundary_guard_labels.append("collision")
-        if com_clearance_violation:
-            boundary_guard_labels.append("CoM")
-        if boundary_guard_labels and np.linalg.norm(q - last_safe_q) > 1e-12:
-            q = np.asarray(last_safe_q, dtype=float).copy()
+        if guard_decision.restored_last_safe:
+            q = guard_decision.q_next
             robot.update_configuration(q)
             _update_robot_visuals(q)
             _sync_joint_sliders_from_q(q)
@@ -1831,14 +1763,13 @@ def main() -> None:
             left_err.value = f"{np.linalg.norm(np.asarray(left_ctrl.position, dtype=float) - left_now):.4f} m"
             current_collision_min = _current_collision_min_distance(q)
             current_com_min_slack = _current_com_min_slack()
-            boundary_guard_applied = True
         deep_penetration_escape_applied = False
         if (
             bool(enable_collision.value)
             and current_collision_min is not None
             and float(current_collision_min) < collision_min_distance_m
             and result_status_name in {"INFEASIBLE", "NUMERICAL_ERROR", "NO_PROGRESS"}
-            and _joint_velocity_norm(result) <= 1e-8
+            and joint_velocity_norm(result) <= 1e-8
         ):
             escaped_q = _attempt_deep_penetration_escape_burst(
                 robot=robot,
@@ -1863,97 +1794,52 @@ def main() -> None:
                 deep_penetration_escape_applied = True
                 current_collision_min = _current_collision_min_distance(q)
                 current_com_min_slack = _current_com_min_slack()
-        constraints_observed_clear = True
-        if bool(enable_collision.value) and current_collision_min is not None:
-            constraints_observed_clear = constraints_observed_clear and (
-                float(current_collision_min) >= collision_min_distance_m - 1e-5
-            )
-        if bool(enable_com_constraint.value) and current_com_min_slack is not None:
-            constraints_observed_clear = constraints_observed_clear and float(current_com_min_slack) >= -1e-4
-        if constraints_observed_clear:
-            last_safe_q = np.asarray(q, dtype=float).copy()
-        boundary_stalled = (
-            _is_collision_boundary_stall(
-                result=result,
-                collision_enabled=bool(enable_collision.value),
-                current_collision_min=current_collision_min,
-                collision_min_distance_m=collision_min_distance_m,
-            )
-        )
-        com_boundary_stalled = _is_com_boundary_stall(
-            result=result,
-            com_enabled=bool(enable_com_constraint.value),
-            current_com_min_slack=current_com_min_slack,
-        )
-        dq_norm_result = _joint_velocity_norm(result)
-        ee_error_above_deadband = max(right_pos_err, left_pos_err) > EE_POSITION_DEADBAND
-        # A "stalled" frame: solver returning essentially zero joint velocity
-        # while EE targets remain unreached. Mirror SCALE_ELASTIC's boundary
-        # plateau — it reports SUCCESS with tiny dq when pinned against a
-        # collision/CoM constraint. The reactive snap below is our last-resort
-        # path when neither per-constraint classifier fires (e.g. because the
-        # active collision pair isn't in the debug list, or CoM is engaged but
-        # slack is just above the boundary_slack threshold).
-        constrained_zero_motion = (
-            ee_error_above_deadband
-            and (
-                (
-                    dq_norm_result <= 1e-8
-                    and (
-                        result_status_name in {"NO_PROGRESS", "INFEASIBLE", "NUMERICAL_ERROR"}
-                        or len(list(getattr(result, "saturated_joints", []) or [])) > 0
-                    )
-                )
-                or (
-                    dq_norm_result <= 1e-4
-                    and result_status_name == "SUCCESS"
-                    and (bool(enable_collision.value) or bool(enable_com_constraint.value))
-                )
-            )
-        )
-        if constrained_zero_motion:
-            constrained_zero_motion_count += 1
-        else:
-            constrained_zero_motion_count = 0
-        did_zero_motion_resync = False
-        did_zero_motion_snap = False
-        if constrained_zero_motion_count >= 5:
+        boundaries = [
+            ConstraintBoundary(
+                "collision",
+                current_collision_min,
+                collision_min_distance_m,
+                enabled=bool(enable_collision.value),
+                violation_tolerance=1e-5,
+            ),
+            ConstraintBoundary(
+                "CoM",
+                current_com_min_slack,
+                0.0,
+                enabled=bool(enable_com_constraint.value),
+                violation_tolerance=1e-4,
+            ),
+        ]
+        constraint_guard.remember_if_clear(q, boundaries)
+        active_constraint_labels = list(guard_decision.boundary_stall_labels)
+        if guard_decision.zero_motion_resync:
             clear_all_target_velocities_if_available(solver)
-            did_zero_motion_resync = True
-            if constrained_zero_motion_count >= 20:
-                _sync_targets_from_robot()
-                constrained_zero_motion_count = 0
-                did_zero_motion_snap = True
-
-        active_constraint_labels = []
-        if boundary_stalled:
-            active_constraint_labels.append("collision")
-        if com_boundary_stalled:
-            active_constraint_labels.append("CoM")
+        if guard_decision.zero_motion_snap:
+            _sync_targets_from_robot()
         constraint_reason = " + ".join(active_constraint_labels) if active_constraint_labels else "constraint"
 
         if result_status_name == "NO_PROGRESS" and max(right_pos_err, left_pos_err) <= EE_POSITION_DEADBAND:
             status.value = "Status: Holding target"
         elif deep_penetration_escape_applied:
             status.value = "Status: penetration escape burst accepted"
-        elif boundary_guard_applied:
+        elif guard_decision.restored_last_safe:
             _sync_targets_from_robot()
             status.value = (
-                f"Status: {' + '.join(boundary_guard_labels)} guard restored last safe pose"
+                f"Status: {' + '.join(guard_decision.restore_labels)} guard restored last safe pose"
                 + (f" | {result.status_message}" if getattr(result, "status_message", "") else "")
             )
-        elif boundary_stalled or com_boundary_stalled:
+        elif active_constraint_labels:
             _sync_targets_from_robot()
             status.value = (
                 f"Status: {constraint_reason} limited; targets snapped to current tools"
                 + (f" | {result.status_message}" if getattr(result, "status_message", "") else "")
             )
-        elif did_zero_motion_snap:
+        elif guard_decision.zero_motion_snap:
             status.value = (
                 "Status: constrained zero-motion persisted; targets snapped to current tools"
                 + (f" | {result.status_message}" if getattr(result, "status_message", "") else "")
             )
-        elif did_zero_motion_resync:
+        elif guard_decision.zero_motion_resync:
             status.value = (
                 "Status: constrained zero-motion; solver state re-synced"
                 + (f" | {result.status_message}" if getattr(result, "status_message", "") else "")

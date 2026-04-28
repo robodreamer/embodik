@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import numpy as np
 
-from examples.example_helpers.robust_ik_runtime import (
+from embodik.interactive_ik import (
+    ConstraintBoundary,
+    ConstrainedStepGuard,
     clip_configuration,
     robust_solve_position_step,
 )
@@ -195,3 +197,64 @@ def test_robust_solve_position_step_applies_collision_violated_safe_hold() -> No
     np.testing.assert_allclose(out.q_next, np.array([0.15, -0.05], dtype=float))
     assert out.solver_result.status.name == "COLLISION_VIOLATED"
     assert [call[0] for call in solver.calls] == ["step"]
+
+
+def test_constrained_step_guard_restores_last_safe_on_boundary_violation() -> None:
+    guard = ConstrainedStepGuard(np.array([0.1, 0.2], dtype=float))
+    decision = guard.evaluate(
+        q_candidate=np.array([0.4, 0.5], dtype=float),
+        result=_Result("SUCCESS", joint_velocities=np.zeros(2, dtype=float)),
+        max_task_error=0.01,
+        boundaries=[
+            ConstraintBoundary(
+                "collision",
+                value=0.02,
+                minimum=0.035,
+                enabled=True,
+            )
+        ],
+        task_deadband=1e-4,
+        constraints_enabled=True,
+    )
+    assert decision.restored_last_safe
+    assert decision.restore_labels == ["collision"]
+    np.testing.assert_allclose(decision.q_next, np.array([0.1, 0.2], dtype=float))
+
+
+def test_constrained_step_guard_tracks_zero_motion_snap_threshold() -> None:
+    guard = ConstrainedStepGuard(
+        np.zeros(2, dtype=float),
+        zero_motion_resync_frames=2,
+        zero_motion_snap_frames=3,
+    )
+    result = _Result("SUCCESS", joint_velocities=np.zeros(2, dtype=float))
+    boundary = ConstraintBoundary("CoM", value=0.0, minimum=0.0, enabled=True)
+
+    first = guard.evaluate(
+        q_candidate=np.zeros(2, dtype=float),
+        result=result,
+        max_task_error=0.01,
+        boundaries=[boundary],
+        task_deadband=1e-4,
+        constraints_enabled=True,
+    )
+    second = guard.evaluate(
+        q_candidate=np.zeros(2, dtype=float),
+        result=result,
+        max_task_error=0.01,
+        boundaries=[boundary],
+        task_deadband=1e-4,
+        constraints_enabled=True,
+    )
+    third = guard.evaluate(
+        q_candidate=np.zeros(2, dtype=float),
+        result=result,
+        max_task_error=0.01,
+        boundaries=[boundary],
+        task_deadband=1e-4,
+        constraints_enabled=True,
+    )
+
+    assert not first.zero_motion_resync
+    assert second.zero_motion_resync
+    assert third.zero_motion_snap
