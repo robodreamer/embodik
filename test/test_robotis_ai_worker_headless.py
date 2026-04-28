@@ -16,14 +16,16 @@ from examples.example_helpers.ai_worker_model_utils import (  # noqa: E402
     resolve_ai_worker_frames,
 )
 from examples.example_helpers.public_ai_worker_paths import resolve_public_ai_worker_urdf_paths  # noqa: E402
+from embodik.interactive_ik import (  # noqa: E402
+    is_collision_boundary_stall as _is_collision_boundary_stall,
+    is_com_boundary_stall as _is_com_boundary_stall,
+)
 from examples.example_helpers.ai_worker_constraint_teleop_app import (  # noqa: E402
     DEFAULT_WORKER_SEED,
     _attempt_deep_penetration_escape_burst,
     _apply_named_joint_seed,
     _apply_soft_lift_margin,
     _configure_collision_constraint,
-    _is_com_boundary_stall,
-    _is_collision_boundary_stall,
     _generate_consecutive_collision_exclusions,
     _generate_worker_collision_include_pairs,
 )
