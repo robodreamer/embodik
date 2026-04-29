@@ -123,9 +123,12 @@ python -c "import embodik; print(embodik.__version__, embodik.RobotModel)"
 pip install "embodik[examples]"
 embodik-examples --copy
 cd embodik_examples
-python 01_basic_ik_simple.py --robot panda
-python 03_teleop_ik.py --robot panda  # browser fallback works without controller
+python 01_basic_ik_simple.py
+python 03_teleop_ik.py  # browser fallback works without controller
 ```
+
+Examples default to the Panda preset; pass `--robot <key>` when you want a
+different model.
 
 ### Troubleshooting
 
@@ -301,10 +304,12 @@ embodik-examples --copy
 
 # Run examples
 cd embodik_examples
-python 01_basic_ik_simple.py --robot panda
-python 02_collision_aware_IK.py --robot panda
-python 03_teleop_ik.py --robot panda
+python 01_basic_ik_simple.py
+python 02_collision_aware_IK.py
+python 03_teleop_ik.py
 ```
+
+These examples default to the Panda preset; use `--robot <key>` to switch models.
 
 **For developers (from repository):**
 ```bash
@@ -315,14 +320,14 @@ pixi run install
 pixi run python examples/01_basic_ik_simple.py
 
 # Run collision-aware IK example
-pixi run python examples/02_collision_aware_IK.py --robot panda
+pixi run python examples/02_collision_aware_IK.py
 
 # Run minimal teleop adapter example (browser fallback if no controller is connected)
-pixi run python examples/03_teleop_ik.py --robot panda
+pixi run python examples/03_teleop_ik.py
 
 # Run clone-only advanced/dev IK surfaces
 pixi run demo-advanced-ik
-pixi run python dev_examples/advanced_interactive_ik.py teleop -- --robot panda
+pixi run python dev_examples/advanced_interactive_ik.py teleop
 
 # Run GPU examples (requires cuda environment)
 pixi run -e cuda demo-gpu          # GPU solver benchmark
@@ -330,6 +335,8 @@ pixi run -e cuda demo-ik-gpu       # Interactive IK with GPU panel
 pixi run -e cuda benchmark-gpu     # Batch IK benchmark
 pixi run -e cuda benchmark-collision  # Collision detection benchmark
 ```
+
+Use `--robot <key>` on example scripts when you need a non-default robot preset.
 
 See the [Examples Documentation](docs/examples/index.md) for detailed guides.
 

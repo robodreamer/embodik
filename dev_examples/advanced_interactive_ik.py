@@ -9,7 +9,7 @@ Usage:
     pixi run demo-advanced-ik
     pixi run python dev_examples/advanced_interactive_ik.py basic -- --robot iiwa
     pixi run python dev_examples/advanced_interactive_ik.py collision -- --robot iiwa
-    pixi run python dev_examples/advanced_interactive_ik.py teleop -- --robot panda
+    pixi run python dev_examples/advanced_interactive_ik.py teleop
 """
 
 from __future__ import annotations

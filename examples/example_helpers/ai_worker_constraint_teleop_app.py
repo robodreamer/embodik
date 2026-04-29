@@ -34,11 +34,20 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from examples.example_helpers.ai_worker_model_utils import (
-    default_ai_worker_ik_joint_names,
-    resolve_ai_worker_frames,
-)
-from examples.example_helpers.visualization_helpers import make_visual_config_mapper
+try:
+    from example_helpers.ai_worker_model_utils import (
+        default_ai_worker_ik_joint_names,
+        resolve_ai_worker_frames,
+    )
+    from example_helpers.visualization_helpers import make_visual_config_mapper
+except ModuleNotFoundError as exc:
+    if exc.name != "example_helpers" and not str(exc.name).startswith("example_helpers."):
+        raise
+    from examples.example_helpers.ai_worker_model_utils import (
+        default_ai_worker_ik_joint_names,
+        resolve_ai_worker_frames,
+    )
+    from examples.example_helpers.visualization_helpers import make_visual_config_mapper
 
 DEFAULT_SOLVER_DT = 0.01
 DEFAULT_POS_GAIN = 10.0

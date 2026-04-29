@@ -16,25 +16,48 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from examples.example_helpers.ai_worker_model_utils import (
-    default_ai_worker_ik_joint_names,
-    resolve_ai_worker_frames,
-)
-from examples.example_helpers.public_ai_worker_paths import resolve_public_ai_worker_urdf_paths
-from examples.example_helpers.ai_worker_constraint_teleop_app import (
-    DEFAULT_ARM_NULLSPACE_WEIGHT,
-    DEFAULT_POSTURE_WEIGHT,
-    DEFAULT_SOLVER_DT,
-    DEFAULT_WORKER_SEED,
-    WORKER_SUPPORT_CONTACT_FRAMES,
-    _apply_named_joint_seed,
-    _apply_soft_lift_margin,
-    _compute_support_polygon_from_contacts,
-    _configure_collision_constraint,
-    _generate_consecutive_collision_exclusions,
-    _generate_worker_collision_include_pairs,
-    _shrink_polygon_2d,
-)
+try:
+    from example_helpers.ai_worker_model_utils import (
+        default_ai_worker_ik_joint_names,
+        resolve_ai_worker_frames,
+    )
+    from example_helpers.public_ai_worker_paths import resolve_public_ai_worker_urdf_paths
+    from example_helpers.ai_worker_constraint_teleop_app import (
+        DEFAULT_ARM_NULLSPACE_WEIGHT,
+        DEFAULT_POSTURE_WEIGHT,
+        DEFAULT_SOLVER_DT,
+        DEFAULT_WORKER_SEED,
+        WORKER_SUPPORT_CONTACT_FRAMES,
+        _apply_named_joint_seed,
+        _apply_soft_lift_margin,
+        _compute_support_polygon_from_contacts,
+        _configure_collision_constraint,
+        _generate_consecutive_collision_exclusions,
+        _generate_worker_collision_include_pairs,
+        _shrink_polygon_2d,
+    )
+except ModuleNotFoundError as exc:
+    if exc.name != "example_helpers" and not str(exc.name).startswith("example_helpers."):
+        raise
+    from examples.example_helpers.ai_worker_model_utils import (
+        default_ai_worker_ik_joint_names,
+        resolve_ai_worker_frames,
+    )
+    from examples.example_helpers.public_ai_worker_paths import resolve_public_ai_worker_urdf_paths
+    from examples.example_helpers.ai_worker_constraint_teleop_app import (
+        DEFAULT_ARM_NULLSPACE_WEIGHT,
+        DEFAULT_POSTURE_WEIGHT,
+        DEFAULT_SOLVER_DT,
+        DEFAULT_WORKER_SEED,
+        WORKER_SUPPORT_CONTACT_FRAMES,
+        _apply_named_joint_seed,
+        _apply_soft_lift_margin,
+        _compute_support_polygon_from_contacts,
+        _configure_collision_constraint,
+        _generate_consecutive_collision_exclusions,
+        _generate_worker_collision_include_pairs,
+        _shrink_polygon_2d,
+    )
 
 
 @dataclass

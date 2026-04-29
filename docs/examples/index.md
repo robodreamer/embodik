@@ -51,17 +51,21 @@ pip install "embodik[examples]"
 embodik-examples --copy
 
 cd embodik_examples
-python3 01_basic_ik_simple.py --robot panda
+python3 01_basic_ik_simple.py
 ```
+
+Examples default to the Panda preset; use `--robot <key>` to switch models.
 
 ### For developers (from repository)
 
 ```bash
 pixi run install
-pixi run python examples/01_basic_ik_simple.py --robot panda
-pixi run python examples/03_teleop_ik.py --robot panda
+pixi run python examples/01_basic_ik_simple.py
+pixi run python examples/03_teleop_ik.py
 pixi run demo-advanced-ik  # clone-only advanced/dev IK surface
 ```
+
+Pass `--robot <key>` when you want a non-default robot preset.
 
 Clone-only advanced surfaces live in `dev_examples/` and are intentionally not
 part of the pip-facing `embodik-examples --copy` workflow.

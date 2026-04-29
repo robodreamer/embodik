@@ -68,14 +68,17 @@ For pip-installed users:
 pip install "embodik[examples]"
 embodik-examples --copy
 cd embodik_examples
-python 01_basic_ik_simple.py --robot panda
+python 01_basic_ik_simple.py
 ```
 
 For repository development:
 
 ```bash
-pixi run python examples/01_basic_ik_simple.py --robot panda
+pixi run python examples/01_basic_ik_simple.py
 ```
+
+The example defaults to the Panda preset; pass `--robot <key>` to use another
+configured model.
 
 ## Adding a New Robot
 

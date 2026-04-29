@@ -58,14 +58,17 @@ self-collision constraints.
 ```bash
 pixi run -e teleop demo-teleop
 # or
-pixi run -e teleop python examples/03_teleop_ik.py --robot panda
+pixi run -e teleop python examples/03_teleop_ik.py
 ```
+
+The example defaults to the Panda preset; pass `--robot <key>` to use another
+configured model.
 
 Useful flags:
 
 ```bash
-pixi run -e teleop python examples/03_teleop_ik.py --robot panda --controller-port /dev/ttyUSB1
-pixi run -e teleop python examples/03_teleop_ik.py --robot panda --no-collision
+pixi run -e teleop python examples/03_teleop_ik.py --controller-port /dev/ttyUSB1
+pixi run -e teleop python examples/03_teleop_ik.py --no-collision
 ```
 
 ## Advanced Teleop Surface
@@ -74,7 +77,7 @@ The public teleop example avoids detailed IK controls. From a git clone, use the
 clone-only advanced launcher when you need solver tuning/debug panels:
 
 ```bash
-pixi run python dev_examples/advanced_interactive_ik.py teleop -- --robot panda
+pixi run python dev_examples/advanced_interactive_ik.py teleop
 ```
 
 The advanced launcher is not part of the pip-facing `embodik-examples --copy`

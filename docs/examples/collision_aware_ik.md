@@ -83,15 +83,18 @@ debug markers continue updating live.
 ## Running
 
 ```bash
-pixi run python examples/02_collision_aware_IK.py --robot panda
+pixi run python examples/02_collision_aware_IK.py
 ```
+
+The example defaults to the Panda preset; pass `--robot <key>` to use another
+configured model.
 
 Optional GPU benchmark panel:
 
 ```bash
 pixi run -e cuda demo-ik-gpu
 # or
-pixi run -e cuda python examples/02_collision_aware_IK.py --robot panda --gpu
+pixi run -e cuda python examples/02_collision_aware_IK.py --gpu
 ```
 
 ## Next Steps
