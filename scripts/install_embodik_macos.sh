@@ -165,8 +165,8 @@ echo "    SDKROOT=$SDKROOT"
 echo "    CMAKE_PREFIX_PATH=$CMAKE_PREFIX_PATH"
 
 if [[ "$MODE" == "pypi" ]]; then
-  echo "==> pip install embodik (from PyPI, no build isolation)..."
-  "$VENV_DIR/bin/python" -m pip install --no-build-isolation embodik
+  echo "==> pip install --upgrade embodik (latest from PyPI, no build isolation)..."
+  "$VENV_DIR/bin/python" -m pip install --upgrade --no-build-isolation embodik
 else
   REPO="$(cd "$EDITABLE_DIR" && pwd)"
   if [[ ! -f "$REPO/CMakeLists.txt" ]] || [[ ! -f "$REPO/pyproject.toml" ]]; then
@@ -183,9 +183,23 @@ fi
 echo ""
 echo "==> Patching rpath for cmeel-installed pinocchio dylibs (macOS binary wheel fix)..."
 EMBODIK_SO="$("$VENV_DIR/bin/python" -c \
-  'import importlib.util, pathlib; \
-   spec = importlib.util.find_spec("embodik._embodik_impl"); \
-   print(spec.origin if spec else "")'  2>/dev/null || true)"
+  'import importlib.metadata as im, pathlib, sysconfig
+candidates = []
+try:
+    dist = im.distribution("embodik")
+    for file in dist.files or []:
+        path = pathlib.PurePosixPath(str(file))
+        if (
+            path.parent == pathlib.PurePosixPath("embodik")
+            and path.name.startswith("_embodik_impl")
+            and path.suffix == ".so"
+        ):
+            candidates.append(pathlib.Path(dist.locate_file(file)))
+except Exception:
+    pass
+platlib = pathlib.Path(sysconfig.get_paths()["platlib"])
+candidates.extend((platlib / "embodik").glob("_embodik_impl*.so"))
+print(next((str(path) for path in candidates if path.is_file()), ""))' 2>/dev/null || true)"
 CMEEL_LIB="$("$VENV_DIR/bin/python" -c \
   'import pinocchio, pathlib; \
    print(pathlib.Path(pinocchio.__file__).resolve().parents[4] / "lib")' 2>/dev/null || true)"

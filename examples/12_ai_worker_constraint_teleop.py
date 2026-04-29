@@ -32,8 +32,14 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from examples.example_helpers.public_ai_worker_paths import resolve_public_ai_worker_urdf_paths
-import examples.example_helpers.ai_worker_constraint_teleop_app as worker_impl
+try:
+    from example_helpers.public_ai_worker_paths import resolve_public_ai_worker_urdf_paths
+    import example_helpers.ai_worker_constraint_teleop_app as worker_impl
+except ModuleNotFoundError as exc:
+    if exc.name != "example_helpers" and not str(exc.name).startswith("example_helpers."):
+        raise
+    from examples.example_helpers.public_ai_worker_paths import resolve_public_ai_worker_urdf_paths
+    import examples.example_helpers.ai_worker_constraint_teleop_app as worker_impl
 
 
 def parse_args() -> argparse.Namespace:

@@ -41,5 +41,8 @@ print(result.task_modes_effective[0], result.task_used_fallback[0], result.task_
 ## Run
 
 ```bash
-pixi run python examples/08_com_constraint_example.py --robot panda
+pixi run python examples/08_com_constraint_example.py
 ```
+
+The example defaults to the Panda preset; pass `--robot <key>` to use another
+configured model.

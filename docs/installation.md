@@ -27,8 +27,10 @@ source .venv/bin/activate
 pip install "embodik[examples]"
 embodik-examples --copy
 cd embodik_examples
-python 02_collision_aware_IK.py --robot panda
+python 02_collision_aware_IK.py
 ```
+
+Examples default to the Panda preset; pass `--robot <key>` to use another model.
 
 That's all you need to get started.  The rest of this page covers manual steps, options, and troubleshooting.
 
@@ -248,8 +250,10 @@ pip install "embodik[examples]"
 # Copy and run examples
 embodik-examples --copy
 cd embodik_examples
-python 01_basic_ik_simple.py --robot panda
+python 01_basic_ik_simple.py
 ```
+
+Use `--robot <key>` when you want a non-default robot preset.
 
 ## Troubleshooting
 
@@ -514,7 +518,7 @@ pixi install -e teleop
 
 # Run the teleop demo
 pixi run -e teleop demo-teleop
-# Or: pixi run -e teleop python examples/03_teleop_ik.py --robot panda
+# Or: pixi run -e teleop python examples/03_teleop_ik.py
 ```
 
 | Task | Description |
@@ -602,7 +606,7 @@ pixi run -e cuda benchmark-collision   # Collision detection benchmark
 # Or run scripts directly
 python examples/06_gpu_solver_demo.py                    # CPU-only benchmark
 python examples/06_gpu_solver_demo.py --gpu --casadi_path ~/.local/cusadi/src/casadi_functions/fn_velocity_solve.casadi  # GPU benchmark
-python examples/02_collision_aware_IK.py --robot panda --gpu  # Interactive IK with GPU
+python examples/02_collision_aware_IK.py --gpu  # Interactive IK with GPU
 ```
 
 ### GPU Collision Detection (Warp)

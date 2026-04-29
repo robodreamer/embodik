@@ -132,8 +132,8 @@ export CMAKE_PREFIX_PATH="${PIN_PREFIX}${CMAKE_PREFIX_PATH:+:${CMAKE_PREFIX_PATH
 echo "    CMAKE_PREFIX_PATH=$CMAKE_PREFIX_PATH"
 
 if [[ "$MODE" == "pypi" ]]; then
-  echo "==> pip install embodik (from PyPI, no build isolation)..."
-  "$VENV_DIR/bin/python" -m pip install --no-build-isolation embodik
+  echo "==> pip install --upgrade embodik (latest from PyPI, no build isolation)..."
+  "$VENV_DIR/bin/python" -m pip install --upgrade --no-build-isolation embodik
 else
   REPO="$(cd "$EDITABLE_DIR" && pwd)"
   if [[ ! -f "$REPO/CMakeLists.txt" ]] || [[ ! -f "$REPO/pyproject.toml" ]]; then
