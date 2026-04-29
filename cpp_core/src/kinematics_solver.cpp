@@ -6120,9 +6120,9 @@ PositionIKResult KinematicsSolver::solve_position_step(
         "q_solution is the last safe configuration";
   }
   if (collision_constraint_.has_value() && collision_constraint_->enabled &&
-      (result.status == SolverStatus::kSuccess ||
-       result.stall_escape_count > 0 ||
-       result.collision_rejection_count > 0)) {
+      (result.stall_escape_count > 0 ||
+       result.collision_rejection_count > 0 ||
+       recovery_inside_collision_margin)) {
     auto final_dist = evaluate_min_collision_distance(q);
     if (final_dist.has_value() && std::isfinite(*final_dist) &&
         *final_dist < collision_constraint_->min_distance - kCollisionTolerance) {
@@ -7050,9 +7050,9 @@ PositionIKResult KinematicsSolver::solve_position_step(
         "min_distance; q_solution is the last safe configuration";
   }
   if (collision_constraint_.has_value() && collision_constraint_->enabled &&
-      (result.status == SolverStatus::kSuccess ||
-       result.stall_escape_count > 0 ||
-       result.collision_rejection_count > 0)) {
+      (result.stall_escape_count > 0 ||
+       result.collision_rejection_count > 0 ||
+       recovery_inside_collision_margin)) {
     auto final_dist = evaluate_min_collision_distance(q);
     if (final_dist.has_value() && std::isfinite(*final_dist) &&
         *final_dist < collision_constraint_->min_distance - kCollisionTolerance) {
