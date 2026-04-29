@@ -68,3 +68,30 @@ def test_ai_worker_sg2_resolves_bundled_urdf_before_network(monkeypatch, tmp_pat
     assert urdf_path.is_relative_to(
         copied_examples_dir / "assets" / "ai_worker" / "generated" / "sg2"
     )
+
+
+def test_ai_worker_visual_entrypoint_can_require_public_visual_urdf(monkeypatch, tmp_path) -> None:
+    copied_examples_dir = _copy_examples_dir(tmp_path)
+    _clear_example_helper_imports()
+    monkeypatch.syspath_prepend(str(copied_examples_dir))
+    paths = importlib.import_module("example_helpers.public_ai_worker_paths")
+
+    public_root = tmp_path / "ai_worker-main"
+    visual_dir = public_root / "ffw_description" / "urdf" / "ffw_sg2_rev1_follower"
+    visual_dir.mkdir(parents=True)
+    visual_urdf = visual_dir / "ffw_sg2_rev1_follower.urdf"
+    visual_urdf.write_text("<robot name='visual_sg2'/>", encoding="utf-8")
+
+    monkeypatch.setattr(paths, "_download_public_repo_to_cache", lambda: public_root)
+
+    urdf_path, collision_urdf_path = paths.resolve_public_ai_worker_urdf_paths(
+        variant="sg2",
+        allow_bundled_base_fallback=False,
+    )
+
+    assert urdf_path == visual_urdf.resolve()
+    assert collision_urdf_path is not None
+    assert collision_urdf_path != urdf_path
+    assert collision_urdf_path.is_relative_to(
+        copied_examples_dir / "assets" / "ai_worker" / "generated" / "sg2"
+    )

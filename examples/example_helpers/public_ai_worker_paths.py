@@ -159,6 +159,7 @@ def resolve_public_ai_worker_urdf_paths(
     ai_worker_root: str | Path | None = None,
     urdf: str | Path | None = None,
     collision_urdf: str | Path | None = None,
+    allow_bundled_base_fallback: bool = True,
 ) -> tuple[Path, Path | None]:
     """Resolve the URDF inputs for the public AI Worker example."""
     variant = str(variant).strip().lower()
@@ -168,7 +169,7 @@ def resolve_public_ai_worker_urdf_paths(
     base_urdf = _require_file(urdf, "URDF")
     if base_urdf is None:
         base_urdf = _resolve_from_public_repo(variant, ai_worker_root)
-    if base_urdf is None:
+    if base_urdf is None and allow_bundled_base_fallback:
         base_urdf = _resolve_bundled_generated_urdf(variant)
     if base_urdf is None:
         public_root = _download_public_repo_to_cache()
