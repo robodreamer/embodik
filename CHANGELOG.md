@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.3] - 2026-04-29
+
+### Fixed
+- Made copied/pip-installed AI Worker examples resolve bundled SG2 generated URDF assets before attempting network downloads.
+- Added copied-example regression coverage so `embodik-examples --copy` imports AI Worker helpers from the copied examples directory, not the source tree.
+- Updated AI Worker example docs and installer guidance around copied example usage.
+
 ## [0.20.2] - 2026-04-28
 
 ### Added
