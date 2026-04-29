@@ -126,6 +126,22 @@ static bool should_report_position_recovery_success(
   return (result.q_solution - current_q).norm() > motion_eps;
 }
 
+static bool collision_recovery_candidate_acceptable(
+    const std::optional<double> &current_dist,
+    const std::optional<double> &candidate_dist, double safe_threshold) {
+  if (!candidate_dist.has_value() || !std::isfinite(*candidate_dist)) {
+    return true;
+  }
+  if (!current_dist.has_value() || !std::isfinite(*current_dist)) {
+    return *candidate_dist >= safe_threshold;
+  }
+  if (*current_dist >= safe_threshold) {
+    return *candidate_dist >= safe_threshold;
+  }
+  return *candidate_dist >=
+         *current_dist - kCollisionPenetrationWorsenTolerance;
+}
+
 static double compute_adaptive_position_step_dt(
     const PositionStepOptions &options, double step_dt, double position_error,
     bool collision_constraint_enabled, double collision_min_distance,
@@ -5483,6 +5499,7 @@ PositionIKResult KinematicsSolver::solve_position_step(
   int no_progress_count = 0;
   bool no_progress_exit = false;
   bool collision_violated_flag = false;
+  bool recovery_inside_collision_margin = false;
 
   for (int step = 0; step < steps; ++step) {
     frame_task->update(*robot_);
@@ -5970,10 +5987,15 @@ PositionIKResult KinematicsSolver::solve_position_step(
         collapsed_primary_scale;
     const int plateau_stall_steps =
         stall_handler_enabled() ? stall_state_.consecutive_stall_steps : 0;
-    const bool plateau_escape =
-        plateau_status &&
-        plateau_stall_steps >= kJointLimitDesaturationPlateauThreshold;
     std::vector<int> desaturation_candidates = last_vel_result.saturated_joints;
+    const bool saturated_zero_motion_plateau =
+        combined_error > 1e-4 &&
+        effective_step_dq_norm < stall_config_.dq_stall_eps &&
+        !desaturation_candidates.empty() &&
+        plateau_stall_steps >= kJointLimitDesaturationPlateauThreshold;
+    const bool plateau_escape =
+        (plateau_status || saturated_zero_motion_plateau) &&
+        plateau_stall_steps >= kJointLimitDesaturationPlateauThreshold;
     auto [q_min, q_max] = robot_->get_joint_limits();
     if (plateau_escape) {
       for (int vi = 0;
@@ -6040,24 +6062,20 @@ PositionIKResult KinematicsSolver::solve_position_step(
         auto curr_dist = evaluate_post_step_collision_distance(q);
         robot_->update_configuration(q_candidate);
         auto cand_dist = evaluate_post_step_collision_distance(q_candidate);
-        // Use min_distance as the safe threshold so desaturation nudges cannot
-        // silently land inside the collision margin (within kCollisionPenetration-
-        // WorsenTolerance of min_distance).
         const double desat_safe_threshold =
             (collision_constraint_.has_value() && collision_constraint_->enabled)
             ? collision_constraint_->min_distance
             : kCollisionPenetrationDistanceThreshold;
-        const bool safe_candidate =
-            (!cand_dist.has_value() || !std::isfinite(*cand_dist) ||
-             *cand_dist >= desat_safe_threshold);
-        const bool not_worse = (!curr_dist.has_value() || !cand_dist.has_value() ||
-                                !std::isfinite(*curr_dist) ||
-                                !std::isfinite(*cand_dist) ||
-                                *cand_dist >=
-                                    *curr_dist - kCollisionPenetrationWorsenTolerance);
-        if (safe_candidate && not_worse) {
+        if (collision_recovery_candidate_acceptable(
+                curr_dist, cand_dist, desat_safe_threshold)) {
           q = q_candidate;
           result.stall_escape_count++;
+          recovery_inside_collision_margin =
+              recovery_inside_collision_margin ||
+              (curr_dist.has_value() && std::isfinite(*curr_dist) &&
+               *curr_dist < desat_safe_threshold &&
+               cand_dist.has_value() && std::isfinite(*cand_dist) &&
+               *cand_dist < desat_safe_threshold);
         } else {
           robot_->update_configuration(q);
         }
@@ -6101,7 +6119,24 @@ PositionIKResult KinematicsSolver::solve_position_step(
         "solve_position_step: no step could maintain collision min_distance; "
         "q_solution is the last safe configuration";
   }
-  if (should_report_position_recovery_success(
+  if (collision_constraint_.has_value() && collision_constraint_->enabled &&
+      (result.status == SolverStatus::kSuccess ||
+       result.stall_escape_count > 0 ||
+       result.collision_rejection_count > 0)) {
+    auto final_dist = evaluate_min_collision_distance(q);
+    if (final_dist.has_value() && std::isfinite(*final_dist) &&
+        *final_dist < collision_constraint_->min_distance - kCollisionTolerance) {
+      recovery_inside_collision_margin = true;
+    }
+  }
+  if (recovery_inside_collision_margin &&
+      result.status == SolverStatus::kSuccess) {
+    result.status = SolverStatus::kNoProgress;
+    result.status_message =
+        "solve_position_step applied recovery motion inside collision margin";
+  }
+  if (!recovery_inside_collision_margin &&
+      should_report_position_recovery_success(
           result, current_q,
           stall_config_.dq_stall_eps * std::max(step_dt, 1e-9))) {
     result.status = SolverStatus::kSuccess;
@@ -6342,6 +6377,7 @@ PositionIKResult KinematicsSolver::solve_position_step(
   int no_progress_count = 0;
   bool no_progress_exit = false;
   bool collision_violated_flag_mts = false;  // multi-target solve_position_step
+  bool recovery_inside_collision_margin = false;
 
   for (int step = 0; step < steps; ++step) {
     double combined_error = 0.0;
@@ -6855,10 +6891,15 @@ PositionIKResult KinematicsSolver::solve_position_step(
         collapsed_primary_scale;
     const int plateau_stall_steps =
         stall_handler_enabled() ? stall_state_.consecutive_stall_steps : 0;
-    const bool plateau_escape =
-        plateau_status &&
-        plateau_stall_steps >= kJointLimitDesaturationPlateauThreshold;
     std::vector<int> desaturation_candidates = last_vel_result.saturated_joints;
+    const bool saturated_zero_motion_plateau =
+        combined_error > 1e-4 &&
+        effective_step_dq_norm < stall_config_.dq_stall_eps &&
+        !desaturation_candidates.empty() &&
+        plateau_stall_steps >= kJointLimitDesaturationPlateauThreshold;
+    const bool plateau_escape =
+        (plateau_status || saturated_zero_motion_plateau) &&
+        plateau_stall_steps >= kJointLimitDesaturationPlateauThreshold;
     auto [q_min, q_max] = robot_->get_joint_limits();
     if (plateau_escape) {
       for (int vi = 0;
@@ -6929,17 +6970,16 @@ PositionIKResult KinematicsSolver::solve_position_step(
             (collision_constraint_.has_value() && collision_constraint_->enabled)
             ? collision_constraint_->min_distance
             : kCollisionPenetrationDistanceThreshold;
-        const bool safe_candidate =
-            (!cand_dist.has_value() || !std::isfinite(*cand_dist) ||
-             *cand_dist >= desat_safe_threshold_mt);
-        const bool not_worse = (!curr_dist.has_value() || !cand_dist.has_value() ||
-                                !std::isfinite(*curr_dist) ||
-                                !std::isfinite(*cand_dist) ||
-                                *cand_dist >=
-                                    *curr_dist - kCollisionPenetrationWorsenTolerance);
-        if (safe_candidate && not_worse) {
+        if (collision_recovery_candidate_acceptable(
+                curr_dist, cand_dist, desat_safe_threshold_mt)) {
           q = q_candidate;
           result.stall_escape_count++;
+          recovery_inside_collision_margin =
+              recovery_inside_collision_margin ||
+              (curr_dist.has_value() && std::isfinite(*curr_dist) &&
+               *curr_dist < desat_safe_threshold_mt &&
+               cand_dist.has_value() && std::isfinite(*cand_dist) &&
+               *cand_dist < desat_safe_threshold_mt);
         } else {
           robot_->update_configuration(q);
         }
@@ -7009,7 +7049,24 @@ PositionIKResult KinematicsSolver::solve_position_step(
         "solve_position_step (multi-target): no step could maintain collision "
         "min_distance; q_solution is the last safe configuration";
   }
-  if (should_report_position_recovery_success(
+  if (collision_constraint_.has_value() && collision_constraint_->enabled &&
+      (result.status == SolverStatus::kSuccess ||
+       result.stall_escape_count > 0 ||
+       result.collision_rejection_count > 0)) {
+    auto final_dist = evaluate_min_collision_distance(q);
+    if (final_dist.has_value() && std::isfinite(*final_dist) &&
+        *final_dist < collision_constraint_->min_distance - kCollisionTolerance) {
+      recovery_inside_collision_margin = true;
+    }
+  }
+  if (recovery_inside_collision_margin &&
+      result.status == SolverStatus::kSuccess) {
+    result.status = SolverStatus::kNoProgress;
+    result.status_message =
+        "solve_position_step applied recovery motion inside collision margin";
+  }
+  if (!recovery_inside_collision_margin &&
+      should_report_position_recovery_success(
           result, current_q,
           stall_config_.dq_stall_eps * std::max(step_dt, 1e-9))) {
     result.status = SolverStatus::kSuccess;
