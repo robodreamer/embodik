@@ -292,6 +292,51 @@ class TestViolatedSeedNeverReturnsCollisionViolated:
             q = np.asarray(result.q_solution, dtype=float)
             panda_robot.update_configuration(q)
 
+    def test_inside_margin_recovery_motion_is_not_reported_as_success(
+        self, panda_robot, panda_solver
+    ):
+        """Recovery from an already-violated seed may move, but not claim full success."""
+        min_dist = 0.05
+        panda_solver.configure_collision_constraint(
+            min_distance=min_dist,
+            max_constraints=3,
+        )
+
+        panda_solver.clear_tasks()
+        task = panda_solver.add_frame_task("ee_task", "panda_hand")
+        task.priority = 0
+        task.weight = 1.0
+
+        q0 = _PANDA_DEFAULT_Q.copy()
+        seed_dist = panda_solver.evaluate_min_collision_distance(q0)
+        if seed_dist >= min_dist:
+            pytest.skip(
+                f"Default panda q is not inside min_distance "
+                f"({seed_dist:.4f} >= {min_dist})."
+            )
+
+        panda_robot.update_configuration(q0)
+        hand_pose = panda_robot.get_frame_pose("panda_hand")
+        target = np.eye(4, dtype=float)
+        target[:3, :3] = np.asarray(hand_pose.rotation, dtype=float)
+        target[:3, 3] = np.asarray(hand_pose.translation, dtype=float) + np.array(
+            [0.0, 0.3, -0.3], dtype=float
+        )
+
+        opts = embodik.PositionStepOptions()
+        opts.max_steps = 50
+        opts.position_gain = 100.0
+        opts.orientation_gain = 1.0
+        opts.stall_recovery = False
+
+        result = panda_solver.solve_position_step(q0, target, "ee_task", opts)
+        q_sol = np.asarray(result.q_solution, dtype=float)
+        sol_dist = panda_solver.evaluate_min_collision_distance(q_sol)
+
+        assert int(getattr(result, "stall_escape_count", 0)) > 0
+        assert sol_dist < min_dist
+        assert result.status != embodik.SolverStatus.SUCCESS
+
 
 class TestAdaptiveDtReducesApproachCycles:
     """adaptive_dt should reduce number of cycles needed to close a large position error."""
