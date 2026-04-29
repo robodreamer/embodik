@@ -23,7 +23,9 @@ from pathlib import Path
 
 _AI_WORKER_REPO_GIT_URL = "https://github.com/ROBOTIS-GIT/ai_worker.git"
 _AI_WORKER_REPO_ZIP_URL = "https://github.com/ROBOTIS-GIT/ai_worker/archive/refs/heads/main.zip"
-_AI_WORKER_CACHE_DIR = Path(os.environ.get("EMBODIK_AI_WORKER_CACHE", "~/.cache/embodik/ai_worker")).expanduser()
+_AI_WORKER_CACHE_DIR = Path(
+    os.environ.get("EMBODIK_AI_WORKER_CACHE", "~/.cache/embodik/ai_worker")
+).expanduser()
 
 _PUBLIC_VARIANT_DIR_GLOBS = {
     "sg2": (
@@ -90,7 +92,16 @@ def _download_public_repo_to_cache() -> Path:
         if git_path:
             try:
                 subprocess.run(
-                    [git_path, "clone", "--depth", "1", "--branch", "main", _AI_WORKER_REPO_GIT_URL, str(extracted)],
+                    [
+                        git_path,
+                        "clone",
+                        "--depth",
+                        "1",
+                        "--branch",
+                        "main",
+                        _AI_WORKER_REPO_GIT_URL,
+                        str(extracted),
+                    ],
                     check=True,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.PIPE,
@@ -115,7 +126,9 @@ def _download_public_repo_to_cache() -> Path:
             if not extracted.exists():
                 matches = sorted(path for path in tmp_dir.iterdir() if path.is_dir())
                 if not matches:
-                    raise FileNotFoundError("Downloaded AI Worker archive did not contain a repository directory.")
+                    raise FileNotFoundError(
+                        "Downloaded AI Worker archive did not contain a repository directory."
+                    )
                 extracted = matches[0]
         staging = _AI_WORKER_CACHE_DIR / ".ai_worker-main.tmp"
         if staging.exists():
@@ -156,10 +169,10 @@ def resolve_public_ai_worker_urdf_paths(
     if base_urdf is None:
         base_urdf = _resolve_from_public_repo(variant, ai_worker_root)
     if base_urdf is None:
+        base_urdf = _resolve_bundled_generated_urdf(variant)
+    if base_urdf is None:
         public_root = _download_public_repo_to_cache()
         base_urdf = _resolve_from_public_repo(variant, public_root)
-    if base_urdf is None:
-        base_urdf = _resolve_bundled_generated_urdf(variant)
     if base_urdf is None:
         raise FileNotFoundError(
             "Could not resolve an AI Worker URDF. Provide --urdf /path/to/model.urdf "
