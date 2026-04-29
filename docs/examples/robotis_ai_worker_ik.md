@@ -17,16 +17,35 @@ interactive collision-aware IK.
 
 ## Run It
 
-From the repository root:
+For a pip/venv install, copy the examples and run the script with the activated
+venv Python:
 
 ```bash
-pixi run python examples/12_ai_worker_constraint_teleop.py --variant sg2
+source .venv/bin/activate
+pip install "embodik[examples]"
+embodik-examples --copy
+cd embodik_examples
+python 12_ai_worker_constraint_teleop.py
 ```
 
-Or switch to the other local worker variant:
+If you are not activating the venv, use the Python path printed by
+`embodik-examples --copy`, for example:
 
 ```bash
-pixi run python examples/12_ai_worker_constraint_teleop.py --variant bg2
+/path/to/.venv/bin/python 12_ai_worker_constraint_teleop.py
+```
+
+From a repository checkout, use Pixi:
+
+```bash
+pixi run python examples/12_ai_worker_constraint_teleop.py
+```
+
+The default worker variant is `sg2`. To use the other worker variant, pass
+`--variant bg2`. For example, from copied examples:
+
+```bash
+python 12_ai_worker_constraint_teleop.py --variant bg2
 ```
 
 ## Asset Resolution

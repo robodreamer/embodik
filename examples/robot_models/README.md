@@ -78,8 +78,11 @@ target_link = config["target_link"]
 
 Or from command line:
 ```bash
-python examples/01_basic_ik_simple.py --robot panda
+python examples/01_basic_ik_simple.py
 ```
+
+The command defaults to the Panda preset; add `--robot <key>` to select another
+configured model.
 
 ### Example 02 (Collision-Aware IK)
 

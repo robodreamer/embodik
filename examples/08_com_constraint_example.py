@@ -13,7 +13,7 @@ Demonstrates the ``configure_com_constraint`` API.  Visualization style:
 Usage
 -----
     cd examples/
-    python 08_com_constraint_example.py [--robot panda] [--visualizer pinocchio]
+    python 08_com_constraint_example.py [--robot KEY] [--visualizer pinocchio]
 
 Interact
 --------
