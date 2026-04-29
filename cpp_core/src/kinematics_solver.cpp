@@ -98,6 +98,67 @@ struct ClassifiedOutcome {
   std::string status_message;
 };
 
+static void sync_position_result_applied_velocity(
+    PositionIKResult &result, const Eigen::VectorXd &current_q,
+    double outer_dt) {
+  if (result.q_solution.size() != current_q.size()) {
+    return;
+  }
+  const double dt_safe = std::max(outer_dt, 1e-9);
+  result.joint_velocities = (result.q_solution - current_q) / dt_safe;
+  result.solution.assign(result.joint_velocities.data(),
+                         result.joint_velocities.data() +
+                             result.joint_velocities.size());
+}
+
+static bool should_report_position_recovery_success(
+    const PositionIKResult &result, const Eigen::VectorXd &current_q,
+    double motion_eps) {
+  if (result.stall_escape_count <= 0 ||
+      result.q_solution.size() != current_q.size()) {
+    return false;
+  }
+  if (result.status == SolverStatus::kSuccess ||
+      result.status == SolverStatus::kInvalidInput ||
+      result.status == SolverStatus::kCollisionViolated) {
+    return false;
+  }
+  return (result.q_solution - current_q).norm() > motion_eps;
+}
+
+static double compute_adaptive_position_step_dt(
+    const PositionStepOptions &options, double step_dt, double position_error,
+    bool collision_constraint_enabled, double collision_min_distance,
+    double last_constraint_min_distance) {
+  if (!options.adaptive_dt ||
+      options.adaptive_dt_reference_distance <= 1e-9 ||
+      options.adaptive_dt_max_scale <= 1.0 ||
+      !std::isfinite(position_error) || position_error <= 0.0) {
+    return step_dt;
+  }
+
+  double scale = position_error / options.adaptive_dt_reference_distance;
+  scale = std::min(scale, options.adaptive_dt_max_scale);
+  scale = std::max(scale, 1.0);
+
+  if (collision_constraint_enabled &&
+      std::isfinite(last_constraint_min_distance)) {
+    const double clearance =
+        last_constraint_min_distance - collision_min_distance;
+    if (clearance <= 0.0) {
+      scale = 1.0;
+    } else {
+      const double max_ee_vel =
+          (options.max_linear_speed > 0.0) ? options.max_linear_speed
+                                           : kAdaptiveDtFallbackMaxEESpeed;
+      const double max_safe_scale = clearance / (step_dt * max_ee_vel);
+      scale = std::min(scale, std::max(max_safe_scale, 1.0));
+    }
+  }
+
+  return step_dt * scale;
+}
+
 static HalfspaceBoundResult compute_halfspace_velocity_bounds(
     const Eigen::VectorXd &slack, double dt, double vel_max, double acc_max,
     bool use_acceleration_limits, double proximity_threshold, double slack_eps,
@@ -5522,33 +5583,12 @@ PositionIKResult KinematicsSolver::solve_position_step(
     // error so large-jump approach is faster; reverts to base dt near target.
     // Proximity-aware cap: limit scale so the integration step cannot overshoot
     // past min_distance in one tick (scale * step_dt * max_ee_speed <= clearance).
-    double step_dt_eff = step_dt;
-    if (options.adaptive_dt &&
-        options.adaptive_dt_reference_distance > 1e-9 &&
-        options.adaptive_dt_max_scale > 1.0) {
-      const double pos_err = error.head<3>().norm();
-      double scale = pos_err / options.adaptive_dt_reference_distance;
-      scale = std::min(scale, options.adaptive_dt_max_scale);
-      scale = std::max(scale, 1.0);
-      // Collision-proximity cap: when near a collision boundary, reduce scale so
-      // the maximum integration step < clearance, preventing overshoot → stall.
-      if (collision_constraint_.has_value() && collision_constraint_->enabled &&
-          std::isfinite(last_constraint_min_distance_)) {
-        const double min_dist = collision_constraint_->min_distance;
-        const double clearance = last_constraint_min_distance_ - min_dist;
-        if (clearance <= 0.0) {
-          scale = 1.0;  // already in violation zone: no adaptive scaling
-        } else {
-          // cap scale so that scale * step_dt * max_ee_vel <= clearance
-          const double max_ee_vel =
-              (options.max_linear_speed > 0.0) ? options.max_linear_speed
-                                               : kAdaptiveDtFallbackMaxEESpeed;
-          const double max_safe_scale = clearance / (step_dt * max_ee_vel);
-          scale = std::min(scale, std::max(max_safe_scale, 1.0));
-        }
-      }
-      step_dt_eff = step_dt * scale;
-    }
+    const double step_dt_eff = compute_adaptive_position_step_dt(
+        options, step_dt, error.head<3>().norm(),
+        collision_constraint_.has_value() && collision_constraint_->enabled,
+        collision_constraint_.has_value() ? collision_constraint_->min_distance
+                                          : 0.0,
+        last_constraint_min_distance_);
     const bool adaptive_step_large = (step_dt_eff > step_dt * 1.01);
     q = pinocchio::integrate(robot_->model(), q,
                              step_dt_eff * last_vel_result.joint_velocities);
@@ -6061,6 +6101,17 @@ PositionIKResult KinematicsSolver::solve_position_step(
         "solve_position_step: no step could maintain collision min_distance; "
         "q_solution is the last safe configuration";
   }
+  if (should_report_position_recovery_success(
+          result, current_q,
+          stall_config_.dq_stall_eps * std::max(step_dt, 1e-9))) {
+    result.status = SolverStatus::kSuccess;
+    result.status_message =
+        "solve_position_step applied constraint recovery motion";
+  }
+  if (result.stall_escape_count > 0 || result.collision_rejection_count > 0 ||
+      collision_violated_flag) {
+    sync_position_result_applied_velocity(result, current_q, step_dt);
+  }
 
   // In teleop-style loops (max_steps=1), stall handling must accumulate across
   // successive solve_position_step calls based on *applied* motion, not only
@@ -6068,7 +6119,9 @@ PositionIKResult KinematicsSolver::solve_position_step(
   // oscillations from resetting the consecutive stall counter.
   if (stall_handler_enabled()) {
     const double applied_step_norm = (result.q_solution - current_q).norm();
-    if (applied_step_norm < stall_config_.dq_stall_eps) {
+    const double applied_step_eps =
+        stall_config_.dq_stall_eps * std::max(step_dt, 1e-9);
+    if (applied_step_norm < applied_step_eps) {
       stall_state_.consecutive_stall_steps++;
       stall_state_.total_stall_steps++;
     } else {
@@ -6292,6 +6345,7 @@ PositionIKResult KinematicsSolver::solve_position_step(
 
   for (int step = 0; step < steps; ++step) {
     double combined_error = 0.0;
+    double max_position_error = 0.0;
     bool task_apply_failed = false;
     std::string task_apply_error;
     for (size_t i = 0; i < n_targets; ++i) {
@@ -6342,10 +6396,17 @@ PositionIKResult KinematicsSolver::solve_position_step(
             }
           }
         }
-        combined_error += error.head<3>().norm();
+        const double task_position_error = error.head<3>().norm();
+        combined_error += task_position_error;
+        if (!is_orientation_only) {
+          max_position_error =
+              std::max(max_position_error, task_position_error);
+        }
         rt.task->setTargetVelocity(v3);
       } else if (error.size() >= 6) {
-        combined_error += error.head<3>().norm() + error.tail<3>().norm();
+        const double task_position_error = error.head<3>().norm();
+        combined_error += task_position_error + error.tail<3>().norm();
+        max_position_error = std::max(max_position_error, task_position_error);
         vel.head<3>() = target.position_gain * error.head<3>();
         vel.tail<3>() = target.orientation_gain * error.tail<3>();
         clamp_spatial_velocity_components(vel, options.max_linear_speed,
@@ -6419,13 +6480,67 @@ PositionIKResult KinematicsSolver::solve_position_step(
 
     Eigen::VectorXd q_pre_step = q;
     bool step_collision_rejected = false;
+    const double step_dt_eff = compute_adaptive_position_step_dt(
+        options, step_dt, max_position_error,
+        collision_constraint_.has_value() && collision_constraint_->enabled,
+        collision_constraint_.has_value() ? collision_constraint_->min_distance
+                                          : 0.0,
+        last_constraint_min_distance_);
+    const bool adaptive_step_large = (step_dt_eff > step_dt * 1.01);
     q = pinocchio::integrate(robot_->model(), q,
-                             step_dt * last_vel_result.joint_velocities);
+                             step_dt_eff * last_vel_result.joint_velocities);
     robot_->update_configuration(q);
 
     // Skip expensive post-step checks when integration produced no motion.
     const bool step_moved =
         (q - q_pre_step).squaredNorm() > kCollisionEscapeNormEps;
+
+    auto eval_broadphase_expanded = [&](const Eigen::VectorXd &q_eval)
+        -> std::optional<double> {
+      auto expanded = get_post_step_rejection_pair_indices();
+      std::unordered_set<std::size_t> in_set(expanded.begin(), expanded.end());
+
+      const auto *geom_model = robot_->collision_model();
+      if (geom_model) {
+        const auto &pairs = geom_model->collisionPairs;
+        const auto &oMf = robot_->data().oMf;
+        const double cutoff =
+            collision_constraint_.has_value()
+                ? collision_constraint_->min_distance +
+                      collision_pair_cache_distance_margin_ +
+                      (sphere_broadphase_enabled_
+                           ? sphere_broadphase_.safety_margin
+                           : 0.0)
+                : std::numeric_limits<double>::infinity();
+
+        for (std::size_t pi = 0; pi < pairs.size(); ++pi) {
+          if (in_set.count(pi)) continue;
+          if (!collision_allowed_pair_mask_.empty() &&
+              pi < collision_allowed_pair_mask_.size() &&
+              !collision_allowed_pair_mask_[pi]) continue;
+
+          if (sphere_broadphase_enabled_ && sphere_broadphase_.is_built()) {
+            const auto &cp = pairs[pi];
+            const auto fa = geom_model->geometryObjects[cp.first].parentFrame;
+            const auto fb = geom_model->geometryObjects[cp.second].parentFrame;
+            if (fa < static_cast<pinocchio::FrameIndex>(oMf.size()) &&
+                fb < static_cast<pinocchio::FrameIndex>(oMf.size())) {
+              const double sphere_lb =
+                  sphere_broadphase_.compute_pair_lower_bound(
+                      cp.first, cp.second, oMf[fa].translation(),
+                      oMf[fa].rotation(), oMf[fb].translation(),
+                      oMf[fb].rotation());
+              if (std::isfinite(sphere_lb) && sphere_lb > cutoff) continue;
+            }
+          }
+
+          expanded.push_back(pi);
+          in_set.insert(pi);
+        }
+      }
+      return evaluate_min_collision_distance_targeted(q_eval, expanded);
+    };
+
     // Post-solve collision rejection: use min_distance as the violation
     // threshold (mirrors single-target overload fix).
     if (step_moved && collision_constraint_.has_value() &&
@@ -6437,7 +6552,9 @@ PositionIKResult KinematicsSolver::solve_position_step(
       // even when the global threshold is more lenient (e.g. after stall
       // handler relaxation or when global < per-pair override).
       const double violation_threshold = collision_constraint_->min_distance;
-      auto post_dist_debug = evaluate_post_step_collision_distance(q);
+      auto post_dist_debug =
+          adaptive_step_large ? eval_broadphase_expanded(q)
+                              : evaluate_post_step_collision_distance(q);
       if (post_dist_debug.has_value() &&
           std::isfinite(*post_dist_debug) &&
           *post_dist_debug < violation_threshold) {
@@ -6465,12 +6582,15 @@ PositionIKResult KinematicsSolver::solve_position_step(
           }
           bool accepted_backoff = false;
           const Eigen::VectorXd dq_nominal =
-              step_dt * last_vel_result.joint_velocities;
+              step_dt_eff * last_vel_result.joint_velocities;
           for (double frac : kCollisionRejectionBackoffFractions) {
             Eigen::VectorXd q_backoff = pinocchio::integrate(
                 robot_->model(), q_pre_step, frac * dq_nominal);
             robot_->update_configuration(q_backoff);
-            auto backoff_dist_debug = evaluate_post_step_collision_distance(q_backoff);
+            auto backoff_dist_debug =
+                adaptive_step_large
+                    ? eval_broadphase_expanded(q_backoff)
+                    : evaluate_post_step_collision_distance(q_backoff);
             if (backoff_dist_debug.has_value() &&
                 std::isfinite(*backoff_dist_debug) &&
                 *backoff_dist_debug >= backoff_threshold) {
@@ -6889,6 +7009,17 @@ PositionIKResult KinematicsSolver::solve_position_step(
         "solve_position_step (multi-target): no step could maintain collision "
         "min_distance; q_solution is the last safe configuration";
   }
+  if (should_report_position_recovery_success(
+          result, current_q,
+          stall_config_.dq_stall_eps * std::max(step_dt, 1e-9))) {
+    result.status = SolverStatus::kSuccess;
+    result.status_message =
+        "solve_position_step applied constraint recovery motion";
+  }
+  if (result.stall_escape_count > 0 || result.collision_rejection_count > 0 ||
+      collision_violated_flag_mts) {
+    sync_position_result_applied_velocity(result, current_q, step_dt);
+  }
 
   // In teleop-style loops (max_steps=1), stall handling must accumulate across
   // successive solve_position_step calls based on *applied* motion, not only
@@ -6896,7 +7027,9 @@ PositionIKResult KinematicsSolver::solve_position_step(
   // oscillations from resetting the consecutive stall counter.
   if (stall_handler_enabled()) {
     const double applied_step_norm = (result.q_solution - current_q).norm();
-    if (applied_step_norm < stall_config_.dq_stall_eps) {
+    const double applied_step_eps =
+        stall_config_.dq_stall_eps * std::max(step_dt, 1e-9);
+    if (applied_step_norm < applied_step_eps) {
       stall_state_.consecutive_stall_steps++;
       stall_state_.total_stall_steps++;
     } else {
