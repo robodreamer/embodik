@@ -67,6 +67,7 @@ test = "python -m pytest test/"
 test-verbose = "python -m pytest test/ -v"
 verify-agent = "python scripts/verify_changed.py --run"
 verify-ai-worker = "python scripts/verify_ai_worker_robustness.py --scenario all --output-json /tmp/ai_worker_metrics.json"
+verify-alpha-wheelbase = "python scripts/verify_optional_wheelbase_robustness.py --matrix --output-json /tmp/optional_wheelbase_metrics.json"
 # GPU solver tests (requires CUDA)
 test-gpu = "EMBODIK_GPU_TESTS=1 pytest test/test_gpu_solver.py test/test_gpu_collision.py -v"
 # GPU benchmarks
