@@ -79,6 +79,7 @@ def main() -> None:
         ai_worker_root=args.ai_worker_root,
         urdf=args.urdf,
         collision_urdf=args.collision_urdf,
+        allow_bundled_base_fallback=False,
     )
 
     if args.print_resolved_paths:
