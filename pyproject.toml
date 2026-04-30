@@ -130,7 +130,7 @@ build-verbosity = 1
 
 [tool.cibuildwheel.linux]
 archs = ["x86_64", "aarch64"]
-before-all = "dnf install -y eigen3-devel"
+before-all = "if command -v dnf >/dev/null 2>&1; then dnf install -y eigen3-devel; elif command -v yum >/dev/null 2>&1; then yum install -y eigen3-devel; elif command -v microdnf >/dev/null 2>&1; then microdnf install -y eigen3-devel; else echo 'No supported package manager found for eigen3-devel' >&2; exit 1; fi"
 repair-wheel-command = "auditwheel repair -w {dest_dir} {wheel}"
 
 [tool.cibuildwheel.macos]
