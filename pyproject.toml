@@ -133,7 +133,7 @@ build-verbosity = 1
 # source builds of cmeel dependencies under emulation and is not release-stable.
 archs = ["x86_64"]
 manylinux-x86_64-image = "manylinux_2_28"
-before-build = "python -m pip install scikit-build-core nanobind 'pin>=3.8.0'"
+before-build = "python -m pip install scikit-build-core nanobind ninja 'pin>=3.8.0'"
 build-frontend = { name = "pip", args = ["--no-build-isolation"] }
 before-all = "if command -v dnf >/dev/null 2>&1; then dnf install -y eigen3-devel; elif command -v yum >/dev/null 2>&1; then yum install -y eigen3-devel; elif command -v microdnf >/dev/null 2>&1; then microdnf install -y eigen3-devel; else echo 'No supported package manager found for eigen3-devel' >&2; exit 1; fi"
 repair-wheel-command = "auditwheel repair -w {dest_dir} {wheel}"
