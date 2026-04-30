@@ -79,7 +79,7 @@ benchmark-transforms = "python scripts/benchmark_transforms.py"
 demo-parallel-tracking = "python examples/07_parallel_trajectory_tracking.py --n-robots 100 --viz-mode hybrid --n-viz-full 9 --spacing 1.2"
 demo-parallel-tracking-benchmark = "python examples/07_parallel_trajectory_tracking.py --n-robots 1000 --benchmark"
 # Export CasADi function for GPU solver
-export-casadi = "python -m embodik.gpu.export_casadi_velocity_solve --robot panda --out fn_velocity_solve.casadi"
+export-casadi = "python -m embodik.gpu.export_casadi_velocity_solve --robot panda --out build/casadi/fn_velocity_solve.casadi"
 lint = "black --check python/ test/ && isort --check python/ test/"
 format = "black python/ test/ && isort python/ test/"
 docs-build = { cmd = "python -W ignore::DeprecationWarning:hppfcl -m mkdocs build", depends-on = ["install"] }
@@ -130,7 +130,7 @@ check-gpu = "python -c \"from embodik.gpu import HAS_CASADI, HAS_CUSADI, HAS_TOR
 test-gpu = "EMBODIK_GPU_TESTS=1 pytest test/test_gpu_solver.py test/test_gpu_collision.py -v"
 benchmark-gpu = "python examples/04_gpu_batch_ik.py --batch_sizes 10 100 500 1000"
 benchmark-collision = "python examples/05_gpu_collision_batch.py"
-export-casadi = "python -m embodik.gpu.export_casadi_velocity_solve --robot panda --out fn_velocity_solve.casadi"
+export-casadi = "python -m embodik.gpu.export_casadi_velocity_solve --robot panda --out build/casadi/fn_velocity_solve.casadi"
 demo-gpu = "python examples/06_gpu_solver_demo.py --batch_sizes 10 100 500 1000 2000"
 demo-ik-gpu = "python examples/02_collision_aware_IK.py --robot panda --gpu"
 # Compare FI-PeSNS vs PPH-SNS solvers

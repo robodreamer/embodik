@@ -1,6 +1,10 @@
 # Git worktrees
 .worktrees/
 
+# Local agent/editor state
+.local tooling
+.editor/
+
 # Python build artifacts
 python_bindings/*.cmake
 python_bindings/CMakeFiles/
@@ -64,6 +68,7 @@ install/
 .pixi/
 
 # Data files
+*.casadi
 *.h5
 *.npz
 *.pkl
