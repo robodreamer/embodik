@@ -466,7 +466,8 @@ pixi run -e cuda check-gpu
 pixi run -e cuda export-casadi
 
 # Step 6: Compile CUDA kernel
-mv fn_velocity_solve.casadi ~/.local/cusadi/src/casadi_functions/
+mkdir -p ~/.local/cusadi/src/casadi_functions
+cp build/casadi/fn_velocity_solve.casadi ~/.local/cusadi/src/casadi_functions/
 cd ~/.local/cusadi
 python run_codegen.py --fn=fn_velocity_solve
 
@@ -564,10 +565,11 @@ cd cusadi
 pip install -e .
 
 # Export for 7-DOF robot (e.g., Panda)
-python -m embodik.gpu.export_casadi_velocity_solve --robot panda --out fn_velocity_solve.casadi
+python -m embodik.gpu.export_casadi_velocity_solve --robot panda
 
-# Move to cusadi and compile
-mv fn_velocity_solve.casadi cusadi/src/casadi_functions/
+# Copy to cusadi and compile
+mkdir -p cusadi/src/casadi_functions
+cp build/casadi/fn_velocity_solve.casadi cusadi/src/casadi_functions/
 cd cusadi
 python run_codegen.py --fn=fn_velocity_solve
 ```

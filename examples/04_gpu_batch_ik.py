@@ -9,8 +9,9 @@ parallel solving.
 Prerequisites:
     1. Install CusADi: git clone https://github.com/se-hwan/cusadi && pip install -e cusadi
     2. Export and compile the CasADi function:
-       python -m embodik.gpu.export_casadi_velocity_solve --robot panda --out fn_velocity_solve.casadi
-       mv fn_velocity_solve.casadi cusadi/src/casadi_functions/
+       python -m embodik.gpu.export_casadi_velocity_solve --robot panda
+       mkdir -p cusadi/src/casadi_functions
+       cp build/casadi/fn_velocity_solve.casadi cusadi/src/casadi_functions/
        cd cusadi && python run_codegen.py --fn=fn_velocity_solve
 
 Usage:
