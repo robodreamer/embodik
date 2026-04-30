@@ -50,7 +50,7 @@ jobs:
           python -m venv .venv
           source .venv/bin/activate
           python -m pip install --upgrade pip
-          pip install pin scikit-build-core nanobind cmake ninja pytest robot_descriptions casadi
+          pip install pin scikit-build-core nanobind cmake ninja pytest pytest-benchmark robot_descriptions casadi
           export Eigen3_DIR="$(brew --prefix eigen@3)/share/eigen3/cmake"
           export SDKROOT="$(xcrun --sdk macosx --show-sdk-path)"
           export CXXFLAGS="-isystem ${SDKROOT}/usr/include/c++/v1 ${CXXFLAGS:-}"
