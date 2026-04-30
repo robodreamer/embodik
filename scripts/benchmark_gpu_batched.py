@@ -312,9 +312,10 @@ def main():
     if not HAS_CUSADI or not HAS_TORCH_CUDA:
         print("\nNote: GPU benchmarks require CusADi + CUDA. To enable:")
         print("  1. Export CasADi function:")
-        print("     pixi run python -m embodik.gpu.export_casadi_velocity_solve --robot panda --out fn_velocity_solve.casadi")
+        print("     pixi run -e cuda export-casadi")
         print("  2. Compile with CusADi:")
-        print("     mv fn_velocity_solve.casadi ~/.local/cusadi/src/casadi_functions/")
+        print("     mkdir -p ~/.local/cusadi/src/casadi_functions")
+        print("     cp build/casadi/fn_velocity_solve.casadi ~/.local/cusadi/src/casadi_functions/")
         print("     cd ~/.local/cusadi && python run_codegen.py --fn=fn_velocity_solve")
 
 
