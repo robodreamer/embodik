@@ -24,6 +24,7 @@
 *.pdf binary
 *.zip binary
 *.tar.gz binary
+*.casadi binary
 *.so binary
 *.dylib binary
 *.dll binary

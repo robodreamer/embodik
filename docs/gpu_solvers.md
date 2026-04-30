@@ -61,7 +61,8 @@ velocity, scales = fn(target, jacobian.flatten(), C, lower, upper)
 
 ```bash
 pixi run -e cuda export-casadi
-mv fn_velocity_solve.casadi ~/.local/cusadi/src/casadi_functions/
+mkdir -p ~/.local/cusadi/src/casadi_functions
+cp build/casadi/fn_velocity_solve.casadi ~/.local/cusadi/src/casadi_functions/
 cd ~/.local/cusadi && python run_codegen.py --fn=fn_velocity_solve
 ```
 
