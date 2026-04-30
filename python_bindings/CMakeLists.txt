@@ -1,5 +1,6 @@
-# Python - always find Python regardless of build system
-find_package(Python REQUIRED COMPONENTS Interpreter Development)
+# Python - nanobind builds an extension module, so request module development
+# headers without requiring an embeddable libpython.
+find_package(Python REQUIRED COMPONENTS Interpreter Development.Module)
 
 # Nanobind discovery
 execute_process(
@@ -130,4 +131,3 @@ add_custom_command(
     COMMENT "Copying type stubs to source package directory (if generated)"
     VERBATIM
 )
-
