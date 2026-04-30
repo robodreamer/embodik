@@ -71,11 +71,11 @@ Most examples default to the Panda preset. Use `--robot <key>` when a script sup
 
 **Franka Panda collision-free IK**
 
-<video controls muted loop playsinline width="100%" src="docs/assets/media/franka_panda_collision_free_ik.mp4"></video>
+<video autoplay muted loop playsinline controls width="100%" src="docs/assets/media/franka_panda_collision_free_ik.mp4"></video>
 
 **ROBOTIS AI Worker constraint teleop**
 
-<video controls muted loop playsinline width="100%" src="docs/assets/media/robotis_ai_worker_collision_free_ik.mp4"></video>
+<video autoplay muted loop playsinline controls width="100%" src="docs/assets/media/robotis_ai_worker_collision_free_ik.mp4"></video>
 
 ## Core Capabilities
 
