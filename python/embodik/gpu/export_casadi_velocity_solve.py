@@ -4,7 +4,7 @@ Export CasADi velocity solve function for CusADi GPU compilation.
 Run: python -m embodik.gpu.export_casadi_velocity_solve [options]
 
 This creates a .casadi file that can be compiled to CUDA using cusadi:
-    1. Move the .casadi file to cusadi/src/casadi_functions/
+    1. Copy the .casadi file to cusadi/src/casadi_functions/
     2. Run: python run_codegen.py --fn=fn_velocity_solve
 
 Uses FI-PeSNS (Fixed-Iteration Penalized eSNS) - a GPU-optimized solver with:
@@ -14,12 +14,12 @@ Uses FI-PeSNS (Fixed-Iteration Penalized eSNS) - a GPU-optimized solver with:
 
 Example:
     # Export for 7-DOF Panda robot
-    python -m embodik.gpu.export_casadi_velocity_solve --robot panda --out fn_velocity_solve.casadi
+    python -m embodik.gpu.export_casadi_velocity_solve --robot panda
 
     # Export for custom configuration
     python -m embodik.gpu.export_casadi_velocity_solve \\
         --n_dof 7 --task_dims 6 3 --n_constraints 14 --k_max 15 \\
-        --out fn_velocity_solve.casadi
+        --out build/casadi/fn_velocity_solve.casadi
 """
 
 from __future__ import annotations
@@ -75,8 +75,8 @@ def main():
     parser.add_argument(
         "--out",
         type=str,
-        default="fn_velocity_solve.casadi",
-        help="Output .casadi file path (default: fn_velocity_solve.casadi)",
+        default="build/casadi/fn_velocity_solve.casadi",
+        help="Output .casadi file path (default: build/casadi/fn_velocity_solve.casadi)",
     )
     parser.add_argument(
         "--robot",
@@ -156,7 +156,8 @@ def main():
     )
 
     # Save the function
-    out_path = Path(args.out)
+    out_path = Path(args.out).expanduser()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
     fn.save(str(out_path))
 
     print(f"Saved CasADi function to: {out_path}")
@@ -169,8 +170,10 @@ def main():
     print(f"  warm_start: {args.warm_start}")
     print()
     print("Next steps:")
-    print(f"  1. mv {out_path} cusadi/src/casadi_functions/")
-    print(f"  2. cd cusadi && python run_codegen.py --fn={out_path.stem}")
+    cusadi_functions = Path.home() / ".local" / "cusadi" / "src" / "casadi_functions"
+    print(f"  1. mkdir -p {cusadi_functions}")
+    print(f"  2. cp {out_path} {cusadi_functions}/")
+    print(f"  3. cd {cusadi_functions.parent.parent} && python run_codegen.py --fn={out_path.stem}")
 
 
 if __name__ == "__main__":

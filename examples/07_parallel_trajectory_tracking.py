@@ -10,7 +10,8 @@ Demonstrates GPU-accelerated parallel IK solving with real FK and Jacobians:
 Usage:
     # First, compile the CusADi kernel (one-time):
     pixi run -e cuda export-casadi
-    mv fn_velocity_solve.casadi ~/.local/cusadi/src/casadi_functions/
+    mkdir -p ~/.local/cusadi/src/casadi_functions
+    cp build/casadi/fn_velocity_solve.casadi ~/.local/cusadi/src/casadi_functions/
     cd ~/.local/cusadi && python3 run_codegen.py --fn=fn_velocity_solve
 
     # Run the demo:
