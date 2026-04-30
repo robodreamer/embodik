@@ -143,5 +143,6 @@ before-all = "brew install eigen@3 urdfdom_headers urdfdom"
 # can locate PyPI/cmeel dylibs that are linked through @rpath.
 before-build = "python -m pip install 'pin>=3.8.0'"
 # Pin wheel prefix is prepended by CMakeLists.txt; Homebrew prefix helps find urdfdom_headers.
-environment = { Eigen3_DIR = "/opt/homebrew/opt/eigen@3/share/eigen3/cmake", CMAKE_PREFIX_PATH = "/opt/homebrew" }
+# cmeel octomap/qhull dylibs currently require macOS 14+, so tag the wheel accordingly.
+environment = { Eigen3_DIR = "/opt/homebrew/opt/eigen@3/share/eigen3/cmake", CMAKE_PREFIX_PATH = "/opt/homebrew", MACOSX_DEPLOYMENT_TARGET = "14.0", CMAKE_OSX_DEPLOYMENT_TARGET = "14.0" }
 repair-wheel-command = "bash scripts/delocate_with_pin_libs.sh {dest_dir} {wheel}"
