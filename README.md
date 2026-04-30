@@ -123,6 +123,10 @@ embodik/
 `-- test/
 ```
 
+## Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=robodreamer/embodik&type=Date)](https://www.star-history.com/#robodreamer/embodik&Date)
+
 ## License
 
 EmbodiK is released under the Apache License 2.0. See [LICENSE](LICENSE) for details.
