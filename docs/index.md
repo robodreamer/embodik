@@ -4,12 +4,6 @@
 
 EmbodiK is a modern C++ library with Python bindings designed for robust, high-performance IK behaviors in cross-embodiment scenarios. The name reflects its focus on **embodied** dynamics and constraint handling, making it ideal for humanoid robots and AI/VLA integrations. Built on top of [Pinocchio](https://github.com/stack-of-tasks/pinocchio) and using [Nanobind](https://github.com/wjakob/nanobind) for seamless Python integration.
 
-## Preview
-
-| Franka Panda collision-free IK | ROBOTIS AI Worker constraint teleop |
-| --- | --- |
-| <video controls muted loop playsinline width="100%" src="assets/media/franka_panda_collision_free_ik.mp4"></video><br>[Open MP4](assets/media/franka_panda_collision_free_ik.mp4) | <video controls muted loop playsinline width="100%" src="assets/media/robotis_ai_worker_collision_free_ik.mp4"></video><br>[Open MP4](assets/media/robotis_ai_worker_collision_free_ik.mp4) |
-
 ## Features
 
 - 🚀 **High Performance**: C++ core with optimized Eigen linear algebra
@@ -56,6 +50,16 @@ pip install embodik
 - [Examples](examples/index.md) — Example code and tutorials
 - [Development Guide](development.md) — Contributing and development
 - [Recovery robustness](recovery_robustness.md) — Hardware seeds, limits, collision, stall recovery
+
+## Preview
+
+**Franka Panda collision-free IK**
+
+<video autoplay muted loop playsinline controls width="100%" src="assets/media/franka_panda_collision_free_ik.mp4"></video>
+
+**ROBOTIS AI Worker constraint teleop**
+
+<video autoplay muted loop playsinline controls width="100%" src="assets/media/robotis_ai_worker_collision_free_ik.mp4"></video>
 
 ## License
 
