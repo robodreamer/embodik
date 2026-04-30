@@ -37,15 +37,19 @@ find_package(Eigen3 3.3 REQUIRED NO_MODULE)
 if(NOT DEFINED pinocchio_DIR AND NOT DEFINED ENV{pinocchio_DIR})
     execute_process(
         COMMAND "${Python_EXECUTABLE}" -c
-            "import pathlib, sys\n"
-            "try:\n"
-            "  import pinocchio\n"
-            "except Exception:\n"
-            "  sys.exit(1)\n"
-            "p = pathlib.Path(pinocchio.__file__).resolve()\n"
-            "# .../cmeel.prefix/lib/pythonX/site-packages/pinocchio/__init__.py\n"
-            "prefix = p.parents[4]\n"
-            "print(str(prefix))\n"
+            [=[
+import pathlib
+import sys
+
+try:
+    import pinocchio
+except Exception:
+    sys.exit(1)
+
+p = pathlib.Path(pinocchio.__file__).resolve()
+# .../cmeel.prefix/lib/pythonX/site-packages/pinocchio/__init__.py
+print(str(p.parents[4]))
+]=]
         RESULT_VARIABLE _pin_prefix_rc
         OUTPUT_VARIABLE _pin_prefix
         OUTPUT_STRIP_TRAILING_WHITESPACE
