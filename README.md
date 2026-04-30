@@ -11,6 +11,12 @@
 
 EmbodiK is a high-performance inverse kinematics library for cross-embodiment robotics and VLA/AI applications. It pairs a C++ core with Python bindings, exposes robot-model utilities without requiring the Python `pin` package at runtime, and includes interactive examples for collision-aware IK, CoM constraints, teleop, GPU batch solving, and dual-arm coordination.
 
+## Preview
+
+| Franka Panda collision-free IK | ROBOTIS AI Worker constraint teleop |
+| --- | --- |
+| <video controls muted loop playsinline width="100%" src="docs/assets/media/franka_panda_collision_free_ik.mp4"></video><br>[Open MP4](docs/assets/media/franka_panda_collision_free_ik.mp4) | <video controls muted loop playsinline width="100%" src="docs/assets/media/robotis_ai_worker_collision_free_ik.mp4"></video><br>[Open MP4](docs/assets/media/robotis_ai_worker_collision_free_ik.mp4) |
+
 ## Overview
 
 EmbodiK is designed for bringing up IK behavior across different robot bodies without rewriting the solver stack for each model. The public examples focus on a practical path:
