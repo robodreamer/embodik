@@ -136,7 +136,7 @@ manylinux-x86_64-image = "manylinux_2_28"
 before-build = "python -m pip install scikit-build-core nanobind ninja 'pin>=3.8.0'"
 build-frontend = { name = "pip", args = ["--no-build-isolation"] }
 before-all = "if command -v dnf >/dev/null 2>&1; then dnf install -y eigen3-devel urdfdom-devel urdfdom-headers-devel; elif command -v yum >/dev/null 2>&1; then yum install -y eigen3-devel urdfdom-devel urdfdom-headers-devel; elif command -v microdnf >/dev/null 2>&1; then microdnf install -y eigen3-devel urdfdom-devel urdfdom-headers-devel; else echo 'No supported package manager found for build dependencies' >&2; exit 1; fi"
-repair-wheel-command = "auditwheel repair -w {dest_dir} {wheel}"
+repair-wheel-command = "bash scripts/auditwheel_with_pin_libs.sh {dest_dir} {wheel}"
 
 [tool.cibuildwheel.macos]
 archs = ["arm64"]
