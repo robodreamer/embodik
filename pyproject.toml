@@ -12,7 +12,7 @@ version = "0.20.3"
 description = "High-performance inverse kinematics solver optimized for cross-embodiment VLA/AI applications"
 authors = [{ name = "Andy Park", email = "andypark.purdue@gmail.com" }]
 readme = "README.md"
-license = { text = "MIT" }
+license = { text = "Apache-2.0" }
 requires-python = ">=3.10"
 # Note: pin (Pinocchio) is NOT a runtime dependency anymore.
 # EmbodiK uses native C++ bindings for all Pinocchio functionality.
@@ -22,7 +22,7 @@ classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
