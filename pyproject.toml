@@ -129,7 +129,9 @@ test-command = "python -c \"import embodik; print(embodik.__version__)\""
 build-verbosity = 1
 
 [tool.cibuildwheel.linux]
-archs = ["x86_64", "aarch64"]
+# Keep Linux wheels on hosted x86_64 runners. The aarch64 path currently forces
+# source builds of cmeel dependencies under emulation and is not release-stable.
+archs = ["x86_64"]
 before-all = "if command -v dnf >/dev/null 2>&1; then dnf install -y eigen3-devel; elif command -v yum >/dev/null 2>&1; then yum install -y eigen3-devel; elif command -v microdnf >/dev/null 2>&1; then microdnf install -y eigen3-devel; else echo 'No supported package manager found for eigen3-devel' >&2; exit 1; fi"
 repair-wheel-command = "auditwheel repair -w {dest_dir} {wheel}"
 
@@ -137,6 +139,9 @@ repair-wheel-command = "auditwheel repair -w {dest_dir} {wheel}"
 archs = ["arm64"]
 # Default Homebrew `eigen` can be Eigen 5.x; EmbodiK requires Eigen 3.x (find_package Eigen3 3.3).
 before-all = "brew install eigen@3 urdfdom_headers urdfdom"
+# Also install Pinocchio in cibuildwheel's build environment so the repair step
+# can locate PyPI/cmeel dylibs that are linked through @rpath.
+before-build = "python -m pip install 'pin>=3.8.0'"
 # Pin wheel prefix is prepended by CMakeLists.txt; Homebrew prefix helps find urdfdom_headers.
 environment = { Eigen3_DIR = "/opt/homebrew/opt/eigen@3/share/eigen3/cmake", CMAKE_PREFIX_PATH = "/opt/homebrew" }
-repair-wheel-command = "delocate-wheel --wheel-dir {dest_dir} -v {wheel}"
+repair-wheel-command = "bash scripts/delocate_with_pin_libs.sh {dest_dir} {wheel}"
