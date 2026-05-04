@@ -143,6 +143,44 @@ def test_integration_zero_velocity_indices_masks_before_integrate():
         os.unlink(urdf_path)
 
 
+def test_adaptive_dt_applies_to_multi_target_overload():
+    """Multi-target solve_position_step should honor PositionStepOptions.adaptive_dt."""
+    urdf_path, robot, solver, _, _ = _make_solver_with_posture()
+    try:
+        q = np.array([0.0, 0.0], dtype=float)
+        robot.update_configuration(q)
+        pose = robot.get_frame_pose("ee")
+        target = np.eye(4, dtype=float)
+        target[:3, :3] = np.array(pose.rotation, dtype=float)
+        target[:3, 3] = np.array(pose.translation, dtype=float)
+        target[1, 3] += 0.12
+        targets = [eik.TaskTarget("ee_task", target, 20.0, 20.0)]
+
+        opts_base = eik.PositionStepOptions()
+        opts_base.dt = 0.01
+        opts_base.max_steps = 1
+        opts_base.adaptive_dt = False
+
+        opts_adapt = eik.PositionStepOptions()
+        opts_adapt.dt = 0.01
+        opts_adapt.max_steps = 1
+        opts_adapt.adaptive_dt = True
+        opts_adapt.adaptive_dt_max_scale = 4.0
+        opts_adapt.adaptive_dt_reference_distance = 0.01
+
+        base = solver.solve_position_step(q, targets, opts_base)
+        robot.update_configuration(q)
+        adapt = solver.solve_position_step(q, targets, opts_adapt)
+
+        base_delta = np.linalg.norm(np.asarray(base.q_solution, dtype=float) - q)
+        adapt_delta = np.linalg.norm(np.asarray(adapt.q_solution, dtype=float) - q)
+
+        assert adapt.status == eik.SolverStatus.SUCCESS
+        assert adapt_delta > base_delta * 2.0
+    finally:
+        os.unlink(urdf_path)
+
+
 def test_locked_joint_indices_qp_zero_and_consistent_velocity():
     urdf_path, robot, solver, _, _ = _make_solver_with_posture()
     try:

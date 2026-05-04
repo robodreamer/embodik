@@ -618,7 +618,11 @@ def test_worker_deep_penetration_escape_burst_recovers_stuck_pull_away() -> None
         allow_solver_intervention=True,
         apply_collision_violated_q_solution=True,
     )
-    assert recovery_step.solver_result.status.name == "SUCCESS"
+    # The escape burst is the recovery action.  A follow-up step may still be
+    # inside the configured clearance shell and therefore report NO_PROGRESS
+    # rather than SUCCESS under the stricter success semantics.
+    assert recovery_step.solver_result.status.name in ("SUCCESS", "NO_PROGRESS")
+    assert float(solver.evaluate_collision_debug(recovery_step.q_next).distance) > 0.0
 
 
 def test_worker_target_in_torso_release_preserves_collision_margin() -> None:

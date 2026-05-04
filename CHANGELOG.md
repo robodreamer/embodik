@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.4] - 2026-05-04
+
+### Added
+- Added research metric helpers and regression coverage for fluidity, smoothness, sign-flip, and metric-writer outputs.
+- Added internal robustness verification tooling and elastic-band investigation notes.
+
+### Changed
+- Improved `SCALE_ELASTIC` recovery fluidity and position-step recovery semantics around constrained teleop stalls.
+- Avoided full collision scans on ordinary position-step success paths to reduce unnecessary collision-check overhead.
+
+### Fixed
+- Fixed the public AI Worker teleop entrypoint so visual URDF resolution can require the public visual mesh while continuing to use bundled reduced collision geometry.
+- Aligned AI Worker recovery tests with current solver intervention semantics.
+
 ## [0.20.3] - 2026-04-29
 
 ### Fixed
