@@ -79,6 +79,10 @@ Most examples default to the Panda preset. Use `--robot <key>` when a script sup
 
 [![ROBOTIS AI Worker constraint teleop preview](docs/assets/media/robotis_ai_worker_collision_free_ik_preview.gif)](https://robodreamer.github.io/embodik/examples/robotis_ai_worker_ik/)
 
+**Unitree G1 retargeting IK**
+
+[![Unitree G1 retargeting IK preview](docs/assets/media/unitree_g1_retargeting_ik_preview.gif)](https://robodreamer.github.io/embodik/examples/unitree_g1_retargeting_ik/)
+
 ## Core Capabilities
 
 - C++ IK core with Nanobind Python bindings.
@@ -93,6 +97,7 @@ Most examples default to the Panda preset. Use `--robot <key>` when a script sup
 
 - [Installation](https://robodreamer.github.io/embodik/installation/) - platform setup, source builds, and troubleshooting.
 - [Quickstart](https://robodreamer.github.io/embodik/quickstart/) - first IK calls and solver concepts.
+- [Working with Transforms](https://robodreamer.github.io/embodik/transforms/) - transform helpers and SE(3) operations.
 - [Examples](https://robodreamer.github.io/embodik/examples/) - public scripts and development-only demos.
 - [API Reference](https://robodreamer.github.io/embodik/api/) - Python API generated from docstrings.
 - [GPU Solvers](https://robodreamer.github.io/embodik/gpu_solvers/) - FI-PeSNS and PPH-SNS batch solver notes.

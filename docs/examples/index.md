@@ -35,10 +35,6 @@ Example code and tutorials for EmbodiK.
 - [`robot_model_example.py`](robot_model_usage.md) — RobotModel API walkthrough (FK/Jacobians/CoM)
 - [`visualization_example.py`](visualization_examples.md) — Visualization and interactive marker usage
 
-### Headless Harnesses
-
-- `examples/harnesses/g1_four_gizmo_ik_benchmark.py` — Headless G1 multi-target IK timing and regression harness
-
 ## Running Examples
 
 ### For pip-installed users (recommended)

@@ -5,6 +5,8 @@ for Unitree G1. It exposes palm, foot, and pelvis target frames, synthetic
 retargeting playback, CoM support-polygon visualization, and optional
 self-collision constraints.
 
+<video autoplay muted loop playsinline controls width="100%" src="../../assets/media/unitree_g1_retargeting_ik.mp4"></video>
+
 ## What It Covers
 
 - Five interactive transform controls: right palm, left palm, right foot, left

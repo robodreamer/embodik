@@ -79,8 +79,6 @@ pytest test/test_hardware_seed_recovery.py
 pytest --cov=embodik --cov-report=html
 ```
 
-See [Recovery robustness](recovery_robustness.md) for how joint-limit recovery, collision constraints, and the stall handler interact when `q` comes from hardware.
-
 ## Code Style
 
 EmbodiK follows PEP 8 for Python code:

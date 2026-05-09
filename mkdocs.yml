@@ -78,20 +78,12 @@ markdown_extensions:
 
 nav:
   - Home: index.md
-  - Changelog: changelog.md
-  - Installation: installation.md
-  - Quickstart: quickstart.md
-  - GPU Solvers: gpu_solvers.md
-  - Working with Transforms: transforms.md
-  - Transform Benchmarks: benchmark_transforms.md
-  - API Reference:
-    - Overview: api/index.md
-    - RobotModel: api/robot_model.md
-    - KinematicsSolver: api/kinematics_solver.md
-    - Tasks: api/tasks.md
-    - Transforms: api/transforms.md
-    - Utilities: api/utils.md
-    - Visualization: api/visualization.md
+  - Get Started:
+    - Installation: installation.md
+    - Quickstart: quickstart.md
+  - Guides:
+    - Working with Transforms: transforms.md
+    - GPU Solvers: gpu_solvers.md
   - Examples:
     - Overview: examples/index.md
     - Core IK:
@@ -101,6 +93,7 @@ nav:
       - CoM Constraint: examples/com_constraint_ik.md
       - Dual-Arm ECTS: examples/dual_arm_ects.md
       - Teleop IK: examples/teleop_ik.md
+    - Robots:
       - ROBOTIS AI Worker IK: examples/robotis_ai_worker_ik.md
       - Unitree G1 Retargeting IK: examples/unitree_g1_retargeting_ik.md
     - GPU & Batch:
@@ -111,5 +104,13 @@ nav:
     - Utilities:
       - Robot Model Usage: examples/robot_model_usage.md
       - Visualization: examples/visualization_examples.md
+  - API Reference:
+    - Overview: api/index.md
+    - RobotModel: api/robot_model.md
+    - KinematicsSolver: api/kinematics_solver.md
+    - Tasks: api/tasks.md
+    - Transforms: api/transforms.md
+    - Utilities: api/utils.md
+    - Visualization: api/visualization.md
   - Development: development.md
-  - Recovery robustness: recovery_robustness.md
+  - Changelog: changelog.md
