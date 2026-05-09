@@ -287,11 +287,14 @@ RobotModel::get_frame_jacobian(const std::string &frame_name,
 
   FrameIndex frame_id = get_frame_id(frame_name);
 
+  if (!jacobians_updated_) {
+    pinocchio::computeJointJacobians(model_, data_, current_q_);
+    jacobians_updated_ = true;
+  }
+
   Eigen::Matrix<double, 6, Eigen::Dynamic> J(6, model_.nv);
   J.setZero();
-
-  // Compute frame Jacobian
-  pinocchio::computeFrameJacobian(model_, data_, current_q_, frame_id, ref, J);
+  pinocchio::getFrameJacobian(model_, data_, frame_id, ref, J);
 
   return J;
 }

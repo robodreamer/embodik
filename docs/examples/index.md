@@ -20,6 +20,8 @@ Example code and tutorials for EmbodiK.
 - [`08_com_constraint_example.py`](com_constraint_ik.md) — CoM support-polygon constraint demo in Viser
 - [`09_dual_arm_ects.py`](dual_arm_ects.md) — Dual-arm ECTS/Orthogonal coordination with collision handling
 - [`12_ai_worker_constraint_teleop.py`](robotis_ai_worker_ik.md) — Dual-arm ROBOTIS AI Worker constraint teleop with CoM and collision handling
+- [`12_robotis_ai_worker_ik.py`](robotis_ai_worker_ik.md) — Viser-based dual-arm ROBOTIS AI worker IK demo for local FFW SG2/BG2 URDFs
+- [`13_unitree_g1_retargeting_ik.py`](unitree_g1_retargeting_ik.md) — Unitree G1 retargeting IK with palm/foot/pelvis targets, CoM visualization, and optional self-collision constraints
 
 ### GPU and Batch
 
@@ -32,6 +34,10 @@ Example code and tutorials for EmbodiK.
 
 - [`robot_model_example.py`](robot_model_usage.md) — RobotModel API walkthrough (FK/Jacobians/CoM)
 - [`visualization_example.py`](visualization_examples.md) — Visualization and interactive marker usage
+
+### Headless Harnesses
+
+- `examples/harnesses/g1_four_gizmo_ik_benchmark.py` — Headless G1 multi-target IK timing and regression harness
 
 ## Running Examples
 
@@ -77,4 +83,5 @@ The `examples/example_helpers/` directory contains reusable utilities:
 - `ik_common.py` — Shared defaults and small IK/collision helper functions
 - `teleop_ik_backend.py` — Reusable stepping IK backend for the teleop example
 - `dual_arm_ik_helper.py` — Dual-arm IK utilities
+- `g1_model_utils.py` / `g1_ik_runtime.py` — Unitree G1 model, retargeting, and IK runtime helpers
 - `limit_profiles/` — Joint limit profile configurations

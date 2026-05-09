@@ -26,6 +26,11 @@
 
 namespace embodik {
 
+enum class ContactType {
+  kPointContact, // 3 rows (linear velocity only)
+  kRigidContact, // 6 rows (full spatial velocity)
+};
+
 /**
  * @brief High-level kinematics solver
  *
@@ -768,6 +773,36 @@ public:
   int get_linear_velocity_constraint_rows() const;
 
   /**
+   * @brief Add a contact frame for contact-root Jacobian projection.
+   *
+   * Added contact rows are stacked into J_c and used to compute
+   * P_c = I - J_c^+ J_c, then all task Jacobians are projected by P_c before
+   * solving.
+   *
+   * @param frame_name Frame to treat as active contact.
+   * @param type Contact constraint type: point (3D) or rigid (6D).
+   */
+  void add_contact_frame(const std::string &frame_name,
+                         ContactType type = ContactType::kRigidContact);
+
+  /**
+   * @brief Convenience helper: clear and set multiple contact frames.
+   */
+  void configure_contact_frames(
+      const std::vector<std::string> &frame_names,
+      ContactType type = ContactType::kRigidContact);
+
+  /**
+   * @brief Clear all contact-root projection frames.
+   */
+  void clear_contact_frames();
+
+  /**
+   * @brief Returns true when contact-root projection is active.
+   */
+  bool has_contact_frames() const { return !contact_frames_.empty(); }
+
+  /**
    * @brief Add a tight 6D frame pose constraint around a target pose.
    *
    * Enforces epsilon-box bounds in task-space around @p target_pose:
@@ -918,9 +953,15 @@ public:
       double headroom_activation_margin = 0.01) const;
 
 private:
+  struct ContactFrameConfig {
+    std::string frame_name;
+    ContactType type = ContactType::kRigidContact;
+  };
+
   std::shared_ptr<RobotModel> robot_;
   std::vector<std::shared_ptr<Task>> tasks_;
   std::unordered_map<std::string, std::shared_ptr<Task>> task_map_;
+  std::vector<ContactFrameConfig> contact_frames_;
 
   // Solver parameters
   double dt_ = 0.01;
@@ -964,8 +1005,21 @@ private:
   /// Optional torso constraint rows injected by solve_position_step into the
   /// next solve_velocity() call; cleared at end of solve_velocity().
   std::optional<TorsoPoseConstraintOptions> pending_step_torso_constraint_;
+  /// One-shot hint set by solve_position_step when RobotModel already holds
+  /// the exact q passed into the next solve_velocity() call.
+  bool pending_reuse_current_kinematics_ = false;
   std::optional<Eigen::MatrixXd> warm_start_selector_cache_;
   int warm_start_constraint_rows_ = -1;
+
+  // Reused solve_velocity scratch containers. Matrix/vector entries are still
+  // resized per solve, but preserving container capacity avoids repeated heap
+  // churn in high-rate interactive IK loops.
+  std::vector<Eigen::VectorXd> scratch_goals_;
+  std::vector<Eigen::MatrixXd> scratch_jacobians_;
+  std::vector<ObjectiveSolveConfig> scratch_objective_configs_;
+  std::vector<std::shared_ptr<Task>> scratch_objective_tasks_;
+  std::vector<std::shared_ptr<Task>> scratch_group_tasks_;
+  std::unordered_set<int> scratch_excluded_union_;
 
   /// Cached velocity-index → configuration-index map for the current robot
   /// (rebuilt when the model pointer or ``nv`` changes).
@@ -1164,6 +1218,7 @@ private:
   compute_tight_frame_pose_constraints();
   std::optional<LinearVelocityConstraintResult>
   compute_tight_point_constraints();
+  Eigen::MatrixXd compute_contact_projector() const;
 
   std::optional<CollisionConstraintConfig> collision_constraint_;
   // Per-geometry-pair min_distance overrides. Key is canonical_pair_key(geom_a, geom_b).

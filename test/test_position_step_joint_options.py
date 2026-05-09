@@ -1034,3 +1034,81 @@ def test_position_ik_rejects_invalid_torso_velocity_box_headroom_fraction():
         assert "velocity_box_headroom.fraction" in out.status_message
     finally:
         os.unlink(urdf_path)
+
+
+def test_position_step_orientation_only_task_uses_orientation_gain():
+    urdf_path = _create_two_joint_urdf()
+    try:
+        robot = eik.RobotModel(urdf_path, floating_base=False)
+        solver = eik.KinematicsSolver(robot)
+        solver.dt = 0.01
+        ori_task = solver.add_frame_task("ori_task", "ee", eik.TaskType.FRAME_ORIENTATION)
+        ori_task.priority = 0
+        ori_task.weight = 1.0
+
+        q = np.array([0.0, 0.0], dtype=float)
+        robot.update_configuration(q)
+        pose = robot.get_frame_pose("ee")
+        target = np.eye(4, dtype=float)
+        target[:3, :3] = np.array(pose.rotation, dtype=float)
+        target[:3, 3] = np.array(pose.translation, dtype=float)
+        # Y-axis rotation target to create pure orientation error.
+        ang = 0.25
+        Ry = np.array(
+            [
+                [np.cos(ang), 0.0, np.sin(ang)],
+                [0.0, 1.0, 0.0],
+                [-np.sin(ang), 0.0, np.cos(ang)],
+            ],
+            dtype=float,
+        )
+        target[:3, :3] = target[:3, :3] @ Ry
+
+        opts = eik.PositionStepOptions()
+        opts.max_steps = 3
+        opts.position_gain = 0.0
+        opts.orientation_gain = 40.0
+        out = solver.solve_position_step(q, target, "ori_task", opts)
+        assert out.status in (eik.SolverStatus.SUCCESS, eik.SolverStatus.INFEASIBLE, eik.SolverStatus.NO_PROGRESS)
+        dq = np.asarray(out.joint_velocities, dtype=float)
+        assert np.linalg.norm(dq) > 1e-6
+    finally:
+        os.unlink(urdf_path)
+
+
+def test_multi_target_orientation_task_uses_orientation_gain():
+    urdf_path = _create_two_joint_urdf()
+    try:
+        robot = eik.RobotModel(urdf_path, floating_base=False)
+        solver = eik.KinematicsSolver(robot)
+        solver.dt = 0.01
+        ori_task = solver.add_frame_task("ori_task", "ee", eik.TaskType.FRAME_ORIENTATION)
+        ori_task.priority = 0
+        ori_task.weight = 1.0
+
+        q = np.array([0.0, 0.0], dtype=float)
+        robot.update_configuration(q)
+        pose = robot.get_frame_pose("ee")
+        target = np.eye(4, dtype=float)
+        target[:3, :3] = np.array(pose.rotation, dtype=float)
+        target[:3, 3] = np.array(pose.translation, dtype=float)
+        ang = -0.20
+        Ry = np.array(
+            [
+                [np.cos(ang), 0.0, np.sin(ang)],
+                [0.0, 1.0, 0.0],
+                [-np.sin(ang), 0.0, np.cos(ang)],
+            ],
+            dtype=float,
+        )
+        target[:3, :3] = target[:3, :3] @ Ry
+
+        opts = eik.PositionStepOptions()
+        opts.max_steps = 3
+        targets = [eik.TaskTarget("ori_task", target, 0.0, 40.0)]
+        out = solver.solve_position_step(q, targets, opts)
+        assert out.status in (eik.SolverStatus.SUCCESS, eik.SolverStatus.INFEASIBLE, eik.SolverStatus.NO_PROGRESS)
+        dq = np.asarray(out.joint_velocities, dtype=float)
+        assert np.linalg.norm(dq) > 1e-6
+    finally:
+        os.unlink(urdf_path)

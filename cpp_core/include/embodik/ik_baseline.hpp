@@ -21,6 +21,7 @@
 #include <chrono>
 #include <cmath>
 #include <limits>
+#include <optional>
 #include <stdexcept>
 #include <vector>
 
@@ -142,7 +143,10 @@ inline SolverResult computeMultiObjectiveVelocitySolutionEigen(
     const Eigen::MatrixXd &constraint_coefficients,
     const Eigen::VectorXd &min_bounds, const Eigen::VectorXd &max_bounds,
     const VelocitySolverConfig &solver_config,
-    const std::vector<ObjectiveSolveConfig> &objective_configs = {});
+    const std::vector<ObjectiveSolveConfig> &objective_configs = {},
+    const Eigen::VectorXd *max_constraint_softening_factors = nullptr,
+    const Eigen::MatrixXd *warm_start_selector = nullptr,
+    Eigen::MatrixXd *final_selector_out = nullptr);
 
 inline double
 calculateConfigurationDistance(const std::vector<double> &position_a,
@@ -269,7 +273,7 @@ inline SolverResult computeMultiObjectiveVelocitySolution(
   // Delegate to Eigen-based implementation
   return computeMultiObjectiveVelocitySolutionEigen(
       eigen_objectives, eigen_jacobians, eigen_constraints, eigen_min_bounds,
-      eigen_max_bounds, solver_config);
+      eigen_max_bounds, solver_config, {}, nullptr, nullptr, nullptr);
 }
 
 // Eigen-based hierarchical velocity solver implementation
@@ -283,7 +287,10 @@ inline SolverResult computeMultiObjectiveVelocitySolutionEigen(
     const Eigen::VectorXd &min_bounds, // (n+k) lower bounds
     const Eigen::VectorXd &max_bounds, // (n+k) upper bounds
     const VelocitySolverConfig &solver_config,
-    const std::vector<ObjectiveSolveConfig> &objective_configs) {
+    const std::vector<ObjectiveSolveConfig> &objective_configs,
+    const Eigen::VectorXd *max_constraint_softening_factors,
+    const Eigen::MatrixXd *warm_start_selector,
+    Eigen::MatrixXd *final_selector_out) {
   auto t0 = std::chrono::high_resolution_clock::now();
   auto get_elapsed_ms = [&t0]() {
     return std::chrono::duration_cast<std::chrono::microseconds>(
@@ -318,7 +325,25 @@ inline SolverResult computeMultiObjectiveVelocitySolutionEigen(
   const auto degrees_of_freedom = constraint_coefficients.cols();
   const auto additional_constraints =
       constraint_coefficients.rows() - degrees_of_freedom;
+  const auto total_constraints = constraint_coefficients.rows();
+  const bool enhanced_mode =
+      (max_constraint_softening_factors != nullptr) ||
+      (warm_start_selector != nullptr);
   const auto num_objectives = objective_jacobians.size();
+  Eigen::VectorXd softening_factors = Eigen::VectorXd::Ones(total_constraints);
+  if (enhanced_mode && max_constraint_softening_factors != nullptr) {
+    if (max_constraint_softening_factors->size() != total_constraints) {
+      return fail(SolverStatus::kShapeMismatch,
+                  "softening factors size must match constraint rows");
+    }
+    softening_factors = *max_constraint_softening_factors;
+    for (Eigen::Index i = 0; i < softening_factors.size(); ++i) {
+      if (!std::isfinite(softening_factors(i)) || softening_factors(i) < 1.0) {
+        return fail(SolverStatus::kInvalidInput,
+                    "softening factors must be finite and >= 1");
+      }
+    }
+  }
   Eigen::VectorXd objective_scaling_factors =
       Eigen::VectorXd::Zero(num_objectives);
   std::vector<TaskSolveMode> objective_effective_modes(
@@ -335,17 +360,90 @@ inline SolverResult computeMultiObjectiveVelocitySolutionEigen(
     }
   }
 
+  // Fast path for the common interactive case: one combined objective whose
+  // unconstrained damped least-squares velocity already satisfies all rows.
+  // This avoids the active-set SNS machinery without changing constrained
+  // behavior; any violation falls through to the existing solver below.
+  if (!enhanced_mode && num_objectives == 1U) {
+    const ObjectiveSolveConfig objective_config =
+        objective_configs.empty() ? ObjectiveSolveConfig{} : objective_configs[0];
+    const auto &current_jacobian = objective_jacobians[0];
+    const auto &current_target = objective_targets[0];
+    Eigen::VectorXd direct_velocity =
+        linalg::ComputeRegularizedInverse(solver_config.regularization_config,
+                                          current_jacobian) *
+        current_target;
+    if (direct_velocity.size() == degrees_of_freedom &&
+        direct_velocity.allFinite()) {
+      const Eigen::VectorXd direct_constraint_eval =
+          constraint_coefficients * direct_velocity;
+      const bool feasible =
+          !((direct_constraint_eval.array() <
+             (min_bounds.array() - solver_config.epsilon))
+                .any() ||
+            (direct_constraint_eval.array() >
+             (max_bounds.array() + solver_config.epsilon))
+                .any());
+      if (feasible) {
+        std::vector<double> final_velocities(
+            static_cast<size_t>(degrees_of_freedom));
+        for (Eigen::Index dof_idx = 0; dof_idx < degrees_of_freedom;
+             ++dof_idx) {
+          final_velocities[static_cast<size_t>(dof_idx)] =
+              direct_velocity(dof_idx);
+        }
+        std::vector<double> applied_scales{
+            objective_config.solve_mode == TaskSolveMode::kMinError ? -1.0
+                                                                    : 1.0};
+        std::vector<double> objective_errors{
+            (current_jacobian * direct_velocity - current_target).norm()};
+        std::vector<TaskSolveMode> objective_effective_modes{
+            objective_config.solve_mode == TaskSolveMode::kScaleElastic
+                ? TaskSolveMode::kScale
+                : objective_config.solve_mode};
+        std::vector<bool> objective_used_fallback{false};
+        return SolverResult{
+            std::move(final_velocities),
+            SolverStatus::kSuccess,
+            get_elapsed_ms(),
+            1U,
+            0.0,
+            std::move(applied_scales),
+            std::move(objective_errors),
+            std::move(objective_effective_modes),
+            std::move(objective_used_fallback),
+            ""};
+      }
+    }
+  }
+
   // Initialize workspace matrices for null-space computation
   Eigen::MatrixXd null_space_projector =
       Eigen::MatrixXd::Identity(degrees_of_freedom, degrees_of_freedom);
   Eigen::MatrixXd saturated_constraint_selector =
-      Eigen::MatrixXd::Zero(degrees_of_freedom + additional_constraints,
-                            degrees_of_freedom + additional_constraints);
+      Eigen::MatrixXd::Zero(total_constraints, total_constraints);
   Eigen::VectorXd velocity_solution = Eigen::VectorXd::Zero(degrees_of_freedom);
   Eigen::VectorXd saturated_values =
-      Eigen::VectorXd::Zero(degrees_of_freedom + additional_constraints);
+      Eigen::VectorXd::Zero(total_constraints);
   Eigen::MatrixXd saturated_constraint_matrix = Eigen::MatrixXd::Zero(
-      degrees_of_freedom + additional_constraints, degrees_of_freedom);
+      total_constraints, degrees_of_freedom);
+  if (enhanced_mode && warm_start_selector != nullptr &&
+      warm_start_selector->rows() == total_constraints &&
+      warm_start_selector->cols() == total_constraints) {
+    const Eigen::VectorXd warm_diag = warm_start_selector->diagonal();
+    for (Eigen::Index i = 0; i < warm_diag.size(); ++i) {
+      const double v = warm_diag(i);
+      if (!std::isfinite(v)) {
+        return fail(SolverStatus::kInvalidInput,
+                    "warm-start selector contains non-finite values");
+      }
+      saturated_constraint_selector(i, i) = (v > 0.5) ? 1.0 : 0.0;
+    }
+    saturated_constraint_matrix.noalias() =
+        saturated_constraint_selector * constraint_coefficients;
+    const Eigen::VectorXd seed_eval = constraint_coefficients * velocity_solution;
+    saturated_values = seed_eval.cwiseMax(min_bounds).cwiseMin(max_bounds);
+  }
 
   // Pre-allocate working memory for optimization loop
   Eigen::VectorXd previous_velocity(degrees_of_freedom);
@@ -364,6 +462,8 @@ inline SolverResult computeMultiObjectiveVelocitySolutionEigen(
   Eigen::MatrixXd inverse_objective_jacobian_projected;
 
   auto solver_status = SolverStatus::kSuccess;
+  Eigen::VectorXd final_check_min_bounds = min_bounds;
+  Eigen::VectorXd final_check_max_bounds = max_bounds;
 
   // Process objectives hierarchically with constraint enforcement
   for (auto objective_index = 0U; objective_index < num_objectives;
@@ -378,6 +478,16 @@ inline SolverResult computeMultiObjectiveVelocitySolutionEigen(
     const auto &current_jacobian = objective_jacobians[objective_index];
     const auto &current_target = objective_targets[objective_index];
     const auto target_dimension = current_jacobian.rows();
+    Eigen::VectorXd objective_min_bounds_storage = min_bounds;
+    Eigen::VectorXd objective_max_bounds_storage = max_bounds;
+    Eigen::VectorXd objective_min_bounds_original = min_bounds;
+    Eigen::VectorXd objective_max_bounds_original = max_bounds;
+    const Eigen::VectorXd *active_min_bounds = &min_bounds;
+    const Eigen::VectorXd *active_max_bounds = &max_bounds;
+    if (enhanced_mode) {
+      active_min_bounds = &objective_min_bounds_storage;
+      active_max_bounds = &objective_max_bounds_storage;
+    }
 
     // Store current state for iterative refinement
     auto previous_null_space = null_space_projector;
@@ -388,6 +498,7 @@ inline SolverResult computeMultiObjectiveVelocitySolutionEigen(
     auto velocity_scale = 1.0;
     auto optimal_scale = 0.0;
     auto consecutive_zero_scales = 0U;
+    auto consecutive_min_error_no_progress = 0U;
     auto constraints_violated = true;
     auto iteration_counter = 0U;
     auto best_constraint_selection = saturated_constraint_selector;
@@ -450,10 +561,12 @@ inline SolverResult computeMultiObjectiveVelocitySolutionEigen(
       constraint_evaluation.noalias() =
           constraint_coefficients * velocity_solution;
       constraints_violated = (constraint_evaluation.array() <
-                              (min_bounds.array() - solver_config.epsilon))
+                              (active_min_bounds->array() -
+                               solver_config.epsilon))
                                  .any() ||
                              (constraint_evaluation.array() >
-                              (max_bounds.array() + solver_config.epsilon))
+                              (active_max_bounds->array() +
+                               solver_config.epsilon))
                                  .any();
 
       Eigen::Index critical_constraint_index = 0;
@@ -461,9 +574,11 @@ inline SolverResult computeMultiObjectiveVelocitySolutionEigen(
         velocity_scale = 1.0;
         if (constraints_violated) {
           Eigen::VectorXd lower_violation =
-              (min_bounds.array() - constraint_evaluation.array()).max(0.0);
+              (active_min_bounds->array() - constraint_evaluation.array())
+                  .max(0.0);
           Eigen::VectorXd upper_violation =
-              (constraint_evaluation.array() - max_bounds.array()).max(0.0);
+              (constraint_evaluation.array() - active_max_bounds->array())
+                  .max(0.0);
           Eigen::VectorXd total_violation = lower_violation + upper_violation;
           total_violation.maxCoeff(&critical_constraint_index);
         }
@@ -482,8 +597,8 @@ inline SolverResult computeMultiObjectiveVelocitySolutionEigen(
           velocity_scale = 0.0;
           solver_status = SolverStatus::kNumericalError;
         } else {
-          min_margin = min_bounds - unscaled_contribution;
-          max_margin = max_bounds - unscaled_contribution;
+          min_margin = *active_min_bounds - unscaled_contribution;
+          max_margin = *active_max_bounds - unscaled_contribution;
 
           for (auto constraint_idx = 0U;
                constraint_idx < degrees_of_freedom + additional_constraints;
@@ -518,6 +633,10 @@ inline SolverResult computeMultiObjectiveVelocitySolutionEigen(
         velocity_scale = 1.0;
       }
 
+      if (enhanced_mode && !objective_is_min_error && velocity_scale > 0.0 &&
+          velocity_scale < solver_config.epsilon) {
+        velocity_scale = solver_config.epsilon;
+      }
       if (velocity_scale == 0) {
         consecutive_zero_scales++;
       } else {
@@ -527,6 +646,33 @@ inline SolverResult computeMultiObjectiveVelocitySolutionEigen(
       // Process feasible solutions within iteration limits
       if ((objective_index == 0 || velocity_scale > 0 || objective_is_min_error) &&
           iteration_counter < solver_config.iteration_limit) {
+        if (enhanced_mode && !objective_is_min_error) {
+          const unsigned int soft_trigger = std::max(
+              1U, solver_config.stall_detection_count / 2U);
+          if (consecutive_zero_scales >= soft_trigger) {
+            const double relax_step =
+                1.0 + 0.5 * static_cast<double>(consecutive_zero_scales - soft_trigger + 1U);
+            for (Eigen::Index i = 0; i < objective_min_bounds_storage.size();
+                 ++i) {
+              const double max_relax = softening_factors(i);
+              if (max_relax <= 1.0) {
+                continue;
+              }
+              const double half_span = 0.5 *
+                                       (objective_max_bounds_original(i) -
+                                        objective_min_bounds_original(i));
+              if (!std::isfinite(half_span) || half_span <= 0.0) {
+                continue;
+              }
+              const double center = 0.5 *
+                                    (objective_max_bounds_original(i) +
+                                     objective_min_bounds_original(i));
+              const double relax = std::min(max_relax, relax_step);
+              objective_min_bounds_storage(i) = center - relax * half_span;
+              objective_max_bounds_storage(i) = center + relax * half_span;
+            }
+          }
+        }
         const Eigen::VectorXd target_term =
             objective_is_min_error ? current_target
                                    : (velocity_scale * current_target);
@@ -542,9 +688,9 @@ inline SolverResult computeMultiObjectiveVelocitySolutionEigen(
         using ConstraintViolationMask = Eigen::Array<bool, Eigen::Dynamic, 1>;
         ConstraintViolationMask constraint_violations =
             (constraint_evaluation.array() <
-             (min_bounds.array() - solver_config.epsilon)) ||
+             (active_min_bounds->array() - solver_config.epsilon)) ||
             (constraint_evaluation.array() >
-             (max_bounds.array() + solver_config.epsilon));
+             (active_max_bounds->array() + solver_config.epsilon));
 
         // Fast path: if all constraints are satisfied, accept this objective
         // update directly and stop saturating rows for this objective.
@@ -584,9 +730,9 @@ inline SolverResult computeMultiObjectiveVelocitySolutionEigen(
 
                 // Clamp constraint value to feasible bounds
                 saturated_values(constraint_idx, 0) =
-                    std::min(std::max(min_bounds(constraint_idx),
+                    std::min(std::max((*active_min_bounds)(constraint_idx),
                                       constraint_evaluation(constraint_idx)),
-                             max_bounds(constraint_idx));
+                             (*active_max_bounds)(constraint_idx));
               }
             }
           } else {
@@ -602,9 +748,9 @@ inline SolverResult computeMultiObjectiveVelocitySolutionEigen(
 
             // Set saturated value for critical constraint
             saturated_values(critical_constraint_index, 0) = std::min(
-                std::max(min_bounds(critical_constraint_index),
+                std::max((*active_min_bounds)(critical_constraint_index),
                          constraint_evaluation(critical_constraint_index)),
-                max_bounds(critical_constraint_index));
+                (*active_max_bounds)(critical_constraint_index));
           }
 
           // Update constraint system with newly saturated constraints
@@ -636,7 +782,13 @@ inline SolverResult computeMultiObjectiveVelocitySolutionEigen(
           if (objective_is_min_error) {
             // MIN_ERROR: keep refining active-set until constraints are
             // satisfied or no new active constraints can be added.
-            should_terminate = !made_saturation_progress;
+            if (made_saturation_progress) {
+              consecutive_min_error_no_progress = 0;
+            } else {
+              consecutive_min_error_no_progress++;
+            }
+            should_terminate = (consecutive_min_error_no_progress >
+                                solver_config.stall_detection_count);
           } else {
             should_terminate =
                 effective_rank < target_dimension; // redundancy exhausted
@@ -658,12 +810,10 @@ inline SolverResult computeMultiObjectiveVelocitySolutionEigen(
                 augmented_projector = best_augmented_projector;
               } else if (constraint_violations.any() &&
                          !made_saturation_progress) {
-                // MIN_ERROR active-set can stall with unsatisfied constraints.
-                // Fall back to the previous feasible velocity to avoid
-                // oscillatory violating updates.
-                velocity_scale = 0.0;
-                velocity_solution = previous_velocity;
-                use_direct_constrained_solve = false;
+                // MIN_ERROR active-set can stall if no new rows can be
+                // saturated. Prefer a direct constrained least-squares step
+                // with the current saturated set to preserve progress.
+                velocity_scale = 1.0;
               } else {
                 // No feasible snapshot yet, but active-set still evolving:
                 // solve constrained least-squares with current saturated set.
@@ -683,10 +833,18 @@ inline SolverResult computeMultiObjectiveVelocitySolutionEigen(
               const Eigen::VectorXd target_term_final =
                   objective_is_min_error ? current_target
                                          : (velocity_scale * current_target);
+              auto adaptive_regularization = solver_config.regularization_config;
+              if (!objective_is_min_error && target_dimension > 0 &&
+                  effective_rank > 0 && effective_rank < target_dimension) {
+                const double rank_ratio =
+                    static_cast<double>(target_dimension) /
+                    static_cast<double>(effective_rank);
+                adaptive_regularization.regularization_factor *= rank_ratio;
+              }
               velocity_solution.noalias() =
                   previous_velocity +
                   linalg::ComputeRegularizedInverse(
-                      solver_config.regularization_config,
+                      adaptive_regularization,
                       current_jacobian * constrained_projector) *
                       (target_term_final - jacobian_velocity_product) +
                   augmented_projector *
@@ -776,15 +934,22 @@ inline SolverResult computeMultiObjectiveVelocitySolutionEigen(
     objective_effective_modes[objective_index] =
         objective_is_min_error ? TaskSolveMode::kMinError
                                : TaskSolveMode::kScale;
+    if (enhanced_mode) {
+      final_check_min_bounds = objective_min_bounds_storage;
+      final_check_max_bounds = objective_max_bounds_storage;
+    } else {
+      final_check_min_bounds = min_bounds;
+      final_check_max_bounds = max_bounds;
+    }
   }
 
   // Verify final solution satisfies all constraints within tolerance
   if (objective_scaling_factors.sum() > solver_config.epsilon &&
       (((constraint_coefficients * velocity_solution).array() <
-        (min_bounds.array() - solver_config.epsilon))
+        (final_check_min_bounds.array() - solver_config.epsilon))
            .any() ||
        ((constraint_coefficients * velocity_solution).array() >
-        (max_bounds.array() + solver_config.epsilon))
+        (final_check_max_bounds.array() + solver_config.epsilon))
            .any())) {
     solver_status = SolverStatus::kNumericalError;
   }
@@ -817,6 +982,10 @@ inline SolverResult computeMultiObjectiveVelocitySolutionEigen(
       std::chrono::duration_cast<std::chrono::microseconds>(end_time - t0)
           .count() /
       1000.0;
+
+  if (final_selector_out != nullptr) {
+    *final_selector_out = saturated_constraint_selector;
+  }
 
   return SolverResult{
       std::move(final_velocities),

@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.5] - 2026-05-09
+
+### Added
+- Added `examples/13_unitree_g1_retargeting_ik.py`, a Unitree G1 whole-body retargeting IK example with palm, pelvis, and foot target controls.
+- Added G1 CoM visualization, optional self-collision handling, collision-geometry inspection, and headless smoke checks for the new example.
+- Bundled the generated G1 collision URDF asset so copied and pip-installed examples can run without source-tree asset paths.
+
+### Changed
+- Updated the examples documentation and copied-example coverage for the Unitree G1 workflow.
+
 ## [0.20.4] - 2026-05-04
 
 ### Added

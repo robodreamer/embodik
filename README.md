@@ -56,6 +56,7 @@ The pip-facing examples are intentionally split by purpose:
 | `08_com_constraint_example.py` | CoM support-polygon constraint visualization. |
 | `09_dual_arm_ects.py` | Dual-arm ECTS and orthogonal coordination modes. |
 | `12_ai_worker_constraint_teleop.py` | ROBOTIS AI Worker dual-arm teleop with CoM and collision handling. |
+| `13_unitree_g1_retargeting_ik.py` | Unitree G1 whole-body retargeting IK with CoM and optional collision handling. |
 
 Run them from a copied example directory:
 
@@ -63,6 +64,7 @@ Run them from a copied example directory:
 python 02_collision_aware_IK.py
 python 03_teleop_ik.py
 python 12_ai_worker_constraint_teleop.py
+python 13_unitree_g1_retargeting_ik.py
 ```
 
 Most examples default to the Panda preset. Use `--robot <key>` when a script supports alternate robot presets. See the [Examples Guide](https://robodreamer.github.io/embodik/examples/) for the full catalog, helper conventions, and clone-only development examples.
