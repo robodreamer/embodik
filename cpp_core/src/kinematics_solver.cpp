@@ -862,6 +862,35 @@ void KinematicsSolver::clear_relative_pose_constraint() {
   relative_pose_constraint_.reset();
 }
 
+void KinematicsSolver::add_contact_frame(const std::string &frame_name,
+                                         ContactType type) {
+  if (frame_name.empty()) {
+    throw std::invalid_argument("contact frame name must not be empty");
+  }
+  if (!robot_->has_frame(frame_name)) {
+    throw std::invalid_argument("unknown frame for contact projection: " +
+                                frame_name);
+  }
+  auto it = std::find_if(
+      contact_frames_.begin(), contact_frames_.end(),
+      [&](const ContactFrameConfig &cfg) { return cfg.frame_name == frame_name; });
+  if (it != contact_frames_.end()) {
+    it->type = type;
+    return;
+  }
+  contact_frames_.push_back(ContactFrameConfig{frame_name, type});
+}
+
+void KinematicsSolver::configure_contact_frames(
+    const std::vector<std::string> &frame_names, ContactType type) {
+  clear_contact_frames();
+  for (const auto &frame_name : frame_names) {
+    add_contact_frame(frame_name, type);
+  }
+}
+
+void KinematicsSolver::clear_contact_frames() { contact_frames_.clear(); }
+
 void KinematicsSolver::set_linear_velocity_constraints(
     const Eigen::MatrixXd &C, const Eigen::VectorXd &lower_bounds,
     const Eigen::VectorXd &upper_bounds) {
@@ -983,6 +1012,39 @@ void KinematicsSolver::add_tight_point_constraint(
 
 void KinematicsSolver::clear_tight_point_constraints() {
   tight_point_constraints_.clear();
+}
+
+Eigen::MatrixXd KinematicsSolver::compute_contact_projector() const {
+  const int nv = robot_->nv();
+  if (contact_frames_.empty()) {
+    return Eigen::MatrixXd::Identity(nv, nv);
+  }
+
+  int total_rows = 0;
+  for (const auto &cfg : contact_frames_) {
+    total_rows += (cfg.type == ContactType::kPointContact) ? 3 : 6;
+  }
+  if (total_rows <= 0) {
+    return Eigen::MatrixXd::Identity(nv, nv);
+  }
+
+  Eigen::MatrixXd J_c(total_rows, nv);
+  J_c.setZero();
+  int row = 0;
+  for (const auto &cfg : contact_frames_) {
+    const Matrix6Xd J_full = robot_->get_frame_jacobian(cfg.frame_name);
+    if (cfg.type == ContactType::kPointContact) {
+      J_c.block(row, 0, 3, nv) = J_full.topRows(3);
+      row += 3;
+    } else {
+      J_c.block(row, 0, 6, nv) = J_full;
+      row += 6;
+    }
+  }
+
+  Eigen::MatrixXd J_c_pinv;
+  detail::ComputeGeneralizedInverse(J_c, constraint_tolerance_, &J_c_pinv);
+  return Eigen::MatrixXd::Identity(nv, nv) - J_c_pinv * J_c;
 }
 
 std::optional<KinematicsSolver::LinearVelocityConstraintResult>
@@ -3581,6 +3643,13 @@ void KinematicsSolver::clamp_jacobians_near_joint_limits(
 }
 
 void KinematicsSolver::sort_tasks_by_priority() {
+  if (std::is_sorted(
+          tasks_.begin(), tasks_.end(),
+          [](const std::shared_ptr<Task> &a, const std::shared_ptr<Task> &b) {
+            return a->getPriority() <= b->getPriority();
+          })) {
+    return;
+  }
   std::stable_sort(
       tasks_.begin(), tasks_.end(),
       [](const std::shared_ptr<Task> &a, const std::shared_ptr<Task> &b) {
@@ -3612,6 +3681,7 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
       if (solver != nullptr) {
         solver->pending_velocity_lock_indices_.clear();
         solver->pending_step_torso_constraint_.reset();
+        solver->pending_reuse_current_kinematics_ = false;
       }
     }
   } clear_pending_locks{this};
@@ -3628,7 +3698,13 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
           "current_q size does not match robot nq in solve_velocity";
       return result;
     }
-    if (timing) {
+    const Eigen::VectorXd &robot_q = robot_->get_current_configuration();
+    const bool can_reuse_current_kinematics =
+        pending_reuse_current_kinematics_ && robot_q.size() == current_q.size() &&
+        (robot_q - current_q).squaredNorm() <= 1e-24;
+    if (can_reuse_current_kinematics) {
+      result.pinocchio_kinematics_time_ms = 0.0;
+    } else if (timing) {
       auto t_kin_start = std::chrono::high_resolution_clock::now();
       robot_->update_kinematics(current_q);
       result.pinocchio_kinematics_time_ms = get_elapsed_ms(t_kin_start);
@@ -3643,13 +3719,6 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
     } else {
       robot_->update_kinematics(robot_->get_current_configuration());
     }
-  }
-
-  // Keep the stored robot configuration aligned with the solve seed before any
-  // startup helpers inspect get_current_configuration() (notably elastic-band
-  // pre-seeding on the first SCALE_ELASTIC tick).
-  if (current_q.size() > 0) {
-    robot_->update_configuration(current_q);
   }
 
   // Auto-enable elastic band when any task uses SCALE_ELASTIC mode.
@@ -3691,11 +3760,16 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
   }
 
   // Collect active tasks: group by priority for order-invariant behavior.
-  std::vector<Eigen::VectorXd> goals;
-  std::vector<Eigen::MatrixXd> jacobians;
-  std::vector<ObjectiveSolveConfig> objective_configs;
-  std::vector<std::shared_ptr<Task>> objective_tasks;
-  std::unordered_set<int> excluded_union;
+  auto &goals = scratch_goals_;
+  auto &jacobians = scratch_jacobians_;
+  auto &objective_configs = scratch_objective_configs_;
+  auto &objective_tasks = scratch_objective_tasks_;
+  auto &excluded_union = scratch_excluded_union_;
+  goals.clear();
+  jacobians.clear();
+  objective_configs.clear();
+  objective_tasks.clear();
+  excluded_union.clear();
   goals.reserve(tasks_.size());
   jacobians.reserve(tasks_.size());
   objective_configs.reserve(tasks_.size());
@@ -3703,42 +3777,45 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
   excluded_union.reserve(tasks_.size());
 
   int current_priority = std::numeric_limits<int>::min();
-  std::vector<std::shared_ptr<Task>> group_tasks;
-  std::vector<Eigen::VectorXd> group_goals;
-  std::vector<Eigen::MatrixXd> group_jacobians;
+  auto &group_tasks = scratch_group_tasks_;
+  group_tasks.clear();
   group_tasks.reserve(tasks_.size());
-  group_goals.reserve(tasks_.size());
-  group_jacobians.reserve(tasks_.size());
 
   auto flush_group = [&]() {
     if (group_tasks.empty()) {
       return;
     }
 
-    bool all_scale_no_fallback = true;
+    bool all_scale_family = true;
+    bool all_min_error = true;
+    bool fallback_value = group_tasks.front()->getAllowMinErrorFallback();
+    bool fallback_consistent = true;
     for (const auto &task : group_tasks) {
       const auto mode = task->getSolveMode();
-      if ((mode != TaskSolveMode::kScale &&
-           mode != TaskSolveMode::kScaleElastic) ||
-          task->getAllowMinErrorFallback()) {
-        all_scale_no_fallback = false;
-        break;
-      }
+      all_scale_family =
+          all_scale_family &&
+          (mode == TaskSolveMode::kScale || mode == TaskSolveMode::kScaleElastic);
+      all_min_error = all_min_error && (mode == TaskSolveMode::kMinError);
+      fallback_consistent =
+          fallback_consistent &&
+          (task->getAllowMinErrorFallback() == fallback_value);
     }
 
-    if (all_scale_no_fallback) {
+    const bool combine_group =
+        fallback_consistent && (all_scale_family || all_min_error);
+    if (combine_group) {
       int total_rows = 0;
-      for (const auto &g : group_goals) {
-        total_rows += static_cast<int>(g.rows());
+      for (const auto &task : group_tasks) {
+        total_rows += task->getDimension();
       }
       Eigen::VectorXd combined_goal(total_rows);
       Eigen::MatrixXd combined_jac(total_rows, robot_->nv());
       combined_goal.setZero();
       combined_jac.setZero();
       int offset = 0;
-      for (size_t i = 0; i < group_goals.size(); ++i) {
-        const auto &g = group_goals[i];
-        const auto &J = group_jacobians[i];
+      for (const auto &task : group_tasks) {
+        Eigen::VectorXd g = task->getVelocity();
+        Eigen::MatrixXd J = task->getJacobian();
         if (g.rows() > 0) {
           combined_goal.segment(offset, g.rows()) = g;
           combined_jac.block(offset, 0, J.rows(), robot_->nv()) = J;
@@ -3747,14 +3824,16 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
       }
       goals.push_back(std::move(combined_goal));
       jacobians.push_back(std::move(combined_jac));
-      objective_configs.push_back(
-          ObjectiveSolveConfig{current_priority, TaskSolveMode::kScale, false});
+      objective_configs.push_back(ObjectiveSolveConfig{
+          current_priority,
+          all_min_error ? TaskSolveMode::kMinError : TaskSolveMode::kScale,
+          all_min_error ? false : fallback_value,
+      });
       objective_tasks.push_back(nullptr);
     } else {
-      for (size_t i = 0; i < group_tasks.size(); ++i) {
-        const auto &task = group_tasks[i];
-        goals.push_back(group_goals[i]);
-        jacobians.push_back(group_jacobians[i]);
+      for (const auto &task : group_tasks) {
+        goals.push_back(task->getVelocity());
+        jacobians.push_back(task->getJacobian());
         // SCALE_ELASTIC is treated as SCALE in the SNS solver;
         // the elastic band mechanism handles the limit expansion.
         const auto effective_mode =
@@ -3771,8 +3850,6 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
     }
 
     group_tasks.clear();
-    group_goals.clear();
-    group_jacobians.clear();
   };
 
   for (const auto &task : tasks_) {
@@ -3794,8 +3871,6 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
     }
 
     group_tasks.push_back(task);
-    group_goals.push_back(task->getVelocity());
-    group_jacobians.push_back(task->getJacobian());
   }
   flush_group();
 
@@ -3822,6 +3897,15 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
           J.col(idx).setZero();
         }
       }
+    }
+  }
+
+  Eigen::MatrixXd contact_P_c;
+  const bool use_contact_projection = !contact_frames_.empty();
+  if (use_contact_projection) {
+    contact_P_c = compute_contact_projector();
+    for (auto &J : jacobians) {
+      J = J * contact_P_c;
     }
   }
 
@@ -3863,6 +3947,10 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
   if (collision_constraint_result.has_value() && !excluded_union.empty()) {
     zero_excluded_columns(collision_constraint_result->jacobian, excluded_union);
   }
+  if (use_contact_projection && collision_constraint_result.has_value()) {
+    collision_constraint_result->jacobian =
+        collision_constraint_result->jacobian * contact_P_c;
+  }
 
   // Task normal projection: when a collision constraint is violated
   // (lower_bound > 0), project out the collision normal from each task
@@ -3894,6 +3982,10 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
   if (com_constraint_result.has_value() && !excluded_union.empty()) {
     zero_excluded_columns(com_constraint_result->jacobian, excluded_union);
   }
+  if (use_contact_projection && com_constraint_result.has_value()) {
+    com_constraint_result->jacobian =
+        com_constraint_result->jacobian * contact_P_c;
+  }
 
   // Task normal projection for violated CoM rows:
   // when outside a half-plane, remove task components that increase outward
@@ -3923,6 +4015,10 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
     zero_excluded_columns(rel_pose_constraint_result->jacobian, excluded_union);
   }
   int rel_pose_violated_rows = 0;
+  if (use_contact_projection && rel_pose_constraint_result.has_value()) {
+    rel_pose_constraint_result->jacobian =
+        rel_pose_constraint_result->jacobian * contact_P_c;
+  }
   if (apply_limits && rel_pose_constraint_result.has_value()) {
     const auto &rpc = rel_pose_constraint_result.value();
     for (int i = 0; i < rpc.violated_rows.size(); ++i) {
@@ -3944,6 +4040,10 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
       }
     }
   }
+  if (use_contact_projection && linear_constraint_result.has_value()) {
+    linear_constraint_result->jacobian =
+        linear_constraint_result->jacobian * contact_P_c;
+  }
 
   std::optional<LinearVelocityConstraintResult> tight_pose_constraint_result =
       compute_tight_frame_pose_constraints();
@@ -3953,6 +4053,10 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
         tight_pose_constraint_result->jacobian.col(idx).setZero();
       }
     }
+  }
+  if (use_contact_projection && tight_pose_constraint_result.has_value()) {
+    tight_pose_constraint_result->jacobian =
+        tight_pose_constraint_result->jacobian * contact_P_c;
   }
   if (apply_limits && tight_pose_constraint_result.has_value()) {
     const auto &tpc = tight_pose_constraint_result.value();
@@ -3969,6 +4073,10 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
         tight_point_constraint_result->jacobian.col(idx).setZero();
       }
     }
+  }
+  if (use_contact_projection && tight_point_constraint_result.has_value()) {
+    tight_point_constraint_result->jacobian =
+        tight_point_constraint_result->jacobian * contact_P_c;
   }
   if (apply_limits && tight_point_constraint_result.has_value()) {
     const auto &tpc = tight_point_constraint_result.value();
@@ -3991,6 +4099,10 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
       step_torso_constraint_result = build_torso_pose_bound_rows(
           *this, *robot_, torso_opts, torso_pose_bounds_reference, dt_,
           excluded_union);
+      if (use_contact_projection && step_torso_constraint_result.has_value()) {
+        step_torso_constraint_result->jacobian =
+            step_torso_constraint_result->jacobian * contact_P_c;
+      }
     }
   }
 
@@ -4490,6 +4602,12 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
     backend_result.solution.assign(static_cast<size_t>(robot_->nv()), 0.0);
     backend_result.final_error = 0.0;
   }
+  if (use_contact_projection &&
+      static_cast<int>(backend_result.solution.size()) == robot_->nv()) {
+    Eigen::Map<Eigen::VectorXd> dq_projected(backend_result.solution.data(),
+                                             backend_result.solution.size());
+    dq_projected = contact_P_c * dq_projected;
+  }
   const double primary_goal_norm = goals.empty() ? 0.0 : goals[0].norm();
 
   // Create velocity-specific result
@@ -4524,7 +4642,7 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
   if (!result.solution.empty()) {
     // Clamp velocity solution to constraint bounds to avoid post-integration
     // limit violations from QP tolerance.
-    if (apply_limits && c_lower.size() >= robot_->nv()) {
+    if (apply_limits && c_lower.size() >= robot_->nv() && !use_contact_projection) {
       Eigen::Map<Eigen::VectorXd> dq(result.solution.data(),
                                      result.solution.size());
       // Velocity-box clamping (always applies to first nv rows).
@@ -4941,6 +5059,15 @@ PositionIKResult KinematicsSolver::solve_position(
                                false});
     }
 
+    Eigen::MatrixXd contact_P_c;
+    const bool use_contact_projection = !contact_frames_.empty();
+    if (use_contact_projection) {
+      contact_P_c = compute_contact_projector();
+      for (auto &J : jacobians) {
+        J = J * contact_P_c;
+      }
+    }
+
     std::optional<CollisionConstraintResult> collision_constraint_result =
         std::nullopt;
     if (collision_constraint_.has_value() && collision_constraint_->enabled) {
@@ -4960,6 +5087,10 @@ PositionIKResult KinematicsSolver::solve_position(
       zero_excluded_columns(com_constraint_result->jacobian,
                             options.excluded_joint_indices);
     }
+    if (use_contact_projection && collision_constraint_result.has_value()) {
+      collision_constraint_result->jacobian =
+          collision_constraint_result->jacobian * contact_P_c;
+    }
 
     std::optional<LinearVelocityConstraintResult> linear_constraint_result =
         compute_linear_velocity_constraints();
@@ -4970,6 +5101,10 @@ PositionIKResult KinematicsSolver::solve_position(
           linear_constraint_result->jacobian.col(idx).setZero();
         }
       }
+    }
+    if (use_contact_projection && linear_constraint_result.has_value()) {
+      linear_constraint_result->jacobian =
+          linear_constraint_result->jacobian * contact_P_c;
     }
 
     std::optional<LinearVelocityConstraintResult> tight_pose_constraint_result =
@@ -4982,6 +5117,10 @@ PositionIKResult KinematicsSolver::solve_position(
         }
       }
     }
+    if (use_contact_projection && tight_pose_constraint_result.has_value()) {
+      tight_pose_constraint_result->jacobian =
+          tight_pose_constraint_result->jacobian * contact_P_c;
+    }
 
     std::optional<LinearVelocityConstraintResult> tight_point_constraint_result =
         compute_tight_point_constraints();
@@ -4993,12 +5132,20 @@ PositionIKResult KinematicsSolver::solve_position(
         }
       }
     }
+    if (use_contact_projection && tight_point_constraint_result.has_value()) {
+      tight_point_constraint_result->jacobian =
+          tight_point_constraint_result->jacobian * contact_P_c;
+    }
 
     std::optional<ConstraintBlock> torso_constraint_result = std::nullopt;
     if (torso_task && torso_has_pose_bounds) {
       torso_constraint_result = build_torso_pose_bound_rows(
           *this, *robot_, torso_opts, torso_pose_bounds_reference, options.dt,
           options.excluded_joint_indices);
+      if (use_contact_projection && torso_constraint_result.has_value()) {
+        torso_constraint_result->jacobian =
+            torso_constraint_result->jacobian * contact_P_c;
+      }
     }
 
     int num_constraints = robot_->nv();
@@ -5195,9 +5342,14 @@ PositionIKResult KinematicsSolver::solve_position(
 
     Eigen::VectorXd dq = Eigen::Map<const Eigen::VectorXd>(
         vel_result.solution.data(), vel_result.solution.size());
-    clamp_joint_velocity_solution_in_place(dq, c_lower, c_upper,
-                                           /*include_position_rows=*/false,
-                                           robot_->nv());
+    if (use_contact_projection) {
+      dq = contact_P_c * dq;
+    }
+    if (!use_contact_projection) {
+      clamp_joint_velocity_solution_in_place(dq, c_lower, c_upper,
+                                             /*include_position_rows=*/false,
+                                             robot_->nv());
+    }
     Eigen::VectorXd q_pre_step = q_current;
     q_current =
         pinocchio::integrate(robot_->model(), q_current, options.dt * dq);
@@ -5563,6 +5715,7 @@ PositionIKResult KinematicsSolver::solve_position_step(
 
     pending_velocity_lock_indices_ = step_locked_indices;
     pending_step_torso_constraint_ = step_torso_constraint;
+    pending_reuse_current_kinematics_ = true;
     VelocitySolverResult vel_out = solve_velocity(q, true);
     have_vel_result = true;
     last_vel_result = std::move(vel_out);
@@ -6483,6 +6636,7 @@ PositionIKResult KinematicsSolver::solve_position_step(
 
     pending_velocity_lock_indices_ = step_locked_indices;
     pending_step_torso_constraint_ = step_torso_constraint;
+    pending_reuse_current_kinematics_ = true;
     VelocitySolverResult vel_out = solve_velocity(q, true);
     have_vel_result = true;
     last_vel_result = std::move(vel_out);

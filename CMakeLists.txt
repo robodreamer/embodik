@@ -7,6 +7,7 @@ find_package(Python REQUIRED COMPONENTS Interpreter)
 # C++ standard
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+include(CheckIPOSupported)
 
 # macOS + Xcode CLT: Clang searches an incomplete libc++ under CommandLineTools before the SDK,
 # which breaks <cmath> / std headers. Prefer the active macOS SDK's libc++ (Pixi, local pip, CI).
@@ -26,6 +27,7 @@ endif()
 option(BUILD_PYTHON_BINDINGS "Build Python bindings" ON)
 option(BUILD_TESTS "Build unit tests" ON)
 option(BUILD_EXAMPLES "Build examples" ON)
+option(EMBODIK_ENABLE_IPO "Enable interprocedural optimization for release builds" ON)
 
 # Find dependencies
 find_package(Eigen3 3.3 REQUIRED NO_MODULE)
@@ -100,6 +102,15 @@ target_link_libraries(embodik_core PUBLIC
     Eigen3::Eigen
     pinocchio::pinocchio
 )
+
+if(EMBODIK_ENABLE_IPO AND NOT CMAKE_BUILD_TYPE STREQUAL "Debug")
+    check_ipo_supported(RESULT _EMBODIK_IPO_SUPPORTED OUTPUT _EMBODIK_IPO_ERROR)
+    if(_EMBODIK_IPO_SUPPORTED)
+        set_property(TARGET embodik_core PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
+    else()
+        message(STATUS "IPO/LTO not enabled for embodik_core: ${_EMBODIK_IPO_ERROR}")
+    endif()
+endif()
 
 # Python bindings
 if(BUILD_PYTHON_BINDINGS)

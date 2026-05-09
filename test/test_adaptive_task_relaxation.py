@@ -117,6 +117,35 @@ def test_scale_with_fallback_reports_fallback_usage():
         os.unlink(urdf_path)
 
 
+def test_same_priority_scale_fallback_tasks_are_grouped_order_independently():
+    urdf_path, robot, solver = _make_solver()
+    try:
+        q = np.array([0.0, 0.0], dtype=float)
+        robot.update_configuration(q)
+
+        link_task = solver.add_frame_task("link1_pos", "link1", eik.TaskType.FRAME_POSITION)
+        ee_task = solver.add_frame_task("ee_pos", "ee", eik.TaskType.FRAME_POSITION)
+        for task in (link_task, ee_task):
+            task.priority = 0
+            task.weight = 1.0
+            task.solve_mode = eik.TaskSolveMode.SCALE_ELASTIC
+            task.allow_min_error_fallback = True
+
+        link_target = np.array(robot.get_frame_pose("link1").translation, dtype=float)
+        ee_target = np.array(robot.get_frame_pose("ee").translation, dtype=float)
+        link_task.set_target_position(link_target + np.array([0.02, 0.0, 0.0]))
+        ee_task.set_target_position(ee_target + np.array([0.0, 0.02, 0.0]))
+
+        result = solver.solve_velocity(q, apply_limits=True)
+
+        assert result.status in (eik.SolverStatus.SUCCESS, eik.SolverStatus.INFEASIBLE)
+        assert np.all(np.isfinite(np.asarray(result.joint_velocities, dtype=float)))
+        assert len(result.task_modes_effective) == 1
+        assert len(result.task_used_fallback) == 1
+    finally:
+        os.unlink(urdf_path)
+
+
 def test_recovery_mode_softens_primary_task_to_min_error():
     """Repeated stalled errors should switch primary objective to MIN_ERROR."""
     urdf_path, robot, solver = _make_solver()
@@ -231,7 +260,11 @@ def test_position_step_single_task_benchmark(benchmark):  # type: ignore[no-unty
 
         result = benchmark.pedantic(run, rounds=50, iterations=1)
         assert result.status in (
-            eik.SolverStatus.kSuccess if hasattr(eik.SolverStatus, "kSuccess") else eik.SolverStatus.SUCCESS,  # compatibility
+            (
+                eik.SolverStatus.kSuccess
+                if hasattr(eik.SolverStatus, "kSuccess")
+                else eik.SolverStatus.SUCCESS
+            ),  # compatibility
             eik.SolverStatus.INFEASIBLE,
             eik.SolverStatus.NUMERICAL_ERROR,
         )
@@ -271,7 +304,11 @@ def test_position_step_low_level_reference_benchmark(benchmark):  # type: ignore
 
         result = benchmark.pedantic(run, rounds=50, iterations=1)
         assert result.status in (
-            eik.SolverStatus.kSuccess if hasattr(eik.SolverStatus, "kSuccess") else eik.SolverStatus.SUCCESS,  # compatibility
+            (
+                eik.SolverStatus.kSuccess
+                if hasattr(eik.SolverStatus, "kSuccess")
+                else eik.SolverStatus.SUCCESS
+            ),  # compatibility
             eik.SolverStatus.INFEASIBLE,
             eik.SolverStatus.NUMERICAL_ERROR,
         )

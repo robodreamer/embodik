@@ -51,6 +51,10 @@ void bind_kinematics_solver(nb::module_ &m) {
                      return self.distance;
                    });
 
+  nb::enum_<ContactType>(m, "ContactType")
+      .value("POINT_CONTACT", ContactType::kPointContact)
+      .value("RIGID_CONTACT", ContactType::kRigidContact);
+
   nb::class_<KinematicsSolver>(
       m, "KinematicsSolver",
       "High-level kinematics solver providing simple API for IK problems")
@@ -570,6 +574,31 @@ void bind_kinematics_solver(nb::module_ &m) {
       .def("get_linear_velocity_constraint_rows",
            &KinematicsSolver::get_linear_velocity_constraint_rows,
            "Return active user-defined linear constraint row count.")
+      .def(
+          "add_contact_frame",
+          [](KinematicsSolver &self, const std::string &frame_name,
+             ContactType contact_type) {
+            self.add_contact_frame(frame_name, contact_type);
+          },
+          nb::arg("frame_name"),
+          nb::arg("contact_type") = ContactType::kRigidContact,
+          "Add a contact frame for contact-root Jacobian projection.\n\n"
+          "POINT_CONTACT constrains linear velocity only (3 rows).\n"
+          "RIGID_CONTACT constrains full spatial velocity (6 rows).")
+      .def(
+          "configure_contact_frames",
+          [](KinematicsSolver &self,
+             const std::vector<std::string> &frame_names,
+             ContactType contact_type) {
+            self.configure_contact_frames(frame_names, contact_type);
+          },
+          nb::arg("frame_names"),
+          nb::arg("contact_type") = ContactType::kRigidContact,
+          "Clear and configure multiple contact frames with a shared contact type.")
+      .def("clear_contact_frames", &KinematicsSolver::clear_contact_frames,
+           "Disable contact-root Jacobian projection.")
+      .def("has_contact_frames", &KinematicsSolver::has_contact_frames,
+           "Return true if contact-root projection is active.")
       .def(
           "add_tight_frame_pose_constraint",
           [](KinematicsSolver &self, const std::string &frame_name,

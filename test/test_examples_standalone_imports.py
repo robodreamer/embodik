@@ -50,6 +50,25 @@ def test_ai_worker_example_imports_from_copied_examples_layout(monkeypatch, tmp_
     assert Path(module_globals["worker_impl"].__file__).is_relative_to(copied_examples_dir)
 
 
+def test_unitree_g1_example_imports_from_copied_examples_layout(monkeypatch, tmp_path) -> None:
+    copied_examples_dir = _copy_examples_dir(tmp_path)
+    _clear_example_helper_imports()
+    monkeypatch.syspath_prepend(str(copied_examples_dir))
+
+    module_globals = runpy.run_path(
+        str(copied_examples_dir / "13_unitree_g1_retargeting_ik.py"),
+        run_name="embodik_g1_import_check",
+    )
+
+    assert "main" in module_globals
+    assert Path(module_globals["_clip_q"].__code__.co_filename).is_relative_to(
+        copied_examples_dir / "example_helpers"
+    )
+    assert Path(
+        module_globals["resolve_g1_collision_urdf_path"].__code__.co_filename
+    ).is_relative_to(copied_examples_dir / "example_helpers")
+
+
 def test_ai_worker_sg2_resolves_bundled_urdf_before_network(monkeypatch, tmp_path) -> None:
     copied_examples_dir = _copy_examples_dir(tmp_path)
     _clear_example_helper_imports()
