@@ -49,7 +49,6 @@ pip install embodik
 - [API Reference](api/index.md) — Complete API documentation
 - [Examples](examples/index.md) — Example code and tutorials
 - [Development Guide](development.md) — Contributing and development
-- [Recovery robustness](recovery_robustness.md) — Hardware seeds, limits, collision, stall recovery
 
 ## Preview
 
@@ -60,6 +59,10 @@ pip install embodik
 **ROBOTIS AI Worker constraint teleop**
 
 <video autoplay muted loop playsinline controls width="100%" src="assets/media/robotis_ai_worker_collision_free_ik.mp4"></video>
+
+**Unitree G1 retargeting IK**
+
+<video autoplay muted loop playsinline controls width="100%" src="assets/media/unitree_g1_retargeting_ik.mp4"></video>
 
 ## License
 
