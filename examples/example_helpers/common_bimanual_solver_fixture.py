@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Headless solver fixture for the public ROBOTIS AI Worker example."""
+"""Headless solver fixture for the common bimanual example."""
 
 from __future__ import annotations
 
@@ -17,52 +17,52 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 try:
-    from example_helpers.ai_worker_model_utils import (
-        default_ai_worker_ik_joint_names,
-        resolve_ai_worker_frames,
+    from example_helpers.common_bimanual_model_utils import (
+        default_common_bimanual_ik_joint_names,
+        resolve_common_bimanual_frames,
     )
     from example_helpers.public_ai_worker_paths import resolve_public_ai_worker_urdf_paths
-    from example_helpers.ai_worker_constraint_teleop_app import (
+    from example_helpers.common_bimanual_teleop_app import (
         DEFAULT_ARM_NULLSPACE_WEIGHT,
         DEFAULT_POSTURE_WEIGHT,
         DEFAULT_SOLVER_DT,
-        DEFAULT_WORKER_SEED,
-        WORKER_SUPPORT_CONTACT_FRAMES,
+        DEFAULT_COMMON_BIMANUAL_SEED,
+        COMMON_BIMANUAL_SUPPORT_CONTACT_FRAMES,
         _apply_named_joint_seed,
         _apply_soft_lift_margin,
         _compute_support_polygon_from_contacts,
         _configure_collision_constraint,
         _generate_consecutive_collision_exclusions,
-        _generate_worker_collision_include_pairs,
+        _generate_common_bimanual_collision_include_pairs,
         _shrink_polygon_2d,
     )
 except ModuleNotFoundError as exc:
     if exc.name != "example_helpers" and not str(exc.name).startswith("example_helpers."):
         raise
-    from examples.example_helpers.ai_worker_model_utils import (
-        default_ai_worker_ik_joint_names,
-        resolve_ai_worker_frames,
+    from examples.example_helpers.common_bimanual_model_utils import (
+        default_common_bimanual_ik_joint_names,
+        resolve_common_bimanual_frames,
     )
     from examples.example_helpers.public_ai_worker_paths import resolve_public_ai_worker_urdf_paths
-    from examples.example_helpers.ai_worker_constraint_teleop_app import (
+    from examples.example_helpers.common_bimanual_teleop_app import (
         DEFAULT_ARM_NULLSPACE_WEIGHT,
         DEFAULT_POSTURE_WEIGHT,
         DEFAULT_SOLVER_DT,
-        DEFAULT_WORKER_SEED,
-        WORKER_SUPPORT_CONTACT_FRAMES,
+        DEFAULT_COMMON_BIMANUAL_SEED,
+        COMMON_BIMANUAL_SUPPORT_CONTACT_FRAMES,
         _apply_named_joint_seed,
         _apply_soft_lift_margin,
         _compute_support_polygon_from_contacts,
         _configure_collision_constraint,
         _generate_consecutive_collision_exclusions,
-        _generate_worker_collision_include_pairs,
+        _generate_common_bimanual_collision_include_pairs,
         _shrink_polygon_2d,
     )
 
 
 @dataclass
 class SolverFixture:
-    """Bundle of objects a caller needs to drive a headless worker solve loop."""
+    """Bundle of objects a caller needs to drive a headless bimanual solve loop."""
 
     variant: str
     urdf_path: Path
@@ -129,7 +129,7 @@ def _collect_joint_indices(robot, joint_names: Iterable[str], ik_joint_names: It
     )
 
 
-def build_worker_solver_fixture(
+def build_common_bimanual_solver_fixture(
     variant: str,
     *,
     collision_enabled: bool = True,
@@ -148,7 +148,7 @@ def build_worker_solver_fixture(
     collision_urdf_path = collision_urdf_path_or_none or urdf_path
 
     full_robot = embodik.RobotModel(str(collision_urdf_path), floating_base=False)
-    ik_joint_names = default_ai_worker_ik_joint_names(full_robot.get_joint_names())
+    ik_joint_names = default_common_bimanual_ik_joint_names(full_robot.get_joint_names())
     robot = embodik.RobotModel(
         str(collision_urdf_path),
         actuated_joint_names=ik_joint_names,
@@ -170,13 +170,13 @@ def build_worker_solver_fixture(
         for name in ("lift_joint",)
         if (idx := joint_name_to_cfg.get(name)) is not None
     ]
-    q = _apply_named_joint_seed(q, joint_name_to_cfg, q_lo, q_hi, DEFAULT_WORKER_SEED)
+    q = _apply_named_joint_seed(q, joint_name_to_cfg, q_lo, q_hi, DEFAULT_COMMON_BIMANUAL_SEED)
     q = _apply_soft_lift_margin(q, joint_name_to_cfg=joint_name_to_cfg, q_lo=q_lo, q_hi=q_hi)
     nullspace_bias_q = np.asarray(q, dtype=float).copy()
     robot.update_configuration(q)
-    support_polygon = _compute_support_polygon_from_contacts(robot, WORKER_SUPPORT_CONTACT_FRAMES)
+    support_polygon = _compute_support_polygon_from_contacts(robot, COMMON_BIMANUAL_SUPPORT_CONTACT_FRAMES)
 
-    frame_map = resolve_ai_worker_frames(robot.get_frame_names())
+    frame_map = resolve_common_bimanual_frames(robot.get_frame_names())
 
     solver = embodik.KinematicsSolver(robot)
     solver.dt = DEFAULT_SOLVER_DT
@@ -192,7 +192,7 @@ def build_worker_solver_fixture(
     right_task.weight = 1.0
     left_task.weight = 1.0
 
-    posture_task = solver.add_posture_task("worker_posture")
+    posture_task = solver.add_posture_task("bimanual_posture")
     posture_task.priority = 1
     posture_task.weight = DEFAULT_POSTURE_WEIGHT
     posture_task.set_target_configuration(np.asarray(q, dtype=float).copy())
@@ -223,7 +223,7 @@ def build_worker_solver_fixture(
             collision_available = False
 
     collision_exclude_pairs = _generate_consecutive_collision_exclusions(robot, urdf_path)
-    collision_include_pairs = _generate_worker_collision_include_pairs(
+    collision_include_pairs = _generate_common_bimanual_collision_include_pairs(
         robot, urdf_path, collision_exclude_pairs
     )
 

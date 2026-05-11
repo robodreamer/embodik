@@ -169,6 +169,14 @@ void bind_kinematics_solver(nb::module_ &m) {
       .def("enable_position_limits", &KinematicsSolver::enable_position_limits,
            nb::arg("enable"), "Enable or disable position limit constraints")
 
+      .def("enable_acceleration_limits",
+           &KinematicsSolver::enable_acceleration_limits, nb::arg("enable"),
+           "Enable or disable inter-tick acceleration limit constraints")
+
+      .def("set_acceleration_limits",
+           &KinematicsSolver::set_acceleration_limits, nb::arg("limits"),
+           "Set per-joint acceleration limits (rad/s^2)")
+
       .def("set_base_position_bounds",
            &KinematicsSolver::set_base_position_bounds, nb::arg("lower"),
            nb::arg("upper"), "Set floating-base position bounds (3D)")

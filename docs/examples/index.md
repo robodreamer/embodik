@@ -19,8 +19,7 @@ Example code and tutorials for EmbodiK.
 - [`03_teleop_ik.py`](teleop_ik.md) — Minimal teleop input adapter into EmbodiK IK
 - [`08_com_constraint_example.py`](com_constraint_ik.md) — CoM support-polygon constraint demo in Viser
 - [`09_dual_arm_ects.py`](dual_arm_ects.md) — Dual-arm ECTS/Orthogonal coordination with collision handling
-- [`12_ai_worker_constraint_teleop.py`](robotis_ai_worker_ik.md) — Dual-arm ROBOTIS AI Worker constraint teleop with CoM and collision handling
-- [`12_robotis_ai_worker_ik.py`](robotis_ai_worker_ik.md) — Viser-based dual-arm ROBOTIS AI worker IK demo for local FFW SG2/BG2 URDFs
+- [`12_bimanual_whole_body_ik.py`](bimanual_whole_body_ik.md) — Bimanual whole-body teleop for AI Worker and RB-Y1 with CoM and collision handling
 - [`13_unitree_g1_retargeting_ik.py`](unitree_g1_retargeting_ik.md) — Unitree G1 retargeting IK with palm/foot/pelvis targets, CoM visualization, and optional self-collision constraints
 
 ### GPU and Batch
@@ -78,6 +77,7 @@ The `examples/example_helpers/` directory contains reusable utilities:
 
 - `ik_common.py` — Shared defaults and small IK/collision helper functions
 - `teleop_ik_backend.py` — Reusable stepping IK backend for the teleop example
+- `common_bimanual_model_utils.py` / `common_bimanual_teleop_app.py` — Shared AI Worker/RB-Y1 bimanual whole-body IK helpers
 - `dual_arm_ik_helper.py` — Dual-arm IK utilities
 - `g1_model_utils.py` / `g1_ik_runtime.py` — Unitree G1 model, retargeting, and IK runtime helpers
 - `limit_profiles/` — Joint limit profile configurations

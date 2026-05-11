@@ -33,22 +33,21 @@ def _clear_example_helper_imports() -> None:
             del sys.modules[name]
 
 
-def test_ai_worker_example_imports_from_copied_examples_layout(monkeypatch, tmp_path) -> None:
+def test_bimanual_example_imports_from_copied_examples_layout(monkeypatch, tmp_path) -> None:
     copied_examples_dir = _copy_examples_dir(tmp_path)
     _clear_example_helper_imports()
     monkeypatch.syspath_prepend(str(copied_examples_dir))
 
     module_globals = runpy.run_path(
-        str(copied_examples_dir / "12_ai_worker_constraint_teleop.py"),
-        run_name="embodik_ai_worker_import_check",
+        str(copied_examples_dir / "12_bimanual_whole_body_ik.py"),
+        run_name="embodik_bimanual_import_check",
     )
 
     assert "main" in module_globals
     assert Path(
         module_globals["resolve_public_ai_worker_urdf_paths"].__code__.co_filename
     ).is_relative_to(copied_examples_dir)
-    assert Path(module_globals["worker_impl"].__file__).is_relative_to(copied_examples_dir)
-
+    assert Path(module_globals["common_app"].__file__).is_relative_to(copied_examples_dir)
 
 def test_unitree_g1_example_imports_from_copied_examples_layout(monkeypatch, tmp_path) -> None:
     copied_examples_dir = _copy_examples_dir(tmp_path)

@@ -11,6 +11,7 @@ EmbodiK is a modern C++ library with Python bindings designed for robust, high-p
 - 🎯 **Multiple Solvers**: Single-step and full multi-task velocity IK
 - 🛡️ **Singularity Robust**: Advanced inverse methods for stable solutions
 - 🔒 **Constraint Support**: Joint limits and operational space constraints
+- 📈 **Solver Diagnostics**: Timing, task scaling, and Jacobian condition-number reporting
 - 📊 **Visualization**: Optional Viser-based interactive visualization
 
 ## Quick Start
@@ -59,6 +60,10 @@ pip install embodik
 **ROBOTIS AI Worker constraint teleop**
 
 <video autoplay muted loop playsinline controls width="100%" src="assets/media/robotis_ai_worker_collision_free_ik.mp4"></video>
+
+**RB-Y1 bimanual whole-body IK**
+
+<video autoplay muted loop playsinline controls width="100%" src="assets/media/rby1_collision_free_ik.mp4"></video>
 
 **Unitree G1 retargeting IK**
 

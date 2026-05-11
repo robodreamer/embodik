@@ -6,6 +6,19 @@
 - `solve_position()` for iterative position IK with an internal objective stack.
 - `solve_position_step()` for marker/teleop loops using registered tasks.
 
+## Result Diagnostics
+
+Solver result objects include `condition_number`, the worst Jacobian condition
+number observed by the singularity-robust inverse during that solve. Values near
+`1.0` indicate well-conditioned task Jacobians; larger values mean the solve is
+more sensitive to target changes, numerical tolerances, or near-singular robot
+postures.
+
+Use this field for logging, test assertions, and tuning UI feedback. It is not a
+manipulability metric and does not indicate a separate solver mode. A high but
+finite value can explain weak or unstable-looking motion even when the solve
+returns `SUCCESS`.
+
 ## Position IK Objective Order
 
 `solve_position()` now supports a three-level stack:

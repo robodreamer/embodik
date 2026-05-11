@@ -75,6 +75,19 @@ Status codes returned by IK solvers:
 
 ## Result Types
 
+All solver result types expose shared diagnostics:
+
+- `status`: Solver status code
+- `computation_time_ms`: Computation time in milliseconds
+- `task_scales`: Task scaling factors for multi-task problems, when applicable
+- `task_errors`: Per-task error magnitudes, when applicable
+- `status_message`: Optional solver status detail
+- `condition_number`: Worst Jacobian condition number observed during the solve.
+  Values near `1.0` are well-conditioned and larger values indicate increasing
+  sensitivity near singular or rank-deficient configurations. This is a
+  diagnostic field for logging and tuning; it is not a manipulability score and
+  does not by itself change solver behavior.
+
 ### PositionIKResult
 
 Result from position IK solving:
@@ -84,6 +97,7 @@ Result from position IK solving:
 - `iterations`: Number of iterations performed
 - `final_error`: Final pose error magnitude
 - `computation_time_ms`: Computation time in milliseconds
+- `condition_number`: Worst Jacobian condition number observed during the solve
 
 ### VelocitySolverResult
 
@@ -93,3 +107,4 @@ Result from velocity IK solving:
 - `status`: Solver status code
 - `task_scales`: Task scaling factors for multi-task problems
 - `computation_time_ms`: Computation time in milliseconds
+- `condition_number`: Worst Jacobian condition number observed during the solve
