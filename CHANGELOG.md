@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.6] - 2026-05-11
+
+### Added
+- Added `SolverResult.condition_number` reporting for singularity/conditioning diagnostics without changing the SRINV damping law.
+- Added opt-in joint acceleration limits (`enable_acceleration_limits()` / `set_acceleration_limits()`) with Python bindings, tests, and example controls.
+- Added the unified `examples/12_bimanual_whole_body_ik.py` entrypoint, defaulting to AI Worker and optionally supporting RB-Y1 with generated bounded primitive collision geometry.
+
+### Changed
+- Renamed shared bimanual example helpers and docs away from AI-worker-specific filenames.
+- Reduced AI Worker interactive solve-time spikes during fast gizmo motion by avoiding secondary-objective retries after a productive solve step and reusing cached collision debug distances in the live loop.
+- Removed the older AI Worker-specific bimanual entrypoints in favor of the common bimanual example.
+
 ## [0.20.5] - 2026-05-09
 
 ### Added
@@ -41,7 +53,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.20.2] - 2026-04-28
 
 ### Added
-- Public ROBOTIS AI Worker constrained dual-arm teleop example (`examples/12_ai_worker_constraint_teleop.py`) with cached public URDF resolution and reduced collision assets.
+- Public ROBOTIS AI Worker constrained dual-arm teleop example (`examples/12_bimanual_whole_body_ik.py`) with cached public URDF resolution and reduced collision assets.
 - Shared `embodik.interactive_ik` runtime helpers for robust interactive IK stepping, constrained last-safe restoration, and boundary stall classification.
 - AI Worker robustness harness and headless regression coverage for collision/CoM boundary behavior.
 

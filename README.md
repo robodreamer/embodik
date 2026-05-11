@@ -55,7 +55,7 @@ The pip-facing examples are intentionally split by purpose:
 | `03_teleop_ik.py` | Small adapter showing how teleop input drives the same IK step. |
 | `08_com_constraint_example.py` | CoM support-polygon constraint visualization. |
 | `09_dual_arm_ects.py` | Dual-arm ECTS and orthogonal coordination modes. |
-| `12_ai_worker_constraint_teleop.py` | ROBOTIS AI Worker dual-arm teleop with CoM and collision handling. |
+| `12_bimanual_whole_body_ik.py` | Bimanual whole-body teleop, defaulting to AI Worker and optionally supporting RB-Y1, with CoM and collision handling. |
 | `13_unitree_g1_retargeting_ik.py` | Unitree G1 whole-body retargeting IK with CoM and optional collision handling. |
 
 Run them from a copied example directory:
@@ -63,7 +63,7 @@ Run them from a copied example directory:
 ```bash
 python 02_collision_aware_IK.py
 python 03_teleop_ik.py
-python 12_ai_worker_constraint_teleop.py
+python 12_bimanual_whole_body_ik.py
 python 13_unitree_g1_retargeting_ik.py
 ```
 
@@ -77,7 +77,11 @@ Most examples default to the Panda preset. Use `--robot <key>` when a script sup
 
 **ROBOTIS AI Worker constraint teleop**
 
-[![ROBOTIS AI Worker constraint teleop preview](docs/assets/media/robotis_ai_worker_collision_free_ik_preview.gif)](https://robodreamer.github.io/embodik/examples/robotis_ai_worker_ik/)
+[![Bimanual whole-body IK preview](docs/assets/media/robotis_ai_worker_collision_free_ik_preview.gif)](https://robodreamer.github.io/embodik/examples/bimanual_whole_body_ik/)
+
+**RB-Y1 bimanual whole-body IK**
+
+[![RB-Y1 bimanual whole-body IK preview](docs/assets/media/rby1_collision_free_ik_preview.gif)](https://robodreamer.github.io/embodik/examples/bimanual_whole_body_ik/)
 
 **Unitree G1 retargeting IK**
 
@@ -88,6 +92,7 @@ Most examples default to the Panda preset. Use `--robot <key>` when a script sup
 - C++ IK core with Nanobind Python bindings.
 - Hierarchical velocity IK tasks for frames, posture, CoM, and dual-arm coordination.
 - Joint-limit, self-collision, and CoM support-polygon constraints.
+- Solver diagnostics for timing, task scaling, and Jacobian condition-number logging.
 - Lie-group-aware configuration operations for floating-base, quaternion, and continuous joints.
 - Native Pinocchio-backed robot model utilities exposed through EmbodiK bindings.
 - Optional Viser visualization for interactive IK demos.

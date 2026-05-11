@@ -4,7 +4,7 @@
 Runs scripted target trajectories through the same solver configuration the
 interactive example uses and reports stall / infeasible / constraint-breach
 counts. Designed to be driven by ``autoresearch:fix`` so every fix in
-``robotis_ai_worker_ik.py`` has a numeric signal.
+``12_bimanual_whole_body_ik.py`` has a numeric signal.
 
 Usage::
 
@@ -30,11 +30,11 @@ if str(REPO_ROOT) not in sys.path:
 
 import embodik  # noqa: E402
 
-from examples.example_helpers.ai_worker_solver_fixture import (  # noqa: E402
-    build_worker_solver_fixture,
+from examples.example_helpers.common_bimanual_solver_fixture import (  # noqa: E402
+    build_common_bimanual_solver_fixture,
     compute_inner_polygon,
 )
-from examples.example_helpers.ai_worker_constraint_teleop_app import (  # noqa: E402
+from examples.example_helpers.common_bimanual_teleop_app import (  # noqa: E402
     EE_POSITION_DEADBAND,
     _polygon_slack,
 )
@@ -350,7 +350,7 @@ def run_scenario(
     fallback_status_names: tuple[str, ...],
     verbose: bool = False,
 ) -> ScenarioMetrics:
-    fx = build_worker_solver_fixture(
+    fx = build_common_bimanual_solver_fixture(
         variant,
         collision_enabled=enable_collision,
         collision_min_distance_m=collision_min_distance_m,

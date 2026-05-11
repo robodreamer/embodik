@@ -80,6 +80,7 @@ struct SolverResult {
       task_modes_effective; // Effective mode used per task
   std::vector<bool> task_used_fallback; // True when SCALE fell back to MIN_ERROR
   std::string status_message;      // Human-readable diagnostic for failures
+  double condition_number = 1.0;   // Worst-case Jacobian condition number
 };
 
 // Extended result for velocity-level solving

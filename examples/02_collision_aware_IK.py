@@ -283,6 +283,7 @@ class embodiKResult:
     collision_time_ms: float = 0.0
     collision_sphere_culled: int = 0
     collision_exact_queries: int = 0
+    condition_number: float = 1.0
 
 
 class embodiKBackend:
@@ -442,6 +443,11 @@ class embodiKBackend:
             collision_time_ms=float(getattr(result, "collision_constraint_time_ms", 0.0)),
             collision_sphere_culled=int(getattr(result, "collision_sphere_culled_pairs", 0)),
             collision_exact_queries=int(getattr(result, "collision_exact_distance_queries", 0)),
+            condition_number=(
+                float(result.condition_number)
+                if hasattr(result, "condition_number")
+                else 1.0
+            ),
         )
 
     def reset(self) -> pin.SE3:
@@ -605,6 +611,17 @@ def run_gui(cfg: RobotConfig, args: argparse.Namespace) -> None:
         status_handle = server.gui.add_text("Status", initial_value="Status: Ready")
         snap_target_button = server.gui.add_button("Snap Target to Current EE")
         reset_robot_button = server.gui.add_button("Reset Robot & Target")
+
+    with server.gui.add_folder("Solver Diagnostics", expand_by_default=False):
+        accel_limit_checkbox = server.gui.add_checkbox(
+            "Acceleration Limits", initial_value=False,
+        )
+        accel_limit_slider = server.gui.add_slider(
+            "Max Accel (rad/s^2)", min=1.0, max=50.0, initial_value=15.0, step=1.0,
+        )
+        conditioning_text = server.gui.add_text(
+            "IK Conditioning", initial_value="condition: --",
+        )
 
     joint_sliders: List[viser.GuiSliderHandle] = []
     with server.gui.add_folder("Joint Configuration", expand_by_default=False):
@@ -1052,6 +1069,20 @@ def run_gui(cfg: RobotConfig, args: argparse.Namespace) -> None:
             backend.set_collision_tuning_mode(collision_tuning_dropdown.value)
         status_handle.value = f"Status: Collision tuning set to {collision_tuning_dropdown.value}"
 
+    @accel_limit_checkbox.on_update
+    def _(_evt) -> None:
+        backend.solver.enable_acceleration_limits(accel_limit_checkbox.value)
+        if accel_limit_checkbox.value:
+            backend.solver.set_acceleration_limits(
+                np.full(backend.robot.nv, accel_limit_slider.value))
+        status_handle.value = f"Status: Accel limits {'ON' if accel_limit_checkbox.value else 'OFF'}"
+
+    @accel_limit_slider.on_update
+    def _(_evt) -> None:
+        if accel_limit_checkbox.value:
+            backend.solver.set_acceleration_limits(
+                np.full(backend.robot.nv, accel_limit_slider.value))
+
     @collision_debug_checkbox.on_update
     def _(_evt) -> None:
         update_collision_visuals()
@@ -1112,6 +1143,8 @@ def run_gui(cfg: RobotConfig, args: argparse.Namespace) -> None:
                 f"mode={result.primary_mode}, scale={result.primary_scale:.3f} | "
                 f"col={col_ms:.2f}ms{adt_suffix}"
             )
+
+            conditioning_text.value = f"condition: {result.condition_number:.1f}"
 
             for slider, value in zip(joint_sliders, q_current):
                 slider.value = float(value)

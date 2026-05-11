@@ -186,9 +186,7 @@ def test_solver_status_hint_helper():
     )
     assert "no feasible solution" in infeasible_msg
     assert "primary task scale collapsed to zero" in infeasible_msg
-    no_progress_msg = eik.get_solver_status_hint(
-        eik.SolverStatus.NO_PROGRESS, "stalled at limits"
-    )
+    no_progress_msg = eik.get_solver_status_hint(eik.SolverStatus.NO_PROGRESS, "stalled at limits")
     assert "progress stalled" in no_progress_msg
     assert "stalled at limits" in no_progress_msg
 
@@ -1070,9 +1068,7 @@ def _run_collision_boundary_jitter_rollout(
     )
     solver.clear_tasks()
 
-    frame_task = solver.add_frame_task(
-        "ee_boundary", "link1", eik.TaskType.FRAME_POSITION
-    )
+    frame_task = solver.add_frame_task("ee_boundary", "link1", eik.TaskType.FRAME_POSITION)
     frame_task.priority = 0
     frame_task.weight = 1.0
     frame_task.solve_mode = solve_mode
@@ -1350,6 +1346,25 @@ def test_activation_margin_auto_updates_with_min_distance(tmp_path):
     assert abs(solver.get_collision_constraint_activation_margin() - 0.1) < 1e-12
     assert solver.set_collision_min_distance(0.03)
     assert abs(solver.get_collision_constraint_activation_margin() - 0.15) < 1e-12
+
+
+def test_activation_margin_uses_nominal_min_distance_during_stall_recovery(tmp_path):
+    robot, solver = _setup_minimal_collision_solver(tmp_path)
+    if not hasattr(solver, "set_collision_constraint_activation_multiplier"):
+        pytest.skip("Activation multiplier API not available.")
+
+    solver.configure_collision_constraint(min_distance=0.04, max_constraints=1)
+    solver.set_collision_constraint_activation_multiplier(5.0)
+    solver.enable_stall_handler(0.04)
+
+    assert solver.get_collision_constraint_activation_margin() == pytest.approx(0.20)
+    assert solver.set_collision_min_distance(0.0)
+    assert solver.get_collision_min_distance() == pytest.approx(0.0)
+    assert solver.get_collision_constraint_activation_margin() == pytest.approx(0.20)
+
+    solver.disable_stall_handler()
+    assert solver.get_collision_min_distance() == pytest.approx(0.04)
+    assert solver.get_collision_constraint_activation_margin() == pytest.approx(0.20)
 
 
 def test_activation_margin_boundary_exact(tmp_path):

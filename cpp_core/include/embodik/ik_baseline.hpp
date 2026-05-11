@@ -63,42 +63,69 @@ namespace linalg {
 
 inline Eigen::MatrixXd ComputeRegularizedInverse(
     const embodik::RegularizedInverseConfig &regularization_config,
-    const Eigen::MatrixXd &input_matrix) {
+    const Eigen::MatrixXd &input_matrix,
+    double *condition_number_out = nullptr) {
   using MatrixDouble = Eigen::MatrixXd;
   using SquareMatrix = Eigen::MatrixXd; // square matrix for gram computation
 
   SquareMatrix gram_matrix = input_matrix * input_matrix.transpose();
 
-  const double threshold_squared = std::pow(regularization_config.epsilon, 2.0);
-  const double det_value = gram_matrix.determinant();
+  // Singular value decomposition is already needed for the SRINV damping law;
+  // reuse it to report condition-number diagnostics to callers.
+  const Eigen::BDCSVD<MatrixDouble> svd_decomp(input_matrix,
+                                               Eigen::ComputeFullU);
+  const auto &sigma_values = svd_decomp.singularValues();
+  const auto &left_singular_vectors = svd_decomp.matrixU();
 
-  const double regularization =
+  // Compute condition number and report to caller
+  double condition_number = 1.0;
+  if (sigma_values.size() > 0) {
+    const double sigma_max = sigma_values(0);
+    const double sigma_min = sigma_values(sigma_values.size() - 1);
+    condition_number = (sigma_min > regularization_config.epsilon * 1e-4)
+                           ? sigma_max / sigma_min
+                           : std::numeric_limits<double>::infinity();
+  }
+  if (condition_number_out) {
+    *condition_number_out = condition_number;
+  }
+
+  // Two-layer singularity-robust damping:
+  //
+  // Layer 1: Global regularization based on gram matrix condition.
+  // Provides a safety floor when the matrix is poorly conditioned even
+  // if no individual singular value is below epsilon (e.g., many moderate
+  // SVs whose product is tiny). Uses the same determinant-based formula
+  // as the original but provides numerical stability.
+  const double threshold_squared =
+      std::pow(regularization_config.epsilon, 2.0);
+  const double det_value = gram_matrix.determinant();
+  const double global_regularization =
       (det_value < threshold_squared)
           ? (1.0 - std::pow(det_value / threshold_squared, 2.0)) *
                 threshold_squared
           : 0.0;
 
   SquareMatrix regularized_gram = gram_matrix;
-  regularized_gram.diagonal().array() += regularization;
+  regularized_gram.diagonal().array() += global_regularization;
 
-  // Singular value decomposition for damping computation
-  const Eigen::BDCSVD<MatrixDouble> svd_decomp(input_matrix,
-                                               Eigen::ComputeFullU);
-  const auto &sigma_values = svd_decomp.singularValues();
-  const auto &left_singular_vectors = svd_decomp.matrixU();
-
+  // Layer 2: Per-singular-value damping with smooth quadratic ramp from full
+  // damping (at sigma=0) to zero (at sigma>=epsilon).
   if (sigma_values.size() > 0) {
-    Eigen::Array<bool, Eigen::Dynamic, 1> small_values =
-        sigma_values.array() < regularization_config.epsilon;
-    if (small_values.any()) {
+    const double eps = regularization_config.epsilon;
+    const double lambda_max = regularization_config.regularization_factor;
+
+    // Continuous quadratic ramp: lambda(sigma) = lambda_max * (1 - (sigma/eps)^2)
+    // for sigma < eps, 0 otherwise. This is C1-continuous at sigma=eps.
+    Eigen::ArrayXd per_sv_damping =
+        lambda_max *
+        (1.0 - (sigma_values.array() / eps).min(1.0).square());
+    per_sv_damping = per_sv_damping.max(0.0);
+
+    if ((per_sv_damping > 0.0).any()) {
       regularized_gram.noalias() +=
           left_singular_vectors *
-          (((regularization_config.regularization_factor *
-             (1.0 - (sigma_values.array() / regularization_config.epsilon)
-                        .square())) *
-            small_values.cast<double>())
-               .matrix()
-               .asDiagonal()) *
+          per_sv_damping.matrix().asDiagonal() *
           left_singular_vectors.transpose();
     }
   }
@@ -144,9 +171,7 @@ inline SolverResult computeMultiObjectiveVelocitySolutionEigen(
     const Eigen::VectorXd &min_bounds, const Eigen::VectorXd &max_bounds,
     const VelocitySolverConfig &solver_config,
     const std::vector<ObjectiveSolveConfig> &objective_configs = {},
-    const Eigen::VectorXd *max_constraint_softening_factors = nullptr,
-    const Eigen::MatrixXd *warm_start_selector = nullptr,
-    Eigen::MatrixXd *final_selector_out = nullptr);
+    const Eigen::VectorXd *max_constraint_softening_factors = nullptr);
 
 inline double
 calculateConfigurationDistance(const std::vector<double> &position_a,
@@ -273,7 +298,7 @@ inline SolverResult computeMultiObjectiveVelocitySolution(
   // Delegate to Eigen-based implementation
   return computeMultiObjectiveVelocitySolutionEigen(
       eigen_objectives, eigen_jacobians, eigen_constraints, eigen_min_bounds,
-      eigen_max_bounds, solver_config, {}, nullptr, nullptr, nullptr);
+      eigen_max_bounds, solver_config, {}, nullptr);
 }
 
 // Eigen-based hierarchical velocity solver implementation
@@ -288,9 +313,7 @@ inline SolverResult computeMultiObjectiveVelocitySolutionEigen(
     const Eigen::VectorXd &max_bounds, // (n+k) upper bounds
     const VelocitySolverConfig &solver_config,
     const std::vector<ObjectiveSolveConfig> &objective_configs,
-    const Eigen::VectorXd *max_constraint_softening_factors,
-    const Eigen::MatrixXd *warm_start_selector,
-    Eigen::MatrixXd *final_selector_out) {
+    const Eigen::VectorXd *max_constraint_softening_factors) {
   auto t0 = std::chrono::high_resolution_clock::now();
   auto get_elapsed_ms = [&t0]() {
     return std::chrono::duration_cast<std::chrono::microseconds>(
@@ -326,9 +349,7 @@ inline SolverResult computeMultiObjectiveVelocitySolutionEigen(
   const auto additional_constraints =
       constraint_coefficients.rows() - degrees_of_freedom;
   const auto total_constraints = constraint_coefficients.rows();
-  const bool enhanced_mode =
-      (max_constraint_softening_factors != nullptr) ||
-      (warm_start_selector != nullptr);
+  const bool enhanced_mode = max_constraint_softening_factors != nullptr;
   const auto num_objectives = objective_jacobians.size();
   Eigen::VectorXd softening_factors = Eigen::VectorXd::Ones(total_constraints);
   if (enhanced_mode && max_constraint_softening_factors != nullptr) {
@@ -360,6 +381,9 @@ inline SolverResult computeMultiObjectiveVelocitySolutionEigen(
     }
   }
 
+  // Track worst-case condition number across all tasks.
+  double worst_condition_number = 1.0;
+
   // Fast path for the common interactive case: one combined objective whose
   // unconstrained damped least-squares velocity already satisfies all rows.
   // This avoids the active-set SNS machinery without changing constrained
@@ -369,10 +393,14 @@ inline SolverResult computeMultiObjectiveVelocitySolutionEigen(
         objective_configs.empty() ? ObjectiveSolveConfig{} : objective_configs[0];
     const auto &current_jacobian = objective_jacobians[0];
     const auto &current_target = objective_targets[0];
+    double direct_condition_number = 1.0;
     Eigen::VectorXd direct_velocity =
         linalg::ComputeRegularizedInverse(solver_config.regularization_config,
-                                          current_jacobian) *
+                                          current_jacobian,
+                                          &direct_condition_number) *
         current_target;
+    worst_condition_number =
+        std::max(worst_condition_number, direct_condition_number);
     if (direct_velocity.size() == degrees_of_freedom &&
         direct_velocity.allFinite()) {
       const Eigen::VectorXd direct_constraint_eval =
@@ -412,7 +440,8 @@ inline SolverResult computeMultiObjectiveVelocitySolutionEigen(
             std::move(objective_errors),
             std::move(objective_effective_modes),
             std::move(objective_used_fallback),
-            ""};
+            "",
+            worst_condition_number};
       }
     }
   }
@@ -427,23 +456,6 @@ inline SolverResult computeMultiObjectiveVelocitySolutionEigen(
       Eigen::VectorXd::Zero(total_constraints);
   Eigen::MatrixXd saturated_constraint_matrix = Eigen::MatrixXd::Zero(
       total_constraints, degrees_of_freedom);
-  if (enhanced_mode && warm_start_selector != nullptr &&
-      warm_start_selector->rows() == total_constraints &&
-      warm_start_selector->cols() == total_constraints) {
-    const Eigen::VectorXd warm_diag = warm_start_selector->diagonal();
-    for (Eigen::Index i = 0; i < warm_diag.size(); ++i) {
-      const double v = warm_diag(i);
-      if (!std::isfinite(v)) {
-        return fail(SolverStatus::kInvalidInput,
-                    "warm-start selector contains non-finite values");
-      }
-      saturated_constraint_selector(i, i) = (v > 0.5) ? 1.0 : 0.0;
-    }
-    saturated_constraint_matrix.noalias() =
-        saturated_constraint_selector * constraint_coefficients;
-    const Eigen::VectorXd seed_eval = constraint_coefficients * velocity_solution;
-    saturated_values = seed_eval.cwiseMax(min_bounds).cwiseMin(max_bounds);
-  }
 
   // Pre-allocate working memory for optimization loop
   Eigen::VectorXd previous_velocity(degrees_of_freedom);
@@ -513,10 +525,14 @@ inline SolverResult computeMultiObjectiveVelocitySolutionEigen(
     }
 
     // Pre-compute transformation matrices for efficiency
+    double task_condition_number = 1.0;
     Eigen::MatrixXd damped_inverse_projected_jacobian =
         linalg::ComputeRegularizedInverse(solver_config.regularization_config,
                                           current_jacobian *
-                                              constrained_projector);
+                                              constrained_projector,
+                                          &task_condition_number);
+    worst_condition_number =
+        std::max(worst_condition_number, task_condition_number);
     Eigen::MatrixXd jacobian_velocity_product =
         current_jacobian * previous_velocity;
     Eigen::MatrixXd saturated_constraints_on_previous_space(
@@ -833,6 +849,7 @@ inline SolverResult computeMultiObjectiveVelocitySolutionEigen(
               const Eigen::VectorXd target_term_final =
                   objective_is_min_error ? current_target
                                          : (velocity_scale * current_target);
+              double cond_tmp = 1.0;
               auto adaptive_regularization = solver_config.regularization_config;
               if (!objective_is_min_error && target_dimension > 0 &&
                   effective_rank > 0 && effective_rank < target_dimension) {
@@ -845,11 +862,14 @@ inline SolverResult computeMultiObjectiveVelocitySolutionEigen(
                   previous_velocity +
                   linalg::ComputeRegularizedInverse(
                       adaptive_regularization,
-                      current_jacobian * constrained_projector) *
+                      current_jacobian * constrained_projector,
+                      &cond_tmp) *
                       (target_term_final - jacobian_velocity_product) +
                   augmented_projector *
                       (saturated_values -
                        saturated_constraint_matrix * previous_velocity);
+              worst_condition_number =
+                  std::max(worst_condition_number, cond_tmp);
             }
             constraints_violated = false;
           }
@@ -920,9 +940,14 @@ inline SolverResult computeMultiObjectiveVelocitySolutionEigen(
       }
 
       // Refresh cached computations for next iteration
-      damped_inverse_projected_jacobian = linalg::ComputeRegularizedInverse(
-          solver_config.regularization_config,
-          current_jacobian * constrained_projector);
+      {
+        double cond_tmp = 1.0;
+        damped_inverse_projected_jacobian = linalg::ComputeRegularizedInverse(
+            solver_config.regularization_config,
+            current_jacobian * constrained_projector, &cond_tmp);
+        worst_condition_number =
+            std::max(worst_condition_number, cond_tmp);
+      }
       saturated_constraints_on_previous_space.noalias() =
           saturated_constraint_matrix * previous_null_space;
       saturated_constraints_velocity.noalias() =
@@ -983,10 +1008,6 @@ inline SolverResult computeMultiObjectiveVelocitySolutionEigen(
           .count() /
       1000.0;
 
-  if (final_selector_out != nullptr) {
-    *final_selector_out = saturated_constraint_selector;
-  }
-
   return SolverResult{
       std::move(final_velocities),
       solver_status,
@@ -1004,8 +1025,8 @@ inline SolverResult computeMultiObjectiveVelocitySolutionEigen(
                  ? "numerical constraint violation beyond epsilon after solve"
                  : (solver_status == SolverStatus::kNonFiniteInput
                         ? "non-finite values detected in solver state"
-                        : "solver failed with input/status error"))
-  };
+                        : "solver failed with input/status error")),
+      worst_condition_number};
 }
 
 // No additional aliases defined

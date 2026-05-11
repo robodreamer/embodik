@@ -1712,9 +1712,14 @@ bool KinematicsSolver::set_collision_min_distance(double min_distance) {
   }
   collision_constraint_->min_distance = std::max(0.0, min_distance);
   if (collision_constraint_->constraint_activation_multiplier > 0.0) {
+    const double activation_distance =
+        stall_config_.enabled
+            ? std::max(collision_constraint_->min_distance,
+                       stall_state_.nominal_min_distance)
+            : collision_constraint_->min_distance;
     collision_constraint_->constraint_activation_margin =
         collision_constraint_->constraint_activation_multiplier *
-        collision_constraint_->min_distance;
+        activation_distance;
   } else {
     collision_constraint_->constraint_activation_margin = 0.0;
   }
@@ -1744,8 +1749,12 @@ void KinematicsSolver::set_collision_constraint_activation_multiplier(
   auto &config = *collision_constraint_;
   config.constraint_activation_multiplier = std::max(0.0, multiplier);
   if (config.constraint_activation_multiplier > 0.0) {
+    const double activation_distance =
+        stall_config_.enabled
+            ? std::max(config.min_distance, stall_state_.nominal_min_distance)
+            : std::max(0.0, config.min_distance);
     config.constraint_activation_margin =
-        config.constraint_activation_multiplier * std::max(0.0, config.min_distance);
+        config.constraint_activation_multiplier * activation_distance;
   } else {
     config.constraint_activation_margin = 0.0;
   }
@@ -1994,12 +2003,26 @@ void KinematicsSolver::enable_stall_handler(double nominal_min_distance) {
         kStallDistanceTolerance) {
       stall_state_.nominal_min_distance = nom;
     }
+    if (collision_constraint_.has_value() &&
+        collision_constraint_->constraint_activation_multiplier > 0.0) {
+      collision_constraint_->constraint_activation_margin =
+          collision_constraint_->constraint_activation_multiplier *
+          std::max(collision_constraint_->min_distance,
+                   stall_state_.nominal_min_distance);
+    }
     return;
   }
   stall_config_.enabled = true;
   stall_state_.nominal_min_distance = nom;
   stall_state_.current_min_distance = nom;
   stall_state_.consecutive_stall_steps = 0;
+  if (collision_constraint_.has_value() &&
+      collision_constraint_->constraint_activation_multiplier > 0.0) {
+    collision_constraint_->constraint_activation_margin =
+        collision_constraint_->constraint_activation_multiplier *
+        std::max(collision_constraint_->min_distance,
+                 stall_state_.nominal_min_distance);
+  }
 }
 
 void KinematicsSolver::disable_stall_handler() {
@@ -2582,7 +2605,6 @@ KinematicsSolver::compute_com_constraint() {
   // Constraint Jacobian: all half-planes (#hp x nv)
   const Eigen::MatrixXd J_all = A_world * J_com.topRows(2);
 
-  const int n_hp = static_cast<int>(slack.size());
   const double vel_max = cfg.com_vel_max;
   const double acc_max = cfg.com_acc_max;
   const double prox = cfg.proximity_threshold;
@@ -4539,6 +4561,25 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
     result.constraint_setup_time_ms = get_elapsed_ms(*t_constraint_start);
   }
 
+  // Acceleration-level constraint cascading: tighten the first nv rows
+  // of c_lower/c_upper (the velocity limit block) based on previous tick's
+  // velocity and the configured acceleration limits.
+  // A deadband of 1% of the acceleration step prevents oscillation when
+  // the velocity is small and the acceleration limit is tight.
+  if (acceleration_limits_enabled_ &&
+      previous_dq_.size() == robot_->nv() &&
+      acceleration_limits_.size() == robot_->nv()) {
+    const int nv = robot_->nv();
+    for (int i = 0; i < nv; ++i) {
+      const double accel_step = acceleration_limits_[i] * dt_;
+      const double deadband = accel_step * 0.01;
+      double a_lb = previous_dq_[i] - accel_step - deadband;
+      double a_ub = previous_dq_[i] + accel_step + deadband;
+      c_lower[i] = std::max(c_lower[i], a_lb);
+      c_upper[i] = std::min(c_upper[i], a_ub);
+    }
+  }
+
   sanitize_solver_inputs(goals, jacobians, C, c_lower, c_upper);
   const bool has_soft_rows = max_softening_factors.maxCoeff() > 1.0;
   if (has_soft_rows) {
@@ -4573,12 +4614,11 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
   config.regularization_config.epsilon = solver_tolerance_;
   config.regularization_config.regularization_factor = damping_;
 
-  // Main's backend owns its selector/fallback state internally; keep the
-  // caller-side cache disabled when using the newer API surface.
   warm_start_selector_cache_.reset();
   warm_start_constraint_rows_ = -1;
   auto backend_result = computeMultiObjectiveVelocitySolutionEigen(
-      goals, jacobians, C, c_lower, c_upper, config, objective_configs);
+      goals, jacobians, C, c_lower, c_upper, config, objective_configs,
+      has_soft_rows ? &max_softening_factors : nullptr);
   if (backend_result.status == SolverStatus::kNonFiniteInput) {
     // Robust fallback: keep control loop stable by returning a zero-velocity
     // step instead of propagating a hard non-finite status.
@@ -4627,6 +4667,7 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
   result.task_used_fallback = backend_result.task_used_fallback;
   result.status_message = classified_velocity.status_message;
   result.limits_applied = apply_limits;
+  result.condition_number = backend_result.condition_number;
 
   for (size_t i = 0; i < objective_tasks.size() &&
                      i < result.task_modes_effective.size() &&
@@ -4665,6 +4706,11 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
     result.joint_velocities = Eigen::Map<const Eigen::VectorXd>(
         result.solution.data(), result.solution.size());
     last_solution_dq_norm_ = result.joint_velocities.norm();
+
+    // Cache velocity for next tick's acceleration constraint cascade
+    if (acceleration_limits_enabled_) {
+      previous_dq_ = result.joint_velocities;
+    }
 
     // Identify saturated joints based on constraint bounds
     if (apply_limits && c_lower.size() >= robot_->nv()) {

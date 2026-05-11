@@ -8,7 +8,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "embodik"
-version = "0.20.5"
+version = "0.20.6"
 description = "High-performance inverse kinematics solver optimized for cross-embodiment VLA/AI applications"
 authors = [{ name = "Andy Park", email = "andypark.purdue@gmail.com" }]
 readme = "README.md"
@@ -80,6 +80,20 @@ Documentation = "https://robodreamer.github.io/embodik/"
 [tool.scikit-build]
 # Specify the CMake source directory
 build-dir = "build"
+
+[tool.scikit-build.sdist]
+# Keep source distributions focused on build/runtime inputs. Documentation,
+# preview media, tests, and maintainer context are published from the repository/docs
+# site instead of being bundled into every PyPI source upload.
+exclude = [
+    ".github/**",
+    "examples/**",
+    "docs/**",
+    "notes/**",
+    "site/**",
+    "test/**",
+    "pixi.lock",
+]
 
 [tool.scikit-build.cmake]
 source-dir = "."

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""ROBOTIS AI worker dual-arm IK demo using local FFW URDF assets.
+"""Common bimanual whole-body IK teleop app.
 
-This example targets the locally available FFW SG2/BG2 URDFs and mirrors the
-interactive dual-tool workflow used in the G1 notebooks, adapted to an
-embodiK + Viser loop.
+This module is shared by the public ROBOTIS AI Worker assets and the RB-Y1
+entrypoint. Model-specific scripts resolve URDFs and then delegate here for the
+common Viser UI, solver setup, collision/CoM controls, and runtime loop.
 """
 
 from __future__ import annotations
@@ -25,7 +25,6 @@ from embodik.interactive_ik import (
     clear_all_target_velocities_if_available,
     clip_configuration,
     configure_primary_solve_mode,
-    joint_velocity_norm,
     robust_solve_position_step,
 )
 from embodik.utils import q2r, r2q
@@ -35,17 +34,17 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 try:
-    from example_helpers.ai_worker_model_utils import (
-        default_ai_worker_ik_joint_names,
-        resolve_ai_worker_frames,
+    from example_helpers.common_bimanual_model_utils import (
+        default_common_bimanual_ik_joint_names,
+        resolve_common_bimanual_frames,
     )
     from example_helpers.visualization_helpers import make_visual_config_mapper
 except ModuleNotFoundError as exc:
     if exc.name != "example_helpers" and not str(exc.name).startswith("example_helpers."):
         raise
-    from examples.example_helpers.ai_worker_model_utils import (
-        default_ai_worker_ik_joint_names,
-        resolve_ai_worker_frames,
+    from examples.example_helpers.common_bimanual_model_utils import (
+        default_common_bimanual_ik_joint_names,
+        resolve_common_bimanual_frames,
     )
     from examples.example_helpers.visualization_helpers import make_visual_config_mapper
 
@@ -61,7 +60,14 @@ EE_POSITION_DEADBAND = 1e-4
 EE_ROTATION_DEADBAND = 1e-3
 LIFT_LIMIT_MARGIN = 1e-3
 DEFAULT_MAX_COLLISION_CONSTRAINTS = 3
-WORKER_SUPPORT_CONTACT_FRAMES = (
+COLLISION_STATE_REFRESH_COOLDOWN_FRAMES = 12
+TARGET_INTERACTION_IDLE_SECONDS = 0.35
+COLLISION_TARGET_HOLD_SECONDS = 0.35
+COLLISION_LAST_SAFE_MARGIN_M = 2e-3
+DEFAULT_JOINT_ACCEL_LIMIT = 15.0
+ROBUST_FALLBACK_STATUS_NAMES = ("INVALID_INPUT", "INFEASIBLE", "NUMERICAL_ERROR", "NO_PROGRESS")
+ROBUST_HOLD_STATUS_NAMES = ("NON_FINITE_INPUT",)
+COMMON_BIMANUAL_SUPPORT_CONTACT_FRAMES = (
     "left_wheel_drive_link",
     "right_wheel_drive_link",
     "rear_wheel_drive_link",
@@ -73,7 +79,7 @@ COLOR_CONTACT_POINT = (0.98, 0.90, 0.18)
 COLOR_COM_INSIDE = (0.12, 0.78, 0.32)
 COLOR_COM_NEAR = (1.00, 0.68, 0.10)
 COLOR_COM_OUTSIDE = (0.92, 0.20, 0.24)
-DEFAULT_WORKER_SEED = {
+DEFAULT_COMMON_BIMANUAL_SEED = {
     "lift_joint": -0.1,
     "head_joint1": 0.0,
     "head_joint2": 0.0,
@@ -92,6 +98,37 @@ DEFAULT_WORKER_SEED = {
     "arm_r_joint6": -0.15,
     "arm_r_joint7": 0.0,
 }
+DEFAULT_RBY1_SEED = {
+    "torso_0": 0.0,
+    "torso_1": 0.5236,
+    "torso_2": -1.0472,
+    "torso_3": 0.5236,
+    "torso_4": 0.0,
+    "torso_5": 0.0,
+    "left_arm_0": -0.7854,
+    "left_arm_1": 0.5236,
+    "left_arm_2": 0.0,
+    "left_arm_3": -1.5708,
+    "left_arm_4": 0.0,
+    "left_arm_5": 0.7854,
+    "left_arm_6": 0.0,
+    "right_arm_0": -0.7854,
+    "right_arm_1": -0.5236,
+    "right_arm_2": 0.0,
+    "right_arm_3": -1.5708,
+    "right_arm_4": 0.0,
+    "right_arm_5": 0.7854,
+    "right_arm_6": 0.0,
+}
+POSTURE_JOINT_CANDIDATES = (
+    "lift_joint",
+    "torso_0",
+    "torso_1",
+    "torso_2",
+    "torso_3",
+    "torso_4",
+    "torso_5",
+)
 
 
 def resolve_ffw_urdf_path(_variant: str) -> Path:
@@ -109,6 +146,65 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--variant", choices=("sg2", "bg2"), default="sg2")
     parser.add_argument("--port", type=int, default=8092)
     return parser.parse_args()
+
+
+def _is_left_arm_joint(joint_name: str) -> bool:
+    return joint_name.startswith(("arm_l_", "gripper_l_", "left_arm_", "gripper_finger_l"))
+
+
+def _is_right_arm_joint(joint_name: str) -> bool:
+    return joint_name.startswith(("arm_r_", "gripper_r_", "right_arm_", "gripper_finger_r"))
+
+
+def _is_arm_joint(joint_name: str) -> bool:
+    return _is_left_arm_joint(joint_name) or _is_right_arm_joint(joint_name)
+
+
+def _posture_control_joint_names(joint_names: list[str]) -> list[str]:
+    available = set(joint_names)
+    return [name for name in POSTURE_JOINT_CANDIDATES if name in available]
+
+
+def _joint_label(joint_name: str) -> str:
+    if joint_name == "lift_joint":
+        return "Lift Joint"
+    if joint_name.startswith("torso_"):
+        return f"Torso {joint_name.rsplit('_', 1)[-1]}"
+    return joint_name.replace("_", " ").title()
+
+
+def _default_seed_for_joint_names(joint_names: list[str]) -> dict[str, float]:
+    names = set(joint_names)
+    if {"torso_0", "left_arm_0", "right_arm_0"}.issubset(names):
+        return DEFAULT_RBY1_SEED
+    return DEFAULT_COMMON_BIMANUAL_SEED
+
+
+def _default_collision_min_distance_mm(variant: str) -> float:
+    """Return default clearance for the active robot collision geometry."""
+    if str(variant).lower() == "rby1":
+        return 20.0
+    return 35.0
+
+
+def _default_collision_max_constraints(variant: str) -> int:
+    """Return a bounded active-row count for the active robot collision geometry."""
+    if str(variant).lower() == "rby1":
+        return 8
+    return DEFAULT_MAX_COLLISION_CONSTRAINTS
+
+
+def _collision_boundary_slack_m(solver, min_distance_m: float) -> float:
+    """Use the active collision-row band when classifying constrained stalls."""
+    fallback = max(5e-3, float(min_distance_m))
+    if hasattr(solver, "get_collision_constraint_activation_margin"):
+        try:
+            margin = float(solver.get_collision_constraint_activation_margin())
+            if np.isfinite(margin) and margin > 0.0:
+                return max(5e-3, margin)
+        except Exception:
+            pass
+    return fallback
 
 
 def _pose_from_ctrl(ctrl) -> np.ndarray:
@@ -169,7 +265,9 @@ def _polygon_edge_pts(poly_xy: np.ndarray, z: float) -> np.ndarray:
     if poly.shape[0] < 2:
         return np.zeros((0, 2, 3), dtype=float)
     pts3 = np.column_stack([poly, np.full(poly.shape[0], float(z))])
-    return np.array([[pts3[i], pts3[(i + 1) % pts3.shape[0]]] for i in range(pts3.shape[0])], dtype=float)
+    return np.array(
+        [[pts3[i], pts3[(i + 1) % pts3.shape[0]]] for i in range(pts3.shape[0])], dtype=float
+    )
 
 
 def _shrink_polygon_2d(poly: np.ndarray, margin_frac: float) -> np.ndarray:
@@ -205,7 +303,16 @@ def _polygon_slack(poly_xy: np.ndarray, point_xy: np.ndarray) -> np.ndarray:
     return slacks
 
 
-def _com_color(min_slack: float, near_boundary_threshold: float = 0.02) -> tuple[float, float, float]:
+def _contains_point_in_polygon(
+    poly_xy: np.ndarray, point_xy: np.ndarray, tolerance: float = 1e-6
+) -> bool:
+    slacks = _polygon_slack(poly_xy, point_xy)
+    return bool(slacks.size and float(slacks.min()) >= -float(tolerance))
+
+
+def _com_color(
+    min_slack: float, near_boundary_threshold: float = 0.02
+) -> tuple[float, float, float]:
     if min_slack < 0.0:
         return COLOR_COM_OUTSIDE
     if min_slack < float(near_boundary_threshold):
@@ -267,102 +374,6 @@ def _apply_soft_lift_margin(
         eff_hi = hi
     q_out[lift_idx] = float(np.clip(q_out[lift_idx], eff_lo, eff_hi))
     return q_out
-
-
-def _attempt_deep_penetration_escape_burst(
-    *,
-    robot,
-    solver,
-    q_current: np.ndarray,
-    targets: list[object],
-    options,
-    q_lo: np.ndarray,
-    q_hi: np.ndarray,
-    zero_velocity_indices: list[int],
-    min_distance_m: float,
-    max_constraints: int,
-    tuning_mode: str,
-    include_pairs: list[tuple[str, str]],
-    exclude_pairs: list[tuple[str, str]],
-    trial_steps: int = 3,
-    improvement_epsilon: float = 1e-4,
-) -> np.ndarray | None:
-    """Try a short unconstrained pull-away burst when inside collision clearance.
-
-    The worker can enter a deadlocked state when the current configuration is
-    already in contact or inside the configured clearance shell and the
-    collision-constrained solve returns zero-motion ``INFEASIBLE`` repeatedly.
-    In that case, briefly dropping the collision constraint can let the
-    commanded pull-away motion unwind the configuration. Only accept the burst
-    if the full collision debug distance improves.
-    """
-    if not hasattr(solver, "evaluate_collision_debug") or not hasattr(solver, "clear_collision_constraint"):
-        return None
-
-    try:
-        dbg_before = solver.evaluate_collision_debug(np.asarray(q_current, dtype=float))
-    except Exception:
-        return None
-    if dbg_before is None or not np.isfinite(dbg_before.distance):
-        return None
-
-    before_distance = float(dbg_before.distance)
-    if before_distance >= float(min_distance_m):
-        return None
-
-    q_seed = np.asarray(q_current, dtype=float).copy()
-    q_trial = q_seed.copy()
-    had_stall_recovery = bool(getattr(options, "stall_recovery", False))
-
-    try:
-        solver.clear_collision_constraint()
-    except Exception:
-        return None
-    if hasattr(solver, "disable_stall_handler"):
-        try:
-            solver.disable_stall_handler()
-        except Exception:
-            pass
-
-    if hasattr(options, "stall_recovery"):
-        options.stall_recovery = False
-
-    try:
-        for _ in range(max(int(trial_steps), 1)):
-            step = robust_solve_position_step(
-                robot=robot,
-                solver=solver,
-                q_current=q_trial,
-                targets=targets,
-                options=options,
-                q_lo=q_lo,
-                q_hi=q_hi,
-                zero_velocity_indices=zero_velocity_indices,
-                fallback_status_names=("INVALID_INPUT", "NUMERICAL_ERROR"),
-            )
-            q_trial = np.asarray(step.q_next, dtype=float).copy()
-            robot.update_configuration(q_trial)
-
-        dbg_after = solver.evaluate_collision_debug(q_trial)
-        if dbg_after is None or not np.isfinite(dbg_after.distance):
-            return None
-        after_distance = float(dbg_after.distance)
-        if after_distance > before_distance + float(improvement_epsilon):
-            return q_trial
-        return None
-    finally:
-        if hasattr(options, "stall_recovery"):
-            options.stall_recovery = had_stall_recovery
-        _configure_collision_constraint(
-            solver,
-            enabled=True,
-            min_distance_m=min_distance_m,
-            max_constraints=max_constraints,
-            tuning_mode=tuning_mode,
-            include_pairs=include_pairs,
-            exclude_pairs=exclude_pairs,
-        )
-        robot.update_configuration(q_seed)
 
 
 def _prepare_viewer_urdf_path(
@@ -480,6 +491,14 @@ def _prepare_viewer_urdf_path(
     return Path(tmp.name)
 
 
+def _urdf_has_collision_geometry(urdf_path: Path) -> bool:
+    try:
+        root = ET.parse(urdf_path).getroot()
+    except Exception:
+        return False
+    return root.find(".//collision/geometry") is not None
+
+
 def _build_link_adjacency_graph(urdf_path: Path) -> dict[str, set[str]]:
     tree = ET.parse(urdf_path)
     root = tree.getroot()
@@ -532,19 +551,45 @@ def _shortest_link_distance(
     return None
 
 
-def _worker_collision_group(name: str) -> str:
+def _common_bimanual_collision_group(name: str) -> str:
     lower = str(name).lower()
+    if lower in {"base", "wheel_l", "wheel_r"}:
+        return "core"
+    if lower.startswith("link_torso_"):
+        return "core"
+    if lower.startswith("link_head_"):
+        return "head"
+    if (
+        lower.startswith("link_left_arm_")
+        or lower in {"ft_sensor_l", "ee_left", "ee_left_tip"}
+        or lower.startswith("ee_finger_l")
+    ):
+        return "left"
+    if (
+        lower.startswith("link_right_arm_")
+        or lower in {"ft_sensor_r", "ee_right", "ee_right_tip"}
+        or lower.startswith("ee_finger_r")
+    ):
+        return "right"
     if lower.startswith("head_") or lower.startswith("camera_"):
         return "head"
-    if "_l_" in lower or lower.startswith("arm_l_") or lower.startswith("gripper_l_") or "camera_l_" in lower:
+    if (
+        "_l_" in lower
+        or lower.startswith(("arm_l_", "gripper_l_", "left_arm_", "gripper_finger_l"))
+        or "camera_l_" in lower
+    ):
         return "left"
-    if "_r_" in lower or lower.startswith("arm_r_") or lower.startswith("gripper_r_") or "camera_r_" in lower:
+    if (
+        "_r_" in lower
+        or lower.startswith(("arm_r_", "gripper_r_", "right_arm_", "gripper_finger_r"))
+        or "camera_r_" in lower
+    ):
         return "right"
     return "core"
 
 
-def _worker_manual_curated_link_pairs() -> list[tuple[str, str]]:
-    """Explicit worker collision whitelist tuned for teleop responsiveness.
+def _common_bimanual_manual_curated_link_pairs() -> list[tuple[str, str]]:
+    """Explicit bimanual collision whitelist tuned for teleop responsiveness.
 
     This replaces the broader heuristic filter with a smaller, intentional set:
     - torso core vs proximal/mid arm links plus gripper base / fingertips
@@ -594,12 +639,66 @@ def _worker_manual_curated_link_pairs() -> list[tuple[str, str]]:
     for left in left_cross:
         for right in right_cross:
             pairs.add(tuple(sorted((left, right))))
+
+    rby1_left_distal = (
+        "link_left_arm_3",
+        "link_left_arm_4",
+        "link_left_arm_5",
+        "link_left_arm_6",
+        "FT_sensor_L",
+        "ee_left",
+        "ee_finger_l1",
+        "ee_finger_l2",
+    )
+    rby1_right_distal = (
+        "link_right_arm_3",
+        "link_right_arm_4",
+        "link_right_arm_5",
+        "link_right_arm_6",
+        "FT_sensor_R",
+        "ee_right",
+        "ee_finger_r1",
+        "ee_finger_r2",
+    )
+    rby1_torso_guard = ("link_torso_4", "link_torso_5")
+    rby1_left_torso = (
+        "link_left_arm_1",
+        "link_left_arm_2",
+        "link_left_arm_3",
+        "link_left_arm_4",
+        "link_left_arm_5",
+        "link_left_arm_6",
+        "FT_sensor_L",
+        "ee_left",
+        "ee_finger_l1",
+        "ee_finger_l2",
+    )
+    rby1_right_torso = (
+        "link_right_arm_1",
+        "link_right_arm_2",
+        "link_right_arm_3",
+        "link_right_arm_4",
+        "link_right_arm_5",
+        "link_right_arm_6",
+        "FT_sensor_R",
+        "ee_right",
+        "ee_finger_r1",
+        "ee_finger_r2",
+    )
+    for left in rby1_left_distal:
+        for right in rby1_right_distal:
+            pairs.add(tuple(sorted((left, right))))
+    for torso in rby1_torso_guard:
+        for link in rby1_left_torso + rby1_right_torso:
+            pairs.add(tuple(sorted((torso, link))))
     return sorted(pairs)
 
 
 def _generate_consecutive_collision_exclusions(robot, urdf_path: Path) -> list[tuple[str, str]]:
     """Exclude structurally adjacent link pairs using the URDF link graph."""
-    if not hasattr(robot, "get_collision_pair_names") or not hasattr(robot, "get_collision_geometries"):
+    if not hasattr(robot, "get_collision_pair_names") or not hasattr(
+        robot, "get_collision_geometries"
+    ):
         return []
     try:
         pair_names = list(robot.get_collision_pair_names())
@@ -627,8 +726,8 @@ def _generate_consecutive_collision_exclusions(robot, urdf_path: Path) -> list[t
         distance = None
         max_allowed_distance = 1
         if link_a and link_b:
-            group_a = _worker_collision_group(link_a)
-            group_b = _worker_collision_group(link_b)
+            group_a = _common_bimanual_collision_group(link_a)
+            group_b = _common_bimanual_collision_group(link_b)
             if {group_a, group_b}.issubset({"core", "head"}):
                 max_allowed_distance = 4
             elif "core" in {group_a, group_b} and ({group_a, group_b} & {"left", "right"}):
@@ -637,16 +736,18 @@ def _generate_consecutive_collision_exclusions(robot, urdf_path: Path) -> list[t
                 max_allowed_distance = 2
             else:
                 max_allowed_distance = 1
-            distance = _shortest_link_distance(link_graph, link_a, link_b, max_hops=max_allowed_distance + 1)
+            distance = _shortest_link_distance(
+                link_graph, link_a, link_b, max_hops=max_allowed_distance + 1
+            )
         if (fa and fb and fa == fb) or (distance is not None and distance <= max_allowed_distance):
             exclusions.append((a, b))
     return exclusions
 
 
-def _generate_worker_collision_include_pairs(
+def _generate_common_bimanual_collision_include_pairs(
     robot, urdf_path: Path, exclude_pairs: list[tuple[str, str]]
 ) -> list[tuple[str, str]]:
-    """Map the curated worker link-pair whitelist onto geometry-pair names."""
+    """Map the curated bimanual link-pair whitelist onto geometry-pair names."""
     if not hasattr(robot, "get_collision_pair_names"):
         return []
     try:
@@ -657,7 +758,7 @@ def _generate_worker_collision_include_pairs(
     exclude_set = {tuple(p) for p in exclude_pairs}
     link_graph = _build_link_adjacency_graph(urdf_path)
     link_names = set(link_graph.keys())
-    curated_link_pairs = set(_worker_manual_curated_link_pairs())
+    curated_link_pairs = set(_common_bimanual_manual_curated_link_pairs())
     include_pairs: list[tuple[str, str]] = []
     for a, b in pair_names:
         pair = (str(a), str(b))
@@ -714,10 +815,21 @@ def _configure_collision_constraint(
     tuning_mode: str,
     include_pairs: list[tuple[str, str]],
     exclude_pairs: list[tuple[str, str]],
+    reset_stall_state: bool = False,
 ) -> None:
     if not hasattr(solver, "configure_collision_constraint"):
         return
     if enabled:
+        if reset_stall_state and hasattr(solver, "disable_stall_handler"):
+            try:
+                solver.disable_stall_handler()
+            except Exception:
+                pass
+        if reset_stall_state and hasattr(solver, "clear_collision_constraint"):
+            try:
+                solver.clear_collision_constraint()
+            except Exception:
+                pass
         _apply_collision_tuning_mode(solver, tuning_mode)
         try:
             solver.configure_collision_constraint(
@@ -754,6 +866,125 @@ def _configure_collision_constraint(
                 pass
 
 
+def _configure_acceleration_limit_constraint(
+    solver,
+    *,
+    enabled: bool,
+    nv: int,
+    max_acceleration: float,
+) -> bool:
+    """Configure inter-tick joint acceleration limits when supported."""
+    if not hasattr(solver, "enable_acceleration_limits"):
+        return False
+    solver.enable_acceleration_limits(bool(enabled))
+    if not bool(enabled):
+        return True
+    if not hasattr(solver, "set_acceleration_limits"):
+        return False
+    solver.set_acceleration_limits(np.full(int(nv), float(max_acceleration), dtype=float))
+    return True
+
+def _status_name(result) -> str:
+    status = getattr(result, "status", None)
+    return getattr(status, "name", str(status))
+
+
+def _should_force_constraint_target_snap(guard_decision) -> bool:
+    """Recapture targets when an active boundary has stopped motion."""
+    return bool(
+        getattr(guard_decision, "boundary_stall_labels", [])
+        or (
+            getattr(guard_decision, "zero_motion_snap", False)
+            and getattr(guard_decision, "boundary_stall_labels", [])
+        )
+    )
+
+
+def _should_refresh_collision_constraint_state(guard_decision, *, collision_enabled: bool) -> bool:
+    """Refresh collision internals after sustained zero-motion at the collision shell."""
+    return bool(
+        collision_enabled
+        and getattr(guard_decision, "zero_motion_resync", False)
+        and "collision" in getattr(guard_decision, "boundary_stall_labels", [])
+    )
+
+
+def _is_restored_collision_zero_motion(
+    guard_decision,
+    *,
+    q_prev: np.ndarray,
+    q_next: np.ndarray,
+    max_task_error: float,
+    task_deadband: float,
+    motion_eps: float = 1e-8,
+) -> bool:
+    """Detect live-loop zero motion when the guard discards a proposed step."""
+    return bool(
+        getattr(guard_decision, "restored_last_safe", False)
+        and "collision" in getattr(guard_decision, "restore_labels", [])
+        and float(np.linalg.norm(np.asarray(q_next, dtype=float) - np.asarray(q_prev, dtype=float)))
+        <= float(motion_eps)
+        and float(max_task_error) > float(task_deadband)
+    )
+
+
+def _collision_target_hold_is_active(
+    *,
+    now: float,
+    hold_until: float,
+    last_target_interaction_time: float,
+    current_collision_min: float | None = None,
+    collision_min_distance_m: float | None = None,
+    collision_margin_m: float = COLLISION_LAST_SAFE_MARGIN_M,
+    idle_seconds: float = TARGET_INTERACTION_IDLE_SECONDS,
+) -> bool:
+    """Keep recovery targets pinned only while still near the collision shell."""
+    if float(hold_until) <= 0.0:
+        return False
+    if (
+        current_collision_min is not None
+        and collision_min_distance_m is not None
+        and np.isfinite(float(current_collision_min))
+        and float(current_collision_min)
+        >= float(collision_min_distance_m) + float(collision_margin_m)
+    ):
+        return False
+    return bool(
+        float(now) < float(hold_until)
+        or float(now) - float(last_target_interaction_time) < float(idle_seconds)
+    )
+
+
+def _constraint_boundary_buffered_clear(
+    boundary: ConstraintBoundary,
+    *,
+    collision_margin_m: float = COLLISION_LAST_SAFE_MARGIN_M,
+) -> bool:
+    """Require extra collision clearance before updating live restore memory."""
+    if boundary.name != "collision":
+        return bool(boundary.clear)
+    if (not boundary.enabled) or (not boundary.observed):
+        return True
+    return float(boundary.value) >= float(boundary.minimum) + float(collision_margin_m)
+
+
+def _remember_if_buffered_clear(
+    guard: ConstrainedStepGuard,
+    q: np.ndarray,
+    boundaries: list[ConstraintBoundary],
+    *,
+    collision_margin_m: float = COLLISION_LAST_SAFE_MARGIN_M,
+) -> bool:
+    """Store last-safe state only when collision is comfortably outside the shell."""
+    if not all(
+        _constraint_boundary_buffered_clear(boundary, collision_margin_m=collision_margin_m)
+        for boundary in boundaries
+    ):
+        return False
+    guard.reset(q)
+    return True
+
+
 def main() -> None:
     args = parse_args()
     urdf_path = resolve_ffw_urdf_path(args.variant)
@@ -764,8 +995,10 @@ def main() -> None:
     from viser.extras import ViserUrdf
 
     full_robot = embodik.RobotModel(str(collision_urdf_path), floating_base=False)
-    ik_joint_names = default_ai_worker_ik_joint_names(full_robot.get_joint_names())
-    robot = embodik.RobotModel(str(collision_urdf_path), actuated_joint_names=ik_joint_names, floating_base=False)
+    ik_joint_names = default_common_bimanual_ik_joint_names(full_robot.get_joint_names())
+    robot = embodik.RobotModel(
+        str(collision_urdf_path), actuated_joint_names=ik_joint_names, floating_base=False
+    )
     server = viser.ViserServer(port=args.port)
     server.scene.add_grid("/ground", width=4, height=4)
 
@@ -825,33 +1058,39 @@ def main() -> None:
                 joint_name_to_cfg[name] = int(robot.get_joint_config_index(name))
             except Exception:
                 pass
+    posture_control_joint_names = _posture_control_joint_names(joint_names)
+    default_joint_seed = _default_seed_for_joint_names(joint_names)
     posture_controlled_indices = [
         idx
-        for name in ("lift_joint",)
+        for name in posture_control_joint_names
         if (idx := joint_name_to_cfg.get(name)) is not None
     ]
-    q = _apply_named_joint_seed(q, joint_name_to_cfg, q_lo, q_hi, DEFAULT_WORKER_SEED)
+    q = _apply_named_joint_seed(q, joint_name_to_cfg, q_lo, q_hi, default_joint_seed)
     q = _apply_soft_lift_margin(q, joint_name_to_cfg=joint_name_to_cfg, q_lo=q_lo, q_hi=q_hi)
     nullspace_bias_q = np.asarray(q, dtype=float).copy()
     robot.update_configuration(q)
-    support_polygon = _compute_support_polygon_from_contacts(robot, WORKER_SUPPORT_CONTACT_FRAMES)
+    support_polygon = _compute_support_polygon_from_contacts(robot, COMMON_BIMANUAL_SUPPORT_CONTACT_FRAMES)
+    initial_com_inside_support = _contains_point_in_polygon(
+        support_polygon, np.asarray(robot.get_com_position(), dtype=float)[:2]
+    )
     default_geometry_view = (
         "Collision"
         if urdf_path.resolve() == collision_urdf_path.resolve()
+        and _urdf_has_collision_geometry(collision_viewer_urdf_path)
         else "Visual"
     )
     _set_geometry_view(default_geometry_view)
     _update_robot_visuals(q)
     constraint_guard = ConstrainedStepGuard(q)
 
-    frame_map = resolve_ai_worker_frames(robot.get_frame_names())
-    print(f"[worker] variant={args.variant} urdf={urdf_path}")
-    print(f"[worker] frames={frame_map}")
+    frame_map = resolve_common_bimanual_frames(robot.get_frame_names())
+    print(f"[bimanual] variant={args.variant} urdf={urdf_path}")
+    print(f"[bimanual] frames={frame_map}")
 
     def _build_solver(q_posture_seed: np.ndarray):
         solver_local = embodik.KinematicsSolver(robot)
         solver_local.dt = DEFAULT_SOLVER_DT
-        solver_local.set_damping(0.1)
+        solver_local.set_damping(0.05 if args.variant == "rby1" else 0.1)
         solver_local.set_tolerance(0.1)
         solver_local.enable_position_limits(True)
         solver_local.enable_velocity_limits(True)
@@ -867,7 +1106,7 @@ def main() -> None:
         right_task_local.weight = 1.0
         left_task_local.weight = 1.0
 
-        posture_local = solver_local.add_posture_task("worker_posture")
+        posture_local = solver_local.add_posture_task("bimanual_posture")
         posture_local.priority = 1
         posture_local.weight = DEFAULT_POSTURE_WEIGHT
         posture_local.set_target_configuration(np.asarray(q_posture_seed, dtype=float).copy())
@@ -876,7 +1115,9 @@ def main() -> None:
         arm_nullspace_local = solver_local.add_posture_task("arm_nullspace")
         arm_nullspace_local.priority = 1
         arm_nullspace_local.weight = 0.0
-        arm_nullspace_local.set_target_configuration(np.asarray(nullspace_bias_q, dtype=float).copy())
+        arm_nullspace_local.set_target_configuration(
+            np.asarray(nullspace_bias_q, dtype=float).copy()
+        )
         return solver_local, right_task_local, left_task_local, posture_local, arm_nullspace_local
 
     solver, right_task, left_task, posture, arm_nullspace = _build_solver(q)
@@ -896,9 +1137,9 @@ def main() -> None:
         else:
             nv_joint = 1
         target_index_list = None
-        if joint_name.startswith(("arm_l_", "gripper_l_")):
+        if _is_left_arm_joint(joint_name):
             target_index_list = left_arm_velocity_indices
-        elif joint_name.startswith(("arm_r_", "gripper_r_")):
+        elif _is_right_arm_joint(joint_name):
             target_index_list = right_arm_velocity_indices
         elif joint_name.startswith("lift_"):
             target_index_list = lift_velocity_indices
@@ -906,7 +1147,7 @@ def main() -> None:
             expanded_idx = idx_v + offset
             if target_index_list is not None:
                 target_index_list.append(expanded_idx)
-            if joint_name.startswith("arm_"):
+            if _is_arm_joint(joint_name):
                 arm_controlled_indices.append(expanded_idx)
             if joint_name in allowed_joint_names:
                 continue
@@ -918,13 +1159,20 @@ def main() -> None:
     arm_controlled_indices = sorted(set(arm_controlled_indices))
     if hasattr(arm_nullspace, "set_controlled_joint_indices"):
         arm_nullspace.set_controlled_joint_indices(list(arm_controlled_indices))
-    collision_exclusions = _generate_consecutive_collision_exclusions(robot, urdf_path)
-    collision_include_pairs = _generate_worker_collision_include_pairs(robot, urdf_path, collision_exclusions)
+    collision_exclusions = _generate_consecutive_collision_exclusions(robot, collision_urdf_path)
+    collision_include_pairs = _generate_common_bimanual_collision_include_pairs(
+        robot, collision_urdf_path, collision_exclusions
+    )
+    total_collision_pairs = (
+        len(list(robot.get_collision_pair_names()))
+        if hasattr(robot, "get_collision_pair_names")
+        else 0
+    )
     collision_cfg = None
     collision_available = False
     if hasattr(robot, "has_collision_geometry"):
         try:
-            collision_available = bool(robot.has_collision_geometry())
+            collision_available = bool(robot.has_collision_geometry()) and total_collision_pairs > 0
         except Exception:
             collision_available = False
 
@@ -950,18 +1198,20 @@ def main() -> None:
         if not bool(enable_collision.value):
             return None
         try:
+            if q_eval is None:
+                if hasattr(solver, "get_last_collision_debug_list"):
+                    debug_rows = list(solver.get_last_collision_debug_list())
+                    if debug_rows:
+                        return min(float(row.distance) for row in debug_rows)
+                if hasattr(solver, "get_last_collision_debug"):
+                    dbg = solver.get_last_collision_debug()
+                    if dbg is not None:
+                        return float(dbg.distance)
             if q_eval is not None and hasattr(solver, "evaluate_collision_debug"):
-                dbg_eval = solver.evaluate_collision_debug(np.asarray(q_eval, dtype=float))
+                q_check = np.asarray(q if q_eval is None else q_eval, dtype=float)
+                dbg_eval = solver.evaluate_collision_debug(q_check)
                 if dbg_eval is not None and np.isfinite(dbg_eval.distance):
                     return float(dbg_eval.distance)
-            if hasattr(solver, "get_last_collision_debug_list"):
-                debug_rows = list(solver.get_last_collision_debug_list())
-                if debug_rows:
-                    return min(float(row.distance) for row in debug_rows)
-            if hasattr(solver, "get_last_collision_debug"):
-                dbg = solver.get_last_collision_debug()
-                if dbg is not None:
-                    return float(dbg.distance)
         except Exception:
             return None
         return None
@@ -1006,6 +1256,19 @@ def main() -> None:
             float(left_wxyz0_xyzw[2]),
         ),
     )
+    last_target_interaction_time = 0.0
+
+    def _mark_target_interaction() -> None:
+        nonlocal last_target_interaction_time
+        last_target_interaction_time = time.monotonic()
+
+    @right_ctrl.on_update
+    def _(_evt) -> None:
+        _mark_target_interaction()
+
+    @left_ctrl.on_update
+    def _(_evt) -> None:
+        _mark_target_interaction()
 
     posture_target = q.copy()
 
@@ -1021,15 +1284,14 @@ def main() -> None:
             return float(default_lo), float(default_hi)
         return float(q_lo[idx]), float(q_hi[idx])
 
-    lift_lo_raw, lift_hi_raw = _joint_limits("lift_joint", -0.5, 0.0)
-    lift_lo = min(lift_lo_raw + LIFT_LIMIT_MARGIN, lift_hi_raw)
-    lift_hi = max(lift_lo_raw, lift_hi_raw - LIFT_LIMIT_MARGIN)
     with server.gui.add_folder("IK Controls"):
         timing_handle = server.gui.add_number("Elapsed (ms)", 0.001, disabled=True)
         auto_ik_solve = server.gui.add_checkbox("Auto IK Solve", initial_value=True)
         enable_left_ee = server.gui.add_checkbox("Enable Left EE", initial_value=True)
         enable_right_ee = server.gui.add_checkbox("Enable Right EE", initial_value=True)
-        pos_gain = server.gui.add_slider("Position Gain", min=0.1, max=200.0, initial_value=DEFAULT_POS_GAIN, step=0.1)
+        pos_gain = server.gui.add_slider(
+            "Position Gain", min=0.1, max=200.0, initial_value=DEFAULT_POS_GAIN, step=0.1
+        )
         ori_gain = server.gui.add_slider(
             "Orientation Gain", min=0.1, max=200.0, initial_value=DEFAULT_ROT_GAIN, step=0.1
         )
@@ -1046,33 +1308,63 @@ def main() -> None:
             options=("SCALE", "SCALE_ELASTIC", "MIN_ERROR"),
             initial_value="SCALE_ELASTIC",
         )
-        allow_fallback = server.gui.add_checkbox("Allow SCALE fallback to MIN_ERROR", initial_value=False)
+        allow_fallback = server.gui.add_checkbox(
+            "Allow SCALE fallback to MIN_ERROR", initial_value=False
+        )
+        enable_accel_limits = server.gui.add_checkbox(
+            "Enable Joint Accel Constraint",
+            initial_value=False,
+            disabled=not hasattr(solver, "enable_acceleration_limits"),
+        )
+        joint_accel_limit = server.gui.add_slider(
+            "Joint Accel Max",
+            min=1.0,
+            max=100.0,
+            step=1.0,
+            initial_value=DEFAULT_JOINT_ACCEL_LIMIT,
+            disabled=not hasattr(solver, "set_acceleration_limits"),
+        )
         lock_passive = server.gui.add_checkbox("Lock passive joints", initial_value=True)
-        arm_nullspace_enable = server.gui.add_checkbox("Enable Arm Nullspace Bias", initial_value=True)
+        arm_nullspace_enable = server.gui.add_checkbox(
+            "Enable Arm Nullspace Bias", initial_value=True
+        )
         arm_nullspace_weight = server.gui.add_slider(
-            "Arm Nullspace Gain", min=0.0, max=2.0, initial_value=DEFAULT_ARM_NULLSPACE_WEIGHT, step=0.01
+            "Arm Nullspace Gain",
+            min=0.0,
+            max=2.0,
+            initial_value=DEFAULT_ARM_NULLSPACE_WEIGHT,
+            step=0.01,
         )
         posture_weight = server.gui.add_slider(
-            "Lift/Head Bias Weight", min=0.0, max=2.0, initial_value=DEFAULT_POSTURE_WEIGHT, step=0.01
+            "Posture Bias Weight", min=0.0, max=2.0, initial_value=DEFAULT_POSTURE_WEIGHT, step=0.01
         )
-        lock_lift_joint = server.gui.add_checkbox("Lock Lift Joint During IK", initial_value=False)
+        lock_lift_joint = server.gui.add_checkbox(
+            "Lock Lift Joint During IK",
+            initial_value=False,
+            disabled="lift_joint" not in joint_name_to_cfg,
+        )
         manual_control = server.gui.add_checkbox("Manual Joint Control", initial_value=False)
 
     with server.gui.add_folder("Collision"):
         enable_collision = server.gui.add_checkbox(
             "Enable self-collision constraint",
             initial_value=hasattr(solver, "configure_collision_constraint") and collision_available,
-            disabled=not hasattr(solver, "configure_collision_constraint") or not collision_available,
+            disabled=not hasattr(solver, "configure_collision_constraint")
+            or not collision_available,
         )
         collision_min_dist_mm = server.gui.add_slider(
-            "Collision min distance (mm)", 0.0, 120.0, 1.0, 35.0
+            "Collision min distance (mm)",
+            0.0,
+            120.0,
+            1.0,
+            _default_collision_min_distance_mm(args.variant),
         )
         collision_max_constraints = server.gui.add_slider(
             "Max Collision Constraints",
             min=1,
             max=64,
             step=1,
-            initial_value=DEFAULT_MAX_COLLISION_CONSTRAINTS,
+            initial_value=_default_collision_max_constraints(args.variant),
         )
         collision_tuning = server.gui.add_dropdown(
             "Collision Tuning",
@@ -1102,7 +1394,8 @@ def main() -> None:
     with server.gui.add_folder("CoM Constraint"):
         enable_com_constraint = server.gui.add_checkbox(
             "Enable CoM Constraint",
-            initial_value=hasattr(solver, "configure_com_constraint"),
+            initial_value=hasattr(solver, "configure_com_constraint")
+            and initial_com_inside_support,
             disabled=not hasattr(solver, "configure_com_constraint"),
         )
         com_margin_pct = server.gui.add_slider(
@@ -1131,8 +1424,33 @@ def main() -> None:
         show_com_viz = server.gui.add_checkbox("Show CoM", initial_value=True)
         show_drop_line = server.gui.add_checkbox("Show CoM drop line", initial_value=True)
 
-    with server.gui.add_folder("Worker Posture"):
-        lift_slider = server.gui.add_slider("Lift Joint", lift_lo, lift_hi, 0.001, _joint_value("lift_joint"))
+    posture_sliders = []
+    with server.gui.add_folder("Whole-Body Posture"):
+        if posture_control_joint_names:
+            for joint_name in posture_control_joint_names:
+                lo_raw, hi_raw = _joint_limits(joint_name, -1.0, 1.0)
+                if joint_name == "lift_joint":
+                    lo = min(lo_raw + LIFT_LIMIT_MARGIN, hi_raw)
+                    hi = max(lo_raw, hi_raw - LIFT_LIMIT_MARGIN)
+                else:
+                    lo, hi = lo_raw, hi_raw
+                initial_value = float(np.clip(_joint_value(joint_name), lo, hi))
+                posture_sliders.append(
+                    (
+                        joint_name,
+                        server.gui.add_slider(
+                            _joint_label(joint_name),
+                            min=float(lo),
+                            max=float(hi),
+                            step=0.001,
+                            initial_value=initial_value,
+                        ),
+                    )
+                )
+        else:
+            server.gui.add_text(
+                "Posture Controls", initial_value="No posture joints in reduced model"
+            )
         snap_targets = server.gui.add_button("Snap Targets to Current Tools")
         reset_pose = server.gui.add_button("Reset Robot + Targets")
 
@@ -1183,6 +1501,7 @@ def main() -> None:
     ]
     dbg_lines = [None for _ in debug_colors]
     com_cfg = None
+    accel_cfg = None
     support_polygon_cache = np.asarray(support_polygon, dtype=float).copy()
     com_outer_poly = server.scene.add_line_segments(
         "/com_viz/outer_polygon",
@@ -1227,11 +1546,11 @@ def main() -> None:
             position=(0.0, 0.0, 0.001),
             visible=bool(show_support_contacts.value),
         )
-        for frame_name in WORKER_SUPPORT_CONTACT_FRAMES
+        for frame_name in COMMON_BIMANUAL_SUPPORT_CONTACT_FRAMES
     }
 
     def _current_support_polygon() -> np.ndarray:
-        return _compute_support_polygon_from_contacts(robot, WORKER_SUPPORT_CONTACT_FRAMES)
+        return _compute_support_polygon_from_contacts(robot, COMMON_BIMANUAL_SUPPORT_CONTACT_FRAMES)
 
     def _margin_frac() -> float:
         return float(com_margin_pct.value) / 100.0
@@ -1265,7 +1584,7 @@ def main() -> None:
             solver.configure_com_constraint(
                 support_polygon=support_polygon_now,
                 margin=_margin_frac(),
-                frame_name="base_link",
+                frame_name=frame_map["base"],
                 com_vel_max=float(com_vel_max.value),
                 com_acc_max=float(com_acc_max.value),
                 use_acceleration_limits=bool(com_use_acc_limits.value),
@@ -1283,9 +1602,27 @@ def main() -> None:
             com_prox_display.value = 0.0
         com_cfg = next_cfg
 
+    def _configure_acceleration_limits_if_needed(force: bool = False) -> None:
+        nonlocal accel_cfg
+        next_cfg = (
+            bool(enable_accel_limits.value),
+            round(float(joint_accel_limit.value), 6),
+        )
+        if not force and next_cfg == accel_cfg:
+            return
+        applied = _configure_acceleration_limit_constraint(
+            solver,
+            enabled=bool(enable_accel_limits.value),
+            nv=int(robot.nv),
+            max_acceleration=float(joint_accel_limit.value),
+        )
+        if not applied:
+            enable_accel_limits.value = False
+        accel_cfg = next_cfg
+
     def _update_com_visualization() -> None:
         support_polygon_now = _current_support_polygon()
-        support_contacts = _support_contact_points(robot, WORKER_SUPPORT_CONTACT_FRAMES)
+        support_contacts = _support_contact_points(robot, COMMON_BIMANUAL_SUPPORT_CONTACT_FRAMES)
         inner_polygon = _shrink_polygon_2d(support_polygon_now, _margin_frac())
         com_pos = np.asarray(robot.get_com_position(), dtype=float)
         com_xy = com_pos[:2]
@@ -1294,7 +1631,9 @@ def main() -> None:
         com_color = _com_color(min_slack)
 
         com_outer_poly.points = _polygon_edge_pts(support_polygon_now, z=0.002)
-        com_outer_poly.colors = np.repeat(COLOR_OUTER_POLY, max(len(support_polygon_now), 1), axis=0)
+        com_outer_poly.colors = np.repeat(
+            COLOR_OUTER_POLY, max(len(support_polygon_now), 1), axis=0
+        )
         com_outer_poly.visible = bool(show_support_polygon.value)
         com_inner_poly.points = _polygon_edge_pts(inner_polygon, z=0.003)
         com_inner_poly.colors = np.repeat(COLOR_INNER_POLY, max(len(inner_polygon), 1), axis=0)
@@ -1314,7 +1653,12 @@ def main() -> None:
         com_floor_disk.visible = bool(show_com_viz.value)
 
         com_drop_line.points = np.array(
-            [[[float(com_xy[0]), float(com_xy[1]), float(com_pos[2])], [float(com_xy[0]), float(com_xy[1]), 0.001]]],
+            [
+                [
+                    [float(com_xy[0]), float(com_xy[1]), float(com_pos[2])],
+                    [float(com_xy[0]), float(com_xy[1]), 0.001],
+                ]
+            ],
             dtype=float,
         )
         com_drop_line.visible = bool(show_com_viz.value) and bool(show_drop_line.value)
@@ -1368,7 +1712,9 @@ def main() -> None:
                 line_width=3.0,
                 visible=True,
             )
-            debug_summaries.append(f"{row.object_a} <-> {row.object_b} | d={float(row.distance):.4f} m")
+            debug_summaries.append(
+                f"{row.object_a} <-> {row.object_b} | d={float(row.distance):.4f} m"
+            )
 
         for i in range(len(dbg_rows), len(debug_colors)):
             dbg_points_a[i].visible = False
@@ -1385,7 +1731,7 @@ def main() -> None:
                 slider.value = float(q_now[idx])
 
     def _sync_posture_sliders_from_q(q_now: np.ndarray) -> None:
-        for joint_name, slider in (("lift_joint", lift_slider),):
+        for joint_name, slider in posture_sliders:
             idx = joint_name_to_cfg.get(joint_name)
             if idx is not None and idx < q_now.size:
                 slider.value = float(q_now[idx])
@@ -1416,12 +1762,14 @@ def main() -> None:
             idx = joint_name_to_cfg.get(joint_name)
             if idx is not None and idx < q_manual.size:
                 q_manual[idx] = float(slider.value)
-        for joint_name, slider in (("lift_joint", lift_slider),):
+        for joint_name, slider in posture_sliders:
             idx = joint_name_to_cfg.get(joint_name)
             if idx is not None and idx < q_manual.size:
                 q_manual[idx] = float(slider.value)
         q_manual = clip_configuration(robot, q_manual, q_lo, q_hi)
-        return _apply_soft_lift_margin(q_manual, joint_name_to_cfg=joint_name_to_cfg, q_lo=q_lo, q_hi=q_hi)
+        return _apply_soft_lift_margin(
+            q_manual, joint_name_to_cfg=joint_name_to_cfg, q_lo=q_lo, q_hi=q_hi
+        )
 
     def _sync_targets_from_robot() -> None:
         right_pose = frame_pose(frame_map["right_tool"])
@@ -1436,17 +1784,115 @@ def main() -> None:
         right_err.value = "0.0000 m"
         left_err.value = "0.0000 m"
 
+    def _sync_targets_from_robot_if_idle(*, force: bool = False) -> bool:
+        if (
+            not force
+            and time.monotonic() - last_target_interaction_time < TARGET_INTERACTION_IDLE_SECONDS
+        ):
+            return False
+        _sync_targets_from_robot()
+        return True
+
+    def _start_collision_target_hold() -> None:
+        nonlocal collision_target_hold_until, collision_hold_right_pose, collision_hold_left_pose
+        collision_hold_right_pose = frame_pose(frame_map["right_tool"])
+        collision_hold_left_pose = frame_pose(frame_map["left_tool"])
+        _ctrl_from_pose(right_ctrl, collision_hold_right_pose)
+        _ctrl_from_pose(left_ctrl, collision_hold_left_pose)
+        collision_target_hold_until = time.monotonic() + COLLISION_TARGET_HOLD_SECONDS
+
     def _reset_solver_state(reason: str) -> None:
-        nonlocal solver, right_task, left_task, posture, arm_nullspace, collision_cfg, com_cfg
+        nonlocal solver, right_task, left_task, posture, arm_nullspace, collision_cfg, com_cfg, accel_cfg
         solver, right_task, left_task, posture, arm_nullspace = _build_solver(posture_target)
         if hasattr(arm_nullspace, "set_controlled_joint_indices"):
             arm_nullspace.set_controlled_joint_indices(list(arm_controlled_indices))
         collision_cfg = None
         com_cfg = None
+        accel_cfg = None
         constraint_guard.reset(q)
         _sync_targets_from_robot()
+        _configure_acceleration_limits_if_needed(force=True)
         _configure_com_constraint_if_needed(force=True)
         status.value = f"Status: solver reset after {reason}"
+
+    def _frame_target_error_for_q(q_eval: np.ndarray, active_targets: list[object]) -> float:
+        q_saved = np.asarray(q, dtype=float).copy()
+        try:
+            robot.update_configuration(np.asarray(q_eval, dtype=float))
+            errors = []
+            for target in active_targets:
+                frame_name = (
+                    frame_map["right_tool"]
+                    if target.task_name == "right_tool_pose"
+                    else frame_map["left_tool"]
+                )
+                pose_now = frame_pose(frame_name)
+                target_pose = np.asarray(target.target_pose, dtype=float)
+                errors.append(float(np.linalg.norm(target_pose[:3, 3] - pose_now[:3, 3])))
+            return max(errors) if errors else 0.0
+        finally:
+            robot.update_configuration(q_saved)
+
+    def _solve_with_secondary_relaxation(
+        active_targets: list[object], q_seed: np.ndarray
+    ) -> tuple[object, bool]:
+        """Retry with secondary posture/nullspace relaxed only after a weak step."""
+        base_posture_weight = float(posture.weight)
+        base_arm_weight = float(arm_nullspace.weight)
+
+        def _run(scale: float):
+            posture.weight = base_posture_weight * scale
+            arm_nullspace.weight = base_arm_weight * scale
+            return robust_solve_position_step(
+                robot=robot,
+                solver=solver,
+                q_current=q_seed,
+                targets=active_targets,
+                options=opts,
+                q_lo=q_lo,
+                q_hi=q_hi,
+                zero_velocity_indices=locked_velocity_indices if lock_passive.value else (),
+                fallback_status_names=ROBUST_FALLBACK_STATUS_NAMES,
+                hold_status_names=ROBUST_HOLD_STATUS_NAMES,
+                allow_solver_intervention=True,
+                apply_collision_violated_q_solution=True,
+            )
+
+        try:
+            base_step = _run(1.0)
+            base_status = _status_name(base_step.solver_result)
+            base_dq_norm = float(
+                np.linalg.norm(
+                    np.asarray(base_step.q_next, dtype=float) - np.asarray(q_seed, dtype=float)
+                )
+            )
+            if base_status == "SUCCESS" or base_dq_norm > 1e-10:
+                return base_step, False
+
+            best_step = base_step
+            best_error = _frame_target_error_for_q(base_step.q_next, active_targets)
+            recovered = False
+            for scale in (0.35, 0.0):
+                step_candidate = _run(scale)
+                status_name = _status_name(step_candidate.solver_result)
+                candidate_error = _frame_target_error_for_q(step_candidate.q_next, active_targets)
+                if candidate_error < best_error:
+                    best_step = step_candidate
+                    best_error = candidate_error
+                    recovered = True
+                dq_norm = float(
+                    np.linalg.norm(
+                        np.asarray(step_candidate.q_next, dtype=float)
+                        - np.asarray(q_seed, dtype=float)
+                    )
+                )
+                productive = status_name == "SUCCESS" or dq_norm > 1e-10
+                if productive:
+                    break
+            return best_step, recovered
+        finally:
+            posture.weight = base_posture_weight
+            arm_nullspace.weight = base_arm_weight
 
     @snap_targets.on_click
     def _(_evt) -> None:
@@ -1457,7 +1903,7 @@ def main() -> None:
     def _(_evt) -> None:
         nonlocal q, posture_target
         q = robot.neutral_configuration()
-        q = _apply_named_joint_seed(q, joint_name_to_cfg, q_lo, q_hi, DEFAULT_WORKER_SEED)
+        q = _apply_named_joint_seed(q, joint_name_to_cfg, q_lo, q_hi, default_joint_seed)
         q = clip_configuration(robot, q, q_lo, q_hi)
         q = _apply_soft_lift_margin(q, joint_name_to_cfg=joint_name_to_cfg, q_lo=q_lo, q_hi=q_hi)
         posture_target = q.copy()
@@ -1473,19 +1919,29 @@ def main() -> None:
         status.value = "Status: Robot and targets reset"
 
     opts = embodik.PositionStepOptions()
+    _configure_acceleration_limits_if_needed(force=True)
     _configure_com_constraint_if_needed(force=True)
     _sync_joint_sliders_from_q(q)
     _sync_posture_sliders_from_q(q)
     _sync_targets_from_robot()
     prev_manual_state = False
+    collision_state_refresh_cooldown = 0
+    collision_target_hold_until = 0.0
+    collision_hold_right_pose: np.ndarray | None = None
+    collision_hold_left_pose: np.ndarray | None = None
 
     while True:
         q_prev = np.asarray(q, dtype=float).copy()
         clear_all_target_velocities_if_available(solver)
+        _configure_acceleration_limits_if_needed()
 
         exclusion_pairs = collision_exclusions if exclude_consecutive.value else []
         include_pairs = list(collision_include_pairs)
-        total_pairs = len(list(robot.get_collision_pair_names())) if hasattr(robot, "get_collision_pair_names") else 0
+        total_pairs = (
+            len(list(robot.get_collision_pair_names()))
+            if hasattr(robot, "get_collision_pair_names")
+            else 0
+        )
         collision_pairs_stats.value = (
             f"total={total_pairs}, included={len(include_pairs)}, excluded={len(exclusion_pairs)}"
         )
@@ -1505,6 +1961,7 @@ def main() -> None:
                 tuning_mode=str(collision_tuning.value),
                 include_pairs=include_pairs,
                 exclude_pairs=list(exclusion_pairs),
+                reset_stall_state=True,
             )
             collision_cfg = next_collision_cfg
             if not bool(enable_collision.value):
@@ -1526,10 +1983,18 @@ def main() -> None:
             _sync_posture_sliders_from_q(q)
             _update_collision_debug()
             _update_com_visualization()
-            right_now = np.asarray(robot.get_frame_pose(frame_map["right_tool"]).translation, dtype=float)
-            left_now = np.asarray(robot.get_frame_pose(frame_map["left_tool"]).translation, dtype=float)
-            right_err.value = f"{np.linalg.norm(np.asarray(right_ctrl.position, dtype=float) - right_now):.4f} m"
-            left_err.value = f"{np.linalg.norm(np.asarray(left_ctrl.position, dtype=float) - left_now):.4f} m"
+            right_now = np.asarray(
+                robot.get_frame_pose(frame_map["right_tool"]).translation, dtype=float
+            )
+            left_now = np.asarray(
+                robot.get_frame_pose(frame_map["left_tool"]).translation, dtype=float
+            )
+            right_err.value = (
+                f"{np.linalg.norm(np.asarray(right_ctrl.position, dtype=float) - right_now):.4f} m"
+            )
+            left_err.value = (
+                f"{np.linalg.norm(np.asarray(left_ctrl.position, dtype=float) - left_now):.4f} m"
+            )
             status.value = "Status: Manual joint control active"
             timing_handle.value = 0.0
             solve_ms.value = "--"
@@ -1559,7 +2024,7 @@ def main() -> None:
             task.allow_min_error_fallback = bool(allow_fallback.value)
 
         posture.weight = float(posture_weight.value)
-        for joint_name in ("lift_joint",):
+        for joint_name in posture_control_joint_names:
             idx = joint_name_to_cfg.get(joint_name)
             if idx is not None and idx < posture_target.size:
                 posture_target[idx] = float(nullspace_bias_q[idx])
@@ -1580,7 +2045,15 @@ def main() -> None:
                 arm_nullspace.set_controlled_joint_indices([])
 
         right_pos_err, left_pos_err, right_rot_err, left_rot_err = _current_task_errors()
-        posture_err = float(np.linalg.norm(np.asarray(posture_target, dtype=float) - np.asarray(q, dtype=float)))
+        if posture_controlled_indices:
+            posture_err = float(
+                np.linalg.norm(
+                    np.asarray(posture_target, dtype=float)[posture_controlled_indices]
+                    - np.asarray(q, dtype=float)[posture_controlled_indices]
+                )
+            )
+        else:
+            posture_err = 0.0
         right_active = bool(enable_right_ee.value)
         left_active = bool(enable_left_ee.value)
 
@@ -1626,21 +2099,50 @@ def main() -> None:
             time.sleep(0.002)
             continue
 
+        collision_min_distance_m = float(collision_min_dist_mm.value) * 1e-3
+        pre_solve_collision_min = _current_collision_min_distance()
+        now = time.monotonic()
+        collision_target_hold_active = _collision_target_hold_is_active(
+            now=now,
+            hold_until=collision_target_hold_until,
+            last_target_interaction_time=last_target_interaction_time,
+            current_collision_min=pre_solve_collision_min,
+            collision_min_distance_m=collision_min_distance_m,
+        )
+        if (
+            not collision_target_hold_active
+            and collision_target_hold_until > 0.0
+            and collision_hold_right_pose is not None
+        ):
+            collision_target_hold_until = 0.0
+            collision_hold_right_pose = None
+            collision_hold_left_pose = None
+
         targets = []
         if right_active:
+            right_target_pose = (
+                np.asarray(collision_hold_right_pose, dtype=float)
+                if collision_target_hold_active and collision_hold_right_pose is not None
+                else _pose_from_ctrl(right_ctrl)
+            )
             targets.append(
                 embodik.TaskTarget(
                     "right_tool_pose",
-                    _pose_from_ctrl(right_ctrl),
+                    right_target_pose,
                     float(pos_gain.value),
                     float(ori_gain.value),
                 )
             )
         if left_active:
+            left_target_pose = (
+                np.asarray(collision_hold_left_pose, dtype=float)
+                if collision_target_hold_active and collision_hold_left_pose is not None
+                else _pose_from_ctrl(left_ctrl)
+            )
             targets.append(
                 embodik.TaskTarget(
                     "left_tool_pose",
-                    _pose_from_ctrl(left_ctrl),
+                    left_target_pose,
                     float(pos_gain.value),
                     float(ori_gain.value),
                 )
@@ -1683,7 +2185,9 @@ def main() -> None:
         if bool(lock_lift_joint.value):
             dynamic_freeze_indices.extend(lift_velocity_indices)
         if lock_passive.value:
-            opts.excluded_joint_indices = sorted(set(list(locked_velocity_indices) + dynamic_freeze_indices))
+            opts.excluded_joint_indices = sorted(
+                set(list(locked_velocity_indices) + dynamic_freeze_indices)
+            )
             opts.integration_zero_velocity_indices = sorted(
                 set(list(locked_velocity_indices) + dynamic_freeze_indices)
             )
@@ -1691,32 +2195,15 @@ def main() -> None:
             opts.excluded_joint_indices = sorted(set(dynamic_freeze_indices))
             opts.integration_zero_velocity_indices = sorted(set(dynamic_freeze_indices))
 
-        step = robust_solve_position_step(
-            robot=robot,
-            solver=solver,
-            q_current=q,
-            targets=targets,
-            options=opts,
-            q_lo=q_lo,
-            q_hi=q_hi,
-            zero_velocity_indices=locked_velocity_indices if lock_passive.value else (),
-            fallback_status_names=("INVALID_INPUT",),
-            hold_status_names=(
-                "NON_FINITE_INPUT",
-                "INFEASIBLE",
-                "NUMERICAL_ERROR",
-                "NO_PROGRESS",
-                "COLLISION_VIOLATED",
-            ),
-            allow_solver_intervention=True,
-            apply_collision_violated_q_solution=False,
-        )
+        step, secondary_relaxed = _solve_with_secondary_relaxation(targets, q)
         q = step.q_next
         q = _apply_soft_lift_margin(q, joint_name_to_cfg=joint_name_to_cfg, q_lo=q_lo, q_hi=q_hi)
         result = step.solver_result
         if not np.all(np.isfinite(q)):
             q = q_prev
-        result_status_name = getattr(getattr(result, "status", None), "name", str(getattr(result, "status", "")))
+        result_status_name = getattr(
+            getattr(result, "status", None), "name", str(getattr(result, "status", ""))
+        )
 
         robot.update_configuration(q)
         _update_robot_visuals(q)
@@ -1725,15 +2212,17 @@ def main() -> None:
         _update_collision_debug()
         _update_com_visualization()
 
-        right_now = np.asarray(robot.get_frame_pose(frame_map["right_tool"]).translation, dtype=float)
+        right_now = np.asarray(
+            robot.get_frame_pose(frame_map["right_tool"]).translation, dtype=float
+        )
         left_now = np.asarray(robot.get_frame_pose(frame_map["left_tool"]).translation, dtype=float)
         right_tgt = np.asarray(right_ctrl.position, dtype=float)
         left_tgt = np.asarray(left_ctrl.position, dtype=float)
         right_err.value = f"{np.linalg.norm(right_tgt - right_now):.4f} m"
         left_err.value = f"{np.linalg.norm(left_tgt - left_now):.4f} m"
-        collision_min_distance_m = float(collision_min_dist_mm.value) * 1e-3
         current_collision_min = _current_collision_min_distance()
         current_com_min_slack = _current_com_min_slack()
+        collision_boundary_slack_m = _collision_boundary_slack_m(solver, collision_min_distance_m)
         boundaries = [
             ConstraintBoundary(
                 "collision",
@@ -1741,6 +2230,7 @@ def main() -> None:
                 collision_min_distance_m,
                 enabled=bool(enable_collision.value),
                 violation_tolerance=1e-5,
+                boundary_slack=collision_boundary_slack_m,
             ),
             ConstraintBoundary(
                 "CoM",
@@ -1758,6 +2248,7 @@ def main() -> None:
             task_deadband=EE_POSITION_DEADBAND,
             constraints_enabled=bool(enable_collision.value or enable_com_constraint.value),
         )
+        restored_collision_zero_motion = False
         if guard_decision.restored_last_safe:
             q = guard_decision.q_next
             robot.update_configuration(q)
@@ -1766,43 +2257,28 @@ def main() -> None:
             _sync_posture_sliders_from_q(q)
             _update_collision_debug()
             _update_com_visualization()
-            right_now = np.asarray(robot.get_frame_pose(frame_map["right_tool"]).translation, dtype=float)
-            left_now = np.asarray(robot.get_frame_pose(frame_map["left_tool"]).translation, dtype=float)
-            right_err.value = f"{np.linalg.norm(np.asarray(right_ctrl.position, dtype=float) - right_now):.4f} m"
-            left_err.value = f"{np.linalg.norm(np.asarray(left_ctrl.position, dtype=float) - left_now):.4f} m"
+            right_now = np.asarray(
+                robot.get_frame_pose(frame_map["right_tool"]).translation, dtype=float
+            )
+            left_now = np.asarray(
+                robot.get_frame_pose(frame_map["left_tool"]).translation, dtype=float
+            )
+            right_err.value = (
+                f"{np.linalg.norm(np.asarray(right_ctrl.position, dtype=float) - right_now):.4f} m"
+            )
+            left_err.value = (
+                f"{np.linalg.norm(np.asarray(left_ctrl.position, dtype=float) - left_now):.4f} m"
+            )
+            _start_collision_target_hold()
+            restored_collision_zero_motion = _is_restored_collision_zero_motion(
+                guard_decision,
+                q_prev=q_prev,
+                q_next=q,
+                max_task_error=max(right_pos_err, left_pos_err),
+                task_deadband=EE_POSITION_DEADBAND,
+            )
             current_collision_min = _current_collision_min_distance(q)
             current_com_min_slack = _current_com_min_slack()
-        deep_penetration_escape_applied = False
-        if (
-            bool(enable_collision.value)
-            and current_collision_min is not None
-            and float(current_collision_min) < collision_min_distance_m
-            and result_status_name in {"INFEASIBLE", "NUMERICAL_ERROR", "NO_PROGRESS"}
-            and joint_velocity_norm(result) <= 1e-8
-        ):
-            escaped_q = _attempt_deep_penetration_escape_burst(
-                robot=robot,
-                solver=solver,
-                q_current=q,
-                targets=targets,
-                options=opts,
-                q_lo=q_lo,
-                q_hi=q_hi,
-                zero_velocity_indices=list(getattr(opts, "integration_zero_velocity_indices", []) or []),
-                min_distance_m=collision_min_distance_m,
-                max_constraints=int(collision_max_constraints.value),
-                tuning_mode=str(collision_tuning.value),
-                include_pairs=include_pairs,
-                exclude_pairs=list(exclusion_pairs),
-            )
-            if escaped_q is not None:
-                q = np.asarray(escaped_q, dtype=float)
-                q = _apply_soft_lift_margin(q, joint_name_to_cfg=joint_name_to_cfg, q_lo=q_lo, q_hi=q_hi)
-                robot.update_configuration(q)
-                _update_robot_visuals(q)
-                deep_penetration_escape_applied = True
-                current_collision_min = _current_collision_min_distance(q)
-                current_com_min_slack = _current_com_min_slack()
         boundaries = [
             ConstraintBoundary(
                 "collision",
@@ -1810,6 +2286,7 @@ def main() -> None:
                 collision_min_distance_m,
                 enabled=bool(enable_collision.value),
                 violation_tolerance=1e-5,
+                boundary_slack=collision_boundary_slack_m,
             ),
             ConstraintBoundary(
                 "CoM",
@@ -1819,28 +2296,75 @@ def main() -> None:
                 violation_tolerance=1e-4,
             ),
         ]
-        constraint_guard.remember_if_clear(q, boundaries)
-        active_constraint_labels = list(guard_decision.boundary_stall_labels)
+        _remember_if_buffered_clear(constraint_guard, q, boundaries)
+        active_constraint_labels = sorted(
+            set(guard_decision.boundary_stall_labels)
+            | (set(guard_decision.restore_labels) if guard_decision.restored_last_safe else set())
+        )
+        force_constraint_snap = _should_force_constraint_target_snap(guard_decision)
+        collision_state_refreshed = False
+        if collision_state_refresh_cooldown > 0:
+            collision_state_refresh_cooldown -= 1
+        if (
+            (
+                _should_refresh_collision_constraint_state(
+                    guard_decision, collision_enabled=bool(enable_collision.value)
+                )
+                or restored_collision_zero_motion
+            )
+            and collision_state_refresh_cooldown <= 0
+        ):
+            _configure_collision_constraint(
+                solver,
+                enabled=True,
+                min_distance_m=collision_min_distance_m,
+                max_constraints=int(collision_max_constraints.value),
+                tuning_mode=str(collision_tuning.value),
+                include_pairs=include_pairs,
+                exclude_pairs=list(exclusion_pairs),
+                reset_stall_state=True,
+            )
+            clear_all_target_velocities_if_available(solver)
+            collision_state_refresh_cooldown = COLLISION_STATE_REFRESH_COOLDOWN_FRAMES
+            if restored_collision_zero_motion:
+                _start_collision_target_hold()
+            collision_state_refreshed = True
         if guard_decision.zero_motion_resync:
             clear_all_target_velocities_if_available(solver)
         if guard_decision.zero_motion_snap:
-            _sync_targets_from_robot()
-        constraint_reason = " + ".join(active_constraint_labels) if active_constraint_labels else "constraint"
+            _sync_targets_from_robot_if_idle(force=force_constraint_snap)
+        constraint_reason = (
+            " + ".join(active_constraint_labels) if active_constraint_labels else "constraint"
+        )
 
-        if result_status_name == "NO_PROGRESS" and max(right_pos_err, left_pos_err) <= EE_POSITION_DEADBAND:
+        if (
+            result_status_name == "NO_PROGRESS"
+            and max(right_pos_err, left_pos_err) <= EE_POSITION_DEADBAND
+        ):
             status.value = "Status: Holding target"
-        elif deep_penetration_escape_applied:
-            status.value = "Status: penetration escape burst accepted"
+        elif collision_state_refreshed:
+            snapped = _sync_targets_from_robot_if_idle(force=True)
+            status.value = (
+                "Status: collision state refreshed after boundary stall"
+                + ("; targets snapped to current tools" if snapped else "")
+                + (f" | {result.status_message}" if getattr(result, "status_message", "") else "")
+            )
         elif guard_decision.restored_last_safe:
-            _sync_targets_from_robot()
+            snapped = _sync_targets_from_robot_if_idle(force=force_constraint_snap)
             status.value = (
                 f"Status: {' + '.join(guard_decision.restore_labels)} guard restored last safe pose"
+                + ("; targets snapped" if snapped else "; preserving active target drag")
                 + (f" | {result.status_message}" if getattr(result, "status_message", "") else "")
             )
         elif active_constraint_labels:
-            _sync_targets_from_robot()
+            snapped = _sync_targets_from_robot_if_idle(force=force_constraint_snap)
             status.value = (
-                f"Status: {constraint_reason} limited; targets snapped to current tools"
+                f"Status: {constraint_reason} limited"
+                + (
+                    "; targets snapped to current tools"
+                    if snapped
+                    else "; preserving active target drag"
+                )
                 + (f" | {result.status_message}" if getattr(result, "status_message", "") else "")
             )
         elif guard_decision.zero_motion_snap:
@@ -1849,31 +2373,41 @@ def main() -> None:
                 + (f" | {result.status_message}" if getattr(result, "status_message", "") else "")
             )
         elif guard_decision.zero_motion_resync:
-            status.value = (
-                "Status: constrained zero-motion; solver state re-synced"
-                + (f" | {result.status_message}" if getattr(result, "status_message", "") else "")
+            status.value = "Status: constrained zero-motion; solver state re-synced" + (
+                f" | {result.status_message}" if getattr(result, "status_message", "") else ""
             )
         elif result_status_name == "NO_PROGRESS":
+            status.value = "Status: weak progress" + (
+                f" | {result.status_message}" if getattr(result, "status_message", "") else ""
+            )
+        elif secondary_relaxed:
             status.value = (
-                "Status: weak progress"
+                f"Status: {result.status.name} | secondary objectives relaxed for tracking"
                 + (f" | {result.status_message}" if getattr(result, "status_message", "") else "")
             )
         elif bool(enable_collision.value) and result_status_name == "COLLISION_VIOLATED":
-            _sync_targets_from_robot()
+            snapped = _sync_targets_from_robot_if_idle(force=True)
             status.value = (
                 "Status: collision limited; holding last safe configuration"
+                + ("; targets snapped" if snapped else "; preserving active target drag")
                 + (f" | {result.status_message}" if getattr(result, "status_message", "") else "")
             )
-        elif result_status_name == "INFEASIBLE" and (bool(enable_collision.value) or bool(enable_com_constraint.value)):
-            _sync_targets_from_robot()
+        elif result_status_name == "INFEASIBLE" and (
+            bool(enable_collision.value) or bool(enable_com_constraint.value)
+        ):
+            snapped = _sync_targets_from_robot_if_idle(force=True)
             status.value = (
-                "Status: constrained solve saturated; targets snapped to current tools"
+                "Status: constrained solve saturated"
+                + (
+                    "; targets snapped to current tools"
+                    if snapped
+                    else "; preserving active target drag"
+                )
                 + (f" | {result.status_message}" if getattr(result, "status_message", "") else "")
             )
         else:
-            status.value = (
-                f"Status: {result.status.name}"
-                + (f" | {result.status_message}" if getattr(result, "status_message", "") else "")
+            status.value = f"Status: {result.status.name}" + (
+                f" | {result.status_message}" if getattr(result, "status_message", "") else ""
             )
         timing_handle.value = float(step.elapsed_ms)
         solve_ms.value = f"{step.elapsed_ms:.2f}"

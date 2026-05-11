@@ -94,7 +94,7 @@ nav:
       - Dual-Arm ECTS: examples/dual_arm_ects.md
       - Teleop IK: examples/teleop_ik.md
     - Robots:
-      - ROBOTIS AI Worker IK: examples/robotis_ai_worker_ik.md
+      - Bimanual Whole-Body IK: examples/bimanual_whole_body_ik.md
       - Unitree G1 Retargeting IK: examples/unitree_g1_retargeting_ik.md
     - GPU & Batch:
       - GPU Batch IK: examples/gpu_batch_ik.md

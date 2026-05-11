@@ -1,19 +1,20 @@
-# ROBOTIS AI Worker Constraint Teleop Example
+# Bimanual Whole-Body IK Example
 
-`examples/12_ai_worker_constraint_teleop.py` is a Viser-based dual-arm IK demo
-for ROBOTIS AI Worker FFW models. It uses the public `ROBOTIS-GIT/ai_worker`
-repository for visual URDF assets and bundled reduced collision assets for
-interactive collision-aware IK.
+`examples/12_bimanual_whole_body_ik.py` is a Viser-based bimanual whole-body IK
+demo for ROBOTIS AI Worker FFW models and RB-Y1. It uses the public
+`ROBOTIS-GIT/ai_worker` repository for AI Worker visual URDF assets, bundled
+reduced collision assets for AI Worker collision-aware IK, and
+`robot_descriptions.rby1_description` when launched with `--robot rby1`.
+
+<video autoplay muted loop playsinline controls width="100%" src="../assets/media/rby1_collision_free_ik.mp4"></video>
 
 ## What It Covers
 
 - Dual 6D transform controls for left/right worker tools
 - Viser visualization throughout via `ViserServer` + `ViserUrdf`
-- Lift and head posture bias controls layered underneath the IK tasks
+- Model-aware posture bias controls layered underneath the IK tasks
 - Passive-joint locking so wheel/drive joints stay quiet during arm teleoperation
-- Support for both local variants available in this workspace:
-  - `sg2`
-  - `bg2`
+- Support for AI Worker `sg2` / `bg2` and RB-Y1 via `--robot rby1`
 
 ## Run It
 
@@ -25,27 +26,29 @@ source .venv/bin/activate
 pip install "embodik[examples]"
 embodik-examples --copy
 cd embodik_examples
-python 12_ai_worker_constraint_teleop.py
+python 12_bimanual_whole_body_ik.py
 ```
 
 If you are not activating the venv, use the Python path printed by
 `embodik-examples --copy`, for example:
 
 ```bash
-/path/to/.venv/bin/python 12_ai_worker_constraint_teleop.py
+/path/to/.venv/bin/python 12_bimanual_whole_body_ik.py
 ```
 
 From a repository checkout, use Pixi:
 
 ```bash
-pixi run python examples/12_ai_worker_constraint_teleop.py
+pixi run python examples/12_bimanual_whole_body_ik.py
 ```
 
-The default worker variant is `sg2`. To use the other worker variant, pass
-`--variant bg2`. For example, from copied examples:
+The default robot model is AI Worker `sg2`. To use the other worker variant,
+pass `--variant bg2`; to launch RB-Y1, pass `--robot rby1`. For example, from
+copied examples:
 
 ```bash
-python 12_ai_worker_constraint_teleop.py --variant bg2
+python 12_bimanual_whole_body_ik.py --variant bg2
+python 12_bimanual_whole_body_ik.py --robot rby1
 ```
 
 ## Asset Resolution

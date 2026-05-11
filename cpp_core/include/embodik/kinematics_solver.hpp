@@ -20,6 +20,7 @@
 #include <memory>
 #include <optional>
 #include <pinocchio/spatial/se3.hpp>
+#include <stdexcept>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -207,6 +208,40 @@ public:
    * @param enable True to enable position limit constraints
    */
   void enable_position_limits(bool enable) { use_position_limits_ = enable; }
+
+  /**
+   * @brief Enable/disable inter-tick acceleration limit constraints.
+   *
+   * When enabled, tightens velocity bounds based on the previous tick's
+   * velocity and the configured acceleration limits, producing smoother
+   * velocity profiles (lower jerk). Requires set_acceleration_limits().
+   * @param enable True to enable acceleration constraints
+   */
+  void enable_acceleration_limits(bool enable) {
+    acceleration_limits_enabled_ = enable;
+    if (enable) {
+      previous_dq_ = Eigen::VectorXd::Zero(robot_->nv());
+    } else {
+      previous_dq_ = Eigen::VectorXd();
+    }
+  }
+
+  /**
+   * @brief Set per-joint acceleration limits (rad/s^2).
+   * @param limits Vector of size nv with max acceleration per joint
+   */
+  void set_acceleration_limits(const Eigen::VectorXd &limits) {
+    if (limits.size() != robot_->nv()) {
+      throw std::invalid_argument("acceleration limits must have size nv");
+    }
+    for (Eigen::Index i = 0; i < limits.size(); ++i) {
+      if (!std::isfinite(limits[i]) || limits[i] < 0.0) {
+        throw std::invalid_argument(
+            "acceleration limits must be finite and non-negative");
+      }
+    }
+    acceleration_limits_ = limits;
+  }
 
   /**
    * @brief Set floating-base position bounds (for floating-base robots)
@@ -992,6 +1027,11 @@ private:
 
   // Debug/perf instrumentation (off by default)
   bool timing_breakdown_enabled_ = false;
+
+  // Inter-tick acceleration constraint cascading
+  bool acceleration_limits_enabled_ = false;
+  Eigen::VectorXd acceleration_limits_;
+  Eigen::VectorXd previous_dq_;
 
   // Floating-base bounds (optional)
   std::optional<Eigen::Vector3d> base_position_lower_;
