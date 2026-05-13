@@ -113,4 +113,5 @@ nav:
     - Utilities: api/utils.md
     - Visualization: api/visualization.md
   - Development: development.md
+  - Third-Party Notices: third_party_notices.md
   - Changelog: changelog.md

@@ -169,7 +169,9 @@ def _solve_cpu_sequential(
     try:
         import embodik as eik
     except ImportError:
-        raise RuntimeError("EmbodiK not installed. Install with: pip install embodik")
+        raise RuntimeError(
+            "EmbodiK not installed. Install with: python -m pip install --only-binary=:all: embodik"
+        )
 
     B = len(objective_targets_batch)
     velocities_list = []

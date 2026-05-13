@@ -9,10 +9,9 @@ EmbodiK supports various task types for multi-task inverse kinematics.
 Control end-effector pose (position + orientation).
 
 ```python
-frame_task = embodik.FrameTask(
-    frame_id="end_effector",
-    target_pose=np.eye(4)  # 4x4 transformation matrix
-)
+frame_task = solver.add_frame_task("ee_task", "panda_hand")
+frame_task.priority = 0
+frame_task.weight = 1.0
 ```
 
 ### PostureTask
@@ -20,18 +19,21 @@ frame_task = embodik.FrameTask(
 Maintain desired joint configuration.
 
 ```python
-posture_task = embodik.PostureTask(
-    target_q=np.array([0.0, 0.5, 0.0, -1.0, 0.0, 1.0, 0.0])
-)
+posture_task = solver.add_posture_task("posture")
+posture_task.priority = 1
+posture_task.set_target_configuration(q_default)
 ```
 
 ### COMTask
 
-Control center of mass position.
+Control center of mass position. Most current examples use the support-polygon
+constraint API instead of a standalone CoM task:
 
 ```python
-com_task = embodik.COMTask(
-    target_com=np.array([0.0, 0.0, 0.8])  # Desired COM position
+solver.configure_com_constraint(
+    support_polygon=polygon_xy,
+    margin=0.05,
+    frame_name="world",
 )
 ```
 
@@ -40,22 +42,16 @@ com_task = embodik.COMTask(
 Control individual joint position.
 
 ```python
-joint_task = embodik.JointTask(
-    joint_id=3,
-    target_q=0.5  # Desired joint angle
-)
+joint_task = solver.add_joint_task("joint_bias", "panda_joint4")
+joint_task.set_target_value(0.5)
 ```
 
 ### MultiJointTask
 
 Control multiple joints simultaneously.
 
-```python
-multi_joint_task = embodik.MultiJointTask(
-    joint_ids=[0, 2, 4],
-    target_q=np.array([0.5, 0.3, 0.7])  # Desired angles for selected joints
-)
-```
+Use a `PostureTask` with selected controlled joints when you want a compact
+multi-joint bias.
 
 ## Units Conventions
 
@@ -107,10 +103,10 @@ task.solve_mode = embodik.TaskSolveMode.SCALE
 task.allow_min_error_fallback = True
 ```
 
-After `solve_velocity()`, inspect effective diagnostics:
+After a solve, inspect effective diagnostics:
 
 ```python
-result = solver.solve_velocity(q)
+result = solver.solve_position_step(q, target_pose, "ee_task", step_opts)
 print(result.task_modes_effective)
 print(result.task_used_fallback)
 ```

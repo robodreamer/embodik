@@ -28,8 +28,13 @@ jobs:
         run: pixi run lint
         continue-on-error: true
 
-  test-macos-arm64:
-    runs-on: macos-14
+  test-linux-pip-source:
+    name: Linux pip source install (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
 
     steps:
       - name: Checkout code
@@ -38,7 +43,31 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python-version }}
+
+      - name: Build and smoke test source install
+        run: |
+          bash scripts/install_embodik_linux.sh \
+            --venv .venv \
+            --python python \
+            --editable "$PWD" \
+            --clean-env
+
+  test-macos-arm64:
+    runs-on: macos-14
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
 
       # EmbodiK uses find_package(Eigen3 3.3). Homebrew `eigen` may be Eigen 5.x; use eigen@3.
       # Pinocchio CMake may require urdfdom_headers from Homebrew when using the PyPI pin wheel.

@@ -67,7 +67,7 @@ Testing expectations:
 | `cpp_core/src/` | C++ implementation (kinematics_solver.cpp, robot_model.cpp, dual_arm_ects.cpp) |
 | `python_bindings/src/` | Nanobind bindings (kinematics_solver_bindings.cpp, tasks_bindings.cpp, etc.) |
 | `python/embodik/` | Python package (gpu, examples, utils) |
-| `examples/` | Standalone example scripts (01–09; 09 = dual-arm ECTS) |
+| `examples/` | Standalone example scripts, including basic IK, collision-aware IK, CoM, dual-arm ECTS, whole-body bimanual, and G1 retargeting demos |
 | `examples/utils/` | dual_iiwa_urdf.py, dual_panda_urdf.py, robot_models.py |
 | `test/` | Pytest suite |
 | `scripts/` | Build helpers (version.py, patch_qhull_cmake.py, upload_pypi.sh) |
@@ -82,15 +82,10 @@ When a task references prior experiments, regressions, or release-era debugging 
 check `private maintainer notes/` first before re-investigating from scratch. These files are
 maintainer-facing context (not public docs) and should be used to inform follow-up work.
 
-Current high-signal notes:
-
-- `private maintainer notes/joint_limit_saturation_exit_findings.md`
-- `private maintainer notes/personal_installer_gist_notes.md`
-- `private maintainer notes/TASK_TEMPLATE.md`
-- `private maintainer notes/POSTMORTEM_TEMPLATE.md`
-
-Guideline: keep user-facing guidance in `docs/`; keep ad-hoc/internal investigation
-artifacts in `private maintainer notes/`.
+Guideline: search `private maintainer notes/` only when the task references prior
+experiments, regressions, release debugging, or private context. Keep
+user-facing guidance in `docs/`; keep ad-hoc/internal investigation artifacts in
+`private maintainer notes/`.
 
 ---
 

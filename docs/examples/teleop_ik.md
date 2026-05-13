@@ -55,6 +55,16 @@ self-collision constraints.
 
 ## Running
 
+Install and copy the example bundle once using the
+[Installation Guide](../installation.md#examples). Then run:
+
+```bash
+cd embodik_examples
+python 03_teleop_ik.py
+```
+
+For repository development, use Pixi:
+
 ```bash
 pixi run -e teleop demo-teleop
 # or

@@ -23,7 +23,7 @@ jobs:
         with:
           lfs: true
 
-      - name: Set up Python
+      - name: Set up host Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -32,6 +32,7 @@ jobs:
         uses: pypa/cibuildwheel@v2.23.2
         env:
           CIBW_OUTPUT_DIR: wheelhouse
+          CIBW_BUILD: "cp310-* cp311-* cp312-*"
 
       - name: Upload wheels artifact
         uses: actions/upload-artifact@v4
@@ -52,7 +53,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "3.11"
 
       - name: Build sdist
         run: |

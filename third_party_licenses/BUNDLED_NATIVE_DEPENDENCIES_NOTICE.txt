@@ -1,0 +1,52 @@
+Bundled Native Dependency Notice
+================================
+
+EmbodiK binary wheels repaired with auditwheel or delocate may bundle native
+libraries from Pinocchio's dependency stack. A Linux auditwheel validation run
+on 2026-05-12 bundled libraries matching these projects:
+
+- Assimp / Open Asset Import Library
+  Upstream: https://github.com/assimp/assimp
+  License expression from cmeel package metadata: BSD-3-Clause
+
+- Boost C++ Libraries
+  Upstream: https://www.boost.org/
+  License expression from cmeel package metadata: BSL-1.0
+
+- Coal / HPP-FCL
+  Upstream: https://github.com/coal-library/coal
+  License expression from cmeel package metadata: BSD-3-Clause
+
+- console_bridge
+  Upstream: https://github.com/ros/console_bridge
+  License expression from cmeel package metadata: Zlib
+
+- OctoMap
+  Upstream: https://octomap.github.io/
+  License expression from cmeel package metadata: BSD-3-Clause
+
+- Pinocchio
+  Upstream: https://github.com/stack-of-tasks/pinocchio
+  License expression from cmeel package metadata: BSD-3-Clause
+
+- Qhull
+  Upstream: http://www.qhull.org/
+  License: Qhull permissive license; see Qhull COPYING.txt in the upstream
+  distribution and cmeel-qhull package metadata.
+
+- TinyXML-2
+  Upstream: https://github.com/leethomason/tinyxml2
+  License expression from cmeel package metadata: Zlib
+
+- URDFDOM
+  Upstream: https://github.com/ros/urdfdom
+  License expression from cmeel package metadata: BSD-3-Clause
+
+Release checklist:
+
+1. Inspect each repaired wheel with `auditwheel show` on Linux or
+   `delocate-listdeps` / `otool -L` on macOS.
+2. Compare the bundled native libraries with this notice.
+3. Add any newly bundled project and required license text before publishing.
+4. Do not publish repaired wheels while this inventory is incomplete for the
+   exact artifacts being uploaded.

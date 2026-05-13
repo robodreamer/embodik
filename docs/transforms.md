@@ -368,8 +368,11 @@ import embodik
 import pinocchio as pin
 import numpy as np
 
-# Create robot model
-model = embodik.RobotModel.from_urdf("robot.urdf")
+# Create robot model and solver
+model = embodik.RobotModel("robot.urdf")
+solver = embodik.KinematicsSolver(model)
+opts = embodik.PositionIKOptions()
+seed_q = model.neutral_configuration()
 
 # Create target pose using SE3
 target_pose_se3 = pin.SE3(np.eye(3), np.array([0.5, 0.2, 0.3]))
@@ -377,11 +380,12 @@ target_pose_se3 = pin.SE3(np.eye(3), np.array([0.5, 0.2, 0.3]))
 # Convert to 4x4 matrix for EmbodiK
 target_pose_matrix = target_pose_se3.homogeneous()
 
-# Use in frame task
-frame_task = embodik.FrameTask(
-    frame_id="end_effector",
-    target_pose=target_pose_matrix
-)
+# Use directly with the position solver
+result = solver.solve_position(seed_q, target_pose_matrix, "end_effector", opts)
+
+# Or with a registered step task
+frame_task = solver.add_frame_task("ee_task", "end_effector")
+frame_task.set_target_pose(target_pose_se3.translation, target_pose_se3.rotation)
 ```
 
 ### Getting Frame Poses

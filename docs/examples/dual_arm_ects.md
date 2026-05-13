@@ -17,6 +17,16 @@ Overview for `examples/09_dual_arm_ects.py`.
 
 ## Run
 
+Install and copy the example bundle once using the
+[Installation Guide](../installation.md#examples). Then run:
+
+```bash
+cd embodik_examples
+python 09_dual_arm_ects.py
+```
+
+For repository development, use Pixi:
+
 ```bash
 pixi run python examples/09_dual_arm_ects.py
 ```

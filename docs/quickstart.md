@@ -1,172 +1,111 @@
 # Quickstart Guide
 
-Get started with EmbodiK in 5 minutes.
+Get started with EmbodiK by running the maintained examples first, then adapt
+their API pattern to your robot.
 
-## Basic Usage
+## Run A Maintained Example
 
-### 1. Create a Robot Model
+Install and copy the example bundle using the
+[Installation Guide](installation.md#examples), then run:
 
-```python
-import embodik
-import numpy as np
-
-# Load robot model from URDF
-model = embodik.RobotModel.from_urdf("path/to/robot.urdf")
-
-# Or create from existing Pinocchio model
-# model = embodik.RobotModel(pinocchio_model)
+```bash
+cd embodik_examples
+python 01_basic_ik_simple.py
 ```
 
-### 2. Create a Kinematics Solver
+From a repository clone:
 
-```python
-solver = embodik.KinematicsSolver(model)
+```bash
+pixi run python examples/01_basic_ik_simple.py
 ```
 
-### 3. Define Tasks
+## Current IK API Pattern
+
+EmbodiK examples use registered tasks on a `KinematicsSolver`; they do not
+instantiate task objects directly.
+
+| Step | API calls | Purpose |
+| --- | --- | --- |
+| Load or resolve a robot | `RobotModel(...)` or an example `resolve_robot_configuration(...)` helper | Provide the kinematic model, default configuration, and target frame names. |
+| Create a solver | `KinematicsSolver(robot)`, `solver.dt`, `set_damping()` | Configure numerical stepping behavior. |
+| Register a frame task | `solver.add_frame_task("ee_task", target_link)` | Track an end-effector pose target. |
+| Add posture bias | `solver.add_posture_task("posture")`, `set_target_configuration(q_default)` | Keep unused freedom near a preferred posture. |
+| Configure options | `PositionIKOptions()` or `PositionStepOptions()` | Set gains, iteration counts, timestep behavior, torso constraints, or stall recovery. |
+| Solve | `solve_position(...)` or `solve_position_step(...)` | Return a result with `status`, `q_solution`, error metrics, and task diagnostics. |
+
+## Position Solve
+
+Use `solve_position()` when you want EmbodiK to iterate toward one target pose
+inside a bounded solve call:
 
 ```python
-# Frame task: control end-effector pose
-frame_task = embodik.FrameTask(
-    frame_id="end_effector",
-    target_pose=np.eye(4)  # 4x4 transformation matrix
-)
+opts = embodik.PositionIKOptions()
+opts.max_iterations = 20
+opts.position_gain = 40.0
+opts.orientation_gain = 40.0
 
-# Posture task: maintain joint configuration
-posture_task = embodik.PostureTask(
-    target_q=np.zeros(model.nq)  # Desired joint angles
-)
-```
-
-### 4. Solve Inverse Kinematics
-
-```python
-# Position IK: solve for joint angles to achieve target pose
-options = embodik.PositionIKOptions(
-    max_iterations=100,
-    tolerance=1e-6
-)
-
-result = solver.solve_position_ik(
-    target_pose=frame_task.target_pose,
-    initial_q=np.zeros(model.nq),
-    options=options
-)
-
+result = solver.solve_position(seed_q, target_pose, "panda_hand", opts)
 if result.status == embodik.SolverStatus.SUCCESS:
-    print(f"Solution found: {result.solution}")
-    print(f"Converged in {result.iterations} iterations")
-else:
-    print(f"Solver failed: {result.status}")
+    q_next = result.q_solution
 ```
 
-## Multi-Task IK
+This path creates the internal objective stack for the call. It is the right
+starting point for offline checks, retargeting steps, and scripts that do not
+need a persistent interactive task stack.
 
-EmbodiK supports hierarchical multi-task inverse kinematics:
+## Interactive Step Solve
+
+Use `solve_position_step()` when a UI, teleop stream, or tracking loop updates a
+target every frame. Register tasks once, then call the step solver repeatedly:
 
 ```python
-# Create multiple tasks with priorities
-tasks = [
-    embodik.FrameTask("end_effector", target_pose_1),  # Priority 1
-    embodik.PostureTask(target_q),                      # Priority 2
-    embodik.COMTask(target_com_position)                # Priority 3
-]
+ee_task = solver.add_frame_task("ee_task", target_link)
+ee_task.priority = 0
+ee_task.weight = 1.0
 
-# Solve with task hierarchy
-result = solver.solve_multi_task_ik(
-    tasks=tasks,
-    initial_q=initial_configuration
-)
+posture = solver.add_posture_task("posture")
+posture.priority = 1
+posture.set_target_configuration(q_default)
+
+step_opts = embodik.PositionStepOptions()
+step_opts.max_steps = 1
+step_opts.adaptive_dt = True
+
+result = solver.solve_position_step(q_current, target_pose, "ee_task", step_opts)
+q_current = result.q_solution
 ```
 
-## Velocity IK
+Examples `01_basic_ik_simple.py`, `02_collision_aware_IK.py`, `03_teleop_ik.py`,
+and the bimanual demos use this pattern.
 
-For real-time control, use velocity IK:
+## Adding Constraints
 
-```python
-# Current configuration
-q = np.array([0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7])
+Constraints are configured on the solver and are enforced during the next solve:
 
-# Desired end-effector velocity (6D: 3 linear + 3 angular)
-target_velocity = np.array([0.1, 0.0, 0.0, 0.0, 0.0, 0.0])
-
-# Solve for joint velocities
-config = embodik.VelocitySolverConfig(
-    epsilon=1e-6,
-    regularization=1e-3
-)
-
-result = solver.solve_velocity_ik(
-    target_velocity=target_velocity,
-    q=q,
-    config=config
-)
-
-if result.status == embodik.SolverStatus.SUCCESS:
-    dq = result.solution  # Joint velocities
-
-    # IMPORTANT: Use integrate() instead of q += dt * dq
-    # This correctly handles floating-base, quaternion, and continuous joints
-    dt = 0.01
-    q = model.integrate(q, np.array(dq), dt)
-```
+| Constraint | API | Used by |
+| --- | --- | --- |
+| Self-collision avoidance | `solver.configure_collision_constraint(...)` | `02_collision_aware_IK.py`, dual-arm and whole-body examples |
+| CoM support polygon | `solver.configure_com_constraint(...)` | `08_com_constraint_example.py`, whole-body examples |
+| Torso orientation or pose bounds | `opts.torso_constraint...` | floating-base and whole-body position solves |
 
 ## Configuration-Space Operations
 
-EmbodiK provides Lie-group-aware operations for working with joint configurations.
-These are essential for floating-base robots where the base orientation is represented
-as a quaternion:
+Use the robot model's manifold-aware methods when applying velocities or
+comparing configurations, especially for floating-base robots:
 
 ```python
-# Integrate velocity into configuration (works for ALL joint types)
-q_new = model.integrate(q, v, dt=0.01)
-
-# Compute tangent-space difference between configurations
-delta_v = model.difference(q_start, q_goal)
-
-# Get neutral (home) configuration with valid quaternion
+q_next = model.integrate(q_current, joint_velocity, dt=0.01)
+delta = model.difference(q_start, q_goal)
 q_home = model.neutral_configuration()
-
-# Re-normalize quaternion components
-q = model.normalize(q)
+q_valid = model.normalize(q_maybe_drifted)
 ```
 
-## Complete Example
-
-```python
-import embodik
-import numpy as np
-
-# 1. Load robot model
-model = embodik.RobotModel.from_urdf("robot.urdf")
-
-# 2. Create solver
-solver = embodik.KinematicsSolver(model)
-
-# 3. Set target pose (end-effector should be at [0.5, 0.2, 0.3])
-target_pose = np.eye(4)
-target_pose[:3, 3] = [0.5, 0.2, 0.3]  # Translation
-# Rotation can be set via target_pose[:3, :3]
-
-# 4. Solve IK
-result = solver.solve_position_ik(
-    target_pose=target_pose,
-    initial_q=np.zeros(model.nq)
-)
-
-# 5. Check result
-if result.status == embodik.SolverStatus.SUCCESS:
-    print(f"✓ IK solved successfully!")
-    print(f"  Joint angles: {result.solution}")
-    print(f"  Iterations: {result.iterations}")
-    print(f"  Final error: {result.final_error}")
-else:
-    print(f"✗ IK failed: {result.status}")
-```
+For fixed-base revolute robots this resembles `q + v * dt`; for floating-base
+robots it preserves quaternion and SE(3) validity.
 
 ## Next Steps
 
-- [Working with Transforms](transforms.md) — Learn how to create and manipulate 3D transforms
-- [API Reference](api/index.md) — Detailed API documentation
-- [Examples](examples/index.md) — More complex examples
-- [Development Guide](development.md) — Contributing to EmbodiK
+- [Examples](examples/index.md) — Maintained runnable scripts.
+- [KinematicsSolver API](api/kinematics_solver.md) — Solver options and result diagnostics.
+- [Tasks API](api/tasks.md) — Registered task types, priorities, and solve modes.
+- [RobotModel API](api/robot_model.md) — Model loading, FK/Jacobians/CoM, collisions, and configuration-space operations.

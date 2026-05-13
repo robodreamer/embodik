@@ -16,23 +16,17 @@ EmbodiK is a modern C++ library with Python bindings designed for robust, high-p
 
 ## Quick Start
 
-```python
-import embodik
-import numpy as np
+Install EmbodiK, run a maintained example, then adapt the registered-task API
+pattern from that script:
 
-# Create robot model
-model = embodik.RobotModel.from_urdf("path/to/robot.urdf")
-
-# Create kinematics solver
-solver = embodik.KinematicsSolver(model)
-
-# Solve IK for a target pose
-target_pose = np.eye(4)  # 4x4 transformation matrix
-result = solver.solve_position_ik(target_pose)
-
-if result.status == embodik.SolverStatus.SUCCESS:
-    print(f"Solution: {result.solution}")
+```bash
+pip install embodik
+python -c "import embodik; print(embodik.__version__)"
 ```
+
+See the [Quickstart](quickstart.md) and [Examples](examples/index.md) pages for
+the current `KinematicsSolver`, `add_frame_task()`, and `solve_position_step()`
+workflow.
 
 ## Installation
 

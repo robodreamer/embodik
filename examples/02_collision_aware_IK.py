@@ -178,7 +178,7 @@ def resolve_robot_configuration(robot_key: str) -> RobotConfig:
                 "Install the 'robot_descriptions' package to use this example:\n"
                 "  pip install robot_descriptions\n"
                 "Or install with examples dependencies:\n"
-                "  pip install embodik[examples]"
+                '  python -m pip install "embodik[examples]"'
             ) from exc
         except AttributeError as exc:
             raise ValueError(

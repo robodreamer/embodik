@@ -11,45 +11,21 @@ an optional GPU benchmark panel.
 It is intentionally more detailed than `01_basic_ik_simple.py`: use it when you
 want to inspect collision behavior, timing, task modes, and solver tuning.
 
-## Core Pattern
+## API Walkthrough
 
-The example uses `solve_position_step()` with a registered task stack:
+The example uses the same `solve_position_step()` path as the basic example,
+then adds collision constraints and diagnostics:
 
-```python
-solver = embodik.KinematicsSolver(robot)
-solver.dt = 0.01
-solver.set_damping(0.1)
-solver.set_tolerance(0.1)
+| Step | API calls | Purpose |
+| --- | --- | --- |
+| Register tasks | `add_frame_task("ee_task", target_link)`, `add_posture_task("posture_task")` | Track the end effector while keeping a configurable nullspace bias. |
+| Configure collision avoidance | `configure_collision_constraint(...)` | Add self-collision velocity-damper constraints to each step. |
+| Tune task behavior | `TaskSolveMode`, `allow_min_error_fallback`, posture `weight` | Let the UI switch between strict scaling, fallback, and nullspace settings. |
+| Step the target | `solve_position_step(q, target_pose, "ee_task", step_opts)` | Produce the next safe configuration and per-task diagnostics. |
+| Visualize/debug | `compute_collision_distances()`, result diagnostics | Show closest pairs, timing, effective task modes, and fallback state. |
 
-frame_task = solver.add_frame_task("ee_task", target_link)
-frame_task.priority = 0
-frame_task.weight = 1.0
-frame_task.solve_mode = embodik.TaskSolveMode.SCALE_ELASTIC
-frame_task.allow_min_error_fallback = False
-
-posture_task = solver.add_posture_task("posture_task")
-posture_task.priority = 1
-posture_task.weight = 1e-2
-posture_task.solve_mode = embodik.TaskSolveMode.MIN_ERROR
-posture_task.set_target_configuration(q_default)
-
-solver.configure_collision_constraint(
-    min_distance=0.05,
-    include_pairs=[],
-    exclude_pairs=collision_exclusions,
-)
-
-opts = embodik.PositionStepOptions()
-opts.position_gain = 10.0
-opts.orientation_gain = 10.0
-opts.max_steps = 1
-opts.adaptive_dt = True
-opts.adaptive_dt_max_scale = 10.0
-opts.adaptive_dt_reference_distance = 0.02
-
-result = solver.solve_position_step(q_current, target_pose, "ee_task", opts)
-q_current = result.q_solution
-```
+Use `examples/02_collision_aware_IK.py` as the runnable source for the full UI
+and option wiring.
 
 ## Collision Configuration
 
@@ -81,6 +57,16 @@ Console collision-pair logs are throttled to avoid noisy output while the visual
 debug markers continue updating live.
 
 ## Running
+
+Install and copy the example bundle once using the
+[Installation Guide](../installation.md#examples). Then run:
+
+```bash
+cd embodik_examples
+python 02_collision_aware_IK.py
+```
+
+For repository development, use Pixi:
 
 ```bash
 pixi run python examples/02_collision_aware_IK.py

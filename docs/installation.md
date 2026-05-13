@@ -1,759 +1,279 @@
 # Installation
 
-EmbodiK requires Python 3.10+ and is distributed via PyPI.
+EmbodiK supports Python 3.10-3.12 and is distributed through PyPI. Start with
+the wheel-only install. If no compatible wheel is available for your
+platform/Python, use the source-build fallback below.
 
-## Quick Start (macOS / Linux)
+> Published repaired wheels do not require the Python `pin` package for core
+> runtime use. Source builds use `pin` or a system Pinocchio install as the
+> native library provider; keep that provider installed in the environment used
+> to import EmbodiK. Some optional examples and visualization paths still use
+> Python Pinocchio directly.
 
-The fastest way to install is with the one-shot script — no cloning required:
-
-=== "macOS"
-
-    ```bash
-    curl -fsSL -O https://gist.githubusercontent.com/robodreamer/adc0b4452d474586c5890877b629005b/raw/install_embodik_macos.sh
-    bash install_embodik_macos.sh --python python3.12
-    ```
-
-=== "Linux (Debian/Ubuntu)"
-
-    ```bash
-    curl -fsSL -O https://gist.githubusercontent.com/robodreamer/adc0b4452d474586c5890877b629005b/raw/install_embodik_linux.sh
-    bash install_embodik_linux.sh
-    ```
-
-The script creates a `.venv` in the current directory, installs all dependencies, and verifies the import.  Activate it and run the examples:
+## Fast Path
 
 ```bash
+python -m venv .venv
 source .venv/bin/activate
-pip install "embodik[examples]"
-embodik-examples --copy
-cd embodik_examples
-python 02_collision_aware_IK.py
+python -m pip install -U pip
+python -m pip install --only-binary=:all: embodik
+python -c "import embodik; print(embodik.__version__)"
 ```
 
-Examples default to the Panda preset; pass `--robot <key>` to use another model.
+If the import command works, the core package is installed. If pip reports that
+no matching binary distribution exists, use the source-build script for your
+platform instead of letting pip build an isolated temporary wheel.
 
-That's all you need to get started.  The rest of this page covers manual steps, options, and troubleshooting.
+## Choose An Install Path
 
----
+| Goal | Use this |
+| --- | --- |
+| Install EmbodiK as a user | `python -m pip install --only-binary=:all: embodik` |
+| Run copied examples | Install core EmbodiK first, then `python -m pip install "embodik[examples]"` |
+| Recover when pip builds from `embodik-*.tar.gz` | Use the one-shot source script for your platform |
+| Develop from a repository clone | Use Pixi; see [Developer Setup](#developer-setup) |
 
-> **Note (v0.4.0+)**: EmbodiK no longer requires the Python `pin` package at runtime.
-> All Pinocchio functionality is exposed through native C++ bindings. The `pin` package
-> is only needed at build time to locate Pinocchio's CMake config.
-
-## macOS (Homebrew): pip / sdist builds
-
-### One-shot installer
-
-From a checkout of this repository (recommended):
-
-```bash
-# PyPI install into ./.venv in your current directory
-bash scripts/install_embodik_macos.sh
-
-# Prefer Python 3.12 and a specific venv path
-bash scripts/install_embodik_macos.sh --python python3.12 --venv ./.venv
-
-# Editable install from the repo (default DIR = parent of scripts/)
-bash scripts/install_embodik_macos.sh --editable
-
-# If you have ROS / a local Pinocchio on DYLD_LIBRARY_PATH or CMAKE_PREFIX_PATH
-bash scripts/install_embodik_macos.sh --clean-env
-```
-
-Run `bash scripts/install_embodik_macos.sh --help` for all options (`--skip-brew`, etc.).
-
-Without cloning, you can download the script and run it from an empty project folder (still installs **embodik from PyPI**):
+## Examples
 
 ```bash
-curl -fsSL -O https://gist.githubusercontent.com/robodreamer/adc0b4452d474586c5890877b629005b/raw/install_embodik_macos.sh
-bash install_embodik_macos.sh --python python3.12
-```
-
-The manual steps below are equivalent if you prefer not to use the script.
-
----
-
-EmbodiK’s CMake uses `find_package(Eigen3 3.3 REQUIRED)`. Homebrew’s default **`eigen` formula is Eigen 5.x**, which CMake rejects (you will see “version found is not compatible with the version requested”). Use **`eigen@3`** and point CMake at it explicitly.
-
-**1. Toolchain**
-
-- Xcode command-line tools: `xcode-select --install`
-- **Python:** Prefer **3.10–3.12** (same range as [pre-built wheels](https://pypi.org/project/embodik/#files) and CI). Newer interpreters (e.g. 3.14) may work but are not validated; create the venv with `python3.12` if your default `python3` is too new.
-
-**2. Homebrew packages**
-
-```bash
-brew install eigen@3 urdfdom_headers urdfdom
-```
-
-`eigen@3` is often *keg-only*. You do **not** have to `brew link` it if you set `Eigen3_DIR` to the keg (below).
-
-Pinocchio’s CMake config may pull in **`urdfdom_headers`**; without the Homebrew packages, configure fails even when the PyPI `pin` wheel is installed.
-
-**3. Environment variables (same shell as `pip install`)**
-
-```bash
-export Eigen3_DIR="$(brew --prefix eigen@3)/share/eigen3/cmake"
-export SDKROOT="$(xcrun --sdk macosx --show-sdk-path)"
-# Command-line tools may ship an incomplete libc++; prefer the SDK’s C++ headers (fixes missing <cmath>).
-export CXXFLAGS="-isystem ${SDKROOT}/usr/include/c++/v1 ${CXXFLAGS:-}"
-
-PIN_PREFIX="$(python -c "import pinocchio, pathlib; print(pathlib.Path(pinocchio.__file__).resolve().parents[4])")"
-export CMAKE_PREFIX_PATH="${PIN_PREFIX}:$(brew --prefix)"
-```
-
-- **`Eigen3_DIR`:** must be **eigen@3**, not `brew --prefix eigen` (Eigen 5).
-- **`CMAKE_PREFIX_PATH`:** must include the **`pin` wheel prefix** (`PIN_PREFIX`) so CMake finds `pinocchio`. Append `:$(brew --prefix)` so Homebrew’s URDF CMake packages are visible. Do **not** set `CMAKE_PREFIX_PATH` to only `$(brew --prefix)` — that drops Pinocchio and breaks with “Could not find pinocchio”.
-- **`SDKROOT` / libc++:** if the compile fails with **`'cstddef' file not found`**, **`'cmath' file not found`**, or similar standard headers, set `SDKROOT` and add the SDK’s libc++ to the include path (the installer script does this automatically):
-  `export CXXFLAGS="-isystem ${SDKROOT}/usr/include/c++/v1 ${CXXFLAGS:-}"` (with `SDKROOT` set as above). If it still fails, install or select full Xcode: `sudo xcode-select -s /Applications/Xcode.app/Contents/Developer` (when Xcode is installed), or reinstall the command-line tools.
-
-**4. Optional checks**
-
-```bash
-test -f "$Eigen3_DIR/Eigen3Config.cmake" && echo "Eigen3_DIR OK"
-```
-
-**5. Editable install from a clone**
-
-```bash
-cd /path/to/embodik
-source .venv/bin/activate
-pip install -U pip
-pip install pin scikit-build-core nanobind cmake ninja
-export Eigen3_DIR="$(brew --prefix eigen@3)/share/eigen3/cmake"
-export SDKROOT="$(xcrun --sdk macosx --show-sdk-path)"
-export CXXFLAGS="-isystem ${SDKROOT}/usr/include/c++/v1 ${CXXFLAGS:-}"
-PIN_PREFIX="$(python -c "import pinocchio, pathlib; print(pathlib.Path(pinocchio.__file__).resolve().parents[4])")"
-export CMAKE_PREFIX_PATH="${PIN_PREFIX}:$(brew --prefix)"
-pip install --no-build-isolation -e .
-```
-
-If you already use a venv (e.g. under `embodik_test`), only `source` it and skip creating a new one.
-
-## Linux (Debian/Ubuntu): pip / sdist builds
-
-### One-shot installer
-
-From a checkout of this repository (recommended):
-
-```bash
-# PyPI install into ./.venv in your current directory
-bash scripts/install_embodik_linux.sh
-
-# Use a specific Python and venv path
-bash scripts/install_embodik_linux.sh --python python3.12 --venv ./.venv
-
-# Editable install from the repo (default DIR = parent of scripts/)
-bash scripts/install_embodik_linux.sh --editable
-
-# If you have ROS / a local Pinocchio on LD_LIBRARY_PATH or CMAKE_PREFIX_PATH
-bash scripts/install_embodik_linux.sh --clean-env
-```
-
-Run `bash scripts/install_embodik_linux.sh --help` for all options (`--skip-apt`, etc.).
-
-Without cloning, you can download the script and run it from an empty project folder (still installs **embodik from PyPI**):
-
-```bash
-curl -fsSL -O https://gist.githubusercontent.com/robodreamer/adc0b4452d474586c5890877b629005b/raw/install_embodik_linux.sh
-bash install_embodik_linux.sh
-```
-
-The installer currently auto-installs system packages on Debian/Ubuntu via `apt-get`. On other distros, install equivalent packages manually and run with `--skip-apt`.
-
-### Manual steps (equivalent)
-
-```bash
-sudo apt-get update
-sudo apt-get install -y \
-  build-essential cmake ninja-build pkg-config \
-  libeigen3-dev liburdfdom-dev
-
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -U pip
-pip install pin scikit-build-core nanobind cmake ninja
-
-PIN_PREFIX="$(python -c "import pinocchio, pathlib; print(pathlib.Path(pinocchio.__file__).resolve().parents[4])")"
-export CMAKE_PREFIX_PATH="$PIN_PREFIX"
-
-pip install --no-build-isolation embodik
-python -c "import embodik; print(embodik.__version__, embodik.RobotModel)"
-```
-
-## Option A: Fresh Environment (No existing Pinocchio)
-
-If you're starting fresh without any local Pinocchio or Boost installations:
-
-```bash
-# Create virtual environment
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -U pip
-
-# Install build dependencies and Pinocchio
-pip install pin scikit-build-core nanobind cmake ninja
-
-# macOS: see "macOS (Homebrew): pip / sdist builds" above — use eigen@3, SDKROOT, and:
-# export Eigen3_DIR="$(brew --prefix eigen@3)/share/eigen3/cmake"
-# export SDKROOT="$(xcrun --sdk macosx --show-sdk-path)"
-# PIN_PREFIX="$(python -c "import pinocchio, pathlib; print(pathlib.Path(pinocchio.__file__).resolve().parents[4])")"
-# export CMAKE_PREFIX_PATH="${PIN_PREFIX}:$(brew --prefix)"
-
-# Set CMAKE_PREFIX_PATH so the build can find Pinocchio (append :$(brew --prefix) on macOS — see above)
-export CMAKE_PREFIX_PATH=$(python -c "import pinocchio, pathlib; print(pathlib.Path(pinocchio.__file__).resolve().parents[4])")
-
-# Install embodik
-pip install --no-build-isolation embodik
-
-# Verify (no pin import needed at runtime!)
-python -c "import embodik; print(embodik.__version__, embodik.RobotModel)"
-```
-
-## Option B: Robotics Environment (Existing Pinocchio/ROS/Boost)
-
-If you have Pinocchio, Boost, or ROS installed locally (e.g., from source builds, conda, or system packages),
-you **must** clear environment variables that point to those installations. Otherwise, embodik may link
-against mismatched library versions and fail at runtime with errors like `libboost_*.so.X.Y.Z not found`.
-
-```bash
-# Create virtual environment
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -U pip
-
-# CRITICAL: Clear local Pinocchio/Boost paths
-unset LD_LIBRARY_PATH DYLD_LIBRARY_PATH CMAKE_PREFIX_PATH pinocchio_DIR
-
-# Install build dependencies and Pinocchio from PyPI
-pip install pin scikit-build-core nanobind cmake ninja
-
-# macOS: same as Option A (eigen@3, SDKROOT, CMAKE_PREFIX_PATH pin + brew — see section above)
-
-# Set CMAKE_PREFIX_PATH to the PyPI pin package (append :$(brew --prefix) on macOS — see above)
-export CMAKE_PREFIX_PATH=$(python -c "import pinocchio, pathlib; print(pathlib.Path(pinocchio.__file__).resolve().parents[4])")
-
-# Install embodik
-pip install --no-build-isolation embodik
-
-# Verify (no pin import needed at runtime!)
-python -c "import embodik; print(embodik.__version__, embodik.RobotModel)"
-```
-
-**Note on package names:** The PyPI package is `pin` (build-time only), but when imported, it's `import pinocchio`.
-
-### With Example Dependencies
-
-```bash
-pip install "embodik[examples]"
-
-# Copy and run examples
+python -m pip install --only-binary=:all: embodik
+python -m pip install "embodik[examples]"
 embodik-examples --copy
 cd embodik_examples
 python 01_basic_ik_simple.py
 ```
 
-Use `--robot <key>` when you want a non-default robot preset.
+The examples extra intentionally includes optional packages used by the copied
+example scripts, including Python Pinocchio for scripts that import `pinocchio`
+directly. Published repaired wheels for the core `embodik` install do not depend
+on Python Pinocchio.
 
-## Troubleshooting
+See the [Examples Guide](examples/index.md) for the full catalog.
 
-### `ImportError: libboost_*.so...`
+## If Pip Builds From Source
 
-This error means `LD_LIBRARY_PATH` points to a locally-built Pinocchio/Boost that conflicts with the `pin` wheel. Fix:
+Use these scripts when pip falls back to `embodik-*.tar.gz`, when no compatible
+wheel exists for your platform/Python, or when you need an editable local build.
+They create a `.venv`, install system and Python build dependencies, prefer the
+PyPI `pin` CMake prefix, install EmbodiK, and run an import smoke test.
+
+The one-shot scripts keep `pin` in the same virtual environment and patch the
+installed extension rpath so source-built EmbodiK can find the native Pinocchio,
+Coal, and related libraries after the shell exits. If you build manually, do not
+remove the native provider used at build time unless you also repair/bundle the
+resulting wheel.
+
+=== "macOS"
+
+    ```bash
+    curl -fsSL -O https://raw.githubusercontent.com/robodreamer/embodik/main/scripts/install_embodik_macos.sh
+    bash install_embodik_macos.sh --python python3.11
+    ```
+
+=== "Linux (Debian/Ubuntu)"
+
+    ```bash
+    curl -fsSL -O https://raw.githubusercontent.com/robodreamer/embodik/main/scripts/install_embodik_linux.sh
+    bash install_embodik_linux.sh
+    ```
+
+From a repository checkout, run the scripts directly:
 
 ```bash
-unset LD_LIBRARY_PATH
+bash scripts/install_embodik_linux.sh --help
+bash scripts/install_embodik_macos.sh --help
 ```
 
-### `ImportError: Library not loaded: @rpath/...` (macOS)
+Common options:
 
-This usually means `DYLD_LIBRARY_PATH` is pointing to a conflicting local Pinocchio/Boost install. Fix:
+- `--venv PATH` chooses the virtualenv location.
+- `--python CMD` chooses the Python interpreter.
+- `--pypi` installs from PyPI.
+- `--editable [DIR]` installs a local checkout.
+- `--clean-env` clears `LD_LIBRARY_PATH`, `DYLD_LIBRARY_PATH`,
+  `CMAKE_PREFIX_PATH`, and `pinocchio_DIR` before building.
+- `--skip-apt` or `--skip-brew` assumes system packages are already installed.
+
+## Manual Linux Source Build
+
+Use the one-shot script above unless you need to debug the build environment.
+For Debian/Ubuntu, the equivalent manual setup is:
 
 ```bash
-unset DYLD_LIBRARY_PATH
+sudo apt-get update
+sudo apt-get install -y \
+  build-essential cmake ninja-build pkg-config \
+  libeigen3-dev liburdfdom-dev patchelf
+
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -U pip
+python -m pip install pin scikit-build-core nanobind cmake ninja
+
+PIN_PREFIX="$(python -c "import pinocchio, pathlib; print(pathlib.Path(pinocchio.__file__).resolve().parents[4])")"
+export CMAKE_PREFIX_PATH="$PIN_PREFIX"
+export LD_LIBRARY_PATH="${PIN_PREFIX}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+
+python -m pip install --no-build-isolation embodik
+python -c "import embodik; print(embodik.__version__)"
 ```
 
-### `Could not find Eigen3` / version not compatible (macOS)
+On other Linux distributions, install equivalent C++ build, CMake, Ninja,
+Eigen3, and URDFDOM packages manually, then run the one-shot script with
+`--skip-apt`.
 
-Homebrew **`eigen`** (Eigen 5.x) does **not** satisfy EmbodiK’s `find_package(Eigen3 3.3)`. Use **`eigen@3`** and set `Eigen3_DIR` in the **same shell** as `pip install`:
+## Manual macOS Source Build
+
+Use Python 3.10-3.12 for source builds. Python 3.11 is a good default when you
+need ABI compatibility with downstream environments such as `validation_robot`.
+Homebrew's default `eigen` formula can be Eigen 5.x; EmbodiK expects Eigen 3.x,
+so use `eigen@3`.
+
+```bash
+brew install eigen@3 urdfdom_headers urdfdom
+
+python3.11 -m venv .venv
+source .venv/bin/activate
+python -m pip install -U pip
+python -m pip install pin scikit-build-core nanobind cmake ninja
+
+export Eigen3_DIR="$(brew --prefix eigen@3)/share/eigen3/cmake"
+export SDKROOT="$(xcrun --sdk macosx --show-sdk-path)"
+export CXXFLAGS="-isystem ${SDKROOT}/usr/include/c++/v1 ${CXXFLAGS:-}"
+
+PIN_PREFIX="$(python -c "import pinocchio, pathlib; print(pathlib.Path(pinocchio.__file__).resolve().parents[4])")"
+export CMAKE_PREFIX_PATH="${PIN_PREFIX}:$(brew --prefix)"
+
+python -m pip install --no-build-isolation embodik
+python -c "import embodik; print(embodik.__version__)"
+```
+
+## Developer Setup
+
+Pixi is the recommended development environment from a repository clone:
+
+```bash
+curl -fsSL https://pixi.sh/install.sh | bash
+git clone https://github.com/robodreamer/embodik.git
+cd embodik
+pixi run install
+pixi run test
+```
+
+Common development commands:
+
+```bash
+pixi run install-rebuild
+pixi run docs-build
+```
+
+Pixi manages Pinocchio, Eigen, Nanobind, CMake, and the Qhull CMake workaround
+used by this repository's development builds.
+
+## Optional Extras
+
+| Extra | Install command | Notes |
+| --- | --- | --- |
+| Examples | `python -m pip install "embodik[examples]"` | Copied examples, robot descriptions, Viser, and Python Pinocchio for scripts that import it directly |
+| Direct visualization | `python -m pip install "embodik[visualization]"` | Viser, mesh loading, and URDF parsing without adding Python Pinocchio |
+| Pinocchio visualization | `python -m pip install "embodik[visualization-pinocchio]"` | Pinocchio's Python ViserVisualizer |
+| GPU solvers | `python -m pip install "embodik[gpu]"` | Experimental; see [GPU Solvers](gpu_solvers.md) |
+| GPU collision | `python -m pip install "embodik[gpu-collision]"` | NVIDIA Warp collision experiments |
+
+Teleop controller setup and CUDA/CusADi build steps are intentionally kept out
+of the core install path. See the [Examples Guide](examples/index.md) and
+[GPU Solvers](gpu_solvers.md) when you need those workflows.
+
+## Troubleshooting Native Builds
+
+### Local Pinocchio, Boost, or ROS paths override the build
+
+If imports fail with missing `libboost_*.so`, `@rpath` errors, or mismatched
+Pinocchio libraries, clear local robotics environment paths and rebuild:
+
+```bash
+unset LD_LIBRARY_PATH DYLD_LIBRARY_PATH CMAKE_PREFIX_PATH pinocchio_DIR
+python -m pip install --force-reinstall --no-cache-dir --no-build-isolation embodik
+```
+
+The one-shot installers provide the same cleanup with `--clean-env`.
+
+### `Could not find pinocchio`
+
+Install the PyPI `pin` build dependency and put its prefix first in
+`CMAKE_PREFIX_PATH`:
+
+```bash
+python -m pip install pin
+PIN_PREFIX="$(python -c "import pinocchio, pathlib; print(pathlib.Path(pinocchio.__file__).resolve().parents[4])")"
+export CMAKE_PREFIX_PATH="$PIN_PREFIX"                    # Linux
+export CMAKE_PREFIX_PATH="${PIN_PREFIX}:$(brew --prefix)" # macOS
+```
+
+### `Could not find Eigen3` or incompatible Eigen version
+
+Linux:
+
+```bash
+sudo apt-get install libeigen3-dev
+```
+
+macOS:
 
 ```bash
 brew install eigen@3
 export Eigen3_DIR="$(brew --prefix eigen@3)/share/eigen3/cmake"
-test -f "$Eigen3_DIR/Eigen3Config.cmake" && echo "Eigen3_DIR OK"
-pip install --no-build-isolation embodik   # or: pip install --no-build-isolation -e .
 ```
 
-### `Could not find a package configuration file provided by "urdfdom_headers"` (macOS)
-
-Pinocchio’s CMake dependencies expect URDF CMake configs on the system. Install:
+### `Could not find urdfdom_headers` on macOS
 
 ```bash
 brew install urdfdom_headers urdfdom
 ```
 
-Keep `CMAKE_PREFIX_PATH` as **`${PIN_PREFIX}:$(brew --prefix)`** (see the `macOS (Homebrew): pip / sdist builds` section above).
+Keep the PyPI `pin` prefix and Homebrew prefix together in `CMAKE_PREFIX_PATH`:
 
-### `'cstddef' file not found` / `'cmath' file not found` (macOS)
+```bash
+export CMAKE_PREFIX_PATH="${PIN_PREFIX}:$(brew --prefix)"
+```
 
-The compiler is not seeing the macOS SDK standard library. Try:
+### `'cstddef' file not found` or `'cmath' file not found` on macOS
 
 ```bash
 export SDKROOT="$(xcrun --sdk macosx --show-sdk-path)"
-pip install --no-build-isolation embodik
+export CXXFLAGS="-isystem ${SDKROOT}/usr/include/c++/v1 ${CXXFLAGS:-}"
 ```
 
-If that is not enough, select full Xcode (when installed): `sudo xcode-select -s /Applications/Xcode.app/Contents/Developer`, or reinstall the command-line tools. Using **Python 3.12** in the venv avoids some bleeding-edge toolchain combinations.
-
-### `CMake cannot find pinocchio`
-
-CMake needs to know where the `pin` wheel installed Pinocchio. Fix:
+If standard headers still fail, reinstall command-line tools or select full
+Xcode when installed:
 
 ```bash
-PIN_PREFIX="$(python -c "import pinocchio, pathlib; print(pathlib.Path(pinocchio.__file__).resolve().parents[4])")"
-export CMAKE_PREFIX_PATH="${PIN_PREFIX}:$(brew --prefix)"   # macOS; Linux: export CMAKE_PREFIX_PATH="$PIN_PREFIX"
-pip install --no-build-isolation embodik
+sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
 ```
 
 ### `Cannot import scikit_build_core.build`
 
-With `--no-build-isolation`, build dependencies must be installed manually:
+With `--no-build-isolation`, build dependencies must already be installed:
 
 ```bash
-pip install scikit-build-core nanobind cmake ninja
+python -m pip install scikit-build-core nanobind cmake ninja
 ```
 
-### For Developers (Building from Source)
+### Qhull CMake configuration error in Pixi/Conda environments
 
-We recommend Pixi for development/reproducible builds, but it is optional. If you prefer venv-only development, see the manual section below.
-
-**Step 1: Install Pixi**
-```bash
-curl -fsSL https://pixi.sh/install.sh | bash
-```
-
-**Step 2: Clone and Install**
-```bash
-git clone https://github.com/robodreamer/embodik.git
-cd embodik
-pixi install    # optional first time; `pixi run install` will solve the env if needed
-pixi run install
-```
-
-**macOS:** Install Xcode command-line tools (`xcode-select --install`). EmbodiK’s `CMakeLists.txt` adds the active macOS SDK’s `libc++` include directory on Apple platforms so standard headers like `<cmath>` resolve with Command Line Tools (same class of issue as the manual `CXXFLAGS` workaround for pip-only installs).
-
-That's it! Pixi automatically:
-- ✅ Installs all system dependencies (CMake, Eigen, Pinocchio, nanobind, etc.)
-- ✅ Builds the C++ extension
-- ✅ Installs the Python package
-- ✅ Applies necessary patches (e.g., Qhull CMake workaround)
-
-**For development with auto-rebuild:**
-```bash
-pixi run install-rebuild
-```
-
-**Optional: Seer controller (xvisio) for teleop examples**
-
-The teleop example (`03_teleop_ik.py`) uses the xvisio SDK for Seer wireless controller support. xvisio is optional and requires `libxvsdk.so` on the host. To install it via Pixi:
+If CMake reports that imported Qhull executable targets do not exist, run:
 
 ```bash
-# Install the teleop environment (includes xvisio)
-pixi install -e teleop
-
-# Run the teleop demo (requires Seer controller + libxvsdk.so)
-pixi run -e teleop demo-teleop
+pixi run patch-qhull
 ```
 
-Without xvisio, the teleop example runs in GUI-only mode with transform controls.
-
-**Activate the environment:**
-```bash
-pixi shell
-```
-
-## Alternative: Manual Installation
-
-<details>
-<summary><strong>⚠️ Manual installation (only if Pixi is not available)</strong></summary>
-
-If you cannot use Pixi, you must manually install all system dependencies:
-
-**1. Install system dependencies:**
-
-Ubuntu/Debian:
-```bash
-sudo apt-get update
-sudo apt-get install -y build-essential cmake libeigen3-dev python3-dev python3-pip
-```
-
-macOS (Homebrew):
-```bash
-brew install cmake python@3.12 eigen@3 urdfdom_headers urdfdom
-```
-(EmbodiK’s CMake expects Eigen 3.x; Homebrew’s default `eigen` package may be Eigen 5.)
-
-**2. Install Pinocchio:**
-
-Option A - via robotpkg (Ubuntu/Debian):
-```bash
-sudo apt-get install robotpkg-pinocchio
-export CMAKE_PREFIX_PATH=/opt/openrobots:$CMAKE_PREFIX_PATH
-```
-
-Option B - build from source:
-```bash
-git clone https://github.com/stack-of-tasks/pinocchio.git
-cd pinocchio
-mkdir build && cd build
-cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=$HOME/.local
-make -j$(nproc)
-make install
-export CMAKE_PREFIX_PATH=$HOME/.local:$CMAKE_PREFIX_PATH
-```
-
-**3. Install embodiK:**
-```bash
-git clone https://github.com/robodreamer/embodik.git
-cd embodik
-python scripts/patch_qhull_cmake.py  # Required for manual installs
-pip install -e .
-```
-
-</details>
-
-
-## Optional Dependencies
-
-### GPU Acceleration (CusADi)
-
-> **Experimental:** GPU solvers are under active development and need more validation.
-
-EmbodiK supports GPU-accelerated batched velocity IK solving using CusADi. This is useful for:
-- Training RL policies with thousands of parallel environments
-- Batch motion planning and optimization
-- High-throughput inference
-
-**Requirements:**
-- NVIDIA GPU with CUDA support
-- PyTorch with CUDA
-- CasADi
-- CusADi (must be installed manually)
-
-#### Option A: Using Pixi (Recommended)
-
-Pixi manages CUDA-enabled PyTorch automatically:
-
-```bash
-cd embodik
-
-# Step 1: Install the CUDA environment
-pixi install -e cuda
-pixi run -e cuda install        # Install embodik in cuda env
-
-# Step 2: Verify CUDA is available
-pixi run -e cuda check-cuda
-# Output: PyTorch X.Y.Z, CUDA available: True, CUDA version: 12.4
-
-# Step 3: Install CusADi (one-time, clones to ~/.local/cusadi)
-pixi run -e cuda install-cusadi
-
-# Step 4: Verify all GPU components
-pixi run -e cuda check-gpu
-# Output: CasADi: True, CusADi: True, CUDA: True
-
-# Step 5: Export CasADi function (FI-PeSNS)
-pixi run -e cuda export-casadi
-
-# Step 6: Compile CUDA kernel
-mkdir -p ~/.local/cusadi/src/casadi_functions
-cp build/casadi/fn_velocity_solve.casadi ~/.local/cusadi/src/casadi_functions/
-cd ~/.local/cusadi
-python run_codegen.py --fn=fn_velocity_solve
-
-# Optional: Export and compile PPH-SNS (alternative solver)
-# pixi run -e cuda export-pph-sns  # Writes directly to cusadi
-# cd ~/.local/cusadi && python run_codegen.py --fn=fn_pph_sns_velocity_solve
-
-# Step 7: Run GPU demos
-pixi run -e cuda demo-gpu           # Comprehensive benchmark
-pixi run -e cuda demo-ik-gpu        # Interactive IK with GPU panel
-pixi run -e cuda benchmark-gpu      # Batch IK benchmark
-```
-
-#### Available GPU Tasks
-
-| Task | Description |
-|------|-------------|
-| `check-cuda` | Verify PyTorch CUDA availability |
-| `check-gpu` | Verify CasADi + CusADi + CUDA |
-| `install-cusadi` | Install CusADi from GitHub to ~/.local/cusadi |
-| `export-casadi` | Export FI-PeSNS velocity solve function |
-| `export-pph-sns` | Export PPH-SNS velocity solve function |
-| `demo-gpu` | Run GPU solver demo/benchmark |
-| `demo-ik-gpu` | Interactive IK with GPU benchmark panel |
-| `benchmark-gpu` | Batch IK performance benchmark |
-| `benchmark-gpu-batched` | GPU batched IK benchmark (100/1000/10000) |
-| `benchmark-solver-comparison` | Compare FI-PeSNS vs PPH-SNS (CPU + GPU) |
-| `benchmark-solver-batched` | Batched GPU benchmark for both solvers |
-| `benchmark-fi-pesns` | FI-PeSNS vs CPU accuracy benchmark |
-| `benchmark-collision` | Collision detection benchmark |
-| `demo-parallel-tracking` | 100 robots tracking trajectories in parallel |
-| `test-gpu` | Run GPU-specific tests |
-
-All GPU tasks should be run with `-e cuda`: `pixi run -e cuda <task>`
-
-### Seer Controller (xvisio)
-
-The teleop example (`03_teleop_ik.py`) supports the Seer wireless controller via the xvisio SDK. This is optional; without it, the example runs in GUI-only mode.
-
-**Requirements:**
-- Seer wireless controller hardware
-- `libxvsdk.so` on the host (from xvisio SDK setup)
-
-**Install via Pixi:**
-
-```bash
-# Install the teleop environment (adds xvisio to default deps)
-pixi install -e teleop
-
-# Run the teleop demo
-pixi run -e teleop demo-teleop
-# Or: pixi run -e teleop python examples/03_teleop_ik.py
-```
-
-| Task | Description |
-|------|-------------|
-| `demo-teleop` | Run teleop IK example with panda robot |
-
-<details>
-<summary><strong>Technical notes on pixi + PyTorch CUDA setup</strong></summary>
-
-Getting CUDA-enabled PyTorch to work with pixi requires careful configuration:
-
-**Problem:** By default, pixi's dependency solver picks PyTorch from conda-forge, which is CPU-only.
-
-**Solution:** The `cuda` feature in `pixi.toml` uses:
-1. **Channel priority**: `channels = ["pytorch", "nvidia", "conda-forge"]` with `channel-priority = "strict"`
-2. **Explicit channel specification**: `pytorch = { version = ">=2.0", channel = "pytorch" }`
-3. **Platform-specific**: `pytorch-cuda` only exists for `linux-64`
-4. **Separate solve group**: Avoids conflicts with the default CPU environment
-
-**Verification:**
-```bash
-pixi list -e cuda | grep pytorch
-# Should show: pytorch from pytorch channel (not conda-forge)
-
-pixi run -e cuda python -c "import torch; print(torch.version.cuda)"
-# Should print: 12.4 (not None)
-```
-
-</details>
-
-#### Option B: Using pip
-
-```bash
-# Install GPU dependencies
-pip install "embodik[gpu]"
-
-# Install PyTorch with CUDA
-pip install torch --index-url https://download.pytorch.org/whl/cu121
-
-# Install CusADi
-git clone https://github.com/se-hwan/cusadi
-cd cusadi
-pip install -e .
-
-# Export for 7-DOF robot (e.g., Panda)
-python -m embodik.gpu.export_casadi_velocity_solve --robot panda
-
-# Copy to cusadi and compile
-mkdir -p cusadi/src/casadi_functions
-cp build/casadi/fn_velocity_solve.casadi cusadi/src/casadi_functions/
-cd cusadi
-python run_codegen.py --fn=fn_velocity_solve
-```
-
-#### Set environment variable
-
-```bash
-export CUSADI_ROOT=/path/to/cusadi
-```
-
-#### Verify GPU setup
-
-```python
-from embodik.gpu import HAS_CASADI, HAS_CUSADI, HAS_TORCH_CUDA
-print(f"CasADi: {HAS_CASADI}, CusADi: {HAS_CUSADI}, CUDA: {HAS_TORCH_CUDA}")
-# CasADi: True, CusADi: True, CUDA: True
-```
-
-#### Benchmark results (typical, RTX A2000)
-
-| Batch Size | CPU (ms) | GPU (ms) | Speedup |
-|------------|----------|----------|---------|
-| 100        | 3        | 0.8      | 4x      |
-| 1000       | 30       | 1.2      | 25x     |
-| 4096       | 120      | 1.5      | 80x     |
-
-#### Run the demos
-
-```bash
-# Using pixi (recommended)
-pixi run -e cuda demo-gpu              # Comprehensive GPU benchmark
-pixi run -e cuda demo-ik-gpu           # Interactive IK with GPU panel
-pixi run -e cuda benchmark-gpu         # Batch IK benchmark
-pixi run -e cuda benchmark-collision   # Collision detection benchmark
-
-# Or run scripts directly
-python examples/06_gpu_solver_demo.py                    # CPU-only benchmark
-python examples/06_gpu_solver_demo.py --gpu --casadi_path ~/.local/cusadi/src/casadi_functions/fn_velocity_solve.casadi  # GPU benchmark
-python examples/02_collision_aware_IK.py --gpu  # Interactive IK with GPU
-```
-
-### GPU Collision Detection (Warp)
-
-For GPU-parallel collision detection using NVIDIA Warp:
-
-```bash
-pip install "embodik[gpu-collision]"
-```
-
-**Example scripts:**
-
-- `examples/05_gpu_collision_batch.py` — Batch collision detection benchmark
-- Run with: `pixi run -e cuda benchmark-collision`
-
-See the GPU Collision section in the README for more details.
-
-### Visualization
-
-EmbodiK includes direct Viser visualization that works without the Python `pin` package:
-
-```bash
-pip install embodik[visualization]
-```
-
-This includes:
-
-- `viser>=0.1.0` — 3D visualization server
-- `trimesh>=3.0.0` — Mesh loading for robot visualization
-
-**Default (v0.4.0+):** EmbodiK now defaults to direct Viser visualization with native bindings
-for rotation/quaternion math. This eliminates runtime dependency conflicts.
-
-**Optional Pinocchio-based visualization:** If you prefer Pinocchio's ViserVisualizer:
-```bash
-pip install embodik[visualization-pinocchio]
-```
-This adds `pin>=3.8.0` which provides Pinocchio's built-in ViserVisualizer.
-
-For legacy visualization (using yourdfpy for URDF parsing):
-```bash
-pip install embodik[visualization-legacy]
-```
-
-### Examples
-
-Install example dependencies:
-
-```bash
-pip install embodik[examples]
-```
-
-This includes:
-
-- `robot_descriptions` — Robot model descriptions
-- `pyyaml` — YAML parsing for robot preset configs
-- `viser` — visualization server used by interactive examples
-- `yourdfpy` — URDF loader used by some examples (via `robot_descriptions.loaders.yourdfpy`)
+This patch is already a dependency of the repository's Pixi build tasks.
 
 ## Verify Installation
 
-Test that EmbodiK is installed correctly:
-
-```python
-import embodik as eik
-print(f"EmbodiK version: {eik.__version__}")
-
-# Test basic functionality
-model = eik.RobotModel("path/to/robot.urdf")
-print("Installation successful!")
-
-# Test native math utilities (no pin needed)
-import numpy as np
-R = np.eye(3)
-omega = eik.log3(R)  # Native rotation utilities
-print(f"log3 works: {omega}")
-```
-
-## Troubleshooting
-
-### Import Error: C++ extension not available
-
-If you see an error that `RobotModel` is not available:
-
-**Using Pixi (Recommended):**
 ```bash
-# Rebuild and reinstall
-pixi run install
-
-# Or for development with auto-rebuild
-pixi run install-rebuild
+python -c "import embodik, numpy as np; print(embodik.__version__); print(embodik.log3(np.eye(3)))"
 ```
-
-**Using PyPI installation (`pip install embodik`):**
-If you installed from PyPI and see this error, it likely means:
-1. Only source distribution (sdist) was available (no pre-built wheel for your platform)
-2. The build failed because Pinocchio wasn't found
-
-Try installing Pinocchio Python package first, then rebuild:
-```bash
-pip install pin  # Installs Pinocchio with C++ libraries
-pip install --force-reinstall --no-cache-dir embodik
-```
-
-**Using manual installation from source:**
-1. Ensure all system dependencies are installed (CMake, Eigen, Pinocchio)
-2. Rebuild the package: `pip install --force-reinstall --no-cache-dir -e .`
-3. Check that CMake found Pinocchio during build
-
-### CMake cannot find Pinocchio
-
-**Using Pixi:** This should not happen - pixi manages Pinocchio automatically. If it does, try:
-```bash
-pixi run install
-```
-
-**Using manual installation:** Set the `CMAKE_PREFIX_PATH`:
-```bash
-export CMAKE_PREFIX_PATH=/path/to/pinocchio/install:$CMAKE_PREFIX_PATH
-pip install -e .
-```
-
-### Qhull CMake Configuration Error
-
-If you encounter an error like:
-```
-CMake Error: The imported target "Qhull::qhull" references the file ".../bin/qhull" but this file does not exist.
-```
-
-This is a known issue with conda-forge's qhull package which doesn't include executable binaries. The installation process automatically applies a patch to work around this. If you're installing manually without pixi, run:
-
-```bash
-python scripts/patch_qhull_cmake.py
-```
-
-before building. This patch is automatically applied when using `pixi run install` or `pixi run build`.
-
-### Build Errors
-
-If you encounter build errors:
-
-1. Ensure you have a C++17 compatible compiler (GCC 7+, Clang 5+)
-2. Check that CMake version is 3.16 or higher: `cmake --version`
-3. Verify Eigen3 for CMake: on Linux use `pkg-config --modversion eigen3` if available; on macOS with Homebrew use `test -f "$(brew --prefix eigen@3)/share/eigen3/cmake/Eigen3Config.cmake" && echo OK`
-4. If using pixi, ensure the Qhull patch was applied: `pixi run patch-qhull`
 
 ## Next Steps
 

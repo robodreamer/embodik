@@ -21,57 +21,33 @@ surface instead:
 pixi run demo-advanced-ik
 ```
 
-## Code Pattern
+## API Walkthrough
 
-The public script follows this structure:
+The public script uses the current registered-task API:
 
-```python
-config = resolve_robot_configuration("panda")
-robot = config["robot"]
-target_link = config["target_link"]
-q_default = config["default_configuration"]
+| Step | API calls | Purpose |
+| --- | --- | --- |
+| Resolve a robot preset | `resolve_robot_configuration("panda")` | Get the `RobotModel`, target link, and default configuration used by the script. |
+| Create the solver | `KinematicsSolver(robot)`, `solver.dt`, `set_damping()`, `set_tolerance()` | Configure the stepping IK solver. |
+| Register the primary task | `solver.add_frame_task("ee_task", target_link)` | Track the draggable end-effector target. |
+| Register posture bias | `solver.add_posture_task("posture_bias")`, `set_target_configuration(q_default)` | Keep unused freedom near the default posture. |
+| Configure stepping | `PositionStepOptions()` | Set gains, one inner step, and adaptive timestep behavior. |
+| Advance IK | `solver.solve_position_step(q, target_pose, "ee_task", step_opts)` | Return a `PositionIKResult`; the next displayed configuration is `result.q_solution`. |
 
-solver = embodik.KinematicsSolver(robot)
-solver.dt = 0.01
-solver.set_damping(0.1)
-solver.set_tolerance(0.1)
-
-ee_task = solver.add_frame_task("ee_task", target_link)
-ee_task.priority = 0
-ee_task.weight = 1.0
-ee_task.solve_mode = embodik.TaskSolveMode.SCALE_ELASTIC
-ee_task.allow_min_error_fallback = False
-
-posture_task = solver.add_posture_task("posture_bias")
-posture_task.priority = 1
-posture_task.weight = 1e-2
-posture_task.solve_mode = embodik.TaskSolveMode.MIN_ERROR
-posture_task.set_target_configuration(q_default)
-
-opts = embodik.PositionStepOptions()
-opts.position_gain = 10.0
-opts.orientation_gain = 10.0
-opts.max_steps = 1
-opts.adaptive_dt = True
-opts.adaptive_dt_max_scale = 10.0
-opts.adaptive_dt_reference_distance = 0.02
-
-result = solver.solve_position_step(q_current, target_pose, "ee_task", opts)
-q_current = result.q_solution
-```
+For the exact imports, visualization wiring, and UI loop, use the script itself:
+`examples/01_basic_ik_simple.py`.
 
 ## Running
 
-For pip-installed users:
+Install and copy the example bundle once using the
+[Installation Guide](../installation.md#examples). Then run:
 
 ```bash
-pip install "embodik[examples]"
-embodik-examples --copy
 cd embodik_examples
 python 01_basic_ik_simple.py
 ```
 
-For repository development:
+For repository development, use Pixi:
 
 ```bash
 pixi run python examples/01_basic_ik_simple.py
