@@ -2,90 +2,29 @@
 
 Example demonstrating hierarchical multi-task inverse kinematics with multiple constraints: frame task, posture task, and CoM support-polygon constraint.
 
-## Code
+## API Walkthrough
 
-```python
-import embodik
-import numpy as np
-from embodik.utils import compute_pose_error, limit_task_velocity
-from embodik import Rt
+Use the current registered-task API for multi-task examples:
 
-# 1. Load robot (run from examples/ directory)
-from utils.robot_models import resolve_robot_configuration
-config = resolve_robot_configuration("panda")
-model = config["robot"]
-target_link = config["target_link"]
-q_default = config["default_configuration"]
-
-# 2. Create solver and add tasks
-solver = embodik.KinematicsSolver(model)
-solver.dt = 0.01
-solver.set_damping(0.1)
-
-frame_task = solver.add_frame_task("ee_task", target_link)
-frame_task.priority = 0
-frame_task.weight = 1.0
-
-posture_task = solver.add_posture_task("posture")
-posture_task.priority = 1
-posture_task.weight = 0.01
-posture_task.set_target_configuration(q_default)
-
-# 3. Configure CoM support-polygon constraint (keeps CoM inside polygon)
-support_polygon = np.array([
-    [-0.08, -0.10],
-    [ 0.18, -0.10],
-    [ 0.18,  0.10],
-    [-0.08,  0.10],
-])
-solver.configure_com_constraint(
-    support_polygon=support_polygon,
-    margin=0.05,  # 5% inward margin (fraction of char_size)
-    frame_name="world",
-    com_vel_max=0.4,
-    com_acc_max=0.1,
-)
-
-# 4. Velocity IK loop (same lower-level pattern used by the CoM example)
-q_current = q_default.copy()
-target_pose = Rt(R=np.eye(3), t=np.array([0.5, 0.2, 0.3]))
-pos_gain, rot_gain = 60.0, 60.0
-
-for _ in range(500):
-    model.update_configuration(q_current)
-    current_ee = model.get_frame_pose(target_link)
-    pose_error = compute_pose_error(current_ee, target_pose)
-
-    if np.linalg.norm(pose_error) < 5e-4:
-        break
-
-    target_velocity = np.concatenate([
-        pos_gain * pose_error[:3],
-        rot_gain * pose_error[3:],
-    ])
-    target_velocity = limit_task_velocity(target_velocity, 0.5, 0.5)
-    frame_task.set_target_velocity(target_velocity)
-
-    result = solver.solve_velocity(q_current, apply_limits=True)
-    if result.status != embodik.SolverStatus.SUCCESS:
-        break
-
-    dq = result.joint_velocities * solver.dt
-    q_lower, q_upper = model.get_joint_limits()
-    q_current = np.clip(q_current + dq, q_lower, q_upper)
-
-print(f"✓ Multi-task IK converged: q = {q_current}")
-```
+| Step | API calls | Purpose |
+| --- | --- | --- |
+| Resolve the robot | `resolve_robot_configuration("panda")` | Load the same model, target link, and default posture used by the examples. |
+| Add the primary task | `solver.add_frame_task("ee_task", target_link)` | End-effector tracking at priority `0`. |
+| Add a posture task | `solver.add_posture_task("posture")`, `set_target_configuration(q_default)` | Nullspace posture objective at a lower priority. |
+| Add CoM constraint | `solver.configure_com_constraint(...)` | Enforce the support polygon as a hard inequality constraint. |
+| Step or iterate | `solve_position_step(...)` for interactive loops, `solve_position(...)` for bounded solve calls | Use position-level APIs rather than hand-maintaining a partial velocity loop in docs. |
+| Read diagnostics | `status`, `q_solution`, `task_scales`, `task_modes_effective`, `task_used_fallback` | Decide whether to accept the update and how to display task behavior. |
 
 ## Explanation
 
-Multi-task multi-constraints IK uses a velocity-based loop:
+Multi-task multi-constraints IK uses a registered solver stack:
 
-1. **Frame task** (priority 0): Drives end-effector toward target pose via `set_target_velocity()`
+1. **Frame task** (priority 0): Drives the end-effector toward the target pose.
 2. **Posture task** (priority 1): Maintains preferred joint configuration in null space via `set_target_configuration()`
 3. **CoM constraint** (`configure_com_constraint`): Keeps the 2D CoM projection inside the support polygon — a hard inequality constraint, not a task
 
-For a full interactive demo with CoM visualization, see [CoM Constraint Example Overview](com_constraint_ik.md).
+For a runnable interactive demo with CoM visualization, see
+[CoM Constraint Example Overview](com_constraint_ik.md).
 
 ## Task Hierarchy
 

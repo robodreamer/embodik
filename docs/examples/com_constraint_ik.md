@@ -9,36 +9,33 @@ Overview for `examples/08_com_constraint_example.py`.
 - Optional proximity activation near polygon boundary
 - Visual feedback for CoM status (inside/near/outside)
 
-## Key API
+## API Walkthrough
 
-```python
-solver.configure_com_constraint(
-    support_polygon=polygon_xy,
-    margin=0.05,
-    frame_name="world",
-    com_vel_max=0.4,
-    com_acc_max=0.1,
-    use_acceleration_limits=True,
-    proximity_fraction=0.05,
-)
-```
+The example keeps the same registered-task stepping path and adds a hard CoM
+support-polygon constraint:
 
-You can test adaptive relaxation behavior in the same demo:
+| Step | API calls | Purpose |
+| --- | --- | --- |
+| Register IK tasks | `add_frame_task("ee_task", target_link)`, `add_posture_task("posture")` | Track the end-effector marker with a posture bias underneath. |
+| Configure support polygon | `configure_com_constraint(...)` | Keep the 2D CoM projection inside the active polygon. |
+| Tune relaxation | `frame_task.solve_mode`, `allow_min_error_fallback`, `posture_task.solve_mode` | Explore strict scaling versus minimum-error fallback near constraints. |
+| Step IK | `solve_position_step(q_current, target_pose, "ee_task", step_opts)` | Apply one interactive IK update using the registered tasks and CoM constraint. |
+| Inspect diagnostics | `result.task_modes_effective`, `result.task_used_fallback`, `result.task_scales` | Display effective mode, fallback use, and scale while the demo runs. |
 
-```python
-frame_task.solve_mode = embodik.TaskSolveMode.SCALE
-frame_task.allow_min_error_fallback = True
-posture_task.solve_mode = embodik.TaskSolveMode.MIN_ERROR
-```
-
-During runtime, inspect:
-
-```python
-result = solver.solve_velocity(q_current, apply_limits=True)
-print(result.task_modes_effective[0], result.task_used_fallback[0], result.task_scales[0])
-```
+Use `examples/08_com_constraint_example.py` for the exact slider values,
+visualization markers, and support-polygon setup.
 
 ## Run
+
+Install and copy the example bundle once using the
+[Installation Guide](../installation.md#examples). Then run:
+
+```bash
+cd embodik_examples
+python 08_com_constraint_example.py
+```
+
+For repository development, use Pixi:
 
 ```bash
 pixi run python examples/08_com_constraint_example.py

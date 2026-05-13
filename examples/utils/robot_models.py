@@ -287,7 +287,7 @@ def resolve_robot_configuration(robot_key: str) -> Dict[str, Any]:
                 "Install the 'robot_descriptions' package to use this example:\n"
                 "  pip install robot_descriptions\n"
                 "Or install with examples dependencies:\n"
-                "  pip install embodik[examples]"
+                '  python -m pip install "embodik[examples]"'
             ) from exc
         except AttributeError as exc:
             raise ValueError(
@@ -352,4 +352,3 @@ def resolve_robot_configuration_with_labels(robot_key: str) -> Dict[str, Any]:
         config["joint_labels"] = generate_joint_labels_from_names(joint_names, robot_key)
 
     return config
-

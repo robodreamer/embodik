@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # One-shot macOS setup: Homebrew deps, venv, exports, and pip install embodik (PyPI or editable).
-# See docs/installation.md — "macOS (Homebrew): pip / sdist builds".
+# See docs/installation.md — "If Pip Builds From Source" and "Manual macOS Source Build".
 
 set -euo pipefail
 
@@ -8,9 +8,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 VENV_DIR=""
-# Prefer Homebrew 3.12 when present (matches CI / wheels; avoids 3.13+ toolchain quirks).
+# Prefer a supported Homebrew Python before falling back to python3.
 if [[ -z "${EMBODIK_PYTHON:-}" ]]; then
-  if [[ -x /opt/homebrew/bin/python3.12 ]]; then
+  if [[ -x /opt/homebrew/bin/python3.11 ]]; then
+    PYTHON_CMD="/opt/homebrew/bin/python3.11"
+  elif [[ -x /usr/local/bin/python3.11 ]]; then
+    PYTHON_CMD="/usr/local/bin/python3.11"
+  elif [[ -x /opt/homebrew/bin/python3.12 ]]; then
     PYTHON_CMD="/opt/homebrew/bin/python3.12"
   elif [[ -x /usr/local/bin/python3.12 ]]; then
     PYTHON_CMD="/usr/local/bin/python3.12"
@@ -40,7 +44,7 @@ usage() {
   echo ""
   echo "Examples:"
   echo "  cd ~/my_project && bash $SCRIPT_DIR/install_embodik_macos.sh"
-  echo "  bash $SCRIPT_DIR/install_embodik_macos.sh --venv .venv --python python3.12"
+  echo "  bash $SCRIPT_DIR/install_embodik_macos.sh --venv .venv --python python3.11"
   echo "  bash $SCRIPT_DIR/install_embodik_macos.sh --editable ~/src/embodik"
 }
 
@@ -115,8 +119,8 @@ if [[ -z "${PY_MAJOR:-}" ]]; then
   exit 1
 fi
 if [[ "$PY_MAJOR" -gt 3 ]] || { [[ "$PY_MAJOR" -eq 3 ]] && [[ "$PY_MINOR" -ge 13 ]]; }; then
-  echo "Warning: Python ${PY_MAJOR}.${PY_MINOR} is newer than the 3.10–3.12 range used in CI." >&2
-  echo "         If the build fails (e.g. missing headers), retry with: --python python3.12" >&2
+  echo "Warning: Python ${PY_MAJOR}.${PY_MINOR} is newer than the 3.10–3.12 supported range." >&2
+  echo "         If the build fails (e.g. missing headers), retry with: --python python3.11" >&2
 fi
 
 if [[ "$SKIP_BREW" -eq 0 ]]; then
@@ -162,6 +166,7 @@ PIN_PREFIX="$("$VENV_DIR/bin/python" -c 'import pinocchio, pathlib; print(pathli
 export CMAKE_PREFIX_PATH="${PIN_PREFIX}:$(brew --prefix)"
 echo "    Eigen3_DIR=$Eigen3_DIR"
 echo "    SDKROOT=$SDKROOT"
+echo "    Pinocchio build prefix=$PIN_PREFIX"
 echo "    CMAKE_PREFIX_PATH=$CMAKE_PREFIX_PATH"
 
 if [[ "$MODE" == "pypi" ]]; then
@@ -177,11 +182,11 @@ else
   "$VENV_DIR/bin/python" -m pip install --no-build-isolation -e "$REPO"
 fi
 
-# On macOS, pre-built embodik wheels embed @loader_path-relative rpaths that do not
-# cover the cmeel.prefix/lib directory where the PyPI `pin` package installs pinocchio
-# dylibs.  Patch the rpath so dlopen can find them without requiring DYLD_LIBRARY_PATH.
+# On macOS source/sdist installs, the extension may need an extra rpath for the
+# cmeel.prefix/lib directory where the PyPI `pin` package installs Pinocchio
+# dylibs. Patch it when present so imports do not require DYLD_LIBRARY_PATH.
 echo ""
-echo "==> Patching rpath for cmeel-installed pinocchio dylibs (macOS binary wheel fix)..."
+echo "==> Patching rpath for cmeel-installed Pinocchio dylibs..."
 EMBODIK_SO="$("$VENV_DIR/bin/python" -c \
   'import importlib.metadata as im, pathlib, sysconfig
 candidates = []
@@ -199,6 +204,26 @@ except Exception:
     pass
 platlib = pathlib.Path(sysconfig.get_paths()["platlib"])
 candidates.extend((platlib / "embodik").glob("_embodik_impl*.so"))
+try:
+    import embodik
+    candidates.extend(pathlib.Path(embodik.__file__).resolve().parent.glob("_embodik_impl*.so"))
+except Exception:
+    pass
+print(next((str(path) for path in candidates if path.is_file()), ""))' 2>/dev/null || true)"
+EMBODIK_CORE_LIB="$("$VENV_DIR/bin/python" -c \
+  'import pathlib, sysconfig
+candidates = []
+platlib = pathlib.Path(sysconfig.get_paths()["platlib"])
+for package_dir in [platlib / "embodik"]:
+    candidates.extend((package_dir / "lib").glob("libembodik_core.*"))
+    candidates.extend(package_dir.glob("libembodik_core.*"))
+try:
+    import embodik
+    package_dir = pathlib.Path(embodik.__file__).resolve().parent
+    candidates.extend((package_dir / "lib").glob("libembodik_core.*"))
+    candidates.extend(package_dir.glob("libembodik_core.*"))
+except Exception:
+    pass
 print(next((str(path) for path in candidates if path.is_file()), ""))' 2>/dev/null || true)"
 CMEEL_LIB="$("$VENV_DIR/bin/python" -c \
   'import pinocchio, pathlib; \
@@ -207,6 +232,10 @@ if [[ -n "$EMBODIK_SO" && -f "$EMBODIK_SO" && -n "$CMEEL_LIB" && -d "$CMEEL_LIB"
   # install_name_tool exits non-zero if the rpath already exists; that is fine.
   install_name_tool -add_rpath "$CMEEL_LIB" "$EMBODIK_SO" 2>/dev/null || true
   echo "    rpath -> $CMEEL_LIB"
+  if [[ -n "$EMBODIK_CORE_LIB" && -f "$EMBODIK_CORE_LIB" ]]; then
+    install_name_tool -add_rpath "$CMEEL_LIB" "$EMBODIK_CORE_LIB" 2>/dev/null || true
+    echo "    core rpath -> $CMEEL_LIB"
+  fi
 else
   echo "    (skipped: EMBODIK_SO='$EMBODIK_SO'  CMEEL_LIB='$CMEEL_LIB')"
 fi

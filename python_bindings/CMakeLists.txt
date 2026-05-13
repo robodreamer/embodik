@@ -32,27 +32,20 @@ target_link_libraries(_embodik_impl PRIVATE
     embodik_core
 )
 
-# For inplace editable installs, copy extension to python/embodik directory
-# Always copy for editable installs (editable.mode = "inplace" in pyproject.toml)
-add_custom_command(TARGET _embodik_impl POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        $<TARGET_FILE:_embodik_impl>
-        "${CMAKE_SOURCE_DIR}/python/embodik/"
-    COMMENT "Copying extension module to python/embodik for editable install"
-)
-
-# Set RPATH so Python can find libembodik_core.{so,dylib}
-# For editable installs (inplace mode), library is next to the extension; wheels place it under lib/.
+# Set RPATH so Python can find libembodik_core.{so,dylib}.
+# Installed packages place libembodik_core under lib/. Search that directory first
+# so upgrades do not accidentally load a stale package-root libembodik_core from
+# older wheels.
 # macOS: use @loader_path (Mach-O). Linux: $ORIGIN. CMake must get separate rpath entries, not one
 # string with a colon, or dyld treats "$ORIGIN:$ORIGIN/lib" as a single invalid path.
 if(APPLE)
     set_target_properties(_embodik_impl PROPERTIES
-        INSTALL_RPATH "@loader_path;@loader_path/lib"
+        INSTALL_RPATH "@loader_path/lib;@loader_path"
         BUILD_RPATH "@loader_path;$<TARGET_FILE_DIR:embodik_core>"
     )
 else()
     set_target_properties(_embodik_impl PROPERTIES
-        INSTALL_RPATH "\$ORIGIN;\$ORIGIN/lib"
+        INSTALL_RPATH "\$ORIGIN/lib;\$ORIGIN"
         BUILD_RPATH "\$ORIGIN;$<TARGET_FILE_DIR:embodik_core>"
     )
 endif()

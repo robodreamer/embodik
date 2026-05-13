@@ -7,7 +7,7 @@ using NVIDIA Warp. It compares performance between CPU sequential and
 GPU parallel collision queries.
 
 Prerequisites:
-    pip install "embodik[gpu-collision]"
+    python -m pip install "embodik[gpu-collision]"
 
 Usage:
     python examples/05_gpu_collision_batch.py [--batch_sizes 10 100 500]

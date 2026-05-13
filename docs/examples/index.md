@@ -36,31 +36,24 @@ Example code and tutorials for EmbodiK.
 
 ## Running Examples
 
-### For pip-installed users (recommended)
+Install and copy the example bundle once using the
+[Installation Guide](../installation.md#examples). Then run scripts from the
+copied `embodik_examples` directory:
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -U pip
-
-unset LD_LIBRARY_PATH CMAKE_PREFIX_PATH pinocchio_DIR
-pip install pin scikit-build-core nanobind cmake ninja
-export CMAKE_PREFIX_PATH=$(python3 -c "import pinocchio, pathlib; print(pathlib.Path(pinocchio.__file__).resolve().parents[4])")
-
-pip install --no-build-isolation embodik
-pip install "embodik[examples]"
-embodik-examples --copy
-
 cd embodik_examples
 python3 01_basic_ik_simple.py
+python3 03_teleop_ik.py
 ```
+
+If pip downloads `embodik-*.tar.gz` or fails while finding native CMake
+packages, use the source-build fallback in the [Installation Guide](../installation.md).
 
 Examples default to the Panda preset; use `--robot <key>` to switch models.
 
-### For developers (from repository)
+For repository development, use Pixi:
 
 ```bash
-pixi run install
 pixi run python examples/01_basic_ik_simple.py
 pixi run python examples/03_teleop_ik.py
 pixi run demo-advanced-ik  # clone-only advanced/dev IK surface

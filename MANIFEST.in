@@ -1,6 +1,8 @@
 # Include README and LICENSE files
 include README.md
 include LICENSE
+include THIRD_PARTY_NOTICES.md
+recursive-include third_party_licenses *.txt
 include scripts/install_embodik_macos.sh
 include scripts/install_embodik_linux.sh
 

@@ -1,28 +1,28 @@
 [build-system]
 # Build isolation only installs build-system requirements. We include `pin` here so that
 # source builds (sdists) can still locate Pinocchio's CMake package config via the PyPI wheel.
-# Note: `pin` is only a BUILD dependency (for CMake to find Pinocchio headers/libs).
-# It is NOT a runtime dependency - EmbodiK exposes all needed functionality via native bindings.
+# Published repaired wheels bundle/repair native Pinocchio dependencies and do not need
+# Python `pin` at runtime. Source/no-build-isolation installs still need the native
+# provider used at build time (`pin` or a system Pinocchio install) to remain available.
 requires = ["scikit-build-core", "nanobind", "pin>=3.8.0"]
 build-backend = "scikit_build_core.build"
 
 [project]
 name = "embodik"
-version = "0.20.6"
+version = "0.20.7"
 description = "High-performance inverse kinematics solver optimized for cross-embodiment VLA/AI applications"
 authors = [{ name = "Andy Park", email = "andypark.purdue@gmail.com" }]
 readme = "README.md"
-license = { text = "Apache-2.0" }
-requires-python = ">=3.10"
-# Note: pin (Pinocchio) is NOT a runtime dependency anymore.
-# EmbodiK uses native C++ bindings for all Pinocchio functionality.
-# The pip 'pin' package is only needed for build-time cmake config.
+license = "Apache-2.0"
+license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md", "third_party_licenses/*.txt"]
+requires-python = ">=3.10,<3.13"
+# Core repaired wheels only need NumPy at Python runtime. Source installs may still
+# require a native Pinocchio provider (`pin` or system libs) at import time.
 dependencies = ["numpy>=1.26.0"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
@@ -40,8 +40,9 @@ embodik-examples = "embodik.cli:examples_cmd"
 
 [project.optional-dependencies]
 visualization = [
-    "viser>=0.1.0",   # Required by Pinocchio's ViserVisualizer
-    "trimesh>=3.0.0", # Required by Pinocchio's ViserVisualizer for mesh loading
+    "viser>=0.1.0",     # Direct Viser visualization server
+    "trimesh>=3.0.0",   # Mesh loading for robot visualization
+    "yourdfpy>=0.0.52", # URDF parsing for direct Viser visualization
 ]
 visualization-legacy = [
     "viser>=0.1.0",
@@ -56,6 +57,7 @@ visualization-pinocchio = [
 ]
 # Example scripts copied via `embodik-examples` import these directly.
 examples = [
+    "pin>=3.8.0",
     "pyyaml>=6.0",
     "robot_descriptions>=1.0.0",
     "viser>=0.1.0",
@@ -78,8 +80,8 @@ Documentation = "https://robodreamer.github.io/embodik/"
 "Bug Reports" = "https://github.com/robodreamer/embodik/issues"
 
 [tool.scikit-build]
-# Specify the CMake source directory
-build-dir = "build"
+# Keep wheel and editable CMake caches separate across Python ABIs and build modes.
+build-dir = "build/{state}-{cache_tag}"
 
 [tool.scikit-build.sdist]
 # Keep source distributions focused on build/runtime inputs. Documentation,
@@ -109,8 +111,9 @@ packages = ["python/embodik"]
 make-fallback = false
 
 [tool.scikit-build.editable]
-# Use inplace mode for editable installs (builds extension in source directory)
-mode = "inplace"
+# Use redirect mode so editable installs can rebuild native extension modules
+# without relying on stale in-source artifacts.
+mode = "redirect"
 
 [tool.scikit-build.cmake.define]
 CMAKE_BUILD_TYPE = "Release"

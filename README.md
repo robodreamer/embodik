@@ -1,6 +1,6 @@
 # EmbodiK
 
-![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)
+![Python](https://img.shields.io/badge/Python-3.10--3.12-3776AB?logo=python&logoColor=white)
 ![C++](https://img.shields.io/badge/core-C%2B%2B-00599C?logo=cplusplus&logoColor=white)
 ![Nanobind](https://img.shields.io/badge/bindings-nanobind-555555)
 [![Build](https://github.com/robodreamer/embodik/actions/workflows/ci.yml/badge.svg)](https://github.com/robodreamer/embodik/actions/workflows/ci.yml)
@@ -29,20 +29,27 @@ https://robodreamer.github.io/embodik/
 Install from PyPI:
 
 ```bash
-pip install embodik
+python -m pip install --only-binary=:all: embodik
+python -c "import embodik; print(embodik.__version__)"
 ```
 
-Install example dependencies, copy the examples into a local folder, and run the basic IK demo:
+If that import works, the core package is installed.
+
+If pip cannot find a compatible wheel, follow the
+platform-specific source-build setup in the [Installation Guide](https://robodreamer.github.io/embodik/installation/).
+
+Optional: follow the [Installation Guide examples setup](https://robodreamer.github.io/embodik/installation/#examples)
+once, then run the basic IK demo from the copied example directory:
 
 ```bash
-pip install "embodik[examples]"
-embodik-examples --copy
-
 cd embodik_examples
 python 01_basic_ik_simple.py
 ```
 
-If `pip install` needs to build from source on your platform, follow the platform-specific setup in the [Installation Guide](https://robodreamer.github.io/embodik/installation/).
+Published repaired wheels do not require the Python `pin` package at runtime.
+Source builds use `pin` or a system Pinocchio install as the native library
+provider; keep that provider installed in the environment used to import
+EmbodiK.
 
 ## Examples
 
@@ -153,5 +160,7 @@ embodik/
 ## License
 
 EmbodiK is released under the Apache License 2.0. See [LICENSE](LICENSE) for details.
+Binary wheels may bundle permissively licensed native dependencies; see
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 Developer: Andy Park <andypark.purdue@gmail.com>

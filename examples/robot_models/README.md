@@ -36,7 +36,7 @@ panda:
 ```bash
 pip install robot_descriptions
 # Or install with examples dependencies:
-pip install embodik[examples]
+python -m pip install "embodik[examples]"
 ```
 
 ### Using Local Files

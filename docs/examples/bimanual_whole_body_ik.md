@@ -6,7 +6,7 @@ demo for ROBOTIS AI Worker FFW models and RB-Y1. It uses the public
 reduced collision assets for AI Worker collision-aware IK, and
 `robot_descriptions.rby1_description` when launched with `--robot rby1`.
 
-<video autoplay muted loop playsinline controls width="100%" src="../assets/media/rby1_collision_free_ik.mp4"></video>
+<video autoplay muted loop playsinline controls width="100%" src="../../assets/media/rby1_collision_free_ik.mp4"></video>
 
 ## What It Covers
 
@@ -18,13 +18,10 @@ reduced collision assets for AI Worker collision-aware IK, and
 
 ## Run It
 
-For a pip/venv install, copy the examples and run the script with the activated
-venv Python:
+Install and copy the example bundle once using the
+[Installation Guide](../installation.md#examples). Then run:
 
 ```bash
-source .venv/bin/activate
-pip install "embodik[examples]"
-embodik-examples --copy
 cd embodik_examples
 python 12_bimanual_whole_body_ik.py
 ```

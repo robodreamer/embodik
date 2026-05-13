@@ -10,7 +10,7 @@ Interactive 3D visualization using Viser.
 import embodik
 import numpy as np
 
-model = embodik.RobotModel.from_urdf("robot.urdf")
+model = embodik.RobotModel("robot.urdf")
 visualizer = embodik.EmbodikVisualizer(model)
 
 # Update robot configuration
@@ -53,8 +53,9 @@ pip install embodik[visualization]
 
 This installs:
 
-- `pin>=3.8.0` — Pinocchio (PyPI package name is `pin`; import is `pinocchio`)
 - `viser>=0.1.0` — 3D visualization library
 - `trimesh>=3.0.0` — Mesh loading for visualization
+- `yourdfpy>=0.0.52` — URDF parsing for direct Viser visualization
 
-**Note:** Pinocchio 3.8.0+ includes native Viser visualization support. For legacy systems, the package falls back to custom visualization using `yourdfpy` if Pinocchio's visualizer is not available.
+Use `embodik[visualization-pinocchio]` only when you specifically want
+Pinocchio's Python `ViserVisualizer`.

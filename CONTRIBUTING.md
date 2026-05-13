@@ -27,9 +27,8 @@ Before creating an issue, please:
 
 ### Development Setup
 
-#### Option 1: Using Pixi (Recommended)
-
-Pixi provides a reproducible development environment with all dependencies managed automatically.
+Pixi is the canonical development environment. It manages CMake, Eigen,
+Pinocchio, Nanobind, test tools, and docs tools.
 
 1. Install Pixi:
    ```bash
@@ -45,35 +44,16 @@ Pixi provides a reproducible development environment with all dependencies manag
 3. Install the package in development mode:
    ```bash
    pixi run install
-   # Or with auto-rebuild on import:
-   pixi run install-rebuild
    ```
 
-4. Activate the pixi environment:
+4. Optional: activate the Pixi shell:
    ```bash
    pixi shell
    ```
 
-All system dependencies (CMake, Eigen, Pinocchio, etc.) are automatically managed by pixi.
-
-#### Option 2: Manual Setup
-
-1. Clone your fork:
-   ```bash
-   git clone https://github.com/YOUR_USERNAME/embodik.git
-   cd embodik
-   ```
-
-2. Install system dependencies:
-   - CMake 3.16+
-   - C++17 compiler (GCC 7+, Clang 5+)
-   - Eigen3 development headers (`libeigen3-dev` on Ubuntu)
-   - Pinocchio library
-
-3. Install in development mode:
-   ```bash
-   pip install -e ".[dev]"
-   ```
+For rebuilds after native C++ changes, run `pixi run install-rebuild`.
+For manual source-build debugging outside Pixi, use the maintained setup in the
+[Installation Guide](docs/installation.md#if-pip-builds-from-source).
 
 ### Coding Standards
 
@@ -84,44 +64,23 @@ All system dependencies (CMake, Eigen, Pinocchio, etc.) are automatically manage
 
 ### Running Tests
 
-**With Pixi:**
 ```bash
 pixi run test
-pixi run test-verbose
-pixi run test-cov  # With coverage (requires dev feature)
 ```
 
-**Without Pixi:**
+For a targeted test:
+
 ```bash
-# Run Python tests
-pytest
-
-# Run with coverage
-pytest --cov=embodik --cov-report=html
-
-# Run C++ tests
-cd build && ctest
+pixi run python -m pytest test/test_robot_model.py
 ```
 
 ### Code Formatting
 
 We use `black` and `isort` for Python code formatting:
 
-**With Pixi:**
 ```bash
-pixi run format      # Format code
-pixi run lint        # Check formatting
-```
-
-**Without Pixi:**
-```bash
-# Format code
-black python/ test/ examples/
-isort python/ test/ examples/
-
-# Check formatting
-black --check python/ test/ examples/
-isort --check python/ test/ examples/
+pixi run format
+pixi run lint
 ```
 
 ### Documentation
@@ -130,11 +89,7 @@ isort --check python/ test/ examples/
 - Update relevant documentation files in `docs/`
 - Build docs locally to verify:
   ```bash
-  # With Pixi
-  pixi run docs-serve
-
-  # Without Pixi
-  mkdocs serve
+  pixi run docs-build
   ```
 
 ### Commit Messages

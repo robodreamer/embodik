@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.7] - 2026-05-13
+
+### Added
+- Added Linux and macOS one-shot installer scripts for source-build fallback paths.
+- Added native dependency notices for repaired wheels that bundle Pinocchio, Coal/HPP-FCL, and related libraries.
+
+### Changed
+- Simplified installation, quickstart, contributing, and example setup docs around a single wheel-first install path.
+- Restored Python 3.11 as a supported install and wheel target alongside Python 3.10 and 3.12.
+- Updated example docs to describe the current registered-task APIs instead of stale velocity-IK snippets.
+
+### Fixed
+- Fixed repaired-wheel loading after upgrades by making Python bindings prefer packaged native libraries before package-root libraries.
+- Pointed public source-build installer commands at repository-owned scripts instead of stale external gist copies.
+
 ## [0.20.6] - 2026-05-11
 
 ### Added

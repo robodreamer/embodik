@@ -50,7 +50,7 @@ Integrate velocity into configuration on the joint manifold.
 ```python
 # After solving for joint velocities
 result = solver.solve_velocity(q)
-dq = np.array(result.solution)
+dq = np.array(result.joint_velocities)
 
 # Correct integration (works for ALL joint types)
 q_new = model.integrate(q, dq, dt=0.01)

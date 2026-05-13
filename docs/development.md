@@ -7,25 +7,23 @@ Guide for contributing to EmbodiK and developing with the source code.
 ### Clone Repository
 
 ```bash
-git clone https://github.com/embodik/embodik.git
+git clone https://github.com/robodreamer/embodik.git
 cd embodik
 ```
 
-### Install in Development Mode
+### Install With Pixi
 
 ```bash
-pip install -e ".[dev]"
+pixi run install
 ```
 
-This installs:
-- EmbodiK in editable mode
-- Development dependencies (pytest, black, isort, etc.)
+Pixi is the canonical development environment. It installs EmbodiK in editable
+mode and manages Pinocchio, Eigen, Nanobind, CMake, test tools, and docs tools.
 
-### Build from Source
+### Rebuild After Native Changes
 
 ```bash
-# Install system dependencies (see Installation guide)
-bash build.sh
+pixi run install-rebuild
 ```
 
 ## Project Structure
@@ -47,7 +45,9 @@ embodik/
 
 ## Building
 
-### Using CMake (Direct)
+### Using CMake (Direct Debugging)
+
+Use direct CMake only when debugging the native build. Otherwise use Pixi.
 
 ```bash
 mkdir build && cd build
@@ -55,11 +55,14 @@ cmake .. -DCMAKE_BUILD_TYPE=Release
 make -j$(nproc)
 ```
 
-### Using pip (Recommended)
+### Using pip (Source-Build Fallback)
 
 ```bash
-pip install -e .
+python -m pip install --no-build-isolation -e .
 ```
+
+If CMake cannot find Pinocchio, Eigen, or URDFDOM, use the source-build
+fallback in the [Installation Guide](installation.md).
 
 ## Testing
 
@@ -67,16 +70,13 @@ Run the test suite:
 
 ```bash
 # Run all tests
-pytest
+pixi run test
 
 # Run specific test file
-pytest test/test_robot_model.py
+pixi run python -m pytest test/test_robot_model.py
 
 # Hardware-style seed recovery (joint limits + self-collision)
-pytest test/test_hardware_seed_recovery.py
-
-# Run with coverage
-pytest --cov=embodik --cov-report=html
+pixi run python -m pytest test/test_hardware_seed_recovery.py
 ```
 
 ## Code Style
@@ -85,13 +85,10 @@ EmbodiK follows PEP 8 for Python code:
 
 ```bash
 # Format code
-black python/
-
-# Sort imports
-isort python/
+pixi run format
 
 # Check style
-flake8 python/
+pixi run lint
 ```
 
 ## Documentation
@@ -99,14 +96,8 @@ flake8 python/
 ### Building Documentation
 
 ```bash
-# Install docs dependencies
-pip install mkdocs-material mkdocstrings[python]
-
-# Serve locally
-mkdocs serve
-
 # Build static site
-mkdocs build
+pixi run docs-build
 ```
 
 ### Writing Documentation
@@ -121,8 +112,8 @@ mkdocs build
 2. Create a feature branch: `git checkout -b feature-name`
 3. Make your changes
 4. Add tests for new functionality
-5. Ensure all tests pass: `pytest`
-6. Format code: `black . && isort .`
+5. Ensure relevant tests pass: `pixi run test`
+6. Format code: `pixi run format`
 7. Submit a pull request
 
 ## Release Process

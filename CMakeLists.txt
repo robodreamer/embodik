@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(embodik VERSION 0.2.0)
+project(embodik VERSION 0.20.7)
 
 # Python is used to auto-discover Pinocchio (PyPI `pin`) CMake config during sdist builds.
 find_package(Python REQUIRED COMPONENTS Interpreter)
@@ -31,6 +31,7 @@ option(EMBODIK_ENABLE_IPO "Enable interprocedural optimization for release build
 
 # Find dependencies
 find_package(Eigen3 3.3 REQUIRED NO_MODULE)
+message(STATUS "EmbodiK: using Eigen3_DIR='${Eigen3_DIR}'")
 
 # If the user doesn't have a system Pinocchio install, try to locate the CMake config
 # shipped with the PyPI `pin` wheel (import name: `pinocchio`).
@@ -64,10 +65,21 @@ print(str(p.parents[4]))
         # picking up a locally-built Pinocchio (which can bake in incompatible Boost SONAMEs).
         set(pinocchio_DIR "${_pin_prefix}/lib/cmake/pinocchio" CACHE PATH "Pinocchio CMake package directory" FORCE)
         message(STATUS "Forcing pinocchio_DIR=${pinocchio_DIR}")
+    else()
+        message(STATUS
+            "EmbodiK: PyPI `pin` was not importable, so CMake will search "
+            "for Pinocchio using the existing CMAKE_PREFIX_PATH/pinocchio_DIR. "
+            "For pip source builds, install `pin>=3.8.0` or set pinocchio_DIR "
+            "to a compatible Pinocchio CMake package.")
     endif()
+else()
+    message(STATUS
+        "EmbodiK: using caller-provided pinocchio_DIR or environment "
+        "pinocchio_DIR; PyPI `pin` auto-detection is skipped.")
 endif()
 
 find_package(pinocchio REQUIRED)
+message(STATUS "EmbodiK: using pinocchio_DIR='${pinocchio_DIR}'")
 
 # Add compile options
 if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
@@ -87,15 +99,6 @@ add_library(embodik_core SHARED
 target_include_directories(embodik_core PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/cpp_core/include>
     $<INSTALL_INTERFACE:include>
-)
-
-# For inplace editable installs, copy core library to python/embodik directory
-# Always copy for editable installs (editable.mode = "inplace" in pyproject.toml)
-add_custom_command(TARGET embodik_core POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        $<TARGET_FILE:embodik_core>
-        "${CMAKE_CURRENT_SOURCE_DIR}/python/embodik/"
-    COMMENT "Copying core library to python/embodik for editable install"
 )
 
 target_link_libraries(embodik_core PUBLIC
@@ -167,4 +170,5 @@ install(DIRECTORY examples/
         PATTERN "*.json"
     PATTERN "__pycache__" EXCLUDE
     PATTERN "*.pyc" EXCLUDE
+    PATTERN "_scratch*" EXCLUDE
 )

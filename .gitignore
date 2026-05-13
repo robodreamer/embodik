@@ -95,6 +95,7 @@ site/
 !plan_docs/**/*.md
 !CHANGELOG.md
 !CONTRIBUTING.md
+!THIRD_PARTY_NOTICES.md
 !agent guidance
 !AGENTS.md
 !LICENSE

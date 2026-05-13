@@ -319,7 +319,7 @@ def examples_cmd(argv: Optional[List[str]] = None) -> int:
             print(f"ERROR: Source directory does not exist: {src_str}", file=sys.stderr)
             return 1
 
-        shutil.copytree(src_str, dst_str)
+        shutil.copytree(src_str, dst_str, ignore=shutil.ignore_patterns("_scratch*"))
         print(f"✓ Copied examples to {dest}")
         print(f"\nTo run an example:")
         print(f"  cd {dest}")

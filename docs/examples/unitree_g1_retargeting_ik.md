@@ -21,13 +21,10 @@ self-collision constraints.
 
 ## Run It
 
-For a pip/venv install, copy the examples and run the script with the activated
-venv Python:
+Install and copy the example bundle once using the
+[Installation Guide](../installation.md#examples). Then run:
 
 ```bash
-source .venv/bin/activate
-pip install "embodik[examples]"
-embodik-examples --copy
 cd embodik_examples
 python 13_unitree_g1_retargeting_ik.py
 ```
