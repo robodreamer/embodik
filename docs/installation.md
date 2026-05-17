@@ -184,6 +184,35 @@ Teleop controller setup and CUDA/CusADi build steps are intentionally kept out
 of the core install path. See the [Examples Guide](examples/index.md) and
 [GPU Solvers](gpu_solvers.md) when you need those workflows.
 
+For Seer controller teleop, xvisio stays in optional Pixi environments and is
+only imported when `--enable-teleop` is provided:
+
+```bash
+pixi install -e teleop
+pixi run -e teleop python examples/03_teleop_ik.py --enable-teleop
+```
+
+For Spot locomanipulation, `mjviser` is the MuJoCo-backed web viewer
+environment for browser GUI policy rollout. Use it when you do not need the
+Seer controller:
+
+```bash
+pixi install -e mjviser
+pixi run -e mjviser spot-locomanip-mjviser
+```
+
+For Spot locomanipulation with mjviser and a Seer controller, use
+`mjviser-teleop`. It includes the same mjviser stack plus the optional
+Seer/xvisio dependencies needed by `--enable-teleop`:
+
+```bash
+pixi install -e mjviser-teleop
+pixi run -e mjviser-teleop spot-locomanip-mjviser --enable-teleop
+```
+
+Use a single Pixi environment per run. `mjviser` and `mjviser-teleop` are
+optional environment names, not Python module arguments.
+
 ## Troubleshooting Native Builds
 
 ### Local Pinocchio, Boost, or ROS paths override the build

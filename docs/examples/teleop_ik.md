@@ -18,10 +18,9 @@ If no Seer controller is connected, the same IK path runs from the draggable
 
 ## Button Mapping
 
-- Trigger hold: stream controller motion into IK.
-- Side button hold: update gripper status.
-- Button A: reset robot and controller reference.
-- Button B: toggle data-collection status.
+- Hold A: stream controller motion into IK.
+- Trigger travel: stream the gripper command continuously.
+- Button B: reset robot and controller reference.
 
 ## Core Pattern
 
@@ -72,12 +71,16 @@ pixi run -e teleop python examples/03_teleop_ik.py
 ```
 
 The example defaults to the Panda preset; pass `--robot <key>` to use another
-configured model.
+configured model. Seer/xvisio support is activated only when you pass
+`--enable-teleop`; otherwise the same IK path is driven by the browser
+transform control.
 
 Useful flags:
 
 ```bash
-pixi run -e teleop python examples/03_teleop_ik.py --controller-port /dev/ttyUSB1
+pixi run -e teleop python examples/03_teleop_ik.py --enable-teleop
+# optional port override
+pixi run -e teleop python examples/03_teleop_ik.py --enable-teleop --controller-port /dev/ttyUSB1
 pixi run -e teleop python examples/03_teleop_ik.py --no-collision
 ```
 
@@ -95,7 +98,8 @@ workflow.
 
 ## Notes
 
-- Requires `xvisio` and host runtime support for Seer controllers.
+- Seer controller mode requires `xvisio`, host runtime support, and an explicit
+  `--enable-teleop`; `--controller-port` only overrides the default `/dev/ttyUSB0` port.
 - Install the teleop Pixi environment once with `pixi install -e teleop`.
 - With no controller connected, drag `/ik_target` in the browser to exercise the
   same `backend.solve_step(goal_pose)` path.

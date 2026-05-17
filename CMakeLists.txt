@@ -168,6 +168,7 @@ install(DIRECTORY examples/
         PATTERN "*.urdf"
         PATTERN "*.stl"
         PATTERN "*.json"
+        PATTERN "*.onnx"
     PATTERN "__pycache__" EXCLUDE
     PATTERN "*.pyc" EXCLUDE
     PATTERN "_scratch*" EXCLUDE

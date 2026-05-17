@@ -64,6 +64,8 @@ The pip-facing examples are intentionally split by purpose:
 | `09_dual_arm_ects.py` | Dual-arm ECTS and orthogonal coordination modes. |
 | `12_bimanual_whole_body_ik.py` | Bimanual whole-body teleop, defaulting to AI Worker and optionally supporting RB-Y1, with CoM and collision handling. |
 | `13_unitree_g1_retargeting_ik.py` | Unitree G1 whole-body retargeting IK with CoM and optional collision handling. |
+| `14_spot_full_body_ik_viser.py` | Spot full-body IK in regular Viser with arm+torso, torso-only, full-body, and two-stage modes. |
+| `15_spot_locomanip_mjviser.py` | Spot locomanipulation ONNX policy rollout in MuJoCo through mjviser. |
 
 Run them from a copied example directory:
 
@@ -72,6 +74,51 @@ python 02_collision_aware_IK.py
 python 03_teleop_ik.py
 python 12_bimanual_whole_body_ik.py
 python 13_unitree_g1_retargeting_ik.py
+python 14_spot_full_body_ik_viser.py
+```
+
+The regular Viser Spot full-body IK example uses the standard example dependencies.
+The MuJoCo/mjviser locomanipulation example needs the optional mjviser stack.
+`mjviser` is the MuJoCo-backed web viewer environment for policy rollout and
+interactive simulation. `mjviser-teleop` is the same viewer stack plus the
+optional Seer/xvisio controller dependencies, so use it only when running
+`--enable-teleop`:
+
+```bash
+pip install "embodik[mjviser]"
+python 15_spot_locomanip_mjviser.py --policy locomanip
+python 15_spot_locomanip_mjviser.py --policy locomanip-stationary
+# add the optional Seer controller extra when needed:
+pip install "embodik[mjviser,teleop]"
+python 15_spot_locomanip_mjviser.py --enable-teleop --policy locomanip
+# or from a clone:
+pixi run -e mjviser spot-locomanip-mjviser --policy locomanip
+pixi run -e mjviser-teleop spot-locomanip-mjviser --enable-teleop --policy locomanip
+```
+
+Use a single Pixi environment per run: `mjviser` for browser GUI control and
+`mjviser-teleop` for browser GUI plus Seer controller input. Do not add
+`mjviser` after `python`; it is a Pixi environment name, not a Python module
+argument. Passing `--enable-teleop` connects the optional controller; the in-app
+**Enable teleop** box starts enabled when the controller connects. The
+locomanipulation app also has solver preference sliders. **Base assist**
+controls how much the solver uses x/y/yaw locomotion while tracking the gripper
+target: lower values keep more motion in the arm, and higher values let the
+base help earlier. **Arm recovery bias** increases the arm posture return while
+condition-number protection is active, which helps avoid fully stretched arm
+configurations during loco-manipulation teleop. The default values are tuned for
+teleop: the base helps on reachable x/y/yaw nudges, and arm recovery stays
+active without making the high-condition-number solve overly stiff.
+The mjviser loop rate-limits ONNX policy inference and background IK requests
+to 50 Hz by default while MuJoCo simulation and rendering continue stepping at
+the model/viewer rate. The IK worker keeps only the newest pending request so
+collision-constrained solves cannot build a backlog and starve the sim thread.
+When collision avoidance is enabled, the default checks the 3 closest active
+collision pairs with balanced speed/accuracy tuning.
+Clone-based Spot IK changes can be headlessly checked with:
+
+```bash
+pixi run -e mjviser-teleop python scripts/spot_locomanip_ik_hardening.py
 ```
 
 Most examples default to the Panda preset. Use `--robot <key>` when a script supports alternate robot presets. See the [Examples Guide](https://robodreamer.github.io/embodik/examples/) for the full catalog, helper conventions, and clone-only development examples.
@@ -93,6 +140,14 @@ Most examples default to the Panda preset. Use `--robot <key>` when a script sup
 **Unitree G1 retargeting IK**
 
 [![Unitree G1 retargeting IK preview](docs/assets/media/unitree_g1_retargeting_ik_preview.gif)](https://robodreamer.github.io/embodik/examples/unitree_g1_retargeting_ik/)
+
+**Spot full-body IK**
+
+[![Spot full-body IK preview](docs/assets/media/spot_fullbody_interactive_ik_preview.gif)](https://robodreamer.github.io/embodik/examples/spot_full_body_ik/)
+
+**Spot locomanipulation mjviser**
+
+[![Spot locomanipulation mjviser preview](docs/assets/media/spot_locomanip_interactive_ik_mjviser_preview.gif)](https://robodreamer.github.io/embodik/examples/spot_locomanip_mjviser/)
 
 ## Core Capabilities
 

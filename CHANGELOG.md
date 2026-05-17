@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.8] - 2026-05-17
+
+### Added
+- Added Spot full-body IK and Spot loco-manipulation mjviser examples with preview media, docs, and optional Seer teleop support.
+- Added reusable Spot policy runtime, mjviser adapter, Seer teleop, and whole-body IK helpers for future policy examples.
+- Added bundled Spot locomanipulation ONNX policy assets tracked through Git LFS.
+
+### Changed
+- Decoupled policy inference, rendering, and IK scheduling so the Spot loco-manipulation example can keep policy updates at 50 Hz while IK runs asynchronously.
+- Tuned the Spot loco-manipulation IK defaults for balanced collision handling, three active collision rows by default, operator-readable controls, and motion-triggered condition protection.
+- Updated docs and README example tables to surface the new Spot `mjviser` and `mjviser-teleop` workflows.
+
 ## [0.20.7] - 2026-05-13
 
 ### Added

@@ -21,6 +21,8 @@ Example code and tutorials for EmbodiK.
 - [`09_dual_arm_ects.py`](dual_arm_ects.md) — Dual-arm ECTS/Orthogonal coordination with collision handling
 - [`12_bimanual_whole_body_ik.py`](bimanual_whole_body_ik.md) — Bimanual whole-body teleop for AI Worker and RB-Y1 with CoM and collision handling
 - [`13_unitree_g1_retargeting_ik.py`](unitree_g1_retargeting_ik.md) — Unitree G1 retargeting IK with palm/foot/pelvis targets, CoM visualization, and optional self-collision constraints
+- [`14_spot_full_body_ik_viser.py`](spot_full_body_ik.md) — Spot full-body IK in regular Viser with arm+torso, torso-only, full-body, and two-stage modes
+- [`15_spot_locomanip_mjviser.py`](spot_locomanip_mjviser.md) — Spot locomanipulation ONNX policy rollout in MuJoCo through mjviser; use `embodik[mjviser]` or `pixi run -e mjviser spot-locomanip-mjviser`; for Seer teleop use the combined environment: `pixi run -e mjviser-teleop spot-locomanip-mjviser --enable-teleop`
 
 ### GPU and Batch
 

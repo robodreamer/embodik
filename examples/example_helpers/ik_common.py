@@ -43,6 +43,8 @@ def apply_collision_tuning_mode(
         solver.set_collision_tuning_mode(
             enum_map.get(label, embodik.CollisionTuningMode.BALANCED)
         )
+        if label != "precise" and hasattr(solver, "enable_sphere_broadphase"):
+            solver.enable_sphere_broadphase(True)
         return
 
     # Backward-compatible fallback for older bindings.
@@ -52,11 +54,15 @@ def apply_collision_tuning_mode(
         if hasattr(solver, "set_collision_refinement_time_budget_us"):
             solver.set_collision_refinement_time_budget_us(0)
     elif label == "balanced":
+        if hasattr(solver, "enable_sphere_broadphase"):
+            solver.enable_sphere_broadphase(True)
         if hasattr(solver, "enable_collision_pair_cache"):
             solver.enable_collision_pair_cache(True, 20, 0.05, 256)
         if hasattr(solver, "set_collision_refinement_time_budget_us"):
             solver.set_collision_refinement_time_budget_us(0)
     else:
+        if hasattr(solver, "enable_sphere_broadphase"):
+            solver.enable_sphere_broadphase(True)
         if hasattr(solver, "enable_collision_pair_cache"):
             solver.enable_collision_pair_cache(True, 100, 0.03, 128)
         if hasattr(solver, "set_collision_refinement_time_budget_us"):
