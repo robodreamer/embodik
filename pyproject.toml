@@ -9,7 +9,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "embodik"
-version = "0.20.7"
+version = "0.20.8"
 description = "High-performance inverse kinematics solver optimized for cross-embodiment VLA/AI applications"
 authors = [{ name = "Andy Park", email = "andypark.purdue@gmail.com" }]
 readme = "README.md"
@@ -62,6 +62,16 @@ examples = [
     "robot_descriptions>=1.0.0",
     "viser>=0.1.0",
     "yourdfpy>=0.0.52",
+]
+mjviser = [
+    "mjviser>=0.0.14",
+    "mujoco>=3.6.0,<3.9",
+    "onnxruntime>=1.18,<2",
+    "robot_descriptions>=1.0.0",
+    "viser>=1.0.24",
+]
+teleop = [
+    "xvisio>=0.3.1",
 ]
 # GPU acceleration via CusADi (requires CUDA + manual cusadi installation)
 gpu = [

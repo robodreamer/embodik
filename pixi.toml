@@ -1,6 +1,6 @@
 [workspace]
 name = "embodik"
-version = "0.20.7"
+version = "0.20.8"
 description = "High-performance inverse kinematics solver optimized for cross-embodiment VLA/AI applications"
 authors = ["Andy Park <andypark.purdue@gmail.com>"]
 channels = ["conda-forge"]
@@ -66,6 +66,7 @@ build = { cmd = "python -m pip install --no-build-isolation .", depends-on = [
 ] }
 test = "python -m pytest test/"
 test-verbose = "python -m pytest test/ -v"
+test-spot-ik = "python -m pytest test/test_spot_whole_body_ik_headless.py -v"
 verify-agent = "python scripts/verify_changed.py --run"
 verify-ai-worker = "python scripts/verify_ai_worker_robustness.py --scenario all --output-json /tmp/ai_worker_metrics.json"
 verify-alpha-wheelbase = "python scripts/verify_optional_wheelbase_robustness.py --matrix --output-json /tmp/optional_wheelbase_metrics.json"
@@ -113,6 +114,20 @@ xvisio = ">=0.3.1"
 [feature.teleop.tasks]
 demo-teleop = "python examples/03_teleop_ik.py --robot panda"
 
+# Optional mjviser/MuJoCo stack for Spot locomanipulation.
+[feature.mjviser.pypi-dependencies]
+mjviser = ">=0.0.14"
+mujoco = ">=3.6.0,<3.9"
+onnxruntime = ">=1.18,<2"
+
+[feature.mjviser.tasks]
+spot-locomanip-mjviser = { cmd = "python examples/15_spot_locomanip_mjviser.py", depends-on = [
+    "install",
+] }
+test-spot-locomanip = { cmd = "python -m pytest test/test_spot_locomanip_mjviser.py -v", depends-on = [
+    "install",
+] }
+
 # CUDA feature for GPU acceleration
 [feature.cuda]
 # CUDA feature needs pytorch channel first to get CUDA build
@@ -146,5 +161,9 @@ export-pph-sns = "python scripts/export_pph_sns.py"
 default = { features = ["dev"], solve-group = "default" }
 # Teleop environment for Seer controller examples (run: pixi run -e teleop demo-teleop)
 teleop = { features = ["dev", "teleop"], solve-group = "teleop" }
+# Optional Spot locomanipulation mjviser example (run: pixi run -e mjviser spot-locomanip-mjviser)
+mjviser = { features = ["dev", "mjviser"], solve-group = "mjviser" }
+# Optional locomanipulation environment with Seer/xvisio teleop enabled.
+mjviser-teleop = { features = ["dev", "mjviser", "teleop"], solve-group = "mjviser-teleop" }
 # CUDA environment for GPU acceleration
 cuda = { features = ["dev", "cuda"], solve-group = "cuda" }

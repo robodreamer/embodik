@@ -96,6 +96,8 @@ nav:
     - Robots:
       - Bimanual Whole-Body IK: examples/bimanual_whole_body_ik.md
       - Unitree G1 Retargeting IK: examples/unitree_g1_retargeting_ik.md
+      - Spot Full-Body IK: examples/spot_full_body_ik.md
+      - Spot Locomanipulation mjviser: examples/spot_locomanip_mjviser.md
     - GPU & Batch:
       - GPU Batch IK: examples/gpu_batch_ik.md
       - GPU Collision Batch: examples/gpu_collision_batch.md

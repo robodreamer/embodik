@@ -414,11 +414,15 @@ void PostureTask::setControlledJointTargets(
   for (size_t i = 0; i < controlled_joint_indices_.size(); ++i) {
     int v_idx = controlled_joint_indices_[i];
     if (v_idx >= 0 && v_idx < model_->nv()) {
-      if (model_->is_floating_base() && v_idx >= 6) {
-        // Map from velocity index to configuration index
-        int q_idx = v_idx + 1;
-        if (q_idx < model_->nq()) {
-          q_target_(q_idx) = target_values(i);
+      if (model_->is_floating_base()) {
+        if (v_idx < 6) {
+          q_target_(v_idx) = target_values(i);
+        } else {
+          // Map from velocity index to configuration index
+          int q_idx = v_idx + 1;
+          if (q_idx < model_->nq()) {
+            q_target_(q_idx) = target_values(i);
+          }
         }
       } else if (!model_->is_floating_base() && v_idx < model_->nq()) {
         q_target_(v_idx) = target_values(i);
@@ -458,10 +462,14 @@ void PostureTask::setControlledJointWeights(const Eigen::VectorXd &weights) {
   for (size_t i = 0; i < controlled_joint_indices_.size(); ++i) {
     int v_idx = controlled_joint_indices_[i];
     if (v_idx >= 0 && v_idx < model_->nv()) {
-      if (model_->is_floating_base() && v_idx >= 6) {
-        int q_idx = v_idx + 1;
-        if (q_idx < model_->nq()) {
-          joint_weights_(q_idx) = weights(i);
+      if (model_->is_floating_base()) {
+        if (v_idx < 6) {
+          joint_weights_(v_idx) = weights(i);
+        } else {
+          int q_idx = v_idx + 1;
+          if (q_idx < model_->nq()) {
+            joint_weights_(q_idx) = weights(i);
+          }
         }
       } else if (!model_->is_floating_base() && v_idx < model_->nq()) {
         joint_weights_(v_idx) = weights(i);
@@ -562,7 +570,16 @@ Eigen::MatrixXd PostureTask::getJacobian() const {
 
     for (size_t i = 0; i < controlled_joint_indices_.size(); ++i) {
       int v_idx = controlled_joint_indices_[i];
-      result_jacobian(i, v_idx) = joint_weights_(v_idx);
+      double row_weight = 1.0;
+      if (model_->is_floating_base() && v_idx >= 6) {
+        int q_idx = v_idx + 1;
+        if (q_idx >= 0 && q_idx < joint_weights_.size()) {
+          row_weight = joint_weights_(q_idx);
+        }
+      } else if (v_idx >= 0 && v_idx < joint_weights_.size()) {
+        row_weight = joint_weights_(v_idx);
+      }
+      result_jacobian(i, v_idx) = row_weight;
     }
   } else {
     // For all joints, return weighted identity
