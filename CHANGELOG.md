@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.9] - 2026-05-18
+
+### Added
+- Bundled public Spot-with-arm URDF assets for the Viser Spot full-body IK example.
+- Bundled the MuJoCo Menagerie Spot-with-arm MJCF scene and meshes for the Spot locomanipulation mjviser example.
+
+### Changed
+- Made the Spot URDF and MJCF resolvers prefer explicit user overrides, then bundled public assets, before falling back to optional cache/download paths.
+- Expanded README and installation docs with copy-paste venv, one-shot installer, and mjviser example run paths for pip users.
+
+### Fixed
+- Fixed copied pip examples requiring private Spot model paths or first-run `robot_descriptions` downloads for the default Spot URDF/MJCF runs.
+
 ## [0.20.8] - 2026-05-17
 
 ### Added

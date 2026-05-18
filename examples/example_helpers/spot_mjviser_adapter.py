@@ -139,11 +139,16 @@ _MANIPULATION_OBJECT_RGBA: dict[str, tuple[float, float, float, float]] = {
     "manip_chair_leg_2": (0.4, 0.2, 0.1, 0.0),
     "manip_chair_leg_3": (0.4, 0.2, 0.1, 0.0),
 }
+_BUNDLED_SPOT_MJCF_SCENE = (
+    Path(__file__).resolve().parents[1] / "assets" / "spot_mjcf" / "scene_arm.xml"
+)
 
 
 def resolve_spot_scene_arm_xml() -> Path:
-    """Return the public MuJoCo Menagerie Spot-with-arm scene from robot_descriptions."""
+    """Return the bundled public MuJoCo Menagerie Spot-with-arm scene."""
 
+    if _BUNDLED_SPOT_MJCF_SCENE.is_file():
+        return _BUNDLED_SPOT_MJCF_SCENE
     try:
         from robot_descriptions import spot_mj_description
     except ImportError as exc:  # pragma: no cover - exercised by dependency-missing users.

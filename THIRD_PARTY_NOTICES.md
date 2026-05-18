@@ -43,3 +43,23 @@ on Linux or `delocate-listdeps`/`otool -L` on macOS. Treat publication as
 blocked until every bundled library is covered by this notice and by the
 required license text in `third_party_licenses/` or in the repaired wheel's
 metadata.
+
+## Example Spot Models
+
+- Project: MuJoCo Menagerie Boston Dynamics Spot MJCF asset
+- Upstream: https://github.com/google-deepmind/mujoco_menagerie/tree/main/boston_dynamics_spot
+- License: BSD-3-Clause
+- Role in EmbodiK: bundled MuJoCo/mjviser Spot-with-arm model for the
+  locomanipulation example.
+
+The upstream license text is included at
+`examples/assets/spot_mjcf/LICENSE`.
+
+- Project: RAI Open Source `spot_description`
+- Upstream: https://github.com/rai-opensource/spot_description
+- License: MIT and BSD-3-Clause notices in the upstream package
+- Role in EmbodiK: bundled Spot-with-arm URDF and meshes for the regular Viser
+  Spot full-body IK example and optional EmbodiK IK overlay.
+
+The upstream license text is included at
+`examples/assets/spot_description/LICENSE`.

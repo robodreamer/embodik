@@ -123,6 +123,14 @@ def test_spot_whole_body_ik_loads_backup_urdf_and_resolves_frames() -> None:
     assert ik.message.startswith("ready:")
 
 
+def test_spot_whole_body_ik_uses_bundled_public_urdf_by_default(monkeypatch) -> None:
+    monkeypatch.delenv(SPOT_URDF_ENV_VAR, raising=False)
+
+    path = resolve_spot_ik_urdf()
+
+    assert path == (_EXAMPLES_DIR / "assets" / "spot_description" / "urdf" / "spot_with_arm.urdf")
+
+
 def test_spot_whole_body_gripper_command_does_not_move_wrist_tool_frame() -> None:
     ik = OptionalSpotWholeBodyIK(_resolve_spot_ik_urdf(), dt=0.01)
     observation = _policy_observation()
@@ -180,7 +188,21 @@ def test_spot_full_body_ik_initializes_regular_viser_backend() -> None:
 
     assert backend.body_frame == "body"
     assert backend.tool_frame in {"arm0_link_wr1", "arm_link_wr1"}
-    assert backend.foot_frames == ("fl_foot", "fr_foot", "hl_foot", "hr_foot")
+    assert backend.foot_frames in {
+        ("fl_foot", "fr_foot", "hl_foot", "hr_foot"),
+        (
+            "front_left_foot",
+            "front_right_foot",
+            "rear_left_foot",
+            "rear_right_foot",
+        ),
+        (
+            "front_left_foot_center",
+            "front_right_foot_center",
+            "rear_left_foot_center",
+            "rear_right_foot_center",
+        ),
+    }
     assert backend.solver.has_contact_frames() is False
     np.testing.assert_allclose(
         backend.config.torso_pose_half_range,
