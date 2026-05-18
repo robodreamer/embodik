@@ -8,16 +8,17 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 VENV_DIR=""
-# Prefer a supported Homebrew Python before falling back to python3.
+# Prefer Homebrew 3.12 when present; use 3.11 only when explicitly requested
+# or when 3.12 is unavailable.
 if [[ -z "${EMBODIK_PYTHON:-}" ]]; then
-  if [[ -x /opt/homebrew/bin/python3.11 ]]; then
-    PYTHON_CMD="/opt/homebrew/bin/python3.11"
-  elif [[ -x /usr/local/bin/python3.11 ]]; then
-    PYTHON_CMD="/usr/local/bin/python3.11"
-  elif [[ -x /opt/homebrew/bin/python3.12 ]]; then
+  if [[ -x /opt/homebrew/bin/python3.12 ]]; then
     PYTHON_CMD="/opt/homebrew/bin/python3.12"
   elif [[ -x /usr/local/bin/python3.12 ]]; then
     PYTHON_CMD="/usr/local/bin/python3.12"
+  elif [[ -x /opt/homebrew/bin/python3.11 ]]; then
+    PYTHON_CMD="/opt/homebrew/bin/python3.11"
+  elif [[ -x /usr/local/bin/python3.11 ]]; then
+    PYTHON_CMD="/usr/local/bin/python3.11"
   else
     PYTHON_CMD="python3"
   fi
@@ -44,7 +45,8 @@ usage() {
   echo ""
   echo "Examples:"
   echo "  cd ~/my_project && bash $SCRIPT_DIR/install_embodik_macos.sh"
-  echo "  bash $SCRIPT_DIR/install_embodik_macos.sh --venv .venv --python python3.11"
+  echo "  bash $SCRIPT_DIR/install_embodik_macos.sh --venv .venv --python python3.12"
+  echo "  bash $SCRIPT_DIR/install_embodik_macos.sh --venv .venv --python python3.11  # optional downstream fallback"
   echo "  bash $SCRIPT_DIR/install_embodik_macos.sh --editable ~/src/embodik"
 }
 
@@ -120,7 +122,7 @@ if [[ -z "${PY_MAJOR:-}" ]]; then
 fi
 if [[ "$PY_MAJOR" -gt 3 ]] || { [[ "$PY_MAJOR" -eq 3 ]] && [[ "$PY_MINOR" -ge 13 ]]; }; then
   echo "Warning: Python ${PY_MAJOR}.${PY_MINOR} is newer than the 3.10–3.12 supported range." >&2
-  echo "         If the build fails (e.g. missing headers), retry with: --python python3.11" >&2
+  echo "         If the build fails (e.g. missing headers), retry with: --python python3.12" >&2
 fi
 
 if [[ "$SKIP_BREW" -eq 0 ]]; then
