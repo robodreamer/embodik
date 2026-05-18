@@ -39,10 +39,13 @@ first; use `--skip-brew` only after installing equivalent native packages.
 
     ```bash
     curl -fsSL -O https://raw.githubusercontent.com/robodreamer/embodik/main/scripts/install_embodik_macos.sh
-    bash install_embodik_macos.sh --python python3.11
+    bash install_embodik_macos.sh --python python3.12
     source .venv/bin/activate
     python -c "import embodik; print(embodik.__version__)"
     ```
+
+    Use `--python python3.11` only when a downstream integration explicitly
+    needs Python 3.11.
 
 === "Linux (Debian/Ubuntu)"
 
@@ -175,15 +178,15 @@ Eigen3, and URDFDOM packages manually, then run the one-shot script with
 
 ## Manual macOS Source Build
 
-Use Python 3.10-3.12 for source builds. Python 3.11 is a good default when you
-need ABI compatibility with downstream environments such as `validation_robot`.
+Use Python 3.10-3.12 for source builds. Python 3.12 is the default macOS path.
+Use Python 3.11 only when a downstream integration explicitly needs that ABI.
 Homebrew's default `eigen` formula can be Eigen 5.x; EmbodiK expects Eigen 3.x,
 so use `eigen@3`.
 
 ```bash
 brew install eigen@3 urdfdom_headers urdfdom
 
-python3.11 -m venv .venv
+python3.12 -m venv .venv
 source .venv/bin/activate
 python -m pip install -U pip
 python -m pip install pin scikit-build-core nanobind cmake ninja
