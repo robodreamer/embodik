@@ -1,8 +1,9 @@
-"""Optional EmbodiK whole-body IK overlay for the Spot locomanipulation example.
+"""Optional EmbodiK whole-body IK overlay for Spot examples.
 
-The public MuJoCo Menagerie Spot asset is MJCF-only. EmbodiK currently consumes
-URDF models, so this overlay is enabled only when the caller supplies a compatible
-Spot URDF. The policy/mjviser example remains runnable without that URDF.
+EmbodiK consumes URDF models for IK, while the mjviser rollout uses MJCF for
+MuJoCo. The examples therefore bundle a public Spot-with-arm URDF alongside the
+public MuJoCo Menagerie MJCF asset so both regular Viser and mjviser examples
+work without private model paths.
 """
 
 from __future__ import annotations
@@ -55,6 +56,11 @@ TOOL_FRAME_CANDIDATES: tuple[str, ...] = (
 )
 SPOT_URDF_ENV_VAR = "EMBODIK_SPOT_IK_URDF"
 _LOCAL_SPOT_URDF_FALLBACKS: tuple[Path, ...] = (
+    Path(__file__).resolve().parents[1]
+    / "assets"
+    / "spot_description"
+    / "urdf"
+    / "spot_with_arm.urdf",
     Path(
         "/path/to/local/backup/backup-x13/Projects/other-bdai-repos/"
         "bdai-data-lfs/bdai/spot_isaac_sim_assets/urdf/spot_whole_body.urdf"
@@ -114,6 +120,19 @@ SPOT_COLLISION_PAIR_REFERENCES: tuple[tuple[str, str], ...] = (
     ("arm0_link_el0_0", "arm0_link_sh0_0"),
     ("arm0_link_el1_0", "arm0_link_sh0_0"),
     ("arm0_link_sh1_0", "arm0_link_el1_0"),
+    ("arm_link_wr0_0", "body_0"),
+    ("arm_link_el0_0", "body_0"),
+    ("arm_link_el1_0", "body_0"),
+    ("arm_link_wr0_0", "front_left_upper_leg_0"),
+    ("arm_link_wr0_0", "front_left_lower_leg_0"),
+    ("arm_link_wr0_0", "front_right_upper_leg_0"),
+    ("arm_link_wr0_0", "front_right_lower_leg_0"),
+    ("arm_link_el0_0", "front_left_upper_leg_0"),
+    ("arm_link_el0_0", "front_right_upper_leg_0"),
+    ("arm_link_el1_0", "front_left_upper_leg_0"),
+    ("arm_link_el1_0", "front_right_upper_leg_0"),
+    ("arm_link_wr0_0", "arm_link_sh0_0"),
+    ("arm_link_el0_0", "arm_link_sh0_0"),
 )
 
 _STANDARD_TORSO_ROLL_PITCH_YAW_HALF_RANGE = np.deg2rad(15.0)
@@ -138,6 +157,20 @@ FOOT_FRAME_CANDIDATE_SETS: tuple[tuple[str, ...], ...] = (
     ("hl_foot", "rear_left_foot_center", "hind_left_foot", "rear_left_foot", "HL"),
     ("hr_foot", "rear_right_foot_center", "hind_right_foot", "rear_right_foot", "HR"),
 )
+_PUBLIC_SPOT_DESCRIPTION_JOINT_ALIASES: dict[str, tuple[str, ...]] = {
+    "fl_hx": ("front_left_hip_x",),
+    "fl_hy": ("front_left_hip_y",),
+    "fl_kn": ("front_left_knee",),
+    "fr_hx": ("front_right_hip_x",),
+    "fr_hy": ("front_right_hip_y",),
+    "fr_kn": ("front_right_knee",),
+    "hl_hx": ("rear_left_hip_x",),
+    "hl_hy": ("rear_left_hip_y",),
+    "hl_kn": ("rear_left_knee",),
+    "hr_hx": ("rear_right_hip_x",),
+    "hr_hy": ("rear_right_hip_y",),
+    "hr_kn": ("rear_right_knee",),
+}
 
 
 @dataclass
@@ -329,7 +362,7 @@ def _joint_name_candidates(mjcf_name: str) -> tuple[str, ...]:
     if mjcf_name.startswith("arm_"):
         suffix = mjcf_name.removeprefix("arm_")
         return (f"arm0_{suffix}", mjcf_name)
-    return (mjcf_name,)
+    return (mjcf_name, *_PUBLIC_SPOT_DESCRIPTION_JOINT_ALIASES.get(mjcf_name, ()))
 
 
 def _existing_path(value) -> Path | None:
@@ -397,12 +430,12 @@ def resolve_spot_ik_urdf(
     for candidate in (value, os.environ.get(SPOT_URDF_ENV_VAR)):
         if path := _existing_path(candidate):
             return path
-    if path := _discover_spot_urdf_from_robot_descriptions():
-        return path
     if include_local_fallbacks:
         for candidate in _LOCAL_SPOT_URDF_FALLBACKS:
             if path := _existing_path(candidate):
                 return path
+    if path := _discover_spot_urdf_from_robot_descriptions():
+        return path
     return None
 
 

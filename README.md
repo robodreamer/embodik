@@ -26,22 +26,29 @@ https://robodreamer.github.io/embodik/
 
 ## Quick Start
 
-Install from PyPI:
+Fastest path for most users is the wheel-only PyPI install inside a virtual
+environment:
 
 ```bash
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install -U pip
 python -m pip install --only-binary=:all: embodik
 python -c "import embodik; print(embodik.__version__)"
 ```
 
 If that import works, the core package is installed.
 
-If pip cannot find a compatible wheel, follow the
-platform-specific source-build setup in the [Installation Guide](https://robodreamer.github.io/embodik/installation/).
+If pip cannot find a compatible wheel, use the one-shot source installer for
+your platform from the [Installation Guide](https://robodreamer.github.io/embodik/installation/).
+It creates the venv, installs native dependencies, builds EmbodiK, and runs an
+import smoke test.
 
-Optional: follow the [Installation Guide examples setup](https://robodreamer.github.io/embodik/installation/#examples)
-once, then run the basic IK demo from the copied example directory:
+To run copied examples from the same venv:
 
 ```bash
+python -m pip install "embodik[examples]"
+embodik-examples --copy
 cd embodik_examples
 python 01_basic_ik_simple.py
 ```
@@ -77,21 +84,30 @@ python 13_unitree_g1_retargeting_ik.py
 python 14_spot_full_body_ik_viser.py
 ```
 
-The regular Viser Spot full-body IK example uses the standard example dependencies.
-The MuJoCo/mjviser locomanipulation example needs the optional mjviser stack.
+The regular Viser Spot full-body IK example uses the standard example
+dependencies and includes a bundled public Spot-with-arm URDF. The
+MuJoCo/mjviser locomanipulation example needs the optional mjviser stack and
+includes a bundled public MuJoCo Menagerie Spot-with-arm MJCF scene.
 `mjviser` is the MuJoCo-backed web viewer environment for policy rollout and
 interactive simulation. `mjviser-teleop` is the same viewer stack plus the
 optional Seer/xvisio controller dependencies, so use it only when running
 `--enable-teleop`:
 
 ```bash
-pip install "embodik[mjviser]"
+python -m pip install "embodik[mjviser]"
+embodik-examples --copy
+cd embodik_examples
 python 15_spot_locomanip_mjviser.py --policy locomanip
 python 15_spot_locomanip_mjviser.py --policy locomanip-stationary
 # add the optional Seer controller extra when needed:
-pip install "embodik[mjviser,teleop]"
+python -m pip install "embodik[mjviser,teleop]"
 python 15_spot_locomanip_mjviser.py --enable-teleop --policy locomanip
-# or from a clone:
+```
+
+From a repository checkout, run the same example from the repository root with
+the matching Pixi environment:
+
+```bash
 pixi run -e mjviser spot-locomanip-mjviser --policy locomanip
 pixi run -e mjviser-teleop spot-locomanip-mjviser --enable-teleop --policy locomanip
 ```

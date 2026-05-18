@@ -1,8 +1,10 @@
 # Installation
 
 EmbodiK supports Python 3.10-3.12 and is distributed through PyPI. Start with
-the wheel-only install. If no compatible wheel is available for your
-platform/Python, use the source-build fallback below.
+the wheel-only install when a wheel exists for your platform. If pip cannot use
+a wheel, use the one-shot installer script instead of debugging a manual source
+build first; it creates the virtual environment, installs native dependencies,
+builds EmbodiK, and runs an import smoke test.
 
 > Published repaired wheels do not require the Python `pin` package for core
 > runtime use. Source builds use `pin` or a system Pinocchio install as the
@@ -10,7 +12,7 @@ platform/Python, use the source-build fallback below.
 > to import EmbodiK. Some optional examples and visualization paths still use
 > Python Pinocchio directly.
 
-## Fast Path
+## Fastest Wheel Path
 
 ```bash
 python -m venv .venv
@@ -21,53 +23,25 @@ python -c "import embodik; print(embodik.__version__)"
 ```
 
 If the import command works, the core package is installed. If pip reports that
-no matching binary distribution exists, use the source-build script for your
-platform instead of letting pip build an isolated temporary wheel.
+no matching binary distribution exists, use the one-shot installer below.
 
-## Choose An Install Path
+## One-Shot Source Installer
 
-| Goal | Use this |
-| --- | --- |
-| Install EmbodiK as a user | `python -m pip install --only-binary=:all: embodik` |
-| Run copied examples | Install core EmbodiK first, then `python -m pip install "embodik[examples]"` |
-| Recover when pip builds from `embodik-*.tar.gz` | Use the one-shot source script for your platform |
-| Develop from a repository clone | Use Pixi; see [Developer Setup](#developer-setup) |
-
-## Examples
-
-```bash
-python -m pip install --only-binary=:all: embodik
-python -m pip install "embodik[examples]"
-embodik-examples --copy
-cd embodik_examples
-python 01_basic_ik_simple.py
-```
-
-The examples extra intentionally includes optional packages used by the copied
-example scripts, including Python Pinocchio for scripts that import `pinocchio`
-directly. Published repaired wheels for the core `embodik` install do not depend
-on Python Pinocchio.
-
-See the [Examples Guide](examples/index.md) for the full catalog.
-
-## If Pip Builds From Source
-
-Use these scripts when pip falls back to `embodik-*.tar.gz`, when no compatible
-wheel exists for your platform/Python, or when you need an editable local build.
-They create a `.venv`, install system and Python build dependencies, prefer the
-PyPI `pin` CMake prefix, install EmbodiK, and run an import smoke test.
-
-The one-shot scripts keep `pin` in the same virtual environment and patch the
-installed extension rpath so source-built EmbodiK can find the native Pinocchio,
-Coal, and related libraries after the shell exits. If you build manually, do not
-remove the native provider used at build time unless you also repair/bundle the
-resulting wheel.
+Use this path when a wheel is not available, when pip tries to build from
+`embodik-*.tar.gz`, or when you want a local editable install. It is the
+recommended source-build path for most users because it handles the venv,
+native dependencies, CMake prefix, rpath repair, and final import check.
+On Linux, the script targets Debian/Ubuntu and uses `sudo apt-get` unless you
+pass `--skip-apt`. On macOS, install Homebrew and Xcode command-line tools
+first; use `--skip-brew` only after installing equivalent native packages.
 
 === "macOS"
 
     ```bash
     curl -fsSL -O https://raw.githubusercontent.com/robodreamer/embodik/main/scripts/install_embodik_macos.sh
     bash install_embodik_macos.sh --python python3.11
+    source .venv/bin/activate
+    python -c "import embodik; print(embodik.__version__)"
     ```
 
 === "Linux (Debian/Ubuntu)"
@@ -75,6 +49,8 @@ resulting wheel.
     ```bash
     curl -fsSL -O https://raw.githubusercontent.com/robodreamer/embodik/main/scripts/install_embodik_linux.sh
     bash install_embodik_linux.sh
+    source .venv/bin/activate
+    python -c "import embodik; print(embodik.__version__)"
     ```
 
 From a repository checkout, run the scripts directly:
@@ -83,6 +59,81 @@ From a repository checkout, run the scripts directly:
 bash scripts/install_embodik_linux.sh --help
 bash scripts/install_embodik_macos.sh --help
 ```
+
+## Choose An Install Path
+
+| Goal | Use this |
+| --- | --- |
+| Install EmbodiK as a user when a wheel exists | `python -m pip install --only-binary=:all: embodik` |
+| Run copied examples in a venv | `python -m pip install "embodik[examples]"`, then `embodik-examples --copy` |
+| Run the Spot mjviser example in a venv | `python -m pip install "embodik[mjviser]"`, then copy examples |
+| Recover when pip builds from `embodik-*.tar.gz` | Use the one-shot source installer for your platform |
+| Develop from a repository clone | Use Pixi; see [Developer Setup](#developer-setup) |
+
+## Examples
+
+=== "Basic Examples"
+
+    ```bash
+    python -m venv .venv
+    source .venv/bin/activate
+    python -m pip install -U pip
+    python -m pip install "embodik[examples]"
+    embodik-examples --copy
+    cd embodik_examples
+    python 01_basic_ik_simple.py
+    python 14_spot_full_body_ik_viser.py
+    ```
+
+=== "Basic + Spot mjviser"
+
+    ```bash
+    python -m venv .venv
+    source .venv/bin/activate
+    python -m pip install -U pip
+    python -m pip install "embodik[examples,mjviser]"
+    embodik-examples --copy
+    cd embodik_examples
+    python 14_spot_full_body_ik_viser.py
+    python 15_spot_locomanip_mjviser.py --policy locomanip
+    ```
+
+The examples extra intentionally includes optional packages used by the copied
+example scripts, including Python Pinocchio for scripts that import `pinocchio`
+directly. Published repaired wheels for the core `embodik` install do not depend
+on Python Pinocchio.
+
+The copied examples include the public Spot-with-arm URDF used by
+`14_spot_full_body_ik_viser.py`, so a normal pip/venv install no longer needs a
+private Spot model path or `EMBODIK_SPOT_IK_URDF` for the default run.
+
+If you already installed only `embodik[examples]`, add the mjviser extra before
+running the MuJoCo-backed Spot example:
+
+```bash
+python -m pip install "embodik[mjviser]"
+python 15_spot_locomanip_mjviser.py --policy locomanip
+```
+
+The copied examples include the public MuJoCo Menagerie Spot-with-arm MJCF
+scene used by the mjviser example, so the default run does not need a
+`robot_descriptions` first-run download or a custom MJCF path.
+
+See the [Examples Guide](examples/index.md) for the full catalog.
+
+## If Pip Builds From Source
+
+Use the one-shot installer scripts above when pip falls back to
+`embodik-*.tar.gz`, when no compatible wheel exists for your platform/Python,
+or when you need an editable local build. They create a `.venv`, install system
+and Python build dependencies, prefer the PyPI `pin` CMake prefix, install
+EmbodiK, and run an import smoke test.
+
+The one-shot scripts keep `pin` in the same virtual environment and patch the
+installed extension rpath so source-built EmbodiK can find the native Pinocchio,
+Coal, and related libraries after the shell exits. If you build manually, do not
+remove the native provider used at build time unless you also repair/bundle the
+resulting wheel.
 
 Common options:
 

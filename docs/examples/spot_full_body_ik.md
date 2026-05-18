@@ -16,13 +16,22 @@ same target can be tested with different whole-body coordination policies.
 
 ## Run It
 
-Install and copy the example bundle once using the
-[Installation Guide](../installation.md#examples). Then run:
+For a pip/venv install, install and copy the example bundle once:
 
 ```bash
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install -U pip
+python -m pip install "embodik[examples]"
+embodik-examples --copy
 cd embodik_examples
 python 14_spot_full_body_ik_viser.py
 ```
+
+The copied example bundle includes a public Spot-with-arm URDF from
+`spot_description`, so no `--urdf` argument is needed for the default path. Use
+`--urdf /path/to/spot.urdf` or set `EMBODIK_SPOT_IK_URDF` only when you want to
+override the bundled model.
 
 From a repository checkout, use Pixi:
 

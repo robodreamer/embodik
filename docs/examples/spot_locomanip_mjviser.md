@@ -2,7 +2,9 @@
 
 `examples/15_spot_locomanip_mjviser.py` runs a Spot locomanipulation ONNX
 policy in MuJoCo through mjviser while EmbodiK handles interactive arm IK.
-It is a clone-oriented development example for testing arm reachability,
+It defaults to the bundled public MuJoCo Menagerie Spot-with-arm scene at
+`examples/assets/spot_mjcf/scene_arm.xml`, so copied examples do not need a
+first-run model download. The example is useful for testing arm reachability,
 locomotion handoff, self-collision constraints, solver timing, and optional
 Seer controller teleop.
 
@@ -33,18 +35,25 @@ Seer controller teleop.
 
 ## Run It
 
-Install the mjviser extra for regular use:
+For a pip/venv install, install the mjviser extra and copy the examples before
+running the script:
 
 ```bash
-pip install "embodik[mjviser]"
+python -m pip install "embodik[mjviser]"
+embodik-examples --copy
+cd embodik_examples
 python 15_spot_locomanip_mjviser.py --policy locomanip
 python 15_spot_locomanip_mjviser.py --policy locomanip-stationary
 ```
 
+The copied example bundle includes the public MuJoCo Menagerie Spot-with-arm
+MJCF model, so no `robot_descriptions` first-run model download is required for
+the default scene.
+
 For Seer controller teleop, install the combined optional extra:
 
 ```bash
-pip install "embodik[mjviser,teleop]"
+python -m pip install "embodik[mjviser,teleop]"
 python 15_spot_locomanip_mjviser.py --enable-teleop --policy locomanip
 ```
 
