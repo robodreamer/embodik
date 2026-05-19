@@ -184,13 +184,43 @@ else
   "$VENV_DIR/bin/python" -m pip install --no-build-isolation -e "$REPO"
 fi
 
-# On macOS source/sdist installs, the extension may need an extra rpath for the
-# cmeel.prefix/lib directory where the PyPI `pin` package installs Pinocchio
-# dylibs. Patch it when present so imports do not require DYLD_LIBRARY_PATH.
 echo ""
-echo "==> Patching rpath for cmeel-installed Pinocchio dylibs..."
-EMBODIK_SO="$("$VENV_DIR/bin/python" -c \
-  'import importlib.metadata as im, pathlib, sysconfig
+echo "==> Verifying import..."
+IMPORT_LOG="$(mktemp)"
+if "$VENV_DIR/bin/python" -c 'import embodik; print("embodik", embodik.__version__, embodik.RobotModel)' 2>"$IMPORT_LOG"; then
+  rm -f "$IMPORT_LOG"
+else
+  RPATH_PATCH_NEEDED=1
+  echo "    initial import failed"
+  sed 's/^/    /' "$IMPORT_LOG" >&2
+  rm -f "$IMPORT_LOG"
+
+  if [[ "$MODE" == "pypi" ]]; then
+    echo ""
+    echo "==> Reinstalling a pristine PyPI wheel and retrying import..."
+    "$VENV_DIR/bin/python" -m pip install --upgrade --force-reinstall --no-deps embodik
+    RETRY_LOG="$(mktemp)"
+    if "$VENV_DIR/bin/python" -c 'import embodik; print("embodik", embodik.__version__, embodik.RobotModel)' 2>"$RETRY_LOG"; then
+      RPATH_PATCH_NEEDED=0
+      rm -f "$RETRY_LOG"
+    else
+      echo "    import still failed after reinstall; patching source-build rpaths and retrying"
+      sed 's/^/    /' "$RETRY_LOG" >&2
+      rm -f "$RETRY_LOG"
+    fi
+  else
+    echo "    patching source-build rpaths and retrying"
+  fi
+
+  if [[ "$RPATH_PATCH_NEEDED" -eq 1 ]]; then
+    # Source/sdist/editable installs may need an extra rpath for the
+    # cmeel.prefix/lib directory where the PyPI `pin` package installs Pinocchio
+    # dylibs. Do not patch healthy repaired wheels: install_name_tool mutates the
+    # Mach-O file and can invalidate code signatures on newer macOS releases.
+    echo ""
+    echo "==> Patching rpath for cmeel-installed Pinocchio dylibs..."
+    EMBODIK_SO="$("$VENV_DIR/bin/python" -c \
+      'import importlib.metadata as im, pathlib, sysconfig
 candidates = []
 try:
     dist = im.distribution("embodik")
@@ -206,45 +236,35 @@ except Exception:
     pass
 platlib = pathlib.Path(sysconfig.get_paths()["platlib"])
 candidates.extend((platlib / "embodik").glob("_embodik_impl*.so"))
-try:
-    import embodik
-    candidates.extend(pathlib.Path(embodik.__file__).resolve().parent.glob("_embodik_impl*.so"))
-except Exception:
-    pass
 print(next((str(path) for path in candidates if path.is_file()), ""))' 2>/dev/null || true)"
-EMBODIK_CORE_LIB="$("$VENV_DIR/bin/python" -c \
-  'import pathlib, sysconfig
+    EMBODIK_CORE_LIB="$("$VENV_DIR/bin/python" -c \
+      'import pathlib, sysconfig
 candidates = []
 platlib = pathlib.Path(sysconfig.get_paths()["platlib"])
 for package_dir in [platlib / "embodik"]:
     candidates.extend((package_dir / "lib").glob("libembodik_core.*"))
     candidates.extend(package_dir.glob("libembodik_core.*"))
-try:
-    import embodik
-    package_dir = pathlib.Path(embodik.__file__).resolve().parent
-    candidates.extend((package_dir / "lib").glob("libembodik_core.*"))
-    candidates.extend(package_dir.glob("libembodik_core.*"))
-except Exception:
-    pass
 print(next((str(path) for path in candidates if path.is_file()), ""))' 2>/dev/null || true)"
-CMEEL_LIB="$("$VENV_DIR/bin/python" -c \
-  'import pinocchio, pathlib; \
-   print(pathlib.Path(pinocchio.__file__).resolve().parents[4] / "lib")' 2>/dev/null || true)"
-if [[ -n "$EMBODIK_SO" && -f "$EMBODIK_SO" && -n "$CMEEL_LIB" && -d "$CMEEL_LIB" ]]; then
-  # install_name_tool exits non-zero if the rpath already exists; that is fine.
-  install_name_tool -add_rpath "$CMEEL_LIB" "$EMBODIK_SO" 2>/dev/null || true
-  echo "    rpath -> $CMEEL_LIB"
-  if [[ -n "$EMBODIK_CORE_LIB" && -f "$EMBODIK_CORE_LIB" ]]; then
-    install_name_tool -add_rpath "$CMEEL_LIB" "$EMBODIK_CORE_LIB" 2>/dev/null || true
-    echo "    core rpath -> $CMEEL_LIB"
-  fi
-else
-  echo "    (skipped: EMBODIK_SO='$EMBODIK_SO'  CMEEL_LIB='$CMEEL_LIB')"
-fi
+    CMEEL_LIB="$("$VENV_DIR/bin/python" -c \
+      'import pinocchio, pathlib; \
+       print(pathlib.Path(pinocchio.__file__).resolve().parents[4] / "lib")' 2>/dev/null || true)"
+    if [[ -n "$EMBODIK_SO" && -f "$EMBODIK_SO" && -n "$CMEEL_LIB" && -d "$CMEEL_LIB" ]]; then
+      # install_name_tool exits non-zero if the rpath already exists; that is fine.
+      install_name_tool -add_rpath "$CMEEL_LIB" "$EMBODIK_SO" 2>/dev/null || true
+      echo "    rpath -> $CMEEL_LIB"
+      if [[ -n "$EMBODIK_CORE_LIB" && -f "$EMBODIK_CORE_LIB" ]]; then
+        install_name_tool -add_rpath "$CMEEL_LIB" "$EMBODIK_CORE_LIB" 2>/dev/null || true
+        echo "    core rpath -> $CMEEL_LIB"
+      fi
+    else
+      echo "    (skipped: EMBODIK_SO='$EMBODIK_SO'  CMEEL_LIB='$CMEEL_LIB')"
+    fi
 
-echo ""
-echo "==> Verifying import..."
-"$VENV_DIR/bin/python" -c 'import embodik; print("embodik", embodik.__version__, embodik.RobotModel)'
+    echo ""
+    echo "==> Verifying import after rpath patch..."
+    "$VENV_DIR/bin/python" -c 'import embodik; print("embodik", embodik.__version__, embodik.RobotModel)'
+  fi
+fi
 
 echo ""
 echo "Done. Activate with:"

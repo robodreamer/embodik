@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Pointed public one-shot installer commands back to the public gist-backed
+  scripts so users without repository access can download them.
+
 ## [0.20.9] - 2026-05-18
 
 ### Added

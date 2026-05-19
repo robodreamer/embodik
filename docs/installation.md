@@ -38,7 +38,7 @@ first; use `--skip-brew` only after installing equivalent native packages.
 === "macOS"
 
     ```bash
-    curl -fsSL -O https://raw.githubusercontent.com/robodreamer/embodik/main/scripts/install_embodik_macos.sh
+    curl -fsSL -O https://gist.githubusercontent.com/robodreamer/adc0b4452d474586c5890877b629005b/raw/install_embodik_macos.sh
     bash install_embodik_macos.sh --python python3.12
     source .venv/bin/activate
     python -c "import embodik; print(embodik.__version__)"
@@ -50,7 +50,7 @@ first; use `--skip-brew` only after installing equivalent native packages.
 === "Linux (Debian/Ubuntu)"
 
     ```bash
-    curl -fsSL -O https://raw.githubusercontent.com/robodreamer/embodik/main/scripts/install_embodik_linux.sh
+    curl -fsSL -O https://gist.githubusercontent.com/robodreamer/adc0b4452d474586c5890877b629005b/raw/install_embodik_linux.sh
     bash install_embodik_linux.sh
     source .venv/bin/activate
     python -c "import embodik; print(embodik.__version__)"
