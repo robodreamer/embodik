@@ -7,9 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.10] - 2026-05-21
+
+### Changed
+- Updated the bundled Spot full-body IK collision asset to match the reference
+  collision geometry while preserving the previous visual meshes.
+- Added a Viser control for switching the Spot full-body IK example between
+  visual geometry, collision geometry, and combined inspection.
+
 ### Fixed
 - Pointed public one-shot installer commands back to the public gist-backed
   scripts so users without repository access can download them.
+- Removed the temporary Spot collision workaround now that the packaged asset
+  reproduces the intended recovery behavior directly.
+- Expanded the curated Spot self-collision set to include auxiliary body-box
+  checks against the distal arm, wrist, gripper fingers, and jaw.
 
 ## [0.20.9] - 2026-05-18
 
