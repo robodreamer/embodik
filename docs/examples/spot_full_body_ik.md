@@ -28,8 +28,8 @@ cd embodik_examples
 python 14_spot_full_body_ik_viser.py
 ```
 
-The copied example bundle includes a public Spot-with-arm URDF from
-`spot_description`, so no `--urdf` argument is needed for the default path. Use
+The copied example bundle includes a Spot-with-arm URDF, so no `--urdf`
+argument is needed for the default path. Use
 `--urdf /path/to/spot.urdf` or set `EMBODIK_SPOT_IK_URDF` only when you want to
 override the bundled model.
 
