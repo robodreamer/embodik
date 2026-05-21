@@ -32,6 +32,7 @@ from example_helpers.spot_whole_body_ik import (  # noqa: E402
     SPOT_COLLISION_MIN_DISTANCE_M,
     SpotFullBodyIK,
     SpotFullBodyIKConfig,
+    SpotFullBodyIKMode,
     _roll_pitch_from_rotation,
     _rotation_from_rpy,
     _rotation_to_xyzw,
@@ -482,13 +483,61 @@ def test_spot_full_body_step_options_match_interactive_robust_defaults() -> None
         assert opts.no_progress_dq_norm_tolerance == pytest.approx(1e-6)
 
 
+def test_packaged_spot_asset_two_stage_collision_recovery_uses_arm() -> None:
+    packaged_urdf = _EXAMPLES_DIR / "assets" / "spot_description" / "urdf" / "spot_with_arm.urdf"
+    backend = SpotFullBodyIK(
+        packaged_urdf,
+        config=SpotFullBodyIKConfig(
+            enable_collision=True,
+            collision_min_distance=SPOT_COLLISION_MIN_DISTANCE_M,
+        ),
+    )
+    initial_tool = backend.current_tool_pose()
+    initial_torso = backend.current_torso_pose()
+    rotation = np.asarray(initial_tool.rotation, dtype=float)
+    initial_tool_position = np.asarray(initial_tool.translation, dtype=float)
+    torso_position = np.asarray(initial_torso.translation, dtype=float)
+    toward_torso = torso_position - initial_tool_position
+    toward_torso /= np.linalg.norm(toward_torso)
+
+    inward_target = embodik.Rt(
+        R=rotation,
+        t=initial_tool_position + 0.45 * toward_torso,
+    )
+    for _ in range(30):
+        backend.solve(SpotFullBodyIKMode.TWO_STAGE, inward_target, inward_target)
+
+    folded_arm = np.array([backend.q[int(index) + 1] for index in backend._arm_velocity_indices])
+    outward_target = embodik.Rt(
+        R=rotation,
+        t=initial_tool_position - 0.10 * toward_torso,
+    )
+    for _ in range(80):
+        result = backend.solve(SpotFullBodyIKMode.TWO_STAGE, outward_target, outward_target)
+
+    recovered_arm = np.array([backend.q[int(index) + 1] for index in backend._arm_velocity_indices])
+    tool_error = float(
+        np.linalg.norm(
+            np.asarray(backend.current_tool_pose().translation, dtype=float)
+            - np.asarray(outward_target.translation, dtype=float)
+        )
+    )
+
+    assert result[0].status.name == "SUCCESS"
+    assert result[1].status.name == "SUCCESS"
+    assert np.linalg.norm(recovered_arm - folded_arm) > 0.5
+    assert tool_error < 1e-3
+
+
 def test_spot_collision_pairs_are_curated_for_reference_model() -> None:
     backend = SpotFullBodyIK(_resolve_spot_ik_urdf(), config=SpotFullBodyIKConfig())
 
     pairs = spot_collision_pairs_from_references(backend.robot)
 
-    assert 0 < len(pairs) <= 15
+    assert 0 < len(pairs) <= 60
     assert set(pairs).issubset(set(backend.robot.get_collision_pair_names()))
+    assert ("body_1", "arm0_link_wr1_0") in pairs
+    assert ("body_2", "arm0_link_fngr_0") in pairs
 
 
 def test_spot_collision_constraint_configures_curated_pairs() -> None:

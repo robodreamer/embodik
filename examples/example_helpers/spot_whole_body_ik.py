@@ -1,9 +1,9 @@
 """Optional EmbodiK whole-body IK overlay for Spot examples.
 
 EmbodiK consumes URDF models for IK, while the mjviser rollout uses MJCF for
-MuJoCo. The examples therefore bundle a public Spot-with-arm URDF alongside the
-public MuJoCo Menagerie MJCF asset so both regular Viser and mjviser examples
-work without private model paths.
+MuJoCo. The examples therefore bundle a Spot-with-arm URDF alongside the MuJoCo
+MJCF asset so both regular Viser and mjviser examples work without custom model
+paths.
 """
 
 from __future__ import annotations
@@ -108,6 +108,44 @@ SPOT_COLLISION_PAIR_REFERENCES: tuple[tuple[str, str], ...] = (
     ("arm0_link_wr0_0", "body_0"),
     ("arm0_link_el0_0", "body_0"),
     ("arm0_link_el1_0", "body_0"),
+    ("arm0_link_wr1_0", "body_0"),
+    ("arm0_link_fngr_0", "body_0"),
+    ("arm0_link_fngr_1", "body_0"),
+    ("arm0_link_fngr_2", "body_0"),
+    ("arm0_link_fngr_3", "body_0"),
+    ("arm0_link_fngr_4", "body_0"),
+    ("arm0_link_fngr_5", "body_0"),
+    ("arm0_link_jaw_0", "body_0"),
+    ("arm0_link_jaw_1", "body_0"),
+    ("arm0_link_jaw_2", "body_0"),
+    ("arm0_link_el0_0", "body_1"),
+    ("arm0_link_el1_0", "body_1"),
+    ("arm0_link_el1_1", "body_1"),
+    ("arm0_link_wr0_0", "body_1"),
+    ("arm0_link_wr1_0", "body_1"),
+    ("arm0_link_fngr_0", "body_1"),
+    ("arm0_link_fngr_1", "body_1"),
+    ("arm0_link_fngr_2", "body_1"),
+    ("arm0_link_fngr_3", "body_1"),
+    ("arm0_link_fngr_4", "body_1"),
+    ("arm0_link_fngr_5", "body_1"),
+    ("arm0_link_jaw_0", "body_1"),
+    ("arm0_link_jaw_1", "body_1"),
+    ("arm0_link_jaw_2", "body_1"),
+    ("arm0_link_el0_0", "body_2"),
+    ("arm0_link_el1_0", "body_2"),
+    ("arm0_link_el1_1", "body_2"),
+    ("arm0_link_wr0_0", "body_2"),
+    ("arm0_link_wr1_0", "body_2"),
+    ("arm0_link_fngr_0", "body_2"),
+    ("arm0_link_fngr_1", "body_2"),
+    ("arm0_link_fngr_2", "body_2"),
+    ("arm0_link_fngr_3", "body_2"),
+    ("arm0_link_fngr_4", "body_2"),
+    ("arm0_link_fngr_5", "body_2"),
+    ("arm0_link_jaw_0", "body_2"),
+    ("arm0_link_jaw_1", "body_2"),
+    ("arm0_link_jaw_2", "body_2"),
     ("arm0_link_wr0_0", "fl_uleg_0"),
     ("arm0_link_wr0_0", "fl_lleg_0"),
     ("arm0_link_wr0_0", "fr_uleg_0"),

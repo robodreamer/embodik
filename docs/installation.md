@@ -106,7 +106,7 @@ example scripts, including Python Pinocchio for scripts that import `pinocchio`
 directly. Published repaired wheels for the core `embodik` install do not depend
 on Python Pinocchio.
 
-The copied examples include the public Spot-with-arm URDF used by
+The copied examples include the bundled Spot-with-arm URDF used by
 `14_spot_full_body_ik_viser.py`, so a normal pip/venv install no longer needs a
 private Spot model path or `EMBODIK_SPOT_IK_URDF` for the default run.
 

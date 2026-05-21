@@ -24,7 +24,10 @@ for _path in (_PYTHON_DIR, _EXAMPLES_DIR):
         sys.path.insert(0, str(_path))
 
 from example_helpers.spot_locomanip_policy import DEFAULT_ARM_COMMAND, INITIAL_ARM_COMMAND  # noqa: E402
-from example_helpers.ik_common import COLLISION_TUNING_OPTIONS  # noqa: E402
+from example_helpers.ik_common import (  # noqa: E402
+    COLLISION_TUNING_OPTIONS,
+    quiet_websocket_handshake_logs,
+)
 from example_helpers.seer_teleop import (  # noqa: E402
     DEFAULT_TELEOP_SCALE_FACTOR,
     SeerController,
@@ -117,6 +120,8 @@ def run_headless(args: argparse.Namespace) -> None:
 
 
 def run_viser(args: argparse.Namespace) -> None:
+    quiet_websocket_handshake_logs()
+
     try:
         import viser
         from viser.extras import ViserUrdf
@@ -144,7 +149,16 @@ def run_viser(args: argparse.Namespace) -> None:
         position=(0.0, 0.0, 0.0),
         wxyz=(1.0, 0.0, 0.0, 0.0),
     )
-    urdf_vis = ViserUrdf(server, urdf, root_node_name="/spot_base/robot")
+    urdf_vis = ViserUrdf(
+        server,
+        urdf_path,
+        root_node_name="/spot_base/robot",
+        collision_mesh_color_override=(0.1, 0.65, 1.0, 0.35),
+        load_collision_meshes=True,
+    )
+    collision_geometry_available = getattr(urdf_vis, "_collision_root_frame", None) is not None
+    if collision_geometry_available:
+        urdf_vis.show_collision = False
 
     tool_pos, tool_wxyz = _pose_to_viser(backend.current_tool_pose())
     torso_pos, torso_wxyz = _pose_to_viser(backend.current_torso_pose())
@@ -174,7 +188,6 @@ def run_viser(args: argparse.Namespace) -> None:
         half_r = server.gui.add_slider("Torso +/- rpy (deg)", 0.0, 45.0, initial_value=15.0, step=0.5)
         pos_gain = server.gui.add_slider("Position gain", 1.0, 120.0, initial_value=60.0, step=1.0)
         rot_gain = server.gui.add_slider("Orientation gain", 1.0, 120.0, initial_value=60.0, step=1.0)
-        foot_gain = server.gui.add_slider("Foot pin gain", 1.0, 500.0, initial_value=120.0, step=5.0)
         nullspace_gain = server.gui.add_slider(
             "Nullspace gain",
             0.0,
@@ -182,6 +195,8 @@ def run_viser(args: argparse.Namespace) -> None:
             initial_value=STANDARD_FULL_BODY_NULLSPACE_GAIN,
             step=0.01,
         )
+
+    with server.gui.add_folder("Collision"):
         collision_available = hasattr(backend.solver, "configure_collision_constraint") and bool(
             backend._collision_include_pairs
         )
@@ -189,6 +204,11 @@ def run_viser(args: argparse.Namespace) -> None:
             hasattr(backend.solver, "evaluate_collision_debug")
             or hasattr(backend.solver, "get_last_collision_debug_list")
             or hasattr(backend.solver, "get_last_collision_debug")
+        )
+        collision_enable = server.gui.add_checkbox(
+            "Enable collision constraint",
+            initial_value=collision_available,
+            disabled=not collision_available,
         )
         collision_min_dist_mm = server.gui.add_slider(
             "Collision min dist (mm)",
@@ -209,9 +229,15 @@ def run_viser(args: argparse.Namespace) -> None:
             options=COLLISION_TUNING_OPTIONS,
             initial_value="balanced",
         )
+        robot_geometry = server.gui.add_dropdown(
+            "Robot geometry",
+            options=("Visual", "Collision", "Visual + collision"),
+            initial_value="Visual",
+            disabled=not collision_geometry_available,
+        )
         show_collision_debug = server.gui.add_checkbox(
             "Show collision debug",
-            initial_value=True,
+            initial_value=False,
             disabled=not collision_debug_available,
         )
         collision_log_mode = server.gui.add_checkbox(
@@ -222,6 +248,18 @@ def run_viser(args: argparse.Namespace) -> None:
         collision_min_dist_mm.disabled = not collision_available
         collision_max_rows.disabled = not collision_available
         collision_tuning.disabled = not collision_available
+
+    def sync_robot_geometry_visibility() -> None:
+        geometry_mode = str(robot_geometry.value)
+        urdf_vis.show_visual = geometry_mode in {"Visual", "Visual + collision"}
+        if collision_geometry_available:
+            urdf_vis.show_collision = geometry_mode in {"Collision", "Visual + collision"}
+
+    @robot_geometry.on_update
+    def _(_) -> None:
+        sync_robot_geometry_visibility()
+
+    with server.gui.add_folder("Solver"):
         solve_mode = server.gui.add_dropdown(
             "Target solve mode",
             options=("SCALE_ELASTIC", "MIN_ERROR", "SCALE"),
@@ -436,7 +474,6 @@ def run_viser(args: argparse.Namespace) -> None:
         torso_target.visible = torso_visible
         snap_tool.disabled = not tool_visible
         snap_torso.disabled = not torso_visible
-        foot_gain.disabled = True
 
     @snap_tool.on_click
     def _(_) -> None:
@@ -571,10 +608,9 @@ def run_viser(args: argparse.Namespace) -> None:
             )
             backend.config.position_gain = float(pos_gain.value)
             backend.config.orientation_gain = float(rot_gain.value)
-            backend.config.foot_position_gain = float(foot_gain.value)
             backend.config.nullspace_gain = float(nullspace_gain.value)
             backend.config.use_contact_projection = True
-            backend.config.enable_collision = bool(collision_available)
+            backend.config.enable_collision = bool(collision_available and collision_enable.value)
             backend.config.collision_min_distance = float(collision_min_dist_mm.value) * 1e-3
             backend.config.collision_max_constraints = int(collision_max_rows.value)
             backend.config.collision_tuning_mode = str(collision_tuning.value)

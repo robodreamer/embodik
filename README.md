@@ -85,7 +85,7 @@ python 14_spot_full_body_ik_viser.py
 ```
 
 The regular Viser Spot full-body IK example uses the standard example
-dependencies and includes a bundled public Spot-with-arm URDF. The
+dependencies and includes a bundled Spot-with-arm URDF. The
 MuJoCo/mjviser locomanipulation example needs the optional mjviser stack and
 includes a bundled public MuJoCo Menagerie Spot-with-arm MJCF scene.
 `mjviser` is the MuJoCo-backed web viewer environment for policy rollout and
