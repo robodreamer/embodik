@@ -156,7 +156,7 @@ if [[ ! -d "$VENV_DIR" ]]; then
 fi
 
 "$VENV_DIR/bin/python" -m pip install -U pip
-"$VENV_DIR/bin/python" -m pip install pin scikit-build-core nanobind cmake ninja
+"$VENV_DIR/bin/python" -m pip install "pin>=3.8.0,<4" scikit-build-core nanobind cmake ninja
 
 echo "==> Configuring CMAKE_PREFIX_PATH (PyPI pin + Homebrew)..."
 if [[ "$CLEAN_ENV" -eq 1 ]]; then
@@ -164,7 +164,7 @@ if [[ "$CLEAN_ENV" -eq 1 ]]; then
   unset LD_LIBRARY_PATH DYLD_LIBRARY_PATH CMAKE_PREFIX_PATH pinocchio_DIR || true
 fi
 # shellcheck disable=SC2016
-PIN_PREFIX="$("$VENV_DIR/bin/python" -c 'import pinocchio, pathlib; print(pathlib.Path(pinocchio.__file__).resolve().parents[4])')"
+PIN_PREFIX="$("$VENV_DIR/bin/python" -c 'import importlib.metadata as im, pathlib; print(pathlib.Path(im.distribution("pin").locate_file("cmeel.prefix")).resolve())')"
 export CMAKE_PREFIX_PATH="${PIN_PREFIX}:$(brew --prefix)"
 echo "    Eigen3_DIR=$Eigen3_DIR"
 echo "    SDKROOT=$SDKROOT"
@@ -246,8 +246,8 @@ for package_dir in [platlib / "embodik"]:
     candidates.extend(package_dir.glob("libembodik_core.*"))
 print(next((str(path) for path in candidates if path.is_file()), ""))' 2>/dev/null || true)"
     CMEEL_LIB="$("$VENV_DIR/bin/python" -c \
-      'import pinocchio, pathlib; \
-       print(pathlib.Path(pinocchio.__file__).resolve().parents[4] / "lib")' 2>/dev/null || true)"
+      'import importlib.metadata as im, pathlib; \
+       print(pathlib.Path(im.distribution("pin").locate_file("cmeel.prefix")).resolve() / "lib")' 2>/dev/null || true)"
     if [[ -n "$EMBODIK_SO" && -f "$EMBODIK_SO" && -n "$CMEEL_LIB" && -d "$CMEEL_LIB" ]]; then
       # install_name_tool exits non-zero if the rpath already exists; that is fine.
       install_name_tool -add_rpath "$CMEEL_LIB" "$EMBODIK_SO" 2>/dev/null || true

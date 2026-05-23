@@ -19,23 +19,21 @@ pin_lib="$(
 import pathlib
 
 try:
-    import pinocchio
+    import importlib.metadata as im
+    pin_prefix = pathlib.Path(im.distribution("pin").locate_file("cmeel.prefix")).resolve()
 except Exception as exc:
     raise SystemExit(
-        "EmbodiK wheel repair error: could not import pinocchio. "
-        "Install the PyPI build dependency with `python -m pip install 'pin>=3.8.0'` "
+        "EmbodiK wheel repair error: could not locate the PyPI `pin` prefix. "
+        "Install the PyPI build dependency with `python -m pip install 'pin>=3.8.0,<4'` "
         "before running delocate."
     ) from exc
 
-pin_path = pathlib.Path(pinocchio.__file__).resolve()
-for parent in pin_path.parents:
-    lib_dir = parent / "lib"
-    if any(lib_dir.glob("libpinocchio*.dylib")):
-        print(lib_dir)
-        break
+lib_dir = pin_prefix / "lib"
+if any(lib_dir.glob("libpinocchio*.dylib")):
+    print(lib_dir)
 else:
     raise SystemExit(
-        f"EmbodiK wheel repair error: could not locate libpinocchio*.dylib from {pin_path}. "
+        f"EmbodiK wheel repair error: could not locate libpinocchio*.dylib from {pin_prefix}. "
         "Check that the PyPI `pin` package installed its cmeel native libraries."
     )
 PY

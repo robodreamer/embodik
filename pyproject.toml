@@ -4,7 +4,7 @@
 # Published repaired wheels bundle/repair native Pinocchio dependencies and do not need
 # Python `pin` at runtime. Source/no-build-isolation installs still need the native
 # provider used at build time (`pin` or a system Pinocchio install) to remain available.
-requires = ["scikit-build-core", "nanobind", "pin>=3.8.0"]
+requires = ["scikit-build-core", "nanobind", "pin>=3.8.0,<4"]
 build-backend = "scikit_build_core.build"
 
 [project]
@@ -51,13 +51,13 @@ visualization-legacy = [
 ]
 # Pinocchio-based visualization (alternative to direct Viser)
 visualization-pinocchio = [
-    "pin>=3.8.0",     # Pinocchio Python bindings
+    "pin>=3.8.0,<4",  # Pinocchio Python bindings
     "viser>=0.1.0",
     "trimesh>=3.0.0",
 ]
 # Example scripts copied via `embodik-examples` import these directly.
 examples = [
-    "pin>=3.8.0",
+    "pin>=3.8.0,<4",
     "pyyaml>=6.0",
     "robot_descriptions>=1.0.0",
     "viser>=0.1.0",
@@ -161,7 +161,7 @@ build-verbosity = 1
 # source builds of cmeel dependencies under emulation and is not release-stable.
 archs = ["x86_64"]
 manylinux-x86_64-image = "manylinux_2_28"
-before-build = "python -m pip install scikit-build-core nanobind ninja 'pin>=3.8.0'"
+before-build = "python -m pip install scikit-build-core nanobind ninja 'pin>=3.8.0,<4'"
 build-frontend = { name = "pip", args = ["--no-build-isolation"] }
 before-all = "if command -v dnf >/dev/null 2>&1; then dnf install -y eigen3-devel urdfdom-devel urdfdom-headers-devel; elif command -v yum >/dev/null 2>&1; then yum install -y eigen3-devel urdfdom-devel urdfdom-headers-devel; elif command -v microdnf >/dev/null 2>&1; then microdnf install -y eigen3-devel urdfdom-devel urdfdom-headers-devel; else echo 'No supported package manager found for build dependencies' >&2; exit 1; fi"
 repair-wheel-command = "bash scripts/auditwheel_with_pin_libs.sh {dest_dir} {wheel}"
@@ -172,7 +172,7 @@ archs = ["arm64"]
 before-all = "brew install eigen@3 urdfdom_headers urdfdom"
 # Also install Pinocchio in cibuildwheel's build environment so the repair step
 # can locate PyPI/cmeel dylibs that are linked through @rpath.
-before-build = "python -m pip install 'pin>=3.8.0'"
+before-build = "python -m pip install 'pin>=3.8.0,<4'"
 # Pin wheel prefix is prepended by CMakeLists.txt; Homebrew prefix helps find urdfdom_headers.
 # cmeel octomap/qhull dylibs currently require macOS 14+, so tag the wheel accordingly.
 environment = { Eigen3_DIR = "/opt/homebrew/opt/eigen@3/share/eigen3/cmake", CMAKE_PREFIX_PATH = "/opt/homebrew", MACOSX_DEPLOYMENT_TARGET = "14.0", CMAKE_OSX_DEPLOYMENT_TARGET = "14.0" }

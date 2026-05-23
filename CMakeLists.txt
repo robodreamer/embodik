@@ -29,10 +29,6 @@ option(BUILD_TESTS "Build unit tests" ON)
 option(BUILD_EXAMPLES "Build examples" ON)
 option(EMBODIK_ENABLE_IPO "Enable interprocedural optimization for release builds" ON)
 
-# Find dependencies
-find_package(Eigen3 3.3 REQUIRED NO_MODULE)
-message(STATUS "EmbodiK: using Eigen3_DIR='${Eigen3_DIR}'")
-
 # If the user doesn't have a system Pinocchio install, try to locate the CMake config
 # shipped with the PyPI `pin` wheel (import name: `pinocchio`).
 #
@@ -43,6 +39,15 @@ if(NOT DEFINED pinocchio_DIR AND NOT DEFINED ENV{pinocchio_DIR})
             [=[
 import pathlib
 import sys
+
+try:
+    import importlib.metadata as im
+    prefix = pathlib.Path(im.distribution("pin").locate_file("cmeel.prefix")).resolve()
+    if (prefix / "lib" / "cmake" / "pinocchio" / "pinocchioConfig.cmake").is_file():
+        print(prefix)
+        sys.exit(0)
+except Exception:
+    pass
 
 try:
     import pinocchio
@@ -65,6 +70,13 @@ print(str(p.parents[4]))
         # picking up a locally-built Pinocchio (which can bake in incompatible Boost SONAMEs).
         set(pinocchio_DIR "${_pin_prefix}/lib/cmake/pinocchio" CACHE PATH "Pinocchio CMake package directory" FORCE)
         message(STATUS "Forcing pinocchio_DIR=${pinocchio_DIR}")
+        if(NOT DEFINED Eigen3_DIR AND NOT DEFINED ENV{Eigen3_DIR})
+            set(_pin_eigen_dir "${_pin_prefix}/share/eigen3/cmake")
+            if(EXISTS "${_pin_eigen_dir}/Eigen3Config.cmake")
+                set(Eigen3_DIR "${_pin_eigen_dir}" CACHE PATH "Eigen3 CMake package directory" FORCE)
+                message(STATUS "Forcing Eigen3_DIR=${Eigen3_DIR}")
+            endif()
+        endif()
     else()
         message(STATUS
             "EmbodiK: PyPI `pin` was not importable, so CMake will search "
@@ -77,6 +89,10 @@ else()
         "EmbodiK: using caller-provided pinocchio_DIR or environment "
         "pinocchio_DIR; PyPI `pin` auto-detection is skipped.")
 endif()
+
+# Find dependencies
+find_package(Eigen3 3.3 REQUIRED NO_MODULE)
+message(STATUS "EmbodiK: using Eigen3_DIR='${Eigen3_DIR}'")
 
 find_package(pinocchio REQUIRED)
 message(STATUS "EmbodiK: using pinocchio_DIR='${pinocchio_DIR}'")

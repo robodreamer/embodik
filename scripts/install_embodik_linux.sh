@@ -119,7 +119,7 @@ if [[ ! -d "$VENV_DIR" ]]; then
 fi
 
 "$VENV_DIR/bin/python" -m pip install -U pip
-"$VENV_DIR/bin/python" -m pip install pin scikit-build-core nanobind cmake ninja
+"$VENV_DIR/bin/python" -m pip install "pin>=3.8.0,<4" scikit-build-core nanobind cmake ninja
 
 echo "==> Configuring CMAKE_PREFIX_PATH (PyPI pin first)..."
 if [[ "$CLEAN_ENV" -eq 1 ]]; then
@@ -128,7 +128,7 @@ if [[ "$CLEAN_ENV" -eq 1 ]]; then
 fi
 
 # shellcheck disable=SC2016
-PIN_PREFIX="$("$VENV_DIR/bin/python" -c 'import pinocchio, pathlib; print(pathlib.Path(pinocchio.__file__).resolve().parents[4])')"
+PIN_PREFIX="$("$VENV_DIR/bin/python" -c 'import importlib.metadata as im, pathlib; print(pathlib.Path(im.distribution("pin").locate_file("cmeel.prefix")).resolve())')"
 export CMAKE_PREFIX_PATH="${PIN_PREFIX}${CMAKE_PREFIX_PATH:+:${CMAKE_PREFIX_PATH}}"
 export LD_LIBRARY_PATH="${PIN_PREFIX}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 echo "    Pinocchio build prefix=$PIN_PREFIX"
