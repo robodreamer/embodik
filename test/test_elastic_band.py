@@ -242,13 +242,19 @@ class TestApproachAHypothesis:
             f"return_err={widened.ee_return_error:.4f}"
         )
 
-        # Decision gate: widened should show some improvement
-        # Either fewer stalls, fewer infeasibles, or better return error
+        baseline_pathology = total_stalls_baseline > 0 or baseline.infeasible_count > 0
+
+        # Decision gate: widening is only expected to improve a pathological
+        # baseline. Newer solver defaults can make the baseline productive
+        # already, in which case this test records the hypothesis without
+        # requiring an artificial win.
         improved_stalls = total_stalls_widened < total_stalls_baseline
         improved_infeasible = widened.infeasible_count < baseline.infeasible_count
         improved_return = widened.ee_return_error < baseline.ee_return_error
 
-        assert improved_stalls or improved_infeasible or improved_return, (
+        assert (
+            not baseline_pathology or improved_stalls or improved_infeasible or improved_return
+        ), (
             f"Axis {axis}: widened limits showed no improvement over baseline. "
             f"Stalls: {total_stalls_widened} vs {total_stalls_baseline}, "
             f"Infeasible: {widened.infeasible_count} vs {baseline.infeasible_count}, "

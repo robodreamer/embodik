@@ -70,6 +70,7 @@ examples = [
     "cmeel-tinyxml2>=10,<11",
     "pyyaml>=6.0",
     "robot_descriptions>=1.0.0",
+    "trimesh>=3.0.0",
     "viser>=0.1.0",
     "yourdfpy>=0.0.52",
 ]
