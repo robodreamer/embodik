@@ -9,6 +9,7 @@
 #include <embodik/tasks.hpp>
 #include <iostream>
 #include <pinocchio/algorithm/kinematics.hpp>
+#include <stdexcept>
 
 namespace embodik {
 
@@ -977,6 +978,65 @@ void AbsoluteFrameTask::setObjectCenterFrame(
   offset_b_ = T_b.inverse() * T_obj;
 }
 
+void AbsoluteFrameTask::calibrate_grasp_offsets(
+    const pinocchio::SE3 &T_L_FK, const pinocchio::SE3 &T_R_FK) {
+  if (!current_abs_pose_valid_) {
+    throw std::runtime_error(
+        "AbsoluteFrameTask::calibrate_grasp_offsets: call update(model) "
+        "before calibrating grasp offsets");
+  }
+
+  const pinocchio::SE3 T_obj_calib(current_abs_orientation_,
+                                   current_abs_position_);
+  const pinocchio::SE3 inv_T_obj = T_obj_calib.inverse();
+  L_in_obj_ = inv_T_obj * T_L_FK;
+  R_in_obj_ = inv_T_obj * T_R_FK;
+  inv_L_in_obj_ = L_in_obj_.inverse();
+  inv_R_in_obj_ = R_in_obj_.inverse();
+  grasp_offsets_calibrated_ = true;
+  last_grasp_divergence_ = GraspDivergenceDiagnostic{};
+}
+
+void AbsoluteFrameTask::calibrate_grasp_offsets(
+    const Eigen::Matrix4d &T_L_FK, const Eigen::Matrix4d &T_R_FK) {
+  calibrate_grasp_offsets(
+      pinocchio::SE3(T_L_FK.topLeftCorner<3, 3>(),
+                     T_L_FK.topRightCorner<3, 1>()),
+      pinocchio::SE3(T_R_FK.topLeftCorner<3, 3>(),
+                     T_R_FK.topRightCorner<3, 1>()));
+}
+
+void AbsoluteFrameTask::set_target_from_arm_targets(
+    const pinocchio::SE3 &T_L_target, const pinocchio::SE3 &T_R_target) {
+  if (!grasp_offsets_calibrated_) {
+    throw std::runtime_error(
+        "AbsoluteFrameTask::set_target_from_arm_targets: grasp offsets not "
+        "calibrated; call calibrate_grasp_offsets first");
+  }
+
+  const pinocchio::SE3 T_obj_from_L = T_L_target * inv_L_in_obj_;
+  const pinocchio::SE3 T_obj_from_R = T_R_target * inv_R_in_obj_;
+  const pinocchio::SE3 T_obj_target =
+      compute_absolute_frame(T_obj_from_L, T_obj_from_R, 0.5);
+
+  last_grasp_divergence_.linear_m =
+      (T_obj_from_L.translation() - T_obj_from_R.translation()).norm();
+  const Eigen::Matrix3d R_rel =
+      T_obj_from_L.rotation().transpose() * T_obj_from_R.rotation();
+  last_grasp_divergence_.angular_rad = logMap(R_rel).norm();
+
+  setTargetPose(T_obj_target.translation(), T_obj_target.rotation());
+}
+
+void AbsoluteFrameTask::set_target_from_arm_targets(
+    const Eigen::Matrix4d &T_L_target, const Eigen::Matrix4d &T_R_target) {
+  set_target_from_arm_targets(
+      pinocchio::SE3(T_L_target.topLeftCorner<3, 3>(),
+                     T_L_target.topRightCorner<3, 1>()),
+      pinocchio::SE3(T_R_target.topLeftCorner<3, 3>(),
+                     T_R_target.topRightCorner<3, 1>()));
+}
+
 void AbsoluteFrameTask::update(const RobotModel &model) {
   pinocchio::SE3 T_a_raw = model.get_frame_pose(frame_a_);
   pinocchio::SE3 T_b_raw = model.get_frame_pose(frame_b_);
@@ -987,6 +1047,7 @@ void AbsoluteFrameTask::update(const RobotModel &model) {
   pinocchio::SE3 T_abs = compute_absolute_frame(T_a, T_b, alpha_);
   current_abs_position_ = T_abs.translation();
   current_abs_orientation_ = T_abs.rotation();
+  current_abs_pose_valid_ = true;
 
   Matrix6Xd J_a = model.get_frame_jacobian(frame_a_);
   Matrix6Xd J_b = model.get_frame_jacobian(frame_b_);

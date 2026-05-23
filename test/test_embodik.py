@@ -1,12 +1,13 @@
 """Consolidated tests for embodiK multi-task solver."""
 
-import math
-import pytest
-import random
-import numpy as np
-import sys
 import logging
+import math
+import random
+import sys
 import textwrap
+
+import numpy as np
+import pytest
 
 import embodik as eik
 
@@ -196,6 +197,9 @@ def test_solve_velocity_propagates_backend_status_message(tmp_path):
     urdf_path = _create_minimal_collision_urdf(tmp_path)
     robot = eik.RobotModel(str(urdf_path), floating_base=False)
     solver = eik.KinematicsSolver(robot)
+    cfg = eik.SolverRuntimeConfig()
+    cfg.weighted_fallback_enabled = False
+    solver.configure_runtime(cfg)
     joint_task = solver.add_joint_task("joint_task", "joint1", target_value=2.0)
     joint_task.priority = 0
     joint_task.weight = 1.0
@@ -205,6 +209,30 @@ def test_solve_velocity_propagates_backend_status_message(tmp_path):
     result = solver.solve_velocity(q0, apply_limits=True)
     assert result.status == eik.SolverStatus.INFEASIBLE
     assert "primary task scale collapsed" in result.status_message
+
+
+def test_weighted_fallback_accepts_constraint_feasible_candidate(tmp_path):
+    """Opt-in weighted fallback can hold a feasible constrained solution."""
+    urdf_path = _create_minimal_collision_urdf(tmp_path)
+    robot = eik.RobotModel(str(urdf_path), floating_base=False)
+    solver = eik.KinematicsSolver(robot)
+    joint_task = solver.add_joint_task("joint_task", "joint1", target_value=2.0)
+    joint_task.priority = 0
+    joint_task.weight = 1.0
+
+    cfg = eik.SolverRuntimeConfig()
+    cfg.weighted_fallback_enabled = True
+    solver.configure_runtime(cfg)
+
+    q0 = np.array([1.57], dtype=float)
+    result = solver.solve_velocity(q0, apply_limits=True)
+    solution = np.asarray(result.solution, dtype=float)
+
+    assert result.status == eik.SolverStatus.SUCCESS
+    assert result.weighted_advisory_available is True
+    assert result.weighted_fallback_used is True
+    assert solution[0] <= 1e-9
+    assert "constrained weighted fallback accepted" in result.status_message
 
 
 def test_position_ik_nonconvergence_reports_no_progress_by_default(tmp_path):
@@ -849,6 +877,109 @@ def test_configure_collision_constraint(tmp_path):
 
     assert result.status == eik.SolverStatus.SUCCESS
     assert np.all(np.isfinite(result.solution))
+
+
+def test_weighted_fallback_accepts_useful_limit_solution_with_active_collision_constraint(tmp_path):
+    """Fallback may recover under nonviolated active collision rows."""
+    urdf_path = _create_three_link_collision_urdf(tmp_path)
+    robot = eik.RobotModel(str(urdf_path), floating_base=False)
+    lower, upper = robot.get_joint_limits()
+    lower = np.asarray(lower, dtype=float)
+    upper = np.asarray(upper, dtype=float)
+    q = np.zeros(robot.nq, dtype=float)
+    q[0] = upper[0]
+    robot.update_configuration(q)
+
+    solver = eik.KinematicsSolver(robot)
+    solver.dt = 0.01
+    solver.enable_position_limits(True)
+    solver.enable_velocity_limits(True)
+
+    blocked = solver.add_joint_task("blocked_joint1", "joint1", target_value=upper[0] + 1.0)
+    blocked.priority = 0
+    blocked.weight = 1.0
+    blocked.allow_min_error_fallback = False
+
+    useful = solver.add_posture_task("useful_joint2", [1])
+    useful.priority = 1
+    useful.weight = 1.0
+    useful.allow_min_error_fallback = False
+    useful.set_controlled_joint_targets(np.array([q[1] + 0.3]))
+
+    runtime = eik.SolverRuntimeConfig()
+    runtime.weighted_fallback_enabled = True
+    solver.configure_runtime(runtime)
+
+    min_distance = 0.0
+    solver.configure_collision_constraint(min_distance=min_distance, max_constraints=1)
+    if hasattr(solver, "set_proximity_gated_collision_activation_enabled"):
+        solver.set_proximity_gated_collision_activation_enabled(False)
+
+    result = solver.solve_velocity(q, apply_limits=True)
+    solution = np.asarray(result.solution, dtype=float)
+    q_next = q + solver.dt * solution
+
+    assert result.status == eik.SolverStatus.SUCCESS
+    assert result.weighted_fallback_used is True
+    assert abs(solution[0]) <= 1e-9
+    assert solution[1] > 0.25
+    assert np.all(q_next <= upper + 1e-9)
+    assert np.all(q_next >= lower - 1e-9)
+    next_distance = solver.evaluate_min_collision_distance(q_next)
+    assert next_distance is not None
+    assert float(next_distance) >= min_distance - 1e-9
+
+
+def test_weighted_fallback_accepts_violated_collision_constraint_after_post_step_validation(
+    tmp_path,
+):
+    """Fallback may recover under violated collision rows if clearance does not worsen."""
+    urdf_path = _create_three_link_collision_urdf(tmp_path)
+    robot = eik.RobotModel(str(urdf_path), floating_base=False)
+    lower, upper = robot.get_joint_limits()
+    upper = np.asarray(upper, dtype=float)
+    q = np.zeros(robot.nq, dtype=float)
+    q[0] = upper[0]
+    robot.update_configuration(q)
+
+    solver = eik.KinematicsSolver(robot)
+    solver.dt = 0.01
+    solver.enable_position_limits(True)
+    solver.enable_velocity_limits(True)
+
+    blocked = solver.add_joint_task("blocked_joint1", "joint1", target_value=upper[0] + 1.0)
+    blocked.priority = 0
+    blocked.weight = 1.0
+    blocked.allow_min_error_fallback = False
+
+    useful = solver.add_posture_task("useful_joint2", [1])
+    useful.priority = 1
+    useful.weight = 1.0
+    useful.allow_min_error_fallback = False
+    useful.set_controlled_joint_targets(np.array([q[1] + 0.3]))
+
+    runtime = eik.SolverRuntimeConfig()
+    runtime.weighted_fallback_enabled = True
+    solver.configure_runtime(runtime)
+
+    current_distance = solver.evaluate_min_collision_distance(q)
+    assert current_distance is not None
+    solver.configure_collision_constraint(
+        min_distance=float(current_distance) + 1e-4,
+        max_constraints=1,
+    )
+    if hasattr(solver, "set_proximity_gated_collision_activation_enabled"):
+        solver.set_proximity_gated_collision_activation_enabled(False)
+
+    result = solver.solve_velocity(q, apply_limits=True)
+    solution = np.asarray(result.solution, dtype=float)
+    q_next = q + solver.dt * solution
+    next_distance = solver.evaluate_min_collision_distance(q_next)
+
+    assert result.status == eik.SolverStatus.SUCCESS
+    assert result.weighted_fallback_used is True
+    assert next_distance is not None
+    assert float(next_distance) >= float(current_distance) - 1e-9
 
 
 def _create_three_link_collision_urdf(tmp_path):

@@ -85,7 +85,7 @@ bash scripts/install_embodik_macos.sh --help
     embodik-examples --copy
     cd embodik_examples
     python 01_basic_ik_simple.py
-    python 14_spot_full_body_ik_viser.py
+    python 08_spot_full_body_ik_viser.py
     ```
 
 === "Basic + Spot mjviser"
@@ -97,8 +97,8 @@ bash scripts/install_embodik_macos.sh --help
     python -m pip install "embodik[examples,mjviser]"
     embodik-examples --copy
     cd embodik_examples
-    python 14_spot_full_body_ik_viser.py
-    python 15_spot_locomanip_mjviser.py --policy locomanip
+    python 08_spot_full_body_ik_viser.py
+    python 09_spot_locomanip_mjviser.py --policy locomanip
     ```
 
 The examples extra intentionally includes optional packages used by the copied
@@ -107,7 +107,7 @@ directly. Published repaired wheels for the core `embodik` install do not depend
 on Python Pinocchio.
 
 The copied examples include the bundled Spot-with-arm URDF used by
-`14_spot_full_body_ik_viser.py`, so a normal pip/venv install no longer needs a
+`08_spot_full_body_ik_viser.py`, so a normal pip/venv install no longer needs a
 private Spot model path or `EMBODIK_SPOT_IK_URDF` for the default run.
 
 If you already installed only `embodik[examples]`, add the mjviser extra before
@@ -115,7 +115,7 @@ running the MuJoCo-backed Spot example:
 
 ```bash
 python -m pip install "embodik[mjviser]"
-python 15_spot_locomanip_mjviser.py --policy locomanip
+python 09_spot_locomanip_mjviser.py --policy locomanip
 ```
 
 The copied examples include the public MuJoCo Menagerie Spot-with-arm MJCF

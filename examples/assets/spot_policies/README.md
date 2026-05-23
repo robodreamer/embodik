@@ -1,7 +1,7 @@
 # Spot Locomanipulation Policy Checkpoints
 
 This directory contains the two ONNX checkpoints used by
-`examples/15_spot_locomanip_mjviser.py`:
+`examples/09_spot_locomanip_mjviser.py`:
 
 - `locomanip_policy.onnx`
 - `locomanip_stationary_policy.onnx`

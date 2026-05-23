@@ -10,14 +10,15 @@ This shows how to:
 - Use InteractiveVisualizer for draggable targets
 """
 
-import numpy as np
-import sys
 import os
-import time
+import sys
 import tempfile
+import time
 
 import embodik
+import numpy as np
 from embodik import EmbodikVisualizer, InteractiveVisualizer
+from example_helpers.ik_common import DEFAULT_VISER_PORT
 from utils.pose_utils import PoseUtils
 
 
@@ -79,16 +80,16 @@ def create_test_urdf():
 </robot>
 """
     fd, path = tempfile.mkstemp(suffix=".urdf")
-    with os.fdopen(fd, 'w') as f:
+    with os.fdopen(fd, "w") as f:
         f.write(urdf_content)
     return path
 
 
 def basic_visualization_example():
     """Basic visualization example with embodiKVisualizer."""
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print("embodiK Basic Visualization Example")
-    print("="*60)
+    print("=" * 60)
 
     # Create test URDF
     urdf_path = create_test_urdf()
@@ -106,8 +107,10 @@ def basic_visualization_example():
 
         # 2. Create visualizer
         print("\n2. Starting visualization...")
-        viz = EmbodikVisualizer(robot, port=8080)
-        print("   Viser server is running - open http://localhost:8080 in your browser")
+        viz = EmbodikVisualizer(robot, port=DEFAULT_VISER_PORT)
+        print(
+            f"   Viser server is running - open http://localhost:{DEFAULT_VISER_PORT} in your browser"
+        )
 
         # 3. Display initial configuration
         q = np.array([0.0, 0.0])
@@ -158,9 +161,9 @@ def basic_visualization_example():
 
 def interactive_visualization_example():
     """Interactive visualization example with draggable targets."""
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print("embodiK Interactive Visualization Example")
-    print("="*60)
+    print("=" * 60)
 
     # Create test URDF
     urdf_path = create_test_urdf()
@@ -178,8 +181,10 @@ def interactive_visualization_example():
 
         # 2. Create interactive visualizer
         print("\n2. Starting interactive visualization...")
-        viz = InteractiveVisualizer(robot, port=8081)
-        print("   Viser server is running - open http://localhost:8081 in your browser")
+        viz = InteractiveVisualizer(robot, port=DEFAULT_VISER_PORT)
+        print(
+            f"   Viser server is running - open http://localhost:{DEFAULT_VISER_PORT} in your browser"
+        )
 
         # 3. Display initial configuration
         q = np.array([0.0, 0.0])
@@ -197,9 +202,9 @@ def interactive_visualization_example():
         def target_callback(pose):
             print(f"Target moved to: {pose[:3, 3]}")
 
-        viz.add_interactive_target("ee_target", initial_pose,
-                                  callback=target_callback,
-                                  color=(1, 0, 0))
+        viz.add_interactive_target(
+            "ee_target", initial_pose, callback=target_callback, color=(1, 0, 0)
+        )
 
         print("\n4. You can now drag the red target in the browser!")
         print("   Target position will be printed when moved")
@@ -229,11 +234,11 @@ def main():
     while True:
         choice = input("\nSelect example (1/2/q): ").strip().lower()
 
-        if choice == '1':
+        if choice == "1":
             basic_visualization_example()
-        elif choice == '2':
+        elif choice == "2":
             interactive_visualization_example()
-        elif choice == 'q':
+        elif choice == "q":
             break
         else:
             print("Invalid choice. Please try again.")

@@ -14,14 +14,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+import embodik
 import numpy as np
 import pinocchio as pin
 import viser
-from viser.extras import ViserUrdf
-
-import embodik
-from robot_descriptions.loaders.yourdfpy import load_robot_description
-from embodik import r2q, q2r, Rt
+from embodik import Rt, q2r, r2q
 from example_helpers.ik_common import (
     COLLISION_DEBUG_LOG_PERIOD_S,
     COLLISION_TUNING_OPTIONS,
@@ -33,13 +30,18 @@ from example_helpers.ik_common import (
     DEFAULT_POS_GAIN,
     DEFAULT_ROT_GAIN,
     DEFAULT_SOLVER_DT,
+    DEFAULT_VISER_PORT,
     apply_collision_tuning_mode,
+    configure_solver_runtime_policy,
 )
+from robot_descriptions.loaders.yourdfpy import load_robot_description
 from utils.robot_models import ensure_ros_package_path, load_robot_presets
+from viser.extras import ViserUrdf
 
 # Check GPU availability
 try:
     from embodik.gpu import HAS_CASADI, HAS_CUSADI, HAS_TORCH_CUDA
+
     GPU_AVAILABLE = HAS_CASADI and HAS_CUSADI and HAS_TORCH_CUDA
 except ImportError:
     HAS_CASADI = False
@@ -102,7 +104,9 @@ def _should_auto_exclude_pair(name_a: str, name_b: str, robot_key: str) -> bool:
     return gap <= 1
 
 
-def generate_auto_collision_exclusions(robot: embodik.RobotModel, robot_key: str) -> List[Tuple[str, str]]:
+def generate_auto_collision_exclusions(
+    robot: embodik.RobotModel, robot_key: str
+) -> List[Tuple[str, str]]:
     exclusions: List[Tuple[str, str]] = []
     for name_a, name_b in robot.get_collision_pair_names():
         if _should_auto_exclude_pair(name_a, name_b, robot_key):
@@ -140,7 +144,9 @@ def resolve_robot_configuration(robot_key: str) -> RobotConfig:
     """
     robot_key = robot_key.lower()
     if robot_key not in ROBOT_PRESETS:
-        raise ValueError(f"Unsupported robot '{robot_key}'. Available options: {sorted(ROBOT_PRESETS)}")
+        raise ValueError(
+            f"Unsupported robot '{robot_key}'. Available options: {sorted(ROBOT_PRESETS)}"
+        )
 
     preset = ROBOT_PRESETS[robot_key]
 
@@ -226,6 +232,7 @@ def resolve_robot_configuration(robot_key: str) -> RobotConfig:
         if not joint_labels:
             # Auto-generate labels from joint names
             from utils.robot_models import generate_joint_labels_from_names
+
             joint_labels = generate_joint_labels_from_names(joint_names, robot_key)
 
     # Handle default configuration - ensure it matches the number of arm joints
@@ -249,7 +256,7 @@ def resolve_robot_configuration(robot_key: str) -> RobotConfig:
                 default_config = np.concatenate([default_config, extra_gripper])
             else:
                 # Truncate to match
-                default_config = default_config[:len(joint_names)]
+                default_config = default_config[: len(joint_names)]
 
     return RobotConfig(
         key=robot_key,
@@ -293,8 +300,7 @@ class embodiKBackend:
         self.robot = embodik.RobotModel(str(cfg.urdf_path), floating_base=False)
         self.solver = embodik.KinematicsSolver(self.robot)
         self.solver.dt = DEFAULT_SOLVER_DT
-        self.solver.set_damping(0.1)
-        self.solver.set_tolerance(0.1)
+        configure_solver_runtime_policy(self.solver)
         self._collision_tuning_mode = "balanced"
         apply_collision_tuning_mode(self.solver, self._collision_tuning_mode)
 
@@ -318,7 +324,7 @@ class embodiKBackend:
                 self.default_arm = np.concatenate([self.default_arm, padding])
             else:
                 # Truncate if needed
-                self.default_arm = self.default_arm[:self.arm_dofs]
+                self.default_arm = self.default_arm[: self.arm_dofs]
 
         self.default_full = np.zeros(self.full_dofs, dtype=float)
         self.default_full[: self.arm_dofs] = self.default_arm
@@ -353,7 +359,9 @@ class embodiKBackend:
         return self.q[: self.arm_dofs].copy()
 
     def set_q(self, q_arm: np.ndarray) -> None:
-        self.q[: self.arm_dofs] = np.clip(q_arm, self.lower[: self.arm_dofs], self.upper[: self.arm_dofs])
+        self.q[: self.arm_dofs] = np.clip(
+            q_arm, self.lower[: self.arm_dofs], self.upper[: self.arm_dofs]
+        )
         self.robot.update_configuration(self.q)
 
     def get_pose(self) -> pin.SE3:
@@ -401,9 +409,7 @@ class embodiKBackend:
         self._step_opts.adaptive_dt_reference_distance = adaptive_dt_reference_distance
 
         ik_start = time.perf_counter()
-        result = self.solver.solve_position_step(
-            self.q, target, "ee_task", self._step_opts
-        )
+        result = self.solver.solve_position_step(self.q, target, "ee_task", self._step_opts)
         elapsed_ms = (time.perf_counter() - ik_start) * 1000.0
 
         if result.status in (
@@ -411,12 +417,12 @@ class embodiKBackend:
             embodik.SolverStatus.INFEASIBLE,
             embodik.SolverStatus.NUMERICAL_ERROR,
         ):
-            self.q = np.clip(np.array(result.q_solution), self.lower, self.upper)
+            self.q = np.asarray(result.q_solution, dtype=float)
             self.robot.update_configuration(self.q)
         # COLLISION_VIOLATED: q_solution is the last safe config — apply it
         # so the robot holds at the safe position rather than freezing entirely.
         elif result.status == embodik.SolverStatus.COLLISION_VIOLATED:
-            self.q = np.clip(np.array(result.q_solution), self.lower, self.upper)
+            self.q = np.asarray(result.q_solution, dtype=float)
             self.robot.update_configuration(self.q)
 
         return embodiKResult(
@@ -431,22 +437,14 @@ class embodiKBackend:
                 else "SCALE"
             ),
             primary_fallback=(
-                bool(result.task_used_fallback[0])
-                if len(result.task_used_fallback) > 0
-                else False
+                bool(result.task_used_fallback[0]) if len(result.task_used_fallback) > 0 else False
             ),
-            primary_scale=(
-                float(result.task_scales[0])
-                if len(result.task_scales) > 0
-                else 1.0
-            ),
+            primary_scale=(float(result.task_scales[0]) if len(result.task_scales) > 0 else 1.0),
             collision_time_ms=float(getattr(result, "collision_constraint_time_ms", 0.0)),
             collision_sphere_culled=int(getattr(result, "collision_sphere_culled_pairs", 0)),
             collision_exact_queries=int(getattr(result, "collision_exact_distance_queries", 0)),
             condition_number=(
-                float(result.condition_number)
-                if hasattr(result, "condition_number")
-                else 1.0
+                float(result.condition_number) if hasattr(result, "condition_number") else 1.0
             ),
         )
 
@@ -462,7 +460,8 @@ class embodiKBackend:
         if enable and not self._collision_enabled:
             try:
                 apply_collision_tuning_mode(
-                    self.solver, getattr(self, "_collision_tuning_mode", "speed")
+                    self.solver,
+                    getattr(self, "_collision_tuning_mode", DEFAULT_COLLISION_TUNING_MODE),
                 )
                 self.solver.configure_collision_constraint(
                     min_distance=0.05,
@@ -500,7 +499,9 @@ def run_gui(cfg: RobotConfig, args: argparse.Namespace) -> None:
     except Exception as exc:  # pragma: no cover
         print(f"[embodiK] Warning: enable_timing_breakdown failed: {exc}")
 
-    bp_status = "ON" if getattr(backend.solver, "sphere_broadphase_enabled", lambda: False)() else "OFF"
+    bp_status = (
+        "ON" if getattr(backend.solver, "sphere_broadphase_enabled", lambda: False)() else "OFF"
+    )
     print(f"[embodiK] Sphere broadphase: {bp_status}")
 
     if hasattr(backend, "robot"):
@@ -524,7 +525,7 @@ def run_gui(cfg: RobotConfig, args: argparse.Namespace) -> None:
     nullspace_bias = default_bias_for_backend(backend)
 
     urdf = load_robot_description(cfg.description_name)
-    server = viser.ViserServer()
+    server = viser.ViserServer(port=args.port)
     server.scene.add_grid("/ground", width=2, height=2)
     urdf_vis = ViserUrdf(server, urdf, root_node_name="/robot")
     actuated_names = list(getattr(urdf_vis._urdf, "actuated_joint_names", []))
@@ -544,7 +545,12 @@ def run_gui(cfg: RobotConfig, args: argparse.Namespace) -> None:
 
     pose = backend.get_pose()
     initial_quat_xyzw = r2q(pose.rotation, order="xyzs")
-    initial_wxyz = (initial_quat_xyzw[3], initial_quat_xyzw[0], initial_quat_xyzw[1], initial_quat_xyzw[2])
+    initial_wxyz = (
+        initial_quat_xyzw[3],
+        initial_quat_xyzw[0],
+        initial_quat_xyzw[1],
+        initial_quat_xyzw[2],
+    )
 
     ik_target = server.scene.add_transform_controls(
         "/ik_target",
@@ -555,10 +561,18 @@ def run_gui(cfg: RobotConfig, args: argparse.Namespace) -> None:
 
     with server.gui.add_folder("IK Controls"):
         timing_handle = server.gui.add_number("Elapsed (ms)", 0.001, disabled=True)
-        pos_gain = server.gui.add_slider("Position Gain", min=0.1, max=200.0, initial_value=DEFAULT_POS_GAIN, step=0.1)
-        rot_gain = server.gui.add_slider("Orientation Gain", min=0.1, max=200.0, initial_value=DEFAULT_ROT_GAIN, step=0.1)
-        iterations_slider = server.gui.add_slider("IK Iterations", min=1, max=20, initial_value=1, step=1)
-        adaptive_dt_checkbox = server.gui.add_checkbox("Adaptive dt", initial_value=DEFAULT_ADAPTIVE_DT)
+        pos_gain = server.gui.add_slider(
+            "Position Gain", min=0.1, max=200.0, initial_value=DEFAULT_POS_GAIN, step=0.1
+        )
+        rot_gain = server.gui.add_slider(
+            "Orientation Gain", min=0.1, max=200.0, initial_value=DEFAULT_ROT_GAIN, step=0.1
+        )
+        iterations_slider = server.gui.add_slider(
+            "IK Iterations", min=1, max=20, initial_value=1, step=1
+        )
+        adaptive_dt_checkbox = server.gui.add_checkbox(
+            "Adaptive dt", initial_value=DEFAULT_ADAPTIVE_DT
+        )
         adaptive_dt_max_scale_slider = server.gui.add_slider(
             "Adaptive dt Max Scale",
             min=1.0,
@@ -577,7 +591,9 @@ def run_gui(cfg: RobotConfig, args: argparse.Namespace) -> None:
             "Enable Nullspace Bias",
             initial_value=DEFAULT_NULLSPACE_ENABLED,
         )
-        nullspace_gain = server.gui.add_slider("Nullspace Gain", min=0.0, max=2.0, initial_value=DEFAULT_NULLSPACE_GAIN, step=0.05)
+        nullspace_gain = server.gui.add_slider(
+            "Nullspace Gain", min=0.0, max=2.0, initial_value=DEFAULT_NULLSPACE_GAIN, step=0.05
+        )
         self_collision_checkbox = server.gui.add_checkbox(
             "Enable Self-Collision",
             initial_value=True,
@@ -602,8 +618,7 @@ def run_gui(cfg: RobotConfig, args: argparse.Namespace) -> None:
             "Show Collision Debug",
             initial_value=True,
             disabled=not (
-                hasattr(backend, "solver")
-                and hasattr(backend.solver, "get_last_collision_debug")
+                hasattr(backend, "solver") and hasattr(backend.solver, "get_last_collision_debug")
             ),
         )
         collision_debug_text = server.gui.add_text("Collision Debug", initial_value="Collision: --")
@@ -614,13 +629,19 @@ def run_gui(cfg: RobotConfig, args: argparse.Namespace) -> None:
 
     with server.gui.add_folder("Solver Diagnostics", expand_by_default=False):
         accel_limit_checkbox = server.gui.add_checkbox(
-            "Acceleration Limits", initial_value=False,
+            "Acceleration Limits",
+            initial_value=False,
         )
         accel_limit_slider = server.gui.add_slider(
-            "Max Accel (rad/s^2)", min=1.0, max=50.0, initial_value=15.0, step=1.0,
+            "Max Accel (rad/s^2)",
+            min=1.0,
+            max=50.0,
+            initial_value=15.0,
+            step=1.0,
         )
         conditioning_text = server.gui.add_text(
-            "IK Conditioning", initial_value="condition: --",
+            "IK Conditioning",
+            initial_value="condition: --",
         )
 
     joint_sliders: List[viser.GuiSliderHandle] = []
@@ -658,8 +679,8 @@ def run_gui(cfg: RobotConfig, args: argparse.Namespace) -> None:
         gpu_status_text = server.gui.add_text(
             "GPU Status",
             initial_value=f"CasADi: {'✓' if HAS_CASADI else '✗'} | "
-                         f"CusADi: {'✓' if HAS_CUSADI else '✗'} | "
-                         f"CUDA: {'✓' if HAS_TORCH_CUDA else '✗'}"
+            f"CusADi: {'✓' if HAS_CUSADI else '✗'} | "
+            f"CUDA: {'✓' if HAS_TORCH_CUDA else '✗'}",
         )
         batch_size_slider = server.gui.add_slider(
             "Batch Size",
@@ -673,8 +694,7 @@ def run_gui(cfg: RobotConfig, args: argparse.Namespace) -> None:
             disabled=not gpu_enabled,
         )
         benchmark_result_text = server.gui.add_text(
-            "Benchmark Result",
-            initial_value="Press 'Run Benchmark' to compare CPU vs GPU"
+            "Benchmark Result", initial_value="Press 'Run Benchmark' to compare CPU vs GPU"
         )
         if not gpu_enabled:
             benchmark_result_text.value = (
@@ -686,13 +706,18 @@ def run_gui(cfg: RobotConfig, args: argparse.Namespace) -> None:
     gpu_ik_solver = None
     if HAS_CUSADI and HAS_TORCH_CUDA:
         try:
-            import torch
-            import casadi as ca
             import os
+
+            import casadi as ca
+            import torch
+
             home = os.path.expanduser("~")
-            casadi_file = os.path.join(home, ".local", "cusadi", "src", "casadi_functions", "fn_velocity_solve.casadi")
+            casadi_file = os.path.join(
+                home, ".local", "cusadi", "src", "casadi_functions", "fn_velocity_solve.casadi"
+            )
             if os.path.exists(casadi_file):
                 from embodik.gpu import CusadiFunction
+
                 fn_casadi = ca.Function.load(casadi_file)
                 gpu_ik_solver = {
                     "fn_casadi": fn_casadi,
@@ -770,24 +795,28 @@ def run_gui(cfg: RobotConfig, args: argparse.Namespace) -> None:
         cpu_solutions = []
         for i in range(current_batch_size):
             result = embodik.computeMultiObjectiveVelocitySolutionEigen(
-                [targets[i]], [np.asfortranarray(jacobians[i])],
-                C, lower, upper
+                [targets[i]], [np.asfortranarray(jacobians[i])], C, lower, upper
             )
             cpu_solutions.append(np.array(result.solution))
         cpu_time = (time.perf_counter() - cpu_start) * 1000
 
         # GPU batched benchmark
         try:
-            import torch
-            import casadi as ca
             import os
+
+            import casadi as ca
+            import torch
             from embodik.gpu import CusadiFunction
 
             home = os.path.expanduser("~")
-            casadi_file = os.path.join(home, ".local", "cusadi", "src", "casadi_functions", "fn_velocity_solve.casadi")
+            casadi_file = os.path.join(
+                home, ".local", "cusadi", "src", "casadi_functions", "fn_velocity_solve.casadi"
+            )
 
             if not os.path.exists(casadi_file):
-                benchmark_result_text.value = "CasADi file not found. Run: pixi run -e cuda export-casadi"
+                benchmark_result_text.value = (
+                    "CasADi file not found. Run: pixi run -e cuda export-casadi"
+                )
                 return
 
             fn_casadi = ca.Function.load(casadi_file)
@@ -845,6 +874,7 @@ def run_gui(cfg: RobotConfig, args: argparse.Namespace) -> None:
             benchmark_result_text.value = f"GPU error: {str(e)[:50]}"
             print(f"[GPU Benchmark] Error: {e}")
             import traceback
+
             traceback.print_exc()
 
     @run_benchmark_button.on_click
@@ -989,7 +1019,9 @@ def run_gui(cfg: RobotConfig, args: argparse.Namespace) -> None:
             ik_target.wxyz = (quat_local[3], quat_local[0], quat_local[1], quat_local[2])
         urdf_vis.update_cfg(make_visual_config(q_current))
         if hasattr(backend, "enable_self_collision"):
-            backend.enable_self_collision(self_collision_checkbox.value and not self_collision_checkbox.disabled)
+            backend.enable_self_collision(
+                self_collision_checkbox.value and not self_collision_checkbox.disabled
+            )
             solver_obj = getattr(backend, "solver", None)
             if (
                 collision_debug_checkbox.value
@@ -1046,7 +1078,9 @@ def run_gui(cfg: RobotConfig, args: argparse.Namespace) -> None:
         if hasattr(backend, "enable_self_collision"):
             if hasattr(backend, "set_collision_tuning_mode"):
                 backend.set_collision_tuning_mode(collision_tuning_dropdown.value)
-            backend.enable_self_collision(self_collision_checkbox.value and not self_collision_checkbox.disabled)
+            backend.enable_self_collision(
+                self_collision_checkbox.value and not self_collision_checkbox.disabled
+            )
             solver_obj = getattr(backend, "solver", None)
             if (
                 collision_debug_checkbox.value
@@ -1074,14 +1108,18 @@ def run_gui(cfg: RobotConfig, args: argparse.Namespace) -> None:
         backend.solver.enable_acceleration_limits(accel_limit_checkbox.value)
         if accel_limit_checkbox.value:
             backend.solver.set_acceleration_limits(
-                np.full(backend.robot.nv, accel_limit_slider.value))
-        status_handle.value = f"Status: Accel limits {'ON' if accel_limit_checkbox.value else 'OFF'}"
+                np.full(backend.robot.nv, accel_limit_slider.value)
+            )
+        status_handle.value = (
+            f"Status: Accel limits {'ON' if accel_limit_checkbox.value else 'OFF'}"
+        )
 
     @accel_limit_slider.on_update
     def _(_evt) -> None:
         if accel_limit_checkbox.value:
             backend.solver.set_acceleration_limits(
-                np.full(backend.robot.nv, accel_limit_slider.value))
+                np.full(backend.robot.nv, accel_limit_slider.value)
+            )
 
     @collision_debug_checkbox.on_update
     def _(_evt) -> None:
@@ -1107,7 +1145,9 @@ def run_gui(cfg: RobotConfig, args: argparse.Namespace) -> None:
             target_rotation = q2r(target_xyzw, order="xyzs")
             target_pose = Rt(R=target_rotation, t=target_position)
 
-            active_indices = [i for i, checkbox in enumerate(nullspace_checkboxes) if checkbox.value]
+            active_indices = [
+                i for i, checkbox in enumerate(nullspace_checkboxes) if checkbox.value
+            ]
             if not nullspace_enabled_checkbox.value:
                 active_indices = []
 
@@ -1130,12 +1170,14 @@ def run_gui(cfg: RobotConfig, args: argparse.Namespace) -> None:
             solver_elapsed_ms = result.elapsed_ms
             col_ms = result.collision_time_ms
             status_prefix = (
-                "⚠ COLLISION_VIOLATED" if result.status == "COLLISION_VIOLATED"
+                "⚠ COLLISION_VIOLATED"
+                if result.status == "COLLISION_VIOLATED"
                 else f"embodiK {result.status}"
             )
             adt_suffix = (
                 f" | adt×{adaptive_dt_max_scale_slider.value:.1f}"
-                if adaptive_dt_checkbox.value else ""
+                if adaptive_dt_checkbox.value
+                else ""
             )
             status_handle.value = (
                 f"Status: {status_prefix} | "
@@ -1158,7 +1200,11 @@ def run_gui(cfg: RobotConfig, args: argparse.Namespace) -> None:
 
         # Optional performance reporting (CLI-controlled)
         iteration_count += 1
-        if args.perf_log != "off" and args.perf_every > 0 and iteration_count % args.perf_every == 0:
+        if (
+            args.perf_log != "off"
+            and args.perf_every > 0
+            and iteration_count % args.perf_every == 0
+        ):
             # Note: solve_step currently measures wall time around single-step position IK.
             # If C++ timing breakdown is enabled, fetch it from an extra solve call
             # would be intrusive; instead we show the wall-time here and rely on
@@ -1170,7 +1216,9 @@ def run_gui(cfg: RobotConfig, args: argparse.Namespace) -> None:
                     f" sphere_culled={result.collision_sphere_culled}"
                     f" exact={result.collision_exact_queries}"
                 )
-            print(f"[Performance] Iter {iteration_count}: solve_step={solver_elapsed_ms:.3f}ms{col_info}")
+            print(
+                f"[Performance] Iter {iteration_count}: solve_step={solver_elapsed_ms:.3f}ms{col_info}"
+            )
 
         time.sleep(0.001)
 
@@ -1193,7 +1241,7 @@ def parse_args() -> argparse.Namespace:
         choices=["off", "basic", "verbose"],
         default="off",
         help="Performance logging mode. 'basic' prints periodic summaries, "
-             "'verbose' also prints extra warnings.",
+        "'verbose' also prints extra warnings.",
     )
     parser.add_argument(
         "--perf-every",
@@ -1206,6 +1254,7 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Enable C++ timing breakdown fields in VelocitySolverResult (debug).",
     )
+    parser.add_argument("--port", type=int, default=DEFAULT_VISER_PORT, help="Viser server port.")
     # GPU options
     parser.add_argument(
         "--gpu",
@@ -1235,9 +1284,11 @@ def main() -> None:
     print(f"  - Target link: {cfg.target_link}")
 
     # Print GPU status
-    print(f"  - GPU Status: CasADi={'✓' if HAS_CASADI else '✗'}, "
-          f"CusADi={'✓' if HAS_CUSADI else '✗'}, "
-          f"CUDA={'✓' if HAS_TORCH_CUDA else '✗'}")
+    print(
+        f"  - GPU Status: CasADi={'✓' if HAS_CASADI else '✗'}, "
+        f"CusADi={'✓' if HAS_CUSADI else '✗'}, "
+        f"CUDA={'✓' if HAS_TORCH_CUDA else '✗'}"
+    )
     if args.gpu:
         if GPU_AVAILABLE:
             print(f"  - GPU mode: ENABLED")

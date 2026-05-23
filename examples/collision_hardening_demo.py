@@ -9,18 +9,19 @@ Shows:
 
 from __future__ import annotations
 
+import argparse
 import os
 import re
 import time
 from pathlib import Path
 from typing import List, Optional, Tuple
 
+import embodik
 import numpy as np
 import viser
+from embodik import Rt, q2r, r2q
+from example_helpers.ik_common import DEFAULT_VISER_PORT, configure_solver_runtime_policy
 from viser.extras import ViserUrdf
-
-import embodik
-from embodik import r2q, q2r, Rt
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -108,10 +109,18 @@ def generate_auto_collision_exclusions(robot: embodik.RobotModel) -> List[Tuple[
 # ---------------------------------------------------------------------------
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--port", type=int, default=DEFAULT_VISER_PORT, help="Viser server port.")
+    return parser.parse_args()
+
+
 def main() -> None:
+    args = parse_args()
     # Load Panda URDF
     try:
         from robot_descriptions.panda_description import URDF_PATH as _URDF_PATH
+
         urdf_path = Path(_URDF_PATH)
     except ImportError as exc:
         raise RuntimeError(
@@ -133,8 +142,7 @@ def main() -> None:
     # Build solver
     solver = embodik.KinematicsSolver(robot)
     solver.dt = 0.01
-    solver.set_damping(0.1)
-    solver.set_tolerance(0.1)
+    configure_solver_runtime_policy(solver)
 
     # Configure collision constraint
     solver.configure_collision_constraint(
@@ -162,19 +170,16 @@ def main() -> None:
     q[: len(DEFAULT_Q)] = DEFAULT_Q
     robot.update_configuration(q)
 
-    lower, upper = robot.get_joint_limits()
-    lower = lower.astype(float)
-    upper = upper.astype(float)
-
     # -----------------------------------------------------------------------
     # Viser setup
     # -----------------------------------------------------------------------
-    server = viser.ViserServer(port=8080)
+    server = viser.ViserServer(port=args.port)
     server.scene.add_grid("/ground", width=2, height=2)
 
     # ViserUrdf for robot visualization
     try:
         from robot_descriptions.loaders.yourdfpy import load_robot_description
+
         urdf_obj = load_robot_description("panda_description")
         urdf_vis = ViserUrdf(server, urdf_obj, root_node_name="/robot")
         _actuated_names = list(getattr(urdf_vis._urdf, "actuated_joint_names", []))
@@ -305,7 +310,7 @@ def main() -> None:
     # -----------------------------------------------------------------------
     step_opts = embodik.PositionStepOptions()
 
-    print("[demo] Viser server started at http://localhost:8080")
+    print(f"[demo] Viser server started at http://localhost:{args.port}")
     print("[demo] Drag the transform controls to move the IK target.")
 
     # -----------------------------------------------------------------------
@@ -337,7 +342,7 @@ def main() -> None:
         result = solver.solve_position_step(q, target_pose, "ee_task", step_opts)
 
         if result.status == embodik.SolverStatus.SUCCESS:
-            q = np.clip(np.array(result.q_solution, dtype=float), lower, upper)
+            q = np.asarray(result.q_solution, dtype=float)
             robot.update_configuration(q)
         elif result.status == embodik.SolverStatus.COLLISION_VIOLATED:
             pass  # hold q — no safe step exists

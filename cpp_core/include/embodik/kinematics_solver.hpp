@@ -10,8 +10,10 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <embodik/dual_arm_ects.hpp>
+#include <embodik/pose_task_group.hpp>
 #include <embodik/robot_model.hpp>
 #include <embodik/sphere_broadphase.hpp>
 #include <embodik/tasks.hpp>
@@ -120,6 +122,30 @@ public:
                           const std::string &frame_a,
                           const std::string &frame_b,
                           double alpha = 0.5);
+
+  /**
+   * @brief Add a pose task group adapter.
+   *
+   * Split mode creates two regular FrameTasks:
+   *   name + "__position" at base_priority, FRAME_POSITION
+   *   name + "__orientation" at base_priority + rotation_priority_offset,
+   *   FRAME_ORIENTATION
+   *
+   * Merged mode creates one regular FRAME_POSE task named name. The adapter
+   * only owns task bookkeeping; solve_position_step() consumes the emitted
+   * TaskTarget list through the existing multi-target path.
+   */
+  std::shared_ptr<PoseTaskGroup>
+  add_pose_task_group(const std::string &name, const std::string &tcp_frame,
+                      int base_priority = 0,
+                      int rotation_priority_offset = 1,
+                      bool merged_pose = false, bool auto_switch = false);
+
+  /**
+   * @brief Get a pose task group by name.
+   */
+  std::shared_ptr<PoseTaskGroup>
+  pose_task_group(const std::string &name) const;
 
   /**
    * @brief Configure a relative pose inequality constraint between two frames
@@ -282,7 +308,7 @@ public:
    * This preserves historical behavior: set_tolerance() maps to
    * VelocitySolverConfig::regularization_config.epsilon.
    *
-   * @param tolerance Regularization epsilon (default 1e-6).
+   * @param tolerance Regularization epsilon (default 0.1).
    */
   void set_tolerance(double tolerance) { solver_tolerance_ = tolerance; }
 
@@ -296,13 +322,12 @@ public:
    *
    * Any Jacobian singular value below @p epsilon is treated as near-singular
    * and receives additional damping proportional to
-   * @c damping * (1 - (sigma/epsilon)^2).  Setting this too large (e.g. 0.1)
-   * will over-regularize the pseudoinverse and suppress joint velocities for
-   * high-DOF robots where many singular values are naturally small but nonzero.
+   * @c damping * (1 - (sigma/epsilon)^2).  Lower values, e.g. 1e-6, preserve
+   * sharper singular-value sensitivity for solver math tests and specialized
+   * experiments.
    *
-   * For most robots, 1e-6 is the right value.  Call this when you need to set
-   * @c set_tolerance() to a larger value for constraint-violation leniency
-   * without inflating the regularization threshold.
+   * Call this when you need to decouple the regularization threshold from
+   * the solver's default tolerance.
    *
    * @param epsilon Singular-value damping threshold.
    */
@@ -328,7 +353,53 @@ public:
    * @brief Set singularity robust damping
    * @param damping Damping factor for pseudo-inverse
    */
-  void set_damping(double damping) { damping_ = damping; }
+  void set_damping(double damping) {
+    damping_ = damping;
+    runtime_config_.damping = damping;
+  }
+
+  /**
+   * @brief Apply a bundled runtime configuration to this solver.
+   *
+   * Stamps cfg.damping onto the solver and stores position-step defaults for
+   * make_position_step_options(). Existing setters and per-call options remain
+   * supported and authoritative.
+   */
+  void configure_runtime(const SolverRuntimeConfig &cfg) {
+    runtime_config_ = cfg;
+    damping_ = cfg.damping;
+    reset_adaptive_state();
+    reset_auto_task_layout_state();
+  }
+
+  /**
+   * @brief Reset default-off stateful runtime adapters without changing config.
+   */
+  void reset_adaptive_state() {
+    advisor_scale_current_ =
+        sanitize_advisor_scale(runtime_config_.advisor_position_weight_scale);
+    advisor_scale_ratio_sum_ = 0.0;
+    advisor_scale_epoch_time_s_ = 0.0;
+    advisor_scale_sample_count_ = 0;
+  }
+
+  /**
+   * @brief Return the last-applied runtime configuration.
+   */
+  const SolverRuntimeConfig &runtime_config() const { return runtime_config_; }
+
+  /**
+   * @brief Build fresh PositionStepOptions from stored runtime defaults.
+   */
+  PositionStepOptions make_position_step_options() const {
+    PositionStepOptions opts;
+    opts.max_steps = runtime_config_.position_step_max_steps;
+    opts.adaptive_dt = runtime_config_.adaptive_dt;
+    opts.adaptive_dt_max_scale = runtime_config_.adaptive_dt_max_scale;
+    opts.adaptive_dt_reference_distance =
+        runtime_config_.adaptive_dt_reference_distance;
+    return opts;
+  }
 
   /**
    * @brief Set recovery gain for joint limit violations.
@@ -663,6 +734,19 @@ public:
   /// @return number of consecutive stall steps in the current streak.
   int stall_handler_consecutive_stall_steps() const;
 
+  /// @return current stall threshold in consecutive near-zero failed solves.
+  int stall_handler_threshold() const { return stall_config_.stall_threshold; }
+
+  /// @return current per-step nominal-margin restoration rate.
+  double stall_handler_restore_rate() const {
+    return stall_config_.restore_rate;
+  }
+
+  /// @return current minimum relaxed margin as a fraction of nominal.
+  double stall_handler_floor_fraction() const {
+    return stall_config_.floor_fraction;
+  }
+
   // ========== Elastic Band Joint Limit Expansion ==========
 
   /**
@@ -996,17 +1080,39 @@ private:
   std::shared_ptr<RobotModel> robot_;
   std::vector<std::shared_ptr<Task>> tasks_;
   std::unordered_map<std::string, std::shared_ptr<Task>> task_map_;
+  std::unordered_map<std::string, std::shared_ptr<PoseTaskGroup>>
+      pose_task_groups_;
   std::vector<ContactFrameConfig> contact_frames_;
 
   // Solver parameters
   double dt_ = 0.01;
   // Singular-value damping threshold for regularized pseudoinverse.
-  double solver_tolerance_ = 1e-6;
+  double solver_tolerance_ = 0.1;
   // Constraint violation deadband + COD pseudoinverse relative threshold.
   double constraint_tolerance_ = 1e-6;
   double tight_tolerance_ = 1e-10;
   int max_iterations_ = 20;
-  double damping_ = 1e-3;
+  double damping_ = 0.1;
+  SolverRuntimeConfig runtime_config_{};
+  static double sanitize_advisor_scale(double scale) {
+    return (std::isfinite(scale) && scale >= 0.0) ? scale : 1.0;
+  }
+  void reset_auto_task_layout_state();
+  void select_auto_task_layout();
+  VelocitySolverResult retry_auto_task_layout_as_split_if_needed(
+      const Eigen::VectorXd &q, VelocitySolverResult result,
+      const std::vector<int> &velocity_lock_indices,
+      const std::optional<TorsoPoseConstraintOptions> &torso_constraint,
+      const std::optional<double> &step_validation_dt);
+  void update_auto_task_layout_feedback(const VelocitySolverResult &result);
+  TaskLayout current_auto_task_layout_ = TaskLayout::kMerged;
+  int auto_layout_below_low_count_ = 0;
+  bool auto_layout_has_feedback_ = false;
+  double auto_layout_binding_score_ = 0.0;
+  double advisor_scale_current_ = 1.0;
+  double advisor_scale_ratio_sum_ = 0.0;
+  double advisor_scale_epoch_time_s_ = 0.0;
+  int advisor_scale_sample_count_ = 0;
   double norm_threshold_ = 1e10;
   int max_zero_scale_iterations_ = 2;
   bool position_ik_debug_ = false;
@@ -1048,6 +1154,9 @@ private:
   /// One-shot hint set by solve_position_step when RobotModel already holds
   /// the exact q passed into the next solve_velocity() call.
   bool pending_reuse_current_kinematics_ = false;
+  /// One-shot integration dt used by solve_position_step so solve_velocity()
+  /// can validate fallback candidates against the actual accepted step length.
+  std::optional<double> pending_step_validation_dt_;
   std::optional<Eigen::MatrixXd> warm_start_selector_cache_;
   int warm_start_constraint_rows_ = -1;
 
@@ -1139,6 +1248,7 @@ private:
 
   StallHandlerConfig stall_config_;
   StallHandlerState stall_state_;
+  bool stall_user_configured_ = false;
 
   void stall_handler_update(VelocitySolverResult &result);
 

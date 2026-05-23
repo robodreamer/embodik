@@ -32,6 +32,9 @@ def _load_panda():
     robot.update_configuration(q_init)
     solver = eik.KinematicsSolver(robot)
     solver.dt = 0.01
+    cfg = eik.SolverRuntimeConfig()
+    cfg.weighted_fallback_enabled = False
+    solver.configure_runtime(cfg)
     return robot, solver
 
 
@@ -94,9 +97,9 @@ class TestJointLimitViolationStartup:
         print(f"  With elastic:    dq={dq_elastic:.6f}, status={result_elastic.status}")
 
         # Elastic band should produce at least as much motion
-        assert dq_elastic >= dq_no * 0.5, (
-            f"Elastic band should help: dq_elastic={dq_elastic} vs dq_no={dq_no}"
-        )
+        assert (
+            dq_elastic >= dq_no * 0.5
+        ), f"Elastic band should help: dq_elastic={dq_elastic} vs dq_no={dq_no}"
         assert np.all(np.isfinite(result_elastic.joint_velocities))
 
         solver.disable_elastic_band()
@@ -140,8 +143,9 @@ class TestJointLimitViolationStartup:
             robot.update_kinematics(q_run)
 
         final_violation = max(0, q_run[1] - q_upper[1])
-        print(f"\nJoint 1 violation: initial={initial_violation:.4f}, "
-              f"final={final_violation:.4f}")
+        print(
+            f"\nJoint 1 violation: initial={initial_violation:.4f}, " f"final={final_violation:.4f}"
+        )
 
         # Violation should decrease (or at least not worsen)
         assert final_violation <= initial_violation + 1e-4, (
@@ -254,8 +258,7 @@ class TestGradualRecovery:
 
         # Phase 2: set target to current position (already reached)
         robot.update_kinematics(q)
-        task.set_target_pose(np.array(task.current_position),
-                             np.array(task.current_orientation))
+        task.set_target_pose(np.array(task.current_position), np.array(task.current_orientation))
 
         for _ in range(50):
             result = solver.solve_velocity(q)
@@ -267,9 +270,9 @@ class TestGradualRecovery:
         final_delta = solver.elastic_band_max_delta()
         print(f"\nDelta convergence: peak={peak_delta:.6f}, final={final_delta:.6f}")
 
-        assert final_delta < peak_delta * 0.5 or final_delta < 0.005, (
-            f"Deltas should converge: peak={peak_delta:.6f}, final={final_delta:.6f}"
-        )
+        assert (
+            final_delta < peak_delta * 0.5 or final_delta < 0.005
+        ), f"Deltas should converge: peak={peak_delta:.6f}, final={final_delta:.6f}"
 
         solver.disable_elastic_band()
         solver.clear_tasks()

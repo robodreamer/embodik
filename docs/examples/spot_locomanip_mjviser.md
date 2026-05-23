@@ -1,6 +1,6 @@
 # Spot Locomanipulation mjviser Example
 
-`examples/15_spot_locomanip_mjviser.py` runs a Spot locomanipulation ONNX
+`examples/09_spot_locomanip_mjviser.py` runs a Spot locomanipulation ONNX
 policy in MuJoCo through mjviser while EmbodiK handles interactive arm IK.
 It defaults to the bundled public MuJoCo Menagerie Spot-with-arm scene at
 `examples/assets/spot_mjcf/scene_arm.xml`, so copied examples do not need a
@@ -42,8 +42,8 @@ running the script:
 python -m pip install "embodik[mjviser]"
 embodik-examples --copy
 cd embodik_examples
-python 15_spot_locomanip_mjviser.py --policy locomanip
-python 15_spot_locomanip_mjviser.py --policy locomanip-stationary
+python 09_spot_locomanip_mjviser.py --policy locomanip
+python 09_spot_locomanip_mjviser.py --policy locomanip-stationary
 ```
 
 The copied example bundle includes the public MuJoCo Menagerie Spot-with-arm
@@ -54,7 +54,7 @@ For Seer controller teleop, install the combined optional extra:
 
 ```bash
 python -m pip install "embodik[mjviser,teleop]"
-python 15_spot_locomanip_mjviser.py --enable-teleop --policy locomanip
+python 09_spot_locomanip_mjviser.py --enable-teleop --policy locomanip
 ```
 
 From a repository checkout, use the matching Pixi environments:

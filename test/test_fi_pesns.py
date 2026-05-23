@@ -8,9 +8,10 @@ Tests validate:
 4. Constraint satisfaction
 """
 
-import pytest
+from typing import List, Tuple
+
 import numpy as np
-from typing import Tuple, List
+import pytest
 
 # Test tolerances
 VELOCITY_ATOL = (
@@ -62,6 +63,7 @@ def test_srinv_matches_numpy_pinv():
     """SRINV should match NumPy pseudo-inverse for well-conditioned matrices."""
     try:
         import casadi as ca
+
         from embodik.gpu.casadi_fi_pesns import srinv
     except ImportError as e:
         pytest.skip(f"CasADi or modules not available: {e}")
@@ -85,6 +87,7 @@ def test_srinv_near_singular():
     """SRINV handles near-singular matrices gracefully."""
     try:
         import casadi as ca
+
         from embodik.gpu.casadi_fi_pesns import srinv
     except ImportError as e:
         pytest.skip(f"CasADi or modules not available: {e}")
@@ -106,6 +109,26 @@ def test_srinv_near_singular():
     assert np.all(np.isfinite(result)), "SRINV should handle near-singular matrix"
 
 
+def test_gpu_srinv_wrappers_share_formula():
+    """FI-PeSNS and PPH-SNS wrappers should route through the same CasADi formula."""
+    try:
+        import casadi as ca
+
+        from embodik.gpu.casadi_fi_pesns import srinv as fi_srinv
+        from embodik.gpu.casadi_pph_sns import srinv as pph_srinv
+    except ImportError as e:
+        pytest.skip(f"CasADi or modules not available: {e}")
+
+    rng = np.random.default_rng(101)
+    matrix = rng.standard_normal((3, 5)).astype(np.float64)
+
+    A_sx = ca.SX.sym("A", 3, 5)
+    fn_fi = ca.Function("fi_srinv", [A_sx], [fi_srinv(A_sx, tol=1e-6, damping=0.1)])
+    fn_pph = ca.Function("pph_srinv", [A_sx], [pph_srinv(A_sx, tol=1e-6, damping=0.1)])
+
+    np.testing.assert_allclose(np.array(fn_fi(matrix)), np.array(fn_pph(matrix)))
+
+
 # =============================================================================
 # Feasible Scale Tests
 # =============================================================================
@@ -115,6 +138,7 @@ def test_get_feasible_task_scale_unconstrained():
     """Scale = 1 when solution is within bounds."""
     try:
         import casadi as ca
+
         from embodik.gpu.casadi_fi_pesns import get_feasible_task_scale
     except ImportError as e:
         pytest.skip(f"CasADi or modules not available: {e}")
@@ -141,6 +165,7 @@ def test_get_feasible_task_scale_constrained():
     """Scale < 1 when full step would violate bounds."""
     try:
         import casadi as ca
+
         from embodik.gpu.casadi_fi_pesns import get_feasible_task_scale
     except ImportError as e:
         pytest.skip(f"CasADi or modules not available: {e}")
@@ -224,7 +249,7 @@ def test_fi_pesns_evaluates():
 def test_fi_pesns_robot_configs():
     """Robot configuration builder works."""
     try:
-        from embodik.gpu.casadi_fi_pesns import build_fi_pesns_for_robot, ROBOT_CONFIGS
+        from embodik.gpu.casadi_fi_pesns import ROBOT_CONFIGS, build_fi_pesns_for_robot
     except ImportError as e:
         pytest.skip(f"CasADi or modules not available: {e}")
 

@@ -204,13 +204,9 @@ def test_tight_constraint_invalid_inputs_raise():
                 "missing_frame", np.eye(4, dtype=float), 1e-5, 1e-4
             )
         with pytest.raises(ValueError):
-            solver.add_tight_frame_pose_constraint(
-                "ee", np.eye(4, dtype=float), -1e-5, 1e-4
-            )
+            solver.add_tight_frame_pose_constraint("ee", np.eye(4, dtype=float), -1e-5, 1e-4)
         with pytest.raises(ValueError):
-            solver.add_tight_point_constraint(
-                "ee", np.array([np.nan, 0.0, 0.0], dtype=float), 1e-5
-            )
+            solver.add_tight_point_constraint("ee", np.array([np.nan, 0.0, 0.0], dtype=float), 1e-5)
     finally:
         os.unlink(urdf)
 
@@ -260,10 +256,7 @@ def test_tight_constraints_allow_progress_without_nonfinite_failures():
             q_next = np.asarray(out.q_solution, dtype=float)
             q = q_next
             robot.update_configuration(q)
-        assert any(
-            s in (eik.SolverStatus.SUCCESS, eik.SolverStatus.NO_PROGRESS)
-            for s in statuses
-        )
+        assert any(s in (eik.SolverStatus.SUCCESS, eik.SolverStatus.NO_PROGRESS) for s in statuses)
     finally:
         os.unlink(urdf)
 
@@ -357,4 +350,3 @@ def test_repeated_steps_remain_stable_under_tight_constraints():
         assert last_avg <= first_avg * 2.0 + 1e-9
     finally:
         os.unlink(urdf)
-

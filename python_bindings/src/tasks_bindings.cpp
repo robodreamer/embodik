@@ -11,6 +11,7 @@
 #include <nanobind/stl/vector.h>
 
 #include <embodik/dual_arm_ects.hpp>
+#include <embodik/pose_task_group.hpp>
 #include <embodik/robot_model.hpp>
 #include <embodik/tasks.hpp>
 
@@ -49,9 +50,19 @@ void bind_tasks(nb::module_ &m) {
       .def("get_type", &Task::getType, "Get task type")
       .def_prop_ro("name", &Task::getName, "Task name")
       .def_prop_rw("priority", &Task::getPriority, &Task::setPriority,
-                   "Task priority (0 = highest)")
-      .def_prop_rw("weight", &Task::getWeight, &Task::setWeight,
-                   "Task weight/gain")
+                   "Task priority (0 = highest). Honored by velocity IK and "
+                   "position-step solves.")
+      .def_prop_rw(
+          "weight", &Task::getWeight, &Task::setWeight,
+          "Task weight/gain - velocity-IK path only.\n\n"
+          "Multiplies get_error() when the solver reads get_velocity() and no "
+          "direct target velocity is set. This is the branch used by "
+          "solve_velocity() and iterative solve_position().\n\n"
+          "solve_position_step() writes target velocities directly from "
+          "TaskTarget position_gain/orientation_gain, so Task.weight is not "
+          "the right attenuation knob there. For position-step solves, set "
+          "task.active = False, omit that task's TaskTarget for the tick, or "
+          "scale the TaskTarget gains.")
       .def_prop_rw("active", &Task::isActive, &Task::setActive,
                    "Whether task is active")
       .def_prop_rw("solve_mode", &Task::getSolveMode, &Task::setSolveMode,
@@ -100,6 +111,38 @@ void bind_tasks(nb::module_ &m) {
                    "Current frame position")
       .def_prop_ro("current_orientation", &FrameTask::getCurrentOrientation,
                    "Current frame orientation");
+
+  nb::class_<PoseTaskGroup>(
+      m, "PoseTaskGroup",
+      "Adapter around split position/orientation or merged pose frame tasks")
+      .def_prop_ro("name", [](const PoseTaskGroup &self) { return self.name(); })
+      .def_prop_ro("tcp_frame",
+                   [](const PoseTaskGroup &self) { return self.tcp_frame(); })
+      .def_prop_ro("base_priority", &PoseTaskGroup::base_priority)
+      .def_prop_ro("rotation_priority_offset",
+                   &PoseTaskGroup::rotation_priority_offset)
+      .def_prop_ro("merged_pose", &PoseTaskGroup::merged_pose)
+      .def_prop_ro("auto_switch", &PoseTaskGroup::auto_switch)
+      .def_prop_ro("current_layout", &PoseTaskGroup::current_layout)
+      .def_prop_ro("position_task", &PoseTaskGroup::position_task)
+      .def_prop_ro("orientation_task", &PoseTaskGroup::orientation_task)
+      .def_prop_ro("merged_task", &PoseTaskGroup::merged_task)
+      .def_prop_ro("last_target", &PoseTaskGroup::last_target)
+      .def_prop_ro("last_position_gain", &PoseTaskGroup::last_position_gain)
+      .def_prop_ro("last_rotation_gain", &PoseTaskGroup::last_rotation_gain)
+      .def_prop_ro("target_set", &PoseTaskGroup::target_set)
+      .def("set_active", &PoseTaskGroup::set_active, nb::arg("active"),
+           "Set active on all underlying tasks")
+      .def("set_solve_mode", &PoseTaskGroup::set_solve_mode, nb::arg("mode"),
+           "Set solve mode on all underlying tasks")
+      .def("set_allow_min_error_fallback",
+           &PoseTaskGroup::set_allow_min_error_fallback, nb::arg("allow"),
+           "Set min-error fallback allowance on all underlying tasks")
+      .def("set_target", &PoseTaskGroup::set_target, nb::arg("target_pose"),
+           nb::arg("position_gain"), nb::arg("rotation_gain"),
+           "Store the target pose and gains for task_targets()")
+      .def("task_targets", &PoseTaskGroup::task_targets,
+           "Return TaskTarget descriptors for solve_position_step()");
 
   // COMTask
   nb::class_<COMTask, Task>(m, "COMTask")
@@ -243,6 +286,26 @@ void bind_tasks(nb::module_ &m) {
            &AbsoluteFrameTask::setObjectCenterFrame,
            nb::arg("object_frame"),
            "Auto-compute TCP offsets so both virtual TCPs coincide at object_frame")
+      .def(
+          "calibrate_grasp_offsets",
+          static_cast<void (AbsoluteFrameTask::*)(const Eigen::Matrix4d &,
+                                                  const Eigen::Matrix4d &)>(
+              &AbsoluteFrameTask::calibrate_grasp_offsets),
+          nb::arg("T_L_FK"), nb::arg("T_R_FK"),
+          "Calibrate rigid arm-to-object offsets from the current task pose")
+      .def(
+          "set_target_from_arm_targets",
+          static_cast<void (AbsoluteFrameTask::*)(const Eigen::Matrix4d &,
+                                                  const Eigen::Matrix4d &)>(
+              &AbsoluteFrameTask::set_target_from_arm_targets),
+          nb::arg("T_L_target"), nb::arg("T_R_target"),
+          "Map calibrated per-arm targets to this absolute task target")
+      .def("get_grasp_divergence", &AbsoluteFrameTask::get_grasp_divergence,
+           nb::rv_policy::reference_internal,
+           "Last left/right implied object-pose divergence")
+      .def_prop_ro("grasp_offsets_calibrated",
+                   &AbsoluteFrameTask::grasp_offsets_calibrated,
+                   "Whether grasp offsets have been calibrated")
       .def_prop_ro("current_position", &AbsoluteFrameTask::getCurrentPosition,
                    "Current absolute position")
       .def_prop_ro("current_orientation",
@@ -250,6 +313,13 @@ void bind_tasks(nb::module_ &m) {
                    "Current absolute orientation")
       .def_prop_ro("frame_a", &AbsoluteFrameTask::getFrameA, "Frame A name")
       .def_prop_ro("frame_b", &AbsoluteFrameTask::getFrameB, "Frame B name");
+
+  nb::class_<AbsoluteFrameTask::GraspDivergenceDiagnostic>(
+      m, "GraspDivergenceDiagnostic")
+      .def_ro("linear_m",
+              &AbsoluteFrameTask::GraspDivergenceDiagnostic::linear_m)
+      .def_ro("angular_rad",
+              &AbsoluteFrameTask::GraspDivergenceDiagnostic::angular_rad);
 
   // ECTSConfig
   nb::class_<ECTSConfig>(m, "ECTSConfig",
@@ -267,6 +337,14 @@ void bind_tasks(nb::module_ &m) {
 
   m.def("map_ects_mode_blended", &map_ects_mode_blended, nb::arg("ratio"),
         "Map a blended coordination mode with custom ratio");
+
+  m.def("compute_absolute_frame", &compute_absolute_frame, nb::arg("T_1"),
+        nb::arg("T_2"), nb::arg("alpha"),
+        "Compute the ECTS absolute frame from two end-effector poses");
+
+  m.def("compute_relative_frame", &compute_relative_frame, nb::arg("T_1"),
+        nb::arg("T_2"),
+        "Compute the ECTS relative frame T_1.inverse() * T_2");
 
   // Helper function to create rotation matrix from roll-pitch-yaw
   m.def(

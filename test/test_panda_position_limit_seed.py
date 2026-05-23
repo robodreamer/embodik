@@ -25,7 +25,6 @@ _PANDA_EE_FRAME = "panda_hand"
 _PANDA_GRIPPER_Q = np.array([0.02, 0.02], dtype=float)
 
 _POSITION_STEP_DT = 0.05
-_SOLVER_DAMPING = 0.1
 _NUDGE_EPS = 1e-3
 _EE_TRANSLATION_OFFSET_X_M = 0.06
 _LIMIT_SLACK_EPS = 1e-6
@@ -68,7 +67,6 @@ def test_panda_solve_position_step_at_joint_limit_vs_nudged_seed():
     solver = eik.KinematicsSolver(robot)
     solver.dt = _POSITION_STEP_DT
     solver.enable_position_limits(True)
-    solver.set_damping(_SOLVER_DAMPING)
 
     q_lo, q_hi = robot.get_joint_limits()
     # Pin panda_joint1 at its upper limit. From the default posture, +X EE motion
@@ -102,15 +100,13 @@ def test_panda_solve_position_step_at_joint_limit_vs_nudged_seed():
         q = np.asarray(q_seed, dtype=float).copy()
         robot.update_configuration(q)
         result = solver.solve_position_step(q, targets, opts)
-        assert result.status == eik.SolverStatus.SUCCESS, (
-            f"{result.status=} {getattr(result, 'status_message', '')}"
-        )
+        assert (
+            result.status == eik.SolverStatus.SUCCESS
+        ), f"{result.status=} {getattr(result, 'status_message', '')}"
         return np.asarray(result.q_solution, dtype=float)
 
     q_sol_limit = one_step(q_at_hi)
-    q_nudged, n_count = _nudge_joint_positions_inside_limits(
-        q_at_hi, q_lo, q_hi, eps=_NUDGE_EPS
-    )
+    q_nudged, n_count = _nudge_joint_positions_inside_limits(q_at_hi, q_lo, q_hi, eps=_NUDGE_EPS)
     assert n_count == 1
     q_sol_nudged = one_step(q_nudged)
 
@@ -119,6 +115,4 @@ def test_panda_solve_position_step_at_joint_limit_vs_nudged_seed():
     assert np.all(q_sol_nudged >= q_lo - _LIMIT_SLACK_EPS)
     assert np.all(q_sol_nudged <= q_hi + _LIMIT_SLACK_EPS)
 
-    np.testing.assert_allclose(
-        q_sol_limit, q_sol_nudged, rtol=0.0, atol=_ATOL_Q_SOLUTION_MATCH
-    )
+    np.testing.assert_allclose(q_sol_limit, q_sol_nudged, rtol=0.0, atol=_ATOL_Q_SOLUTION_MATCH)

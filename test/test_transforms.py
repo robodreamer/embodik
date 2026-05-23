@@ -15,11 +15,14 @@ TOL = 1e-10
 
 def test_r2q_q2r_roundtrip_wxyz():
     """Round-trip: R -> r2q (wxyz) -> q2r -> R."""
-    R = np.array([
-        [0.0, -1.0, 0.0],
-        [1.0, 0.0, 0.0],
-        [0.0, 0.0, 1.0],
-    ], dtype=float)
+    R = np.array(
+        [
+            [0.0, -1.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ],
+        dtype=float,
+    )
     q = eik.r2q(R, order="sxyz")
     R2 = eik.q2r(q, order="sxyz")
     np.testing.assert_allclose(R, R2, atol=TOL)
@@ -27,11 +30,14 @@ def test_r2q_q2r_roundtrip_wxyz():
 
 def test_r2q_q2r_roundtrip_xyzw():
     """Round-trip: R -> r2q (xyzw) -> q2r -> R."""
-    R = np.array([
-        [0.0, -1.0, 0.0],
-        [1.0, 0.0, 0.0],
-        [0.0, 0.0, 1.0],
-    ], dtype=float)
+    R = np.array(
+        [
+            [0.0, -1.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ],
+        dtype=float,
+    )
     q = eik.r2q(R, order="xyzs")
     R2 = eik.q2r(q, order="xyzs")
     np.testing.assert_allclose(R, R2, atol=TOL)

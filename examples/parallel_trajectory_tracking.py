@@ -24,14 +24,15 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import math
 import time
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Tuple
-import math
 
 import numpy as np
+from example_helpers.ik_common import DEFAULT_VISER_PORT
 
 # Suppress pytorch_kinematics URDF warnings
 warnings.filterwarnings("ignore", message="Unknown attribute")
@@ -44,10 +45,13 @@ CusadiFunction = None
 
 try:
     import torch
+
     HAS_TORCH = True
     if torch.cuda.is_available():
         try:
-            from embodik.gpu import HAS_CUSADI, CusadiFunction as _CusadiFunction
+            from embodik.gpu import HAS_CUSADI
+            from embodik.gpu import CusadiFunction as _CusadiFunction
+
             if HAS_CUSADI:
                 CusadiFunction = _CusadiFunction
                 HAS_GPU = True
@@ -58,12 +62,14 @@ except ImportError:
 
 try:
     import pytorch_kinematics as pk
+
     HAS_PK = True
 except ImportError:
     pass
 
 try:
     import casadi as ca
+
     HAS_CASADI = True
 except ImportError:
     HAS_CASADI = False
@@ -76,21 +82,26 @@ except ImportError:
 
 try:
     import viser
-    from viser.extras import ViserUrdf
     from robot_descriptions.loaders.yourdfpy import load_robot_description
+    from viser.extras import ViserUrdf
+
     HAS_VISER = True
 except ImportError:
     HAS_VISER = False
-    print("Warning: viser/robot_descriptions not installed. Install with: pip install viser robot_descriptions")
+    print(
+        "Warning: viser/robot_descriptions not installed. Install with: pip install viser robot_descriptions"
+    )
 
 
 # -----------------------------------------------------------------------------
 # Trajectory Generators
 # -----------------------------------------------------------------------------
 
+
 @dataclass
 class TrajectoryShape:
     """Base class for trajectory shapes."""
+
     name: str
     center: np.ndarray
     scale: float
@@ -111,7 +122,14 @@ class TrajectoryShape:
 class CircleTrajectory(TrajectoryShape):
     """Circular trajectory in XY plane."""
 
-    def __init__(self, center: np.ndarray, radius: float, speed: float = 1.0, phase: float = 0.0, tilt: float = 0.0):
+    def __init__(
+        self,
+        center: np.ndarray,
+        radius: float,
+        speed: float = 1.0,
+        phase: float = 0.0,
+        tilt: float = 0.0,
+    ):
         super().__init__("circle", center, radius, phase, speed)
         self.tilt = tilt  # Rotation around X axis
 
@@ -140,7 +158,14 @@ class Figure8Trajectory(TrajectoryShape):
 class SpiralTrajectory(TrajectoryShape):
     """Spiral trajectory with vertical motion."""
 
-    def __init__(self, center: np.ndarray, radius: float, height: float, speed: float = 1.0, phase: float = 0.0):
+    def __init__(
+        self,
+        center: np.ndarray,
+        radius: float,
+        height: float,
+        speed: float = 1.0,
+        phase: float = 0.0,
+    ):
         super().__init__("spiral", center, radius, phase, speed)
         self.height = height
 
@@ -163,12 +188,25 @@ class HeartTrajectory(TrajectoryShape):
         theta = self.phase_offset + self.speed * t
         # Parametric heart curve
         x = self.center[0] + self.scale * 0.5 * (16 * np.sin(theta) ** 3) / 16
-        y = self.center[1] + self.scale * 0.5 * (13 * np.cos(theta) - 5 * np.cos(2*theta) - 2 * np.cos(3*theta) - np.cos(4*theta)) / 16
+        y = (
+            self.center[1]
+            + self.scale
+            * 0.5
+            * (
+                13 * np.cos(theta)
+                - 5 * np.cos(2 * theta)
+                - 2 * np.cos(3 * theta)
+                - np.cos(4 * theta)
+            )
+            / 16
+        )
         z = self.center[2]
         return np.array([x, y, z])
 
 
-def create_diverse_trajectories(n_robots: int, base_center: np.ndarray, grid_spacing: float = 0.4) -> List[TrajectoryShape]:
+def create_diverse_trajectories(
+    n_robots: int, base_center: np.ndarray, grid_spacing: float = 0.4
+) -> List[TrajectoryShape]:
     """Create diverse trajectories for multiple robots arranged in a grid."""
     trajectories = []
 
@@ -214,6 +252,7 @@ def create_diverse_trajectories(n_robots: int, base_center: np.ndarray, grid_spa
 # GPU Solver
 # -----------------------------------------------------------------------------
 
+
 class BatchedPandaKinematics:
     """
     GPU-accelerated batched FK and Jacobian using pytorch_kinematics.
@@ -237,6 +276,7 @@ class BatchedPandaKinematics:
         """Load Panda kinematic chain."""
         try:
             from robot_descriptions.panda_description import URDF_PATH
+
             with open(URDF_PATH, "r", encoding="utf-8") as f:
                 urdf_xml = f.read()
             self.chain = pk.build_serial_chain_from_urdf(urdf_xml, "panda_hand")
@@ -267,7 +307,7 @@ class BatchedPandaKinematics:
 class ParallelGPUSolver:
     """
     GPU-accelerated parallel IK solver using CusADi + pytorch_kinematics.
-    
+
     Computes real FK and Jacobians on GPU, then solves velocity IK in parallel.
     """
 
@@ -276,64 +316,78 @@ class ParallelGPUSolver:
         self.n_dof = n_dof
         self.task_dim = task_dim
         self.n_constraints = n_constraints
-        
+
         self.device = None
         self.fn_casadi = None
         self.fn_cusadi = None
         self.kinematics = None
-        
+
         # Pre-allocated tensors for efficiency
         self._C_batch = None
         self._lower_batch = None
         self._upper_batch = None
-        
+
         if HAS_GPU:
             self.device = torch.device("cuda")
             self._setup_cusadi()
-            
+
             if HAS_PK:
                 self.kinematics = BatchedPandaKinematics(n_robots, device="cuda")
             else:
-                print("[Warning] pytorch_kinematics not available - install with: pip install pytorch-kinematics")
-    
+                print(
+                    "[Warning] pytorch_kinematics not available - install with: pip install pytorch-kinematics"
+                )
+
     def _setup_cusadi(self):
         """Load and setup CusADi function."""
         import os
+
         home = os.path.expanduser("~")
-        casadi_file = os.path.join(home, ".local", "cusadi", "src", "casadi_functions", "fn_velocity_solve.casadi")
-        
+        casadi_file = os.path.join(
+            home, ".local", "cusadi", "src", "casadi_functions", "fn_velocity_solve.casadi"
+        )
+
         if not os.path.exists(casadi_file):
             print(f"[GPU] CasADi file not found: {casadi_file}")
             print("[GPU] Run: pixi run -e cuda export-casadi && compile with CusADi")
             return
-        
+
         try:
             self.fn_casadi = ca.Function.load(casadi_file)
             self.fn_cusadi = CusadiFunction(self.fn_casadi, self.n_robots)
             print(f"[GPU] Loaded CusADi function for {self.n_robots} parallel instances")
         except Exception as e:
             print(f"[GPU] Failed to load CusADi: {e}")
-    
+
     def _prepare_constraints(self, C: np.ndarray, lower: np.ndarray, upper: np.ndarray):
         """Pre-allocate and cache constraint tensors."""
         if self._C_batch is None:
             C_flat = C.flatten()
-            self._C_batch = torch.from_numpy(
-                np.tile(C_flat[np.newaxis, :], (self.n_robots, 1))
-            ).double().to(self.device).contiguous()
-            self._lower_batch = torch.from_numpy(
-                np.tile(lower[np.newaxis, :], (self.n_robots, 1))
-            ).double().to(self.device).contiguous()
-            self._upper_batch = torch.from_numpy(
-                np.tile(upper[np.newaxis, :], (self.n_robots, 1))
-            ).double().to(self.device).contiguous()
-    
+            self._C_batch = (
+                torch.from_numpy(np.tile(C_flat[np.newaxis, :], (self.n_robots, 1)))
+                .double()
+                .to(self.device)
+                .contiguous()
+            )
+            self._lower_batch = (
+                torch.from_numpy(np.tile(lower[np.newaxis, :], (self.n_robots, 1)))
+                .double()
+                .to(self.device)
+                .contiguous()
+            )
+            self._upper_batch = (
+                torch.from_numpy(np.tile(upper[np.newaxis, :], (self.n_robots, 1)))
+                .double()
+                .to(self.device)
+                .contiguous()
+            )
+
     def forward_kinematics(self, q: torch.Tensor) -> torch.Tensor:
         """Compute batched end-effector positions."""
         if self.kinematics is not None:
             return self.kinematics.forward_kinematics(q)
         return torch.zeros(q.shape[0], 3, device=self.device, dtype=torch.float64)
-    
+
     def solve_batched(
         self,
         targets: np.ndarray,  # (n_robots, task_dim)
@@ -352,38 +406,38 @@ class ParallelGPUSolver:
         """
         if self.fn_cusadi is None or self.kinematics is None:
             return np.zeros((self.n_robots, self.n_dof)), 0.0, 0.0
-        
+
         # Prepare constraints (cached after first call)
         self._prepare_constraints(C, lower, upper)
-        
+
         # Compute real Jacobians from current configuration
         torch.cuda.synchronize()
         fk_start = time.perf_counter()
         J = self.kinematics.jacobian(q_current)
         torch.cuda.synchronize()
         fk_elapsed_ms = (time.perf_counter() - fk_start) * 1000
-        
+
         # Use position-only Jacobian if task_dim == 3
         if self.task_dim == 3:
             J = J[:, :3, :]
-        
+
         jacobians_flat = J.reshape(self.n_robots, -1).contiguous()
-        
+
         # Convert targets to tensor
         targets_t = torch.from_numpy(targets.copy()).double().to(self.device).contiguous()
-        
+
         inputs = [targets_t, jacobians_flat, self._C_batch, self._lower_batch, self._upper_batch]
-        
+
         # Solve
         torch.cuda.synchronize()
         ik_start = time.perf_counter()
         self.fn_cusadi.evaluate(inputs)
         torch.cuda.synchronize()
         ik_elapsed_ms = (time.perf_counter() - ik_start) * 1000
-        
+
         # Get output
         velocities = self.fn_cusadi.getDenseOutput(0).cpu().numpy().squeeze()
-        
+
         return velocities, ik_elapsed_ms, fk_elapsed_ms
 
 
@@ -423,6 +477,7 @@ class CPUSolver:
 # Visualization
 # -----------------------------------------------------------------------------
 
+
 def run_visualization(args: argparse.Namespace):
     """Run the interactive visualization with 100 robot instances."""
     if not HAS_VISER:
@@ -442,13 +497,15 @@ def run_visualization(args: argparse.Namespace):
     print(f"Parallel Trajectory Tracking Demo - {n_robots} Robots")
     print(f"{'='*70}")
     print(f"GPU Available: {HAS_GPU}")
-    print(f"Task dimension: {task_dim}D (position{'+ orientation' if args.orientation else ' only'})")
+    print(
+        f"Task dimension: {task_dim}D (position{'+ orientation' if args.orientation else ' only'})"
+    )
     print(f"Visualization mode: {viz_mode}")
     if viz_mode == "hybrid":
         print(f"  - {n_viz_full} full URDF robots + {n_robots - n_viz_full} point markers")
 
     # Create viser server
-    server = viser.ViserServer()
+    server = viser.ViserServer(port=args.port)
 
     # Grid layout with equal spacing
     n_cols = int(np.ceil(np.sqrt(n_robots)))
@@ -475,7 +532,9 @@ def run_visualization(args: argparse.Namespace):
         y = (row - (n_rows - 1) / 2) * grid_spacing
         base_positions.append(np.array([x, y, 0.0]))
 
-    print(f"Grid: {n_cols}x{n_rows}, spacing: {grid_spacing}m, total area: {grid_width:.1f}x{grid_height:.1f}m")
+    print(
+        f"Grid: {n_cols}x{n_rows}, spacing: {grid_spacing}m, total area: {grid_width:.1f}x{grid_height:.1f}m"
+    )
 
     # Panda default configuration (from robot_presets.yaml)
     PANDA_DEFAULT_ARM = np.array([0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785])
@@ -495,7 +554,7 @@ def run_visualization(args: argparse.Namespace):
         full_config = np.zeros(n_actuated)
         full_config[:n_dof] = PANDA_DEFAULT_ARM.copy()
         if n_actuated > n_dof:
-            full_config[n_dof:] = PANDA_GRIPPER_OPEN[:n_actuated - n_dof]
+            full_config[n_dof:] = PANDA_GRIPPER_OPEN[: n_actuated - n_dof]
         robot_configs.append(full_config)
 
         # Get base position for this robot
@@ -580,7 +639,7 @@ def run_visualization(args: argparse.Namespace):
     # Create GPU solver with real FK/Jacobians
     gpu_solver = ParallelGPUSolver(n_robots, n_dof, task_dim) if HAS_GPU else None
     cpu_solver = CPUSolver(n_robots, n_dof, task_dim)
-    
+
     if gpu_solver is not None and gpu_solver.kinematics is not None:
         print(f"[Mode] Real FK + Jacobians via pytorch_kinematics (GPU)")
     else:
@@ -593,7 +652,9 @@ def run_visualization(args: argparse.Namespace):
 
     # GUI
     with server.gui.add_folder("Controls"):
-        use_gpu_checkbox = server.gui.add_checkbox("Use GPU", initial_value=HAS_GPU and args.use_gpu)
+        use_gpu_checkbox = server.gui.add_checkbox(
+            "Use GPU", initial_value=HAS_GPU and args.use_gpu
+        )
         speed_slider = server.gui.add_slider("Speed", min=0.1, max=3.0, initial_value=1.0, step=0.1)
         pause_checkbox = server.gui.add_checkbox("Pause", initial_value=False)
 
@@ -606,12 +667,11 @@ def run_visualization(args: argparse.Namespace):
 
     with server.gui.add_folder("Info"):
         info_text = server.gui.add_text(
-            "Status",
-            initial_value=f"{n_robots} robots | Real FK/Jacobians"
+            "Status", initial_value=f"{n_robots} robots | Real FK/Jacobians"
         )
 
     print(f"\nStarting simulation loop...")
-    print(f"Open browser to: http://localhost:8080")
+    print(f"Open browser to: http://localhost:{args.port}")
     print(f"Press Ctrl+C to stop\n")
 
     # Simulation parameters
@@ -627,8 +687,7 @@ def run_visualization(args: argparse.Namespace):
     # Joint configurations as torch tensor for GPU FK/Jacobians
     if HAS_TORCH and gpu_solver is not None:
         q_tensor = torch.tensor(
-            np.array([cfg[:n_dof] for cfg in robot_configs]),
-            device="cuda", dtype=torch.float64
+            np.array([cfg[:n_dof] for cfg in robot_configs]), device="cuda", dtype=torch.float64
         )
     else:
         q_tensor = None
@@ -649,17 +708,24 @@ def run_visualization(args: argparse.Namespace):
                     targets[i] = vel_3d
 
             # Solve IK with real FK/Jacobians
-            if use_gpu_checkbox.value and gpu_solver is not None and gpu_solver.fn_cusadi is not None and q_tensor is not None:
-                velocities, ik_ms, fk_ms = gpu_solver.solve_batched(targets, q_tensor, C, lower, upper)
-                
+            if (
+                use_gpu_checkbox.value
+                and gpu_solver is not None
+                and gpu_solver.fn_cusadi is not None
+                and q_tensor is not None
+            ):
+                velocities, ik_ms, fk_ms = gpu_solver.solve_batched(
+                    targets, q_tensor, C, lower, upper
+                )
+
                 ik_time_avg = 0.9 * ik_time_avg + 0.1 * ik_ms
                 fk_time_avg = 0.9 * fk_time_avg + 0.1 * fk_ms
                 total_ms = ik_time_avg + fk_time_avg
-                
+
                 ik_time_text.value = f"{ik_time_avg:.2f} ms"
                 fk_time_text.value = f"{fk_time_avg:.2f} ms"
                 total_time_text.value = f"{total_ms:.2f} ms"
-                
+
                 throughput = n_robots / (total_ms / 1000) if total_ms > 0 else 0
                 throughput_text.value = f"{throughput:.0f} solves/sec"
             else:
@@ -736,7 +802,7 @@ def run_benchmark(args: argparse.Namespace):
     C = np.eye(n_dof)
     lower = np.full(n_dof, -2.0)
     upper = np.full(n_dof, 2.0)
-    
+
     # Create q_tensor with default Panda configuration
     q_default = np.tile(BatchedPandaKinematics.DEFAULT_CONFIG, (n_robots, 1))
     q_tensor = torch.tensor(q_default, device="cuda", dtype=torch.float64)
@@ -759,13 +825,13 @@ def run_benchmark(args: argparse.Namespace):
             _, ik_elapsed, fk_elapsed = gpu_solver.solve_batched(targets, q_tensor, C, lower, upper)
             ik_times.append(ik_elapsed)
             fk_times.append(fk_elapsed)
-        
+
         ik_avg = np.mean(ik_times)
         ik_std = np.std(ik_times)
         fk_avg = np.mean(fk_times)
         fk_std = np.std(fk_times)
         gpu_avg = ik_avg + fk_avg
-        
+
         print(f"GPU IK Solver: {ik_avg:.2f} ± {ik_std:.2f} ms")
         print(f"GPU FK/Jacobian: {fk_avg:.2f} ± {fk_std:.2f} ms")
         print(f"GPU Total: {gpu_avg:.2f} ms")
@@ -780,7 +846,7 @@ def run_benchmark(args: argparse.Namespace):
         U, s, Vt = np.linalg.svd(jacobians[i], full_matrices=False)
         s = np.clip(s, 0.3, 3.0)
         jacobians[i] = U @ np.diag(s) @ Vt
-    
+
     cpu_times = []
     for _ in range(n_runs):
         _, elapsed = cpu_solver.solve_batched(targets[:cpu_subset], jacobians, C, lower, upper)
@@ -808,35 +874,43 @@ def main():
     parser = argparse.ArgumentParser(
         description="Parallel Trajectory Tracking Demo with 100 Robots",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=__doc__
+        epilog=__doc__,
     )
     parser.add_argument(
-        "--n-robots", type=int, default=100,
-        help="Number of robot instances (default: 100)"
+        "--n-robots", type=int, default=100, help="Number of robot instances (default: 100)"
     )
     parser.add_argument(
-        "--use-gpu", action="store_true", default=True,
-        help="Use GPU solver (default: True)"
+        "--use-gpu", action="store_true", default=True, help="Use GPU solver (default: True)"
     )
     parser.add_argument(
-        "--orientation", action="store_true",
-        help="Include orientation in task (6D instead of 3D)"
+        "--orientation", action="store_true", help="Include orientation in task (6D instead of 3D)"
     )
     parser.add_argument(
-        "--benchmark", action="store_true",
-        help="Run benchmark without visualization"
+        "--benchmark", action="store_true", help="Run benchmark without visualization"
     )
     parser.add_argument(
-        "--viz-mode", choices=["full", "hybrid", "points"], default="hybrid",
-        help="Visualization mode: 'full' (all URDF), 'hybrid' (some URDF + points), 'points' (all points)"
+        "--port",
+        type=int,
+        default=DEFAULT_VISER_PORT,
+        help=f"Viser server port for visualization mode (default: {DEFAULT_VISER_PORT})",
     )
     parser.add_argument(
-        "--n-viz-full", type=int, default=9,
-        help="Number of full URDF robots in hybrid mode (default: 9)"
+        "--viz-mode",
+        choices=["full", "hybrid", "points"],
+        default="hybrid",
+        help="Visualization mode: 'full' (all URDF), 'hybrid' (some URDF + points), 'points' (all points)",
     )
     parser.add_argument(
-        "--spacing", type=float, default=1.0,
-        help="Grid spacing between robots in meters (default: 1.0)"
+        "--n-viz-full",
+        type=int,
+        default=9,
+        help="Number of full URDF robots in hybrid mode (default: 9)",
+    )
+    parser.add_argument(
+        "--spacing",
+        type=float,
+        default=1.0,
+        help="Grid spacing between robots in meters (default: 1.0)",
     )
 
     args = parser.parse_args()

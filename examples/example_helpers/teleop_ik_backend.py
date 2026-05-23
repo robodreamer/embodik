@@ -6,10 +6,9 @@ import time
 from dataclasses import dataclass
 from typing import Any, Optional
 
+import embodik
 import numpy as np
 import pinocchio as pin
-
-import embodik
 from example_helpers.ik_common import (
     DEFAULT_ADAPTIVE_DT,
     DEFAULT_ADAPTIVE_DT_MAX_SCALE,
@@ -20,6 +19,7 @@ from example_helpers.ik_common import (
     DEFAULT_ROT_GAIN,
     DEFAULT_SOLVER_DT,
     apply_collision_tuning_mode,
+    configure_solver_runtime_policy,
 )
 from utils.robot_models import ensure_ros_package_path
 
@@ -52,8 +52,7 @@ class TeleopIKBackend:
         self.robot = embodik.RobotModel(str(cfg.urdf_path), floating_base=False)
         self.solver = embodik.KinematicsSolver(self.robot)
         self.solver.dt = DEFAULT_SOLVER_DT
-        self.solver.set_damping(0.1)
-        self.solver.set_tolerance(0.1)
+        configure_solver_runtime_policy(self.solver)
         self._collision_tuning_mode = DEFAULT_COLLISION_TUNING_MODE
         apply_collision_tuning_mode(self.solver, self._collision_tuning_mode)
         try:
@@ -71,9 +70,7 @@ class TeleopIKBackend:
                 print(f"Warning: failed to apply collision exclusions: {exc}")
         self._collision_enabled = False
         self.nullspace_joint_weights = (
-            nullspace_joint_weights.copy()
-            if nullspace_joint_weights is not None
-            else None
+            nullspace_joint_weights.copy() if nullspace_joint_weights is not None else None
         )
 
         self.default_arm = cfg.default_configuration.copy()
@@ -81,10 +78,10 @@ class TeleopIKBackend:
             padding = np.zeros(self.arm_dofs - len(self.default_arm), dtype=float)
             self.default_arm = np.concatenate([self.default_arm, padding])
         elif len(self.default_arm) > self.arm_dofs:
-            self.default_arm = self.default_arm[:self.arm_dofs]
+            self.default_arm = self.default_arm[: self.arm_dofs]
 
         self.default_full = np.zeros(self.full_dofs, dtype=float)
-        self.default_full[:self.arm_dofs] = self.default_arm
+        self.default_full[: self.arm_dofs] = self.default_arm
         self.q = self.default_full.copy()
         self.robot.update_configuration(self.q)
 
@@ -116,10 +113,12 @@ class TeleopIKBackend:
         return self.robot.get_frame_pose(self.cfg.target_link)
 
     def get_q(self) -> np.ndarray:
-        return self.q[:self.arm_dofs].copy()
+        return self.q[: self.arm_dofs].copy()
 
     def set_q(self, q_arm: np.ndarray) -> None:
-        self.q[:self.arm_dofs] = np.clip(q_arm, self.lower[:self.arm_dofs], self.upper[:self.arm_dofs])
+        self.q[: self.arm_dofs] = np.clip(
+            q_arm, self.lower[: self.arm_dofs], self.upper[: self.arm_dofs]
+        )
         self.robot.update_configuration(self.q)
 
     def solve_step(
@@ -162,9 +161,7 @@ class TeleopIKBackend:
         self._step_opts.adaptive_dt_reference_distance = float(adaptive_dt_reference_distance)
 
         ik_start = time.perf_counter()
-        result = self.solver.solve_position_step(
-            self.q, target, "ee_task", self._step_opts
-        )
+        result = self.solver.solve_position_step(self.q, target, "ee_task", self._step_opts)
         elapsed_ms = (time.perf_counter() - ik_start) * 1000.0
 
         if result.status in (
@@ -173,7 +170,7 @@ class TeleopIKBackend:
             embodik.SolverStatus.NUMERICAL_ERROR,
             embodik.SolverStatus.NO_PROGRESS,
         ):
-            self.q = np.clip(np.array(result.q_solution), self.lower, self.upper)
+            self.q = np.asarray(result.q_solution, dtype=float)
             self.robot.update_configuration(self.q)
 
         return IKResult(
@@ -198,7 +195,8 @@ class TeleopIKBackend:
         if enable and not self._collision_enabled:
             try:
                 apply_collision_tuning_mode(
-                    self.solver, getattr(self, "_collision_tuning_mode", DEFAULT_COLLISION_TUNING_MODE)
+                    self.solver,
+                    getattr(self, "_collision_tuning_mode", DEFAULT_COLLISION_TUNING_MODE),
                 )
                 self.solver.configure_collision_constraint(
                     min_distance=float(min_distance),

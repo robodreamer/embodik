@@ -7,7 +7,6 @@ import time
 
 import embodik
 import numpy as np
-from embodik.interactive_ik import joint_velocity_norm
 from embodik.utils import q2r, r2q
 
 
@@ -135,48 +134,6 @@ def _enum_names(values) -> str:
     return ",".join(names) if names else "--"
 
 
-def _needs_min_error_recovery(result) -> bool:
-    if result.status == embodik.SolverStatus.NUMERICAL_ERROR:
-        return True
-    if result.status != embodik.SolverStatus.NO_PROGRESS:
-        return False
-    dq = np.asarray(getattr(result, "joint_velocities", []), dtype=float)
-    if dq.size and np.linalg.norm(dq) > 1e-10:
-        return False
-    msg = str(getattr(result, "status_message", "")).lower()
-    scales = [abs(float(s)) for s in getattr(result, "task_scales", [])]
-    zero_scales = bool(scales) and max(scales) <= 1e-10
-    return "non-finite" in msg or zero_scales
-
-
-def _scaled_targets(targets, gain_scale: float):
-    return [
-        embodik.TaskTarget(
-            t.task_name,
-            np.asarray(t.target_pose, dtype=float),
-            float(t.position_gain) * gain_scale,
-            float(t.orientation_gain) * gain_scale,
-        )
-        for t in targets
-    ]
-
-
-def _scaled_secondary_targets(targets, secondary_gain_scale: float):
-    secondary_names = {"torso_upright_ori"}
-    out = []
-    for t in targets:
-        scale = secondary_gain_scale if t.task_name in secondary_names else 1.0
-        out.append(
-            embodik.TaskTarget(
-                t.task_name,
-                np.asarray(t.target_pose, dtype=float),
-                float(t.position_gain) * scale,
-                float(t.orientation_gain) * scale,
-            )
-        )
-    return out
-
-
 def _clone_position_step_options(opts):
     clone = embodik.PositionStepOptions()
     for name in (
@@ -279,19 +236,6 @@ def _clear_interactive_solver_transients(solver) -> None:
     _configure_interactive_elastic_band(solver)
 
 
-def _post_step_collision_distance(solver, q: np.ndarray) -> float:
-    """Use the solver's cached collision guard before falling back to a full scan."""
-    for name in ("evaluate_post_step_collision_distance", "evaluate_min_collision_distance"):
-        fn = getattr(solver, name, None)
-        if fn is None:
-            continue
-        try:
-            return float(fn(q))
-        except Exception:
-            continue
-    return float("inf")
-
-
 def _current_collision_min_distance(solver, q_eval: np.ndarray | None = None) -> float | None:
     """Read the current configured collision min distance without a full app-side scan."""
     try:
@@ -361,12 +305,6 @@ def _configure_g1_collision_constraint(
         )
         if hasattr(solver, "enable_stall_handler"):
             solver.enable_stall_handler(float(min_distance_m))
-            if hasattr(solver, "configure_stall_handler"):
-                solver.configure_stall_handler(
-                    stall_threshold=3,
-                    restore_rate=0.2,
-                    floor_fraction=0.0,
-                )
     except RuntimeError:
         if hasattr(solver, "clear_collision_constraint"):
             solver.clear_collision_constraint()
@@ -374,132 +312,10 @@ def _configure_g1_collision_constraint(
             solver.disable_stall_handler()
 
 
-def _attempt_g1_penetration_escape_burst(
-    *,
-    robot,
-    solver,
-    q_current: np.ndarray,
-    targets,
-    options,
-    target_tasks,
-    frame_targets,
-    q_lo: np.ndarray,
-    q_hi: np.ndarray,
-    min_distance_m: float,
-    max_constraints: int,
-    tuning_mode: str,
-    include_pairs: list[tuple[str, str]],
-    trial_steps: int = 3,
-    improvement_epsilon: float = 1e-4,
-) -> np.ndarray | None:
-    """Temporarily drop collision to accept only a measured pull-away improvement."""
-    if not hasattr(solver, "evaluate_collision_debug") or not hasattr(
-        solver, "clear_collision_constraint"
-    ):
-        return None
-    try:
-        dbg_before = solver.evaluate_collision_debug(np.asarray(q_current, dtype=float))
-    except Exception:
-        return None
-    if dbg_before is None or not np.isfinite(float(dbg_before.distance)):
-        return None
-    before_distance = float(dbg_before.distance)
-    if before_distance >= float(min_distance_m):
-        return None
-
-    q_seed = np.asarray(q_current, dtype=float).copy()
-    q_trial = q_seed.copy()
-    had_stall_recovery = bool(getattr(options, "stall_recovery", False))
-    try:
-        solver.clear_collision_constraint()
-        if hasattr(solver, "disable_stall_handler"):
-            solver.disable_stall_handler()
-        if hasattr(options, "stall_recovery"):
-            options.stall_recovery = False
-        burst_opts = _clone_position_step_options(options)
-        burst_opts.max_steps = max(2, int(getattr(options, "max_steps", 1)))
-        for _ in range(max(int(trial_steps), 1)):
-            result, _recovered = _solve_quality_step(
-                solver,
-                robot,
-                q_trial,
-                q_lo,
-                q_hi,
-                targets,
-                burst_opts,
-                target_tasks,
-                frame_targets,
-                prefer_min_error=True,
-                error_limit=0.08,
-            )
-            if not hasattr(result, "q_solution"):
-                break
-            q_trial = _clip_q(robot, np.asarray(result.q_solution, dtype=float), q_lo, q_hi)
-            if not np.all(np.isfinite(q_trial)):
-                return None
-            robot.update_configuration(q_trial)
-        dbg_after = solver.evaluate_collision_debug(q_trial)
-        if dbg_after is None or not np.isfinite(float(dbg_after.distance)):
-            return None
-        if float(dbg_after.distance) > before_distance + float(improvement_epsilon):
-            return q_trial
-        return None
-    finally:
-        if hasattr(options, "stall_recovery"):
-            options.stall_recovery = had_stall_recovery
-        _configure_g1_collision_constraint(
-            solver,
-            enabled=True,
-            min_distance_m=min_distance_m,
-            max_constraints=max_constraints,
-            tuning_mode=tuning_mode,
-            include_pairs=include_pairs,
-        )
-        robot.update_configuration(q_seed)
-
-
-def _solve_targets_as_min_error(solver, q, targets, opts, target_tasks):
-    previous_modes = [task.solve_mode for task in target_tasks]
-    previous_fallbacks = [bool(task.allow_min_error_fallback) for task in target_tasks]
-    try:
-        if hasattr(solver, "elastic_band_enabled") and solver.elastic_band_enabled():
-            solver.disable_elastic_band()
-        for task in target_tasks:
-            task.solve_mode = embodik.TaskSolveMode.MIN_ERROR
-            task.allow_min_error_fallback = True
-        result = solver.solve_position_step(q, targets, opts)
-        if _needs_min_error_recovery(result):
-            result = solver.solve_position_step(q, _scaled_targets(targets, 0.35), opts)
-        if _needs_min_error_recovery(result):
-            result = solver.solve_position_step(q, _scaled_targets(targets, 0.15), opts)
-    finally:
-        for task, mode, fallback in zip(target_tasks, previous_modes, previous_fallbacks):
-            task.solve_mode = mode
-            task.allow_min_error_fallback = fallback
-        _configure_interactive_elastic_band(solver)
-    return result
-
-
-def _solve_with_min_error_recovery(solver, q, targets, opts, target_tasks, prefer_min_error=False):
-    if prefer_min_error:
-        return _solve_targets_as_min_error(solver, q, targets, opts, target_tasks), False
-
-    result = solver.solve_position_step(q, targets, opts)
-    if not _needs_min_error_recovery(result):
-        return result, False
-
-    retry = _solve_targets_as_min_error(solver, q, targets, opts, target_tasks)
-    if hasattr(retry, "q_solution") and retry.status != embodik.SolverStatus.NUMERICAL_ERROR:
-        return retry, True
-    return result, False
-
-
 def _solve_quality_step(
     solver,
     robot,
     q,
-    q_lo,
-    q_hi,
     targets,
     opts,
     target_tasks,
@@ -507,61 +323,5 @@ def _solve_quality_step(
     prefer_min_error=False,
     error_limit=0.03,
 ):
-    q_current = np.asarray(q, dtype=float)
-    robot.update_configuration(q_current)
-    pre_error = _max_frame_target_position_error(robot, frame_targets)
-    attempts = [
-        (targets, opts, prefer_min_error, False),
-        (_scaled_secondary_targets(targets, 0.35), opts, True, True),
-        (_scaled_secondary_targets(targets, 0.0), opts, True, True),
-    ]
-    extended_opts = _clone_position_step_options(opts)
-    extended_opts.max_steps = max(int(getattr(opts, "max_steps", 1)), 10)
-    attempts.append((_scaled_secondary_targets(targets, 0.0), extended_opts, True, True))
-
-    best = None
-    best_error = float("inf")
-    for attempt_targets, attempt_opts, attempt_min_error, recovered in attempts:
-        result, min_error_recovered = _solve_with_min_error_recovery(
-            solver,
-            q_current,
-            attempt_targets,
-            attempt_opts,
-            target_tasks,
-            prefer_min_error=attempt_min_error,
-        )
-        if (
-            not hasattr(result, "q_solution")
-            or result.status == embodik.SolverStatus.COLLISION_VIOLATED
-        ):
-            candidate_error = float("inf")
-        else:
-            q_candidate = _clip_q(robot, np.asarray(result.q_solution, dtype=float), q_lo, q_hi)
-            if np.all(np.isfinite(q_candidate)):
-                robot.update_configuration(q_candidate)
-                candidate_error = _max_frame_target_position_error(robot, frame_targets)
-            else:
-                candidate_error = float("inf")
-
-        if candidate_error < best_error:
-            best = (result, bool(recovered or min_error_recovered))
-            best_error = candidate_error
-        result_dq = np.asarray(getattr(result, "joint_velocities", []), dtype=float)
-        result_moved = bool(result_dq.size and np.linalg.norm(result_dq) > 1e-10)
-        result_productive = result.status == embodik.SolverStatus.SUCCESS or result_moved
-        improved = candidate_error <= max(pre_error - 1e-4, pre_error * 0.98)
-        already_accurate = candidate_error <= 0.005
-        if already_accurate or (result_productive and (candidate_error <= error_limit or improved)):
-            break
-
-    robot.update_configuration(q_current)
-    if best is None:
-        return _solve_with_min_error_recovery(
-            solver,
-            q_current,
-            targets,
-            opts,
-            target_tasks,
-            prefer_min_error=prefer_min_error,
-        )
-    return best
+    del robot, target_tasks, frame_targets, prefer_min_error, error_limit
+    return solver.solve_position_step(np.asarray(q, dtype=float), targets, opts), False

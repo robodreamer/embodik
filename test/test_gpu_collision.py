@@ -5,9 +5,10 @@ These tests validate that the Warp-based collision detection matches
 hpp-fcl/Pinocchio collision results within specified tolerances.
 """
 
-import pytest
-import numpy as np
 import os
+
+import numpy as np
+import pytest
 
 # Test tolerances
 DISTANCE_ATOL = 1e-3  # Distance tolerance (mesh discretization)
@@ -148,8 +149,8 @@ class TestGPUvsCPUCollision:
         try:
             import embodik as eik
             from embodik.gpu.warp_collision import (
-                compute_collision_distances_batched,
                 check_warp_availability,
+                compute_collision_distances_batched,
             )
         except ImportError:
             pytest.skip("Required modules not available")

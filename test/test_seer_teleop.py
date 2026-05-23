@@ -83,7 +83,9 @@ def test_seer_controller_handles_xvisio_native_load_failure(monkeypatch) -> None
     assert controller.connected is False
 
 
-def test_seer_button_mapping_uses_a_for_stream_trigger_fraction_and_b_for_reset(monkeypatch) -> None:
+def test_seer_button_mapping_uses_a_for_stream_trigger_fraction_and_b_for_reset(
+    monkeypatch,
+) -> None:
     states = iter(
         [
             (0, 0, 0),
@@ -124,7 +126,9 @@ def test_seer_button_mapping_uses_a_for_stream_trigger_fraction_and_b_for_reset(
     controller.process_buttons()
     assert controller.streaming is True
     assert controller.gripper_closed is True
-    assert controller.trigger_fraction == pytest.approx((seer_teleop.TRIGGER_THRESHOLD + 1) / seer_teleop.TRIGGER_MAX_VALUE)
+    assert controller.trigger_fraction == pytest.approx(
+        (seer_teleop.TRIGGER_THRESHOLD + 1) / seer_teleop.TRIGGER_MAX_VALUE
+    )
 
     controller.process_buttons()
     assert events == ["stream_start", "reset"]
@@ -137,7 +141,9 @@ def test_seer_button_mapping_uses_a_for_stream_trigger_fraction_and_b_for_reset(
     controller.process_buttons()
     assert controller.streaming is True
     assert controller.gripper_closed is True
-    assert controller.trigger_fraction == pytest.approx((seer_teleop.TRIGGER_THRESHOLD + 1) / seer_teleop.TRIGGER_MAX_VALUE)
+    assert controller.trigger_fraction == pytest.approx(
+        (seer_teleop.TRIGGER_THRESHOLD + 1) / seer_teleop.TRIGGER_MAX_VALUE
+    )
 
     controller.process_buttons()
     assert controller.streaming is False

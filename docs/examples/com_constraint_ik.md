@@ -1,6 +1,6 @@
 # CoM Constraint Example Overview
 
-Overview for `examples/08_com_constraint_example.py`.
+Overview for `examples/04_com_constraint_example.py`.
 
 ## What It Demonstrates
 
@@ -22,7 +22,7 @@ support-polygon constraint:
 | Step IK | `solve_position_step(q_current, target_pose, "ee_task", step_opts)` | Apply one interactive IK update using the registered tasks and CoM constraint. |
 | Inspect diagnostics | `result.task_modes_effective`, `result.task_used_fallback`, `result.task_scales` | Display effective mode, fallback use, and scale while the demo runs. |
 
-Use `examples/08_com_constraint_example.py` for the exact slider values,
+Use `examples/04_com_constraint_example.py` for the exact slider values,
 visualization markers, and support-polygon setup.
 
 ## Run
@@ -32,13 +32,13 @@ Install and copy the example bundle once using the
 
 ```bash
 cd embodik_examples
-python 08_com_constraint_example.py
+python 04_com_constraint_example.py
 ```
 
 For repository development, use Pixi:
 
 ```bash
-pixi run python examples/08_com_constraint_example.py
+pixi run python examples/04_com_constraint_example.py
 ```
 
 The example defaults to the Panda preset; pass `--robot <key>` to use another

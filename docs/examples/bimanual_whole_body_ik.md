@@ -1,6 +1,6 @@
 # Bimanual Whole-Body IK Example
 
-`examples/12_bimanual_whole_body_ik.py` is a Viser-based bimanual whole-body IK
+`examples/06_bimanual_whole_body_ik.py` is a Viser-based bimanual whole-body IK
 demo for ROBOTIS AI Worker FFW models and RB-Y1. It uses the public
 `ROBOTIS-GIT/ai_worker` repository for AI Worker visual URDF assets, bundled
 reduced collision assets for AI Worker collision-aware IK, and
@@ -23,20 +23,20 @@ Install and copy the example bundle once using the
 
 ```bash
 cd embodik_examples
-python 12_bimanual_whole_body_ik.py
+python 06_bimanual_whole_body_ik.py
 ```
 
 If you are not activating the venv, use the Python path printed by
 `embodik-examples --copy`, for example:
 
 ```bash
-/path/to/.venv/bin/python 12_bimanual_whole_body_ik.py
+/path/to/.venv/bin/python 06_bimanual_whole_body_ik.py
 ```
 
 From a repository checkout, use Pixi:
 
 ```bash
-pixi run python examples/12_bimanual_whole_body_ik.py
+pixi run python examples/06_bimanual_whole_body_ik.py
 ```
 
 The default robot model is AI Worker `sg2`. To use the other worker variant,
@@ -44,8 +44,8 @@ pass `--variant bg2`; to launch RB-Y1, pass `--robot rby1`. For example, from
 copied examples:
 
 ```bash
-python 12_bimanual_whole_body_ik.py --variant bg2
-python 12_bimanual_whole_body_ik.py --robot rby1
+python 06_bimanual_whole_body_ik.py --variant bg2
+python 06_bimanual_whole_body_ik.py --robot rby1
 ```
 
 ## Asset Resolution

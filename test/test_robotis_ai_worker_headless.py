@@ -10,26 +10,37 @@ import pytest
 
 embodik = pytest.importorskip("embodik")
 
+from embodik.interactive_ik import (  # noqa: E402
+    is_collision_boundary_stall as _is_collision_boundary_stall,
+)
+from embodik.interactive_ik import is_com_boundary_stall as _is_com_boundary_stall
+from embodik.interactive_ik import (
+    robust_solve_position_step,
+)
 from examples.example_helpers.common_bimanual_model_utils import (  # noqa: E402
     default_common_bimanual_ik_joint_names,
     resolve_common_bimanual_frames,
-)
-from examples.example_helpers.public_ai_worker_paths import (
-    resolve_public_ai_worker_urdf_paths,
-)  # noqa: E402
-from embodik.interactive_ik import (  # noqa: E402
-    is_collision_boundary_stall as _is_collision_boundary_stall,
-    is_com_boundary_stall as _is_com_boundary_stall,
 )
 from examples.example_helpers.common_bimanual_teleop_app import (  # noqa: E402
     DEFAULT_COMMON_BIMANUAL_SEED,
     _apply_named_joint_seed,
     _apply_soft_lift_margin,
     _configure_collision_constraint,
-    _generate_consecutive_collision_exclusions,
     _generate_common_bimanual_collision_include_pairs,
+    _generate_consecutive_collision_exclusions,
 )
-from examples.example_helpers.robust_ik_runtime import robust_solve_position_step  # noqa: E402
+from examples.example_helpers.public_ai_worker_paths import (  # noqa: E402
+    resolve_public_ai_worker_urdf_paths,
+)
+from examples.harnesses.ai_worker_weighted_fallback_harness import (  # noqa: E402
+    run_ai_worker_weighted_fallback_comparison,
+)
+
+
+def _disable_weighted_fallback(solver: embodik.KinematicsSolver) -> None:
+    cfg = embodik.SolverRuntimeConfig()
+    cfg.weighted_fallback_enabled = False
+    solver.configure_runtime(cfg)
 
 
 def _resolve_worker_urdf() -> Path:
@@ -65,6 +76,28 @@ def _load_worker_collision_robot():
     return robot, frames, Path(urdf)
 
 
+def _load_reduced_worker_robot():
+    urdf = _resolve_worker_urdf()
+    if not Path(urdf).is_file():
+        pytest.skip("local FFW SG2 URDF not available")
+    full = embodik.RobotModel(str(urdf), floating_base=False)
+    robot = embodik.RobotModel(
+        str(urdf),
+        actuated_joint_names=default_common_bimanual_ik_joint_names(full.get_joint_names()),
+        floating_base=False,
+    )
+    frames = resolve_common_bimanual_frames(robot.get_frame_names())
+    q_lo, q_hi = robot.get_joint_limits()
+    joint_name_to_cfg = {
+        name: int(robot.get_joint_config_index(name)) for name in robot.get_joint_names()
+    }
+    q0 = _apply_named_joint_seed(
+        robot.neutral_configuration(), joint_name_to_cfg, q_lo, q_hi, DEFAULT_COMMON_BIMANUAL_SEED
+    )
+    q0 = _apply_soft_lift_margin(q0, joint_name_to_cfg=joint_name_to_cfg, q_lo=q_lo, q_hi=q_hi)
+    return robot, frames, np.asarray(q0, dtype=float)
+
+
 def _frame_pose_matrix(robot, frame_name: str) -> np.ndarray:
     pose = robot.get_frame_pose(frame_name)
     T = np.eye(4, dtype=float)
@@ -91,6 +124,77 @@ def _build_locked_velocity_indices(robot) -> list[int]:
     return sorted(set(locked))
 
 
+def _run_limited_bimanual_pose_group_case(
+    *,
+    mode: str,
+    limit_width: float,
+    target_offset: np.ndarray,
+    steps: int = 40,
+):
+    robot, frames, q0 = _load_reduced_worker_robot()
+    robot.update_configuration(q0)
+    lower, upper = robot.get_joint_limits()
+    lower = lower.copy()
+    upper = upper.copy()
+    for idx in range(len(q0)):
+        lower[idx] = max(lower[idx], q0[idx] - limit_width)
+        upper[idx] = min(upper[idx], q0[idx] + limit_width)
+    robot.set_joint_limits(lower, upper)
+
+    solver = embodik.KinematicsSolver(robot)
+    solver.dt = 0.01
+    solver.enable_position_limits(True)
+    solver.enable_velocity_limits(True)
+    _disable_weighted_fallback(solver)
+    cfg = embodik.SolverRuntimeConfig()
+    cfg.weighted_fallback_enabled = False
+    cfg.enable_auto_task_layout = mode == "auto"
+    solver.configure_runtime(cfg)
+
+    groups = [
+        solver.add_pose_task_group(
+            "right_tool_pose",
+            frames["right_tool"],
+            merged_pose=mode == "merged",
+            auto_switch=mode == "auto",
+        ),
+        solver.add_pose_task_group(
+            "left_tool_pose",
+            frames["left_tool"],
+            merged_pose=mode == "merged",
+            auto_switch=mode == "auto",
+        ),
+    ]
+    right_target = _frame_pose_matrix(robot, frames["right_tool"])
+    left_target = _frame_pose_matrix(robot, frames["left_tool"])
+    right_target[:3, 3] += np.asarray(target_offset, dtype=float)
+    left_target[:3, 3] += np.asarray(target_offset, dtype=float) * np.array(
+        [1.0, -1.0, 1.0], dtype=float
+    )
+
+    opts = embodik.PositionStepOptions()
+    opts.max_steps = 1
+    statuses = []
+    layouts = []
+    errors = []
+    moved_frames = 0
+    q = q0.copy()
+    for _ in range(steps):
+        targets = []
+        for group, target in zip(groups, (right_target, left_target)):
+            group.set_target(target, position_gain=10.0, rotation_gain=3.0)
+            targets.extend(group.task_targets())
+        result = solver.solve_position_step(q, targets, opts)
+        q_next = np.asarray(result.q_solution, dtype=float)
+        if float(np.linalg.norm(q_next - q)) > 1e-9:
+            moved_frames += 1
+        q = q_next
+        statuses.append(result.status)
+        layouts.append(result.diagnostics.active_task_layout)
+        errors.append(float(result.position_error))
+    return statuses, layouts, errors, moved_frames
+
+
 def test_reduced_worker_ik_joint_set_excludes_wheels_and_head() -> None:
     urdf = _resolve_worker_urdf()
     reduced = embodik.RobotModel(
@@ -107,6 +211,47 @@ def test_reduced_worker_ik_joint_set_excludes_wheels_and_head() -> None:
     assert not any("wheel_" in name for name in joint_names)
     assert not any(name.startswith("head_") for name in joint_names)
     assert not any(name.startswith("gripper_") for name in joint_names)
+
+
+def test_ai_worker_weighted_fallback_accepts_useful_limit_solution() -> None:
+    comparison = run_ai_worker_weighted_fallback_comparison()
+
+    assert comparison.prioritized_status == embodik.SolverStatus.INFEASIBLE
+    assert comparison.weighted_status == embodik.SolverStatus.SUCCESS
+    assert comparison.weighted_fallback_used is True
+    assert comparison.weighted_advisory_available is True
+    assert abs(comparison.weighted_solution[comparison.blocked_index]) <= 1e-9
+    assert comparison.weighted_solution[comparison.secondary_index] > 0.35
+    assert comparison.prioritized_solution[comparison.secondary_index] > 0.35
+    assert np.all(comparison.q_next <= comparison.upper + 1e-9)
+    assert np.all(comparison.q_next >= comparison.lower - 1e-9)
+    assert "constrained weighted fallback accepted" in comparison.weighted_status_message
+
+
+def test_ai_worker_auto_pose_layout_keeps_bimanual_case_productive() -> None:
+    offset = np.array([-0.18, 0.12, 0.03], dtype=float)
+
+    merged_statuses, merged_layouts, merged_errors, merged_moved = (
+        _run_limited_bimanual_pose_group_case(mode="merged", limit_width=0.04, target_offset=offset)
+    )
+    split_statuses, split_layouts, split_errors, split_moved = (
+        _run_limited_bimanual_pose_group_case(mode="split", limit_width=0.04, target_offset=offset)
+    )
+    auto_statuses, auto_layouts, auto_errors, auto_moved = _run_limited_bimanual_pose_group_case(
+        mode="auto", limit_width=0.04, target_offset=offset
+    )
+
+    assert all(layout == embodik.TaskLayout.MERGED for layout in merged_layouts)
+    assert all(layout == embodik.TaskLayout.SPLIT for layout in split_layouts)
+    assert auto_layouts[0] == embodik.TaskLayout.SPLIT
+    assert all(layout == embodik.TaskLayout.SPLIT for layout in auto_layouts)
+    assert merged_statuses[-1] != embodik.SolverStatus.SUCCESS
+    assert split_statuses[-1] == embodik.SolverStatus.SUCCESS
+    assert auto_statuses[-1] == embodik.SolverStatus.SUCCESS
+    assert merged_moved < 15
+    assert split_moved >= 35
+    assert auto_moved >= 35
+    assert auto_errors[-1] <= merged_errors[-1]
 
 
 def test_worker_collision_exclusions_include_shoulder_root_pairs() -> None:
@@ -172,10 +317,9 @@ def test_worker_self_collision_constraint_stays_feasible_for_inward_reach() -> N
 
     solver = embodik.KinematicsSolver(robot)
     solver.dt = 0.01
-    solver.set_damping(0.1)
-    solver.set_tolerance(0.1)
     solver.enable_position_limits(True)
     solver.enable_velocity_limits(True)
+    _disable_weighted_fallback(solver)
     right_task = solver.add_frame_task(
         "right_tool_pose", frames["right_tool"], embodik.TaskType.FRAME_POSE
     )
@@ -188,7 +332,9 @@ def test_worker_self_collision_constraint_stays_feasible_for_inward_reach() -> N
         task.solve_mode = embodik.TaskSolveMode.SCALE_ELASTIC
 
     exclusions = _generate_consecutive_collision_exclusions(robot, visual_urdf)
-    include_pairs = _generate_common_bimanual_collision_include_pairs(robot, visual_urdf, exclusions)
+    include_pairs = _generate_common_bimanual_collision_include_pairs(
+        robot, visual_urdf, exclusions
+    )
     solver.configure_collision_constraint(
         min_distance=0.03, include_pairs=include_pairs, exclude_pairs=exclusions, max_constraints=3
     )
@@ -222,8 +368,6 @@ def _solve_single_step(
 ) -> np.ndarray:
     solver = embodik.KinematicsSolver(robot)
     solver.dt = 0.01
-    solver.set_damping(0.1)
-    solver.set_tolerance(0.1)
     solver.enable_position_limits(True)
     solver.enable_velocity_limits(True)
 
@@ -349,7 +493,7 @@ def test_unlocked_lift_can_participate_in_single_arm_solve() -> None:
     assert abs(lift_locked) <= 1e-9
 
 
-def test_worker_one_arm_collision_plateau_classifies_as_boundary_stall() -> None:
+def test_worker_one_arm_collision_push_remains_productive_without_boundary_stall() -> None:
     robot, frames, collision_urdf = _load_worker_collision_robot()
     visual_urdf = _resolve_worker_urdf()
     q_lo, q_hi = robot.get_joint_limits()
@@ -364,8 +508,6 @@ def test_worker_one_arm_collision_plateau_classifies_as_boundary_stall() -> None
 
     solver = embodik.KinematicsSolver(robot)
     solver.dt = 0.01
-    solver.set_damping(0.1)
-    solver.set_tolerance(0.1)
     solver.enable_position_limits(True)
     solver.enable_velocity_limits(True)
 
@@ -404,7 +546,9 @@ def test_worker_one_arm_collision_plateau_classifies_as_boundary_stall() -> None
         left_task.clear_excluded_joint_indices()
 
     exclusions = _generate_consecutive_collision_exclusions(robot, visual_urdf)
-    include_pairs = _generate_common_bimanual_collision_include_pairs(robot, visual_urdf, exclusions)
+    include_pairs = _generate_common_bimanual_collision_include_pairs(
+        robot, visual_urdf, exclusions
+    )
     _configure_collision_constraint(
         solver,
         enabled=True,
@@ -430,21 +574,15 @@ def test_worker_one_arm_collision_plateau_classifies_as_boundary_stall() -> None
     target_pose[:3, 3] += np.array([-0.25, 0.25, 0.0], dtype=float)
 
     boundary_stall_detected = False
-    snapped_target = None
+    statuses = []
     for _step_idx in range(50):
         step = robust_solve_position_step(
-            robot=robot,
             solver=solver,
             q_current=q,
             targets=[embodik.TaskTarget("right_tool_pose", target_pose, 10.0, 10.0)],
             options=opts,
-            q_lo=q_lo,
-            q_hi=q_hi,
-            zero_velocity_indices=locked_velocity_indices + left_arm_velocity_indices,
-            fallback_status_names=("INVALID_INPUT", "NUMERICAL_ERROR"),
-            allow_solver_intervention=True,
-            apply_collision_violated_q_solution=True,
         )
+        statuses.append(step.solver_result.status.name)
         q = step.q_next
         robot.update_configuration(q)
 
@@ -465,28 +603,12 @@ def test_worker_one_arm_collision_plateau_classifies_as_boundary_stall() -> None
             collision_min_distance_m=0.035,
         ):
             boundary_stall_detected = True
-            snapped_target = _frame_pose_matrix(robot, frames["right_tool"])
             break
 
-    assert (
-        boundary_stall_detected
-    ), "Expected repeated inward solve to reach a collision-boundary plateau"
-    assert snapped_target is not None
-
-    recovery_step = robust_solve_position_step(
-        robot=robot,
-        solver=solver,
-        q_current=q,
-        targets=[embodik.TaskTarget("right_tool_pose", snapped_target, 10.0, 10.0)],
-        options=opts,
-        q_lo=q_lo,
-        q_hi=q_hi,
-        zero_velocity_indices=locked_velocity_indices + left_arm_velocity_indices,
-        fallback_status_names=("INVALID_INPUT", "NUMERICAL_ERROR"),
-        allow_solver_intervention=True,
-        apply_collision_violated_q_solution=True,
-    )
-    np.testing.assert_allclose(recovery_step.q_next, q, atol=1e-9)
+    assert not boundary_stall_detected
+    assert statuses
+    assert statuses[-1] == "SUCCESS"
+    assert np.all(np.isfinite(q))
 
 
 class _DummyStatus:
@@ -547,8 +669,6 @@ def test_worker_deep_penetration_stall_is_solver_visible_without_example_escape(
 
     solver = embodik.KinematicsSolver(robot)
     solver.dt = 0.01
-    solver.set_damping(0.1)
-    solver.set_tolerance(0.1)
     solver.enable_position_limits(True)
     solver.enable_velocity_limits(True)
 
@@ -599,15 +719,10 @@ def test_worker_deep_penetration_stall_is_solver_visible_without_example_escape(
 
     for _step_idx in range(60):
         step = robust_solve_position_step(
-            robot=robot,
             solver=solver,
             q_current=q,
             targets=[embodik.TaskTarget("right_tool_pose", into_target, 10.0, 10.0)],
             options=opts,
-            q_lo=q_lo,
-            q_hi=q_hi,
-            zero_velocity_indices=opts.integration_zero_velocity_indices,
-            fallback_status_names=("INVALID_INPUT", "NUMERICAL_ERROR"),
         )
         q = step.q_next
         robot.update_configuration(q)
@@ -615,7 +730,9 @@ def test_worker_deep_penetration_stall_is_solver_visible_without_example_escape(
     assert float(solver.evaluate_collision_debug(q).distance) <= 0.0
 
     exclusions = _generate_consecutive_collision_exclusions(robot, visual_urdf)
-    include_pairs = _generate_common_bimanual_collision_include_pairs(robot, visual_urdf, exclusions)
+    include_pairs = _generate_common_bimanual_collision_include_pairs(
+        robot, visual_urdf, exclusions
+    )
     _configure_collision_constraint(
         solver,
         enabled=True,
@@ -628,24 +745,20 @@ def test_worker_deep_penetration_stall_is_solver_visible_without_example_escape(
 
     away_target = start_pose.copy()
     away_target[:3, 3] += np.array([0.10, -0.10, 0.0], dtype=float)
-    frozen_step = robust_solve_position_step(
-        robot=robot,
+    before_distance = float(solver.evaluate_collision_debug(q).distance)
+    recovery_step = robust_solve_position_step(
         solver=solver,
         q_current=q,
         targets=[embodik.TaskTarget("right_tool_pose", away_target, 10.0, 10.0)],
         options=opts,
-        q_lo=q_lo,
-        q_hi=q_hi,
-        zero_velocity_indices=opts.integration_zero_velocity_indices,
-        fallback_status_names=("INVALID_INPUT", "NUMERICAL_ERROR"),
-        allow_solver_intervention=True,
-        apply_collision_violated_q_solution=True,
     )
-    assert frozen_step.solver_result.status.name == "INFEASIBLE"
-    assert np.linalg.norm(
-        np.asarray(frozen_step.solver_result.joint_velocities, dtype=float)
-    ) == pytest.approx(0.0)
-    assert float(solver.evaluate_collision_debug(q).distance) <= 0.0
+    q_recovered = np.asarray(recovery_step.q_next, dtype=float)
+    robot.update_configuration(q_recovered)
+    after_distance = float(solver.evaluate_collision_debug(q_recovered).distance)
+
+    assert recovery_step.solver_result.status.name == "SUCCESS"
+    assert np.all(np.isfinite(q_recovered))
+    assert after_distance >= before_distance - 1e-6
 
 
 def test_worker_target_in_torso_release_preserves_collision_margin() -> None:
@@ -669,7 +782,6 @@ def test_worker_target_in_torso_release_preserves_collision_margin() -> None:
         rot_gain=10.0,
         enable_collision=True,
         enable_com=True,
-        fallback_status_names=("INVALID_INPUT", "INFEASIBLE", "NUMERICAL_ERROR", "NO_PROGRESS"),
     )
     record = metrics.as_dict()
     assert record["collision_breach_count"] == 0

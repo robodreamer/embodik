@@ -1,6 +1,6 @@
 # GPU Batch IK Example Overview
 
-Overview for `examples/04_gpu_batch_ik.py`.
+Overview for `examples/gpu_batch_ik.py`.
 
 ## What It Demonstrates
 
@@ -11,7 +11,7 @@ Overview for `examples/04_gpu_batch_ik.py`.
 ## Run
 
 ```bash
-python3 examples/04_gpu_batch_ik.py --batch_sizes 10 100 1000
+python3 examples/gpu_batch_ik.py --batch_sizes 10 100 1000
 ```
 
 Use `--use_gpu` after setting up CusADi codegen artifacts.

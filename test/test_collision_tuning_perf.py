@@ -73,7 +73,6 @@ def _make_panda_solver(tuning_mode: str = "speed"):
 
     solver = eik.KinematicsSolver(robot)
     solver.dt = 0.01
-    solver.set_damping(0.1)
     solver.configure_collision_constraint(
         min_distance=0.04,
         include_pairs=[],

@@ -41,19 +41,19 @@ except ImportError as e:
         ImportWarning,
     )
 
-# Export utility functions
-from .utils import (
-    get_pose_error_vector,
-    r2q,
-    q2r,
-    Rt,
-)
-
-# Export transform helpers (Rotation/SO3 - native, no SciPy)
-from .transforms import Rotation, SO3
-
 # Stall detection & recovery helper
 from .stall_handler import StallHandler
+
+# Export transform helpers (Rotation/SO3 - native, no SciPy)
+from .transforms import SO3, Rotation
+
+# Export utility functions
+from .utils import (
+    Rt,
+    get_pose_error_vector,
+    q2r,
+    r2q,
+)
 
 # Export visualization classes (optional)
 # Default to direct Viser visualization (no pip pinocchio dependency)
@@ -92,10 +92,10 @@ solve_velocity_gpu_batched = None
 check_gpu_availability = None
 try:
     from .gpu_solver import (
+        BatchSolveResult,
+        check_gpu_availability,
         solve_velocity_batched,
         solve_velocity_gpu_batched,
-        check_gpu_availability,
-        BatchSolveResult,
     )
 
     _gpu_solver_available = True
@@ -158,6 +158,7 @@ def get_solver_status_hint(status, status_message: str | None = None) -> str:
     if status_message:
         return f"{base} Details: {status_message}"
     return base
+
 
 __all__ = [
     # C++ classes (when available)

@@ -6,11 +6,12 @@ within specified tolerances.
 """
 
 import math
-import pytest
-import numpy as np
-from typing import Tuple, List
-import sys
 import os
+import sys
+from typing import List, Tuple
+
+import numpy as np
+import pytest
 
 # Test tolerances
 VELOCITY_ATOL = 1e-4  # Velocity solution tolerance
@@ -320,8 +321,8 @@ class TestBatchCorrectness:
     def test_batch_matches_sequential(self):
         """Batched CPU solve should match sequential CPU solves."""
         try:
-            from embodik.gpu_solver import solve_velocity_batched
             import embodik as eik
+            from embodik.gpu_solver import solve_velocity_batched
         except ImportError:
             pytest.skip("GPU solver not available")
 
@@ -368,7 +369,7 @@ class TestEdgeCases:
     def test_fallback_without_cusadi(self):
         """Test that CPU fallback works when CusADi is not available."""
         try:
-            from embodik.gpu_solver import solve_velocity_batched, HAS_CUSADI
+            from embodik.gpu_solver import HAS_CUSADI, solve_velocity_batched
         except ImportError:
             pytest.skip("GPU solver module not available")
 
@@ -388,8 +389,8 @@ class TestEdgeCases:
     def test_numerical_stability_near_singular(self):
         """Test handling of near-singular Jacobians."""
         try:
-            from embodik.gpu_solver import solve_velocity_batched
             import embodik as eik
+            from embodik.gpu_solver import solve_velocity_batched
         except ImportError:
             pytest.skip("GPU solver not available")
 

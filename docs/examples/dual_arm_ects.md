@@ -1,6 +1,6 @@
 # Dual-Arm ECTS Example Overview
 
-Overview for `examples/09_dual_arm_ects.py`.
+Overview for `examples/05_dual_arm_ects.py`.
 
 ## What It Demonstrates
 
@@ -22,11 +22,11 @@ Install and copy the example bundle once using the
 
 ```bash
 cd embodik_examples
-python 09_dual_arm_ects.py
+python 05_dual_arm_ects.py
 ```
 
 For repository development, use Pixi:
 
 ```bash
-pixi run python examples/09_dual_arm_ects.py
+pixi run python examples/05_dual_arm_ects.py
 ```

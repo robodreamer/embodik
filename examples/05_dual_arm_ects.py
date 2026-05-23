@@ -24,15 +24,16 @@ Interactive Viser controls:
 Usage
 -----
     cd examples/
-    python 09_dual_arm_ects.py
-    # Or: pixi run python3 examples/09_dual_arm_ects.py
+    python 05_dual_arm_ects.py
+    # Or: pixi run python3 examples/05_dual_arm_ects.py
 
 Requires: robot_descriptions, viser, yourdfpy
 """
 
+import argparse
+import os
 import tempfile
 import time
-import os
 
 import numpy as np
 
@@ -44,11 +45,15 @@ except ImportError:
 
 import embodik
 from embodik import Rt
-
+from example_helpers.ik_common import (
+    DEFAULT_COLLISION_TUNING_MODE,
+    DEFAULT_VISER_PORT,
+    configure_solver_runtime_policy,
+)
 from utils.dual_iiwa_urdf import (
     build_dual_iiwa_urdf,
-    get_dual_iiwa_frame_names,
     get_dual_iiwa_default_configuration,
+    get_dual_iiwa_frame_names,
     get_dual_iiwa_joint_names,
 )
 
@@ -79,7 +84,7 @@ NULLSPACE_OBJECTIVES = [
 DEFAULT_SOLVER_DT = 0.01
 DEFAULT_POS_GAIN = 10.0
 DEFAULT_ROT_GAIN = 10.0
-DEFAULT_NULLSPACE_GAIN_EXP = -2.0   # 10^-2 = 0.01
+DEFAULT_NULLSPACE_GAIN_EXP = -2.0  # 10^-2 = 0.01
 DEFAULT_DAMPING = 0.1
 DEFAULT_TOLERANCE = 0.1
 COLLISION_TUNING_OPTIONS = ("speed", "balanced", "precise")
@@ -98,7 +103,7 @@ def _apply_collision_tuning_mode(
             "balanced": embodik.CollisionTuningMode.BALANCED,
             "speed": embodik.CollisionTuningMode.SPEED,
         }
-        solver.set_collision_tuning_mode(enum_map.get(label, embodik.CollisionTuningMode.SPEED))
+        solver.set_collision_tuning_mode(enum_map.get(label, embodik.CollisionTuningMode.BALANCED))
         return
 
     # Backward-compatible fallback for older bindings.
@@ -135,6 +140,7 @@ def _dual_iiwa_collision_exclusions(robot: "embodik.RobotModel") -> list:
     The link index n is the second-to-last numeric token.
     """
     import re as _re
+
     # Matches the link number in e.g. "iiwa_left_iiwa_link_3_0"
     _link_idx_pat = _re.compile(r"iiwa_link_(\d+)_\d+$")
 
@@ -161,6 +167,7 @@ def _dual_iiwa_collision_exclusions(robot: "embodik.RobotModel") -> list:
 def _mat_from_wxyz(wxyz: np.ndarray) -> np.ndarray:
     """Convert wxyz quaternion to 3x3 rotation matrix."""
     from scipy.spatial.transform import Rotation as Rscipy
+
     xyzw = np.array([wxyz[1], wxyz[2], wxyz[3], wxyz[0]])
     return Rscipy.from_quat(xyzw).as_matrix()
 
@@ -168,6 +175,7 @@ def _mat_from_wxyz(wxyz: np.ndarray) -> np.ndarray:
 def _wxyz_from_mat(R: np.ndarray) -> np.ndarray:
     """Convert 3x3 rotation matrix to wxyz quaternion."""
     from scipy.spatial.transform import Rotation as Rscipy
+
     xyzw = Rscipy.from_matrix(R).as_quat()
     return np.array([xyzw[3], xyzw[0], xyzw[1], xyzw[2]])
 
@@ -175,45 +183,37 @@ def _wxyz_from_mat(R: np.ndarray) -> np.ndarray:
 def _ects_config(mode_label: str) -> embodik.ECTSConfig:
     """Map MATLAB-style coordination mode label to ECTSConfig."""
     mapping = {
-        "Orthogonal":      embodik.map_ects_mode("orthogonal"),
-        "Serial (L)":      embodik.map_ects_mode("serial_left"),
-        "Blended (0.75)":  embodik.map_ects_mode_blended(0.75),
-        "Parallel":        embodik.map_ects_mode("parallel"),
-        "Blended (0.25)":  embodik.map_ects_mode_blended(0.25),
-        "Serial (R)":      embodik.map_ects_mode("serial_right"),
+        "Orthogonal": embodik.map_ects_mode("orthogonal"),
+        "Serial (L)": embodik.map_ects_mode("serial_left"),
+        "Blended (0.75)": embodik.map_ects_mode_blended(0.75),
+        "Parallel": embodik.map_ects_mode("parallel"),
+        "Blended (0.25)": embodik.map_ects_mode_blended(0.25),
+        "Serial (R)": embodik.map_ects_mode("serial_right"),
     }
     return mapping[mode_label]
 
 
 def _effective_absolute_pose(robot, left_frame: str, right_frame: str, alpha: float):
-    """Compute ECTS absolute frame pose from left/right EE poses and alpha.
+    """Compute the C++ ECTS absolute frame for the current left/right EE poses.
 
     With set_object_center_frame, abs_task.current_position is the object center
     and does not change with alpha. For mode-change snap we need the effective
-    frame: position = alpha*left + (1-alpha)*right, orientation = slerp.
-    Returns (position, orientation) as numpy arrays.
+    frame used by the C++ task.
     """
-    from scipy.spatial.transform import Rotation as Rscipy
-
     left_se3 = robot.get_frame_pose(left_frame)
     right_se3 = robot.get_frame_pose(right_frame)
-    left_pos = np.array(left_se3.translation)
-    right_pos = np.array(right_se3.translation)
-    left_R = np.array(left_se3.rotation)
-    right_R = np.array(right_se3.rotation)
+    absolute = embodik.compute_absolute_frame(left_se3, right_se3, alpha)
+    return np.array(absolute.translation), np.array(absolute.rotation)
 
-    pos = alpha * left_pos + (1.0 - alpha) * right_pos
-    R_left = Rscipy.from_matrix(left_R)
-    R_right = Rscipy.from_matrix(right_R)
-    # Slerp: R_result = R_left * (R_left^{-1} * R_right)^{1-alpha} -> alpha=1 gives left, alpha=0 gives right
-    r_rel = R_left.inv() * R_right
-    r_part = Rscipy.from_rotvec((1.0 - alpha) * r_rel.as_rotvec())
-    R_abs = R_left * r_part
-    ori = R_abs.as_matrix()
-    return pos, ori
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Dual-arm ECTS interactive IK example.")
+    parser.add_argument("--port", type=int, default=DEFAULT_VISER_PORT, help="Viser server port.")
+    return parser.parse_args()
 
 
 def main():
+    args = parse_args()
     from scipy.spatial.transform import Rotation as Rscipy
 
     # Build and load dual iiwa robot
@@ -233,9 +233,8 @@ def main():
 
     solver = embodik.KinematicsSolver(robot)
     solver.dt = DEFAULT_SOLVER_DT
-    solver.set_damping(DEFAULT_DAMPING)
-    solver.set_tolerance(DEFAULT_TOLERANCE)
-    _collision_tuning_mode = "speed"
+    configure_solver_runtime_policy(solver)
+    _collision_tuning_mode = DEFAULT_COLLISION_TUNING_MODE
     _apply_collision_tuning_mode(solver, _collision_tuning_mode)
     solver.enable_velocity_limits(True)
     solver.enable_position_limits(True)
@@ -276,7 +275,7 @@ def main():
 
     posture = solver.add_posture_task("posture")
     posture.set_target_configuration(q_init.copy())
-    posture.weight = 10.0 ** DEFAULT_NULLSPACE_GAIN_EXP
+    posture.weight = 10.0**DEFAULT_NULLSPACE_GAIN_EXP
     posture.priority = 1
 
     # Initialize tasks: set object center frame and capture relative target
@@ -300,7 +299,7 @@ def main():
     init_rel_ori = rel_task.current_orientation.copy()
 
     # Viser server
-    server = viser.ViserServer(port=8080, label="ECTS Dual-Arm IK")
+    server = viser.ViserServer(port=args.port, label="ECTS Dual-Arm IK")
 
     # URDF visualization
     fd2, urdf_path2 = tempfile.mkstemp(suffix=".urdf")
@@ -310,6 +309,7 @@ def main():
     try:
         import yourdfpy
         from viser.extras import ViserUrdf
+
         urdf_yourdfpy = yourdfpy.URDF.load(urdf_path2)
         urdf_vis = ViserUrdf(server, urdf_yourdfpy, root_node_name="/robot")
     finally:
@@ -461,15 +461,16 @@ def main():
             initial_value=_collision_tuning_mode,
         )
         collision_min_dist_slider = server.gui.add_slider(
-            "Min Distance (mm)", min=1, max=100, step=1,
+            "Min Distance (mm)",
+            min=1,
+            max=100,
+            step=1,
             initial_value=int(COLLISION_MIN_DISTANCE * 1000),
         )
         collision_debug_checkbox = server.gui.add_checkbox(
             "Show Collision Debug", initial_value=False
         )
-        collision_debug_text = server.gui.add_text(
-            "Closest Pair", initial_value="--"
-        )
+        collision_debug_text = server.gui.add_text("Closest Pair", initial_value="--")
 
     with server.gui.add_folder("Actions"):
         snap_button = server.gui.add_button("Snap Object Marker to Current")
@@ -484,12 +485,16 @@ def main():
     # --- Collision debug scene objects ---
     _collision_root = "/collision_debug"
     _col_sphere_a = server.scene.add_icosphere(
-        f"{_collision_root}/point_a", radius=0.015,
-        color=(1.0, 0.2, 0.2), visible=False,
+        f"{_collision_root}/point_a",
+        radius=0.015,
+        color=(1.0, 0.2, 0.2),
+        visible=False,
     )
     _col_sphere_b = server.scene.add_icosphere(
-        f"{_collision_root}/point_b", radius=0.015,
-        color=(0.2, 0.8, 0.2), visible=False,
+        f"{_collision_root}/point_b",
+        radius=0.015,
+        color=(0.2, 0.8, 0.2),
+        visible=False,
     )
     _col_line_handle = None
     _last_collision_debug = None
@@ -534,8 +539,11 @@ def main():
         seg[0, 1] = pb
         colors = np.array([[[1.0, 0.2, 0.2], [0.2, 0.8, 0.2]]], dtype=float)
         _col_line_handle = server.scene.add_line_segments(
-            f"{_collision_root}/segment", points=seg, colors=colors,
-            line_width=3.0, visible=True,
+            f"{_collision_root}/segment",
+            points=seg,
+            colors=colors,
+            line_width=3.0,
+            visible=True,
         )
         collision_debug_text.value = (
             f"{debug.object_a} ↔ {debug.object_b} | d={debug.distance:.3f} m"
@@ -633,12 +641,14 @@ def main():
         n_obj = len(robot.get_collision_geometry_names())
         n_pairs = len(robot.get_collision_pair_names())
         n_excl = len(_collision_exclusions)
-        print(f"[collision] {n_obj} geometries, {n_pairs} pairs "
-              f"({n_excl} excluded, {n_pairs - n_excl} active)")
+        print(
+            f"[collision] {n_obj} geometries, {n_pairs} pairs "
+            f"({n_excl} excluded, {n_pairs - n_excl} active)"
+        )
     except Exception:
         pass
 
-    print("ECTS Dual-Arm IK (dual iiwa) running on http://localhost:8080")
+    print(f"ECTS Dual-Arm IK (dual iiwa) running on http://localhost:{args.port}")
     print("  Blue marker  = absolute frame (object midpoint); in Orthogonal = left EE")
     print("  Green marker = relative frame (right arm grasp); in Orthogonal = right EE")
 
@@ -782,50 +792,82 @@ def main():
                 _prev_grasp_wxyz = new_g_wxyz.copy()
 
             # --- Axis masks (MATLAB S_cart1 / S_cart2) ---
-            abs_task.set_position_mask(np.array([
-                1.0 if abs_pos_x.value else 0.0,
-                1.0 if abs_pos_y.value else 0.0,
-                1.0 if abs_pos_z.value else 0.0,
-            ]))
-            abs_task.set_orientation_mask(np.array([
-                1.0 if abs_ori_x.value else 0.0,
-                1.0 if abs_ori_y.value else 0.0,
-                1.0 if abs_ori_z.value else 0.0,
-            ]))
-            rel_task.set_position_mask(np.array([
-                1.0 if rel_pos_x.value else 0.0,
-                1.0 if rel_pos_y.value else 0.0,
-                1.0 if rel_pos_z.value else 0.0,
-            ]))
-            rel_task.set_orientation_mask(np.array([
-                1.0 if rel_ori_x.value else 0.0,
-                1.0 if rel_ori_y.value else 0.0,
-                1.0 if rel_ori_z.value else 0.0,
-            ]))
+            abs_task.set_position_mask(
+                np.array(
+                    [
+                        1.0 if abs_pos_x.value else 0.0,
+                        1.0 if abs_pos_y.value else 0.0,
+                        1.0 if abs_pos_z.value else 0.0,
+                    ]
+                )
+            )
+            abs_task.set_orientation_mask(
+                np.array(
+                    [
+                        1.0 if abs_ori_x.value else 0.0,
+                        1.0 if abs_ori_y.value else 0.0,
+                        1.0 if abs_ori_z.value else 0.0,
+                    ]
+                )
+            )
+            rel_task.set_position_mask(
+                np.array(
+                    [
+                        1.0 if rel_pos_x.value else 0.0,
+                        1.0 if rel_pos_y.value else 0.0,
+                        1.0 if rel_pos_z.value else 0.0,
+                    ]
+                )
+            )
+            rel_task.set_orientation_mask(
+                np.array(
+                    [
+                        1.0 if rel_ori_x.value else 0.0,
+                        1.0 if rel_ori_y.value else 0.0,
+                        1.0 if rel_ori_z.value else 0.0,
+                    ]
+                )
+            )
             if is_orthogonal:
-                left_ee_task.set_position_mask(np.array([
-                    1.0 if abs_pos_x.value else 0.0,
-                    1.0 if abs_pos_y.value else 0.0,
-                    1.0 if abs_pos_z.value else 0.0,
-                ]))
-                left_ee_task.set_orientation_mask(np.array([
-                    1.0 if abs_ori_x.value else 0.0,
-                    1.0 if abs_ori_y.value else 0.0,
-                    1.0 if abs_ori_z.value else 0.0,
-                ]))
-                right_ee_task.set_position_mask(np.array([
-                    1.0 if rel_pos_x.value else 0.0,
-                    1.0 if rel_pos_y.value else 0.0,
-                    1.0 if rel_pos_z.value else 0.0,
-                ]))
-                right_ee_task.set_orientation_mask(np.array([
-                    1.0 if rel_ori_x.value else 0.0,
-                    1.0 if rel_ori_y.value else 0.0,
-                    1.0 if rel_ori_z.value else 0.0,
-                ]))
+                left_ee_task.set_position_mask(
+                    np.array(
+                        [
+                            1.0 if abs_pos_x.value else 0.0,
+                            1.0 if abs_pos_y.value else 0.0,
+                            1.0 if abs_pos_z.value else 0.0,
+                        ]
+                    )
+                )
+                left_ee_task.set_orientation_mask(
+                    np.array(
+                        [
+                            1.0 if abs_ori_x.value else 0.0,
+                            1.0 if abs_ori_y.value else 0.0,
+                            1.0 if abs_ori_z.value else 0.0,
+                        ]
+                    )
+                )
+                right_ee_task.set_position_mask(
+                    np.array(
+                        [
+                            1.0 if rel_pos_x.value else 0.0,
+                            1.0 if rel_pos_y.value else 0.0,
+                            1.0 if rel_pos_z.value else 0.0,
+                        ]
+                    )
+                )
+                right_ee_task.set_orientation_mask(
+                    np.array(
+                        [
+                            1.0 if rel_ori_x.value else 0.0,
+                            1.0 if rel_ori_y.value else 0.0,
+                            1.0 if rel_ori_z.value else 0.0,
+                        ]
+                    )
+                )
 
             # --- Nullspace secondary objective ---
-            ns_gain = 10.0 ** nullspace_exp_slider.value
+            ns_gain = 10.0**nullspace_exp_slider.value
             ns_obj = nullspace_objective.value
             if ns_obj == "None":
                 posture.weight = 0.0
@@ -851,18 +893,26 @@ def main():
             # --- Relative constraint (bounds on stored relative target) ---
             if constraint_mode.value == "relative_bounds":
                 bound_m = constraint_bound.value * 0.001
-                lower = np.array([
-                    _rel_target_pos[0] - bound_m,
-                    _rel_target_pos[1] - bound_m,
-                    _rel_target_pos[2] - bound_m,
-                    -10.0, -10.0, -10.0,
-                ])
-                upper = np.array([
-                    _rel_target_pos[0] + bound_m,
-                    _rel_target_pos[1] + bound_m,
-                    _rel_target_pos[2] + bound_m,
-                    10.0, 10.0, 10.0,
-                ])
+                lower = np.array(
+                    [
+                        _rel_target_pos[0] - bound_m,
+                        _rel_target_pos[1] - bound_m,
+                        _rel_target_pos[2] - bound_m,
+                        -10.0,
+                        -10.0,
+                        -10.0,
+                    ]
+                )
+                upper = np.array(
+                    [
+                        _rel_target_pos[0] + bound_m,
+                        _rel_target_pos[1] + bound_m,
+                        _rel_target_pos[2] + bound_m,
+                        10.0,
+                        10.0,
+                        10.0,
+                    ]
+                )
                 mask = np.array([1, 1, 1, 0, 0, 0], dtype=np.float64)
                 solver.configure_relative_pose_constraint(
                     LEFT_FRAME, RIGHT_FRAME, lower, upper, mask
@@ -915,13 +965,19 @@ def main():
                         # Relative task: detect grasp handle drag, maintain stored target
                         curr_grasp_pos = np.array(grasp_handle.position)
                         curr_grasp_wxyz = np.array(grasp_handle.wxyz)
-                        if not np.allclose(curr_grasp_pos, _prev_grasp_pos, atol=1e-4) or \
-                                not np.allclose(curr_grasp_wxyz, _prev_grasp_wxyz, atol=1e-4):
+                        if not np.allclose(
+                            curr_grasp_pos, _prev_grasp_pos, atol=1e-4
+                        ) or not np.allclose(curr_grasp_wxyz, _prev_grasp_wxyz, atol=1e-4):
                             left_se3_cur = robot.get_frame_pose(LEFT_FRAME)
-                            R_left_cur = np.array(left_se3_cur.rotation)
-                            t_left_cur = np.array(left_se3_cur.translation)
-                            _rel_target_pos = R_left_cur.T @ (curr_grasp_pos - t_left_cur)
-                            _rel_target_ori = R_left_cur.T @ _mat_from_wxyz(curr_grasp_wxyz)
+                            right_target = Rt(
+                                R=_mat_from_wxyz(curr_grasp_wxyz),
+                                t=curr_grasp_pos,
+                            )
+                            relative_target = embodik.compute_relative_frame(
+                                left_se3_cur, right_target
+                            )
+                            _rel_target_pos = np.array(relative_target.translation)
+                            _rel_target_ori = np.array(relative_target.rotation)
                             _prev_grasp_pos = curr_grasp_pos.copy()
                             _prev_grasp_wxyz = curr_grasp_wxyz.copy()
 
@@ -965,7 +1021,9 @@ def main():
             # --- Status display ---
             abs_task.update(robot)
             abs_err_m = np.linalg.norm(abs_task.current_position - np.array(object_handle.position))
-            rel_err_m = float(np.linalg.norm(rel_error_vec[:3])) if not manual_control.value else 0.0
+            rel_err_m = (
+                float(np.linalg.norm(rel_error_vec[:3])) if not manual_control.value else 0.0
+            )
             elapsed_text.value = f"{solver_elapsed_ms:.2f}"
             abs_error_text.value = f"{abs_err_m:.4f}"
             rel_error_text.value = f"{rel_err_m:.4f}" if not manual_control.value else "--"

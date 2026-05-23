@@ -7,9 +7,9 @@ teleoperation loops.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import time
-from typing import Iterable, Sequence
+from dataclasses import dataclass
+from typing import Sequence
 
 import numpy as np
 
@@ -41,15 +41,23 @@ class ConstraintBoundary:
 
     @property
     def violated(self) -> bool:
-        return self.observed and float(self.value) < float(self.minimum) - float(self.violation_tolerance)
+        return self.observed and float(self.value) < float(self.minimum) - float(
+            self.violation_tolerance
+        )
 
     @property
     def clear(self) -> bool:
-        return (not self.enabled) or (not self.observed) or float(self.value) >= float(self.minimum) - float(self.violation_tolerance)
+        return (
+            (not self.enabled)
+            or (not self.observed)
+            or float(self.value) >= float(self.minimum) - float(self.violation_tolerance)
+        )
 
     @property
     def near(self) -> bool:
-        return self.observed and float(self.value) <= float(self.minimum) + float(self.boundary_slack)
+        return self.observed and float(self.value) <= float(self.minimum) + float(
+            self.boundary_slack
+        )
 
 
 @dataclass
@@ -68,7 +76,9 @@ def clip_configuration(robot, q: np.ndarray, q_lo: np.ndarray, q_hi: np.ndarray)
     """Clip joints to limits while preserving floating-base quaternion validity."""
     q_out = np.asarray(q, dtype=float).copy()
     if getattr(robot, "is_floating_base", False) and q_out.size >= 7:
-        q_out[7:] = np.clip(q_out[7:], np.asarray(q_lo[7:], dtype=float), np.asarray(q_hi[7:], dtype=float))
+        q_out[7:] = np.clip(
+            q_out[7:], np.asarray(q_lo[7:], dtype=float), np.asarray(q_hi[7:], dtype=float)
+        )
         quat = q_out[3:7]
         norm = float(np.linalg.norm(quat))
         if np.isfinite(norm) and norm > 1e-12:
@@ -112,7 +122,9 @@ def is_constraint_boundary_stall(
     """Classify zero-motion near-boundary plateaus as constrained holds."""
     if not boundary.near:
         return False
-    if solver_status_name(result) not in (status_names or {"NO_PROGRESS", "INFEASIBLE", "NUMERICAL_ERROR", "SUCCESS"}):
+    if solver_status_name(result) not in (
+        status_names or {"NO_PROGRESS", "INFEASIBLE", "NUMERICAL_ERROR", "SUCCESS"}
+    ):
         return False
     return joint_velocity_norm(result) <= float(dq_stall_eps)
 
@@ -217,21 +229,18 @@ class ConstrainedStepGuard:
 
         status_name = solver_status_name(result)
         dq_norm = joint_velocity_norm(result)
-        zero_motion = (
-            max_task_error > float(task_deadband)
-            and (
-                (
-                    dq_norm <= self.zero_motion_eps
-                    and (
-                        status_name in {"NO_PROGRESS", "INFEASIBLE", "NUMERICAL_ERROR"}
-                        or len(list(getattr(result, "saturated_joints", []) or [])) > 0
-                    )
+        zero_motion = max_task_error > float(task_deadband) and (
+            (
+                dq_norm <= self.zero_motion_eps
+                and (
+                    status_name in {"NO_PROGRESS", "INFEASIBLE", "NUMERICAL_ERROR"}
+                    or len(list(getattr(result, "saturated_joints", []) or [])) > 0
                 )
-                or (
-                    constraints_enabled
-                    and status_name == "SUCCESS"
-                    and dq_norm <= self.success_zero_motion_eps
-                )
+            )
+            or (
+                constraints_enabled
+                and status_name == "SUCCESS"
+                and dq_norm <= self.success_zero_motion_eps
             )
         )
         if zero_motion:
@@ -254,89 +263,38 @@ class ConstrainedStepGuard:
         )
 
 
-def _apply_targets_to_solver_tasks(solver, targets: Iterable[object]) -> None:
-    """Mirror ``TaskTarget`` payloads onto solver tasks for velocity fallback."""
-    for target in targets:
-        task = solver.get_task(target.task_name)
-        pose = np.asarray(target.target_pose, dtype=float)
-        try:
-            task.set_target_pose(pose[:3, 3], pose[:3, :3])
-            continue
-        except Exception:
-            pass
-        try:
-            task.set_target_orientation(pose[:3, :3])
-            continue
-        except Exception:
-            pass
-        task.set_target_position(pose[:3, 3])
-
-
 def robust_solve_position_step(
     *,
-    robot,
     solver,
     q_current: np.ndarray,
     targets: Sequence[object],
     options,
-    q_lo: np.ndarray,
-    q_hi: np.ndarray,
-    zero_velocity_indices: Sequence[int] | None = None,
-    fallback_status_names: Sequence[str] = (),
     hold_status_names: Sequence[str] = ("NON_FINITE_INPUT",),
-    allow_solver_intervention: bool = False,
-    apply_collision_violated_q_solution: bool = False,
 ) -> RobustStepResult:
-    """Run ``solve_position_step`` with consistent example-side recovery."""
+    """Run ``solve_position_step`` and trust solver-owned constraint policy."""
     q_prev = np.asarray(q_current, dtype=float).copy()
     q_next = q_prev.copy()
-    zero_velocity_indices = list(zero_velocity_indices or [])
 
     t0 = time.perf_counter()
     result = solver.solve_position_step(q_prev, list(targets), options)
     elapsed_ms = (time.perf_counter() - t0) * 1e3
     solver_calls = 1
     status_name = solver_status_name(result)
-    solver_intervened = (
-        int(getattr(result, "collision_rejection_count", 0)) > 0
-        or int(getattr(result, "stall_escape_count", 0)) > 0
-    )
 
     if status_name in hold_status_names:
-        return RobustStepResult(q_next=q_prev, solver_result=result, elapsed_ms=elapsed_ms, solver_calls=solver_calls)
-
-    if allow_solver_intervention and solver_intervened and hasattr(result, "q_solution"):
-        q_next = clip_configuration(robot, np.asarray(result.q_solution, dtype=float), q_lo, q_hi)
-        return RobustStepResult(q_next=q_next, solver_result=result, elapsed_ms=elapsed_ms, solver_calls=solver_calls)
-
-    if apply_collision_violated_q_solution and status_name == "COLLISION_VIOLATED" and hasattr(result, "q_solution"):
-        q_next = clip_configuration(robot, np.asarray(result.q_solution, dtype=float), q_lo, q_hi)
-        return RobustStepResult(q_next=q_next, solver_result=result, elapsed_ms=elapsed_ms, solver_calls=solver_calls)
-
-    if status_name in set(fallback_status_names):
-        _apply_targets_to_solver_tasks(solver, targets)
-        t1 = time.perf_counter()
-        vel_result = solver.solve_velocity(q_prev, apply_limits=True)
-        elapsed_ms += (time.perf_counter() - t1) * 1e3
-        solver_calls += 1
-        if solver_status_name(vel_result) == "SUCCESS":
-            dq = np.asarray(vel_result.joint_velocities, dtype=float).copy()
-            if zero_velocity_indices:
-                dq[zero_velocity_indices] = 0.0
-            q_next = np.asarray(robot.integrate(q_prev, dq, solver.dt), dtype=float)
-            q_next = clip_configuration(robot, q_next, q_lo, q_hi)
-            result = vel_result
-        elif hasattr(result, "q_solution"):
-            q_next = clip_configuration(robot, np.asarray(result.q_solution, dtype=float), q_lo, q_hi)
-        return RobustStepResult(q_next=q_next, solver_result=result, elapsed_ms=elapsed_ms, solver_calls=solver_calls)
+        return RobustStepResult(
+            q_next=q_prev, solver_result=result, elapsed_ms=elapsed_ms, solver_calls=solver_calls
+        )
 
     if hasattr(result, "q_solution"):
-        q_next = clip_configuration(robot, np.asarray(result.q_solution, dtype=float), q_lo, q_hi)
+        q_next = np.asarray(result.q_solution, dtype=float).copy()
 
     if not np.all(np.isfinite(q_next)):
         q_next = q_prev
 
-    return RobustStepResult(q_next=q_next, solver_result=result, elapsed_ms=elapsed_ms, solver_calls=solver_calls)
+    return RobustStepResult(
+        q_next=q_next, solver_result=result, elapsed_ms=elapsed_ms, solver_calls=solver_calls
+    )
 
 
 def configure_primary_solve_mode(options, solve_mode, allow_fallback: bool) -> None:

@@ -4,6 +4,7 @@ This is a minimal example demonstrating basic inverse kinematics solving.
 """
 
 import numpy as np
+
 import embodik
 
 

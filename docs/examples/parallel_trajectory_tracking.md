@@ -1,6 +1,6 @@
 # Parallel Trajectory Tracking Overview
 
-Overview for `examples/07_parallel_trajectory_tracking.py`.
+Overview for `examples/parallel_trajectory_tracking.py`.
 
 ## What It Demonstrates
 

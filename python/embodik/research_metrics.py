@@ -233,9 +233,7 @@ def summarize_fluidity(
         sample.elastic_delta for sample in step_samples if sample.elastic_delta is not None
     ]
 
-    dq_sign_flip_count, jerk_values = _motion_smoothness(
-        step_samples, sign_flip_eps=sign_flip_eps
-    )
+    dq_sign_flip_count, jerk_values = _motion_smoothness(step_samples, sign_flip_eps=sign_flip_eps)
     deadline_miss_count = 0
     if deadline_ms is not None:
         deadline = float(deadline_ms)
@@ -372,9 +370,7 @@ def _vector_motion_smoothness(
         return 0, []
 
     sign_flip_count = 0
-    previous_sign = np.sign(
-        np.where(np.abs(vectors[0]) > sign_flip_eps, vectors[0], 0.0)
-    )
+    previous_sign = np.sign(np.where(np.abs(vectors[0]) > sign_flip_eps, vectors[0], 0.0))
     for vector in vectors[1:]:
         sign = np.sign(np.where(np.abs(vector) > sign_flip_eps, vector, 0.0))
         sign_flip_count += int(np.count_nonzero((previous_sign * sign) < 0.0))

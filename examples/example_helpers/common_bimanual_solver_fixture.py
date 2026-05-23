@@ -8,9 +8,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
 
-import numpy as np
-
 import embodik
+import numpy as np
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
@@ -21,21 +20,22 @@ try:
         default_common_bimanual_ik_joint_names,
         resolve_common_bimanual_frames,
     )
-    from example_helpers.public_ai_worker_paths import resolve_public_ai_worker_urdf_paths
     from example_helpers.common_bimanual_teleop_app import (
+        COMMON_BIMANUAL_SUPPORT_CONTACT_FRAMES,
         DEFAULT_ARM_NULLSPACE_WEIGHT,
+        DEFAULT_COMMON_BIMANUAL_SEED,
         DEFAULT_POSTURE_WEIGHT,
         DEFAULT_SOLVER_DT,
-        DEFAULT_COMMON_BIMANUAL_SEED,
-        COMMON_BIMANUAL_SUPPORT_CONTACT_FRAMES,
         _apply_named_joint_seed,
         _apply_soft_lift_margin,
         _compute_support_polygon_from_contacts,
         _configure_collision_constraint,
-        _generate_consecutive_collision_exclusions,
         _generate_common_bimanual_collision_include_pairs,
+        _generate_consecutive_collision_exclusions,
         _shrink_polygon_2d,
     )
+    from example_helpers.ik_common import configure_solver_runtime_policy
+    from example_helpers.public_ai_worker_paths import resolve_public_ai_worker_urdf_paths
 except ModuleNotFoundError as exc:
     if exc.name != "example_helpers" and not str(exc.name).startswith("example_helpers."):
         raise
@@ -43,21 +43,22 @@ except ModuleNotFoundError as exc:
         default_common_bimanual_ik_joint_names,
         resolve_common_bimanual_frames,
     )
-    from examples.example_helpers.public_ai_worker_paths import resolve_public_ai_worker_urdf_paths
     from examples.example_helpers.common_bimanual_teleop_app import (
+        COMMON_BIMANUAL_SUPPORT_CONTACT_FRAMES,
         DEFAULT_ARM_NULLSPACE_WEIGHT,
+        DEFAULT_COMMON_BIMANUAL_SEED,
         DEFAULT_POSTURE_WEIGHT,
         DEFAULT_SOLVER_DT,
-        DEFAULT_COMMON_BIMANUAL_SEED,
-        COMMON_BIMANUAL_SUPPORT_CONTACT_FRAMES,
         _apply_named_joint_seed,
         _apply_soft_lift_margin,
         _compute_support_polygon_from_contacts,
         _configure_collision_constraint,
-        _generate_consecutive_collision_exclusions,
         _generate_common_bimanual_collision_include_pairs,
+        _generate_consecutive_collision_exclusions,
         _shrink_polygon_2d,
     )
+    from examples.example_helpers.ik_common import configure_solver_runtime_policy
+    from examples.example_helpers.public_ai_worker_paths import resolve_public_ai_worker_urdf_paths
 
 
 @dataclass
@@ -166,27 +167,30 @@ def build_common_bimanual_solver_fixture(
             except Exception:
                 pass
     posture_controlled_indices = [
-        idx
-        for name in ("lift_joint",)
-        if (idx := joint_name_to_cfg.get(name)) is not None
+        idx for name in ("lift_joint",) if (idx := joint_name_to_cfg.get(name)) is not None
     ]
     q = _apply_named_joint_seed(q, joint_name_to_cfg, q_lo, q_hi, DEFAULT_COMMON_BIMANUAL_SEED)
     q = _apply_soft_lift_margin(q, joint_name_to_cfg=joint_name_to_cfg, q_lo=q_lo, q_hi=q_hi)
     nullspace_bias_q = np.asarray(q, dtype=float).copy()
     robot.update_configuration(q)
-    support_polygon = _compute_support_polygon_from_contacts(robot, COMMON_BIMANUAL_SUPPORT_CONTACT_FRAMES)
+    support_polygon = _compute_support_polygon_from_contacts(
+        robot, COMMON_BIMANUAL_SUPPORT_CONTACT_FRAMES
+    )
 
     frame_map = resolve_common_bimanual_frames(robot.get_frame_names())
 
     solver = embodik.KinematicsSolver(robot)
     solver.dt = DEFAULT_SOLVER_DT
-    solver.set_damping(0.1)
-    solver.set_tolerance(0.1)
+    configure_solver_runtime_policy(solver)
     solver.enable_position_limits(True)
     solver.enable_velocity_limits(True)
 
-    right_task = solver.add_frame_task("right_tool_pose", frame_map["right_tool"], embodik.TaskType.FRAME_POSE)
-    left_task = solver.add_frame_task("left_tool_pose", frame_map["left_tool"], embodik.TaskType.FRAME_POSE)
+    right_task = solver.add_frame_task(
+        "right_tool_pose", frame_map["right_tool"], embodik.TaskType.FRAME_POSE
+    )
+    left_task = solver.add_frame_task(
+        "left_tool_pose", frame_map["left_tool"], embodik.TaskType.FRAME_POSE
+    )
     right_task.priority = 0
     left_task.priority = 0
     right_task.weight = 1.0

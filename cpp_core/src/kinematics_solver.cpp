@@ -24,6 +24,7 @@
 #include <embodik/ik_baseline.hpp>
 #include <embodik/kinematics_solver.hpp>
 #include <embodik/tasks.hpp>
+#include <embodik/weighted_advisor.hpp>
 
 namespace embodik {
 
@@ -66,6 +67,7 @@ constexpr double kCollisionBoundRotationRadius = 1.5; // meters
 constexpr double kCollisionBoundSafetyMargin = 5e-3; // meters
 // Post-step rejection: safe margin above penetration threshold for early-exit.
 constexpr double kPostStepSafeMargin = 0.01; // 1cm
+constexpr double kPositionStepBacktrackGainScale = 0.1;
 // Adaptive dt proximity cap: assumed max EE approach speed when options.max_linear_speed
 // is not set. Used to bound how large a dt_eff can safely be near a collision boundary.
 constexpr double kAdaptiveDtFallbackMaxEESpeed = 1.0; // m/s
@@ -686,6 +688,63 @@ static void tighten_bounds_with_reference_corridor(
   }
 }
 
+static void clamp_joint_velocity_to_position_limits_for_integration(
+    Eigen::Ref<Eigen::VectorXd> dq, const Eigen::VectorXd &q_current,
+    const Eigen::VectorXd &q_min, const Eigen::VectorXd &q_max,
+    const std::vector<int> &velocity_to_config_index, double integration_dt,
+    int nv) {
+  if (integration_dt <= 0.0 || dq.size() < nv || q_current.size() == 0) {
+    return;
+  }
+
+  constexpr double margin_limit = 1e-4;
+  for (int vi = 0; vi < nv; ++vi) {
+    if (vi >= static_cast<int>(velocity_to_config_index.size())) {
+      continue;
+    }
+    const int qi = velocity_to_config_index[vi];
+    if (qi < 0 || qi >= q_current.size() ||
+        qi >= q_min.size() || qi >= q_max.size()) {
+      continue;
+    }
+    if (!std::isfinite(q_current[qi]) || !std::isfinite(q_min[qi]) ||
+        !std::isfinite(q_max[qi])) {
+      continue;
+    }
+
+    const double lower_velocity =
+        (q_min[qi] + margin_limit - q_current[qi]) / integration_dt;
+    const double upper_velocity =
+        (q_max[qi] - margin_limit - q_current[qi]) / integration_dt;
+    if (lower_velocity <= upper_velocity) {
+      dq[vi] = std::clamp(dq[vi], lower_velocity, upper_velocity);
+    } else {
+      dq[vi] = 0.5 * (lower_velocity + upper_velocity);
+    }
+  }
+}
+
+static void expand_scalar_joint_limits_for_velocity_delta(
+    Eigen::VectorXd &q_min, Eigen::VectorXd &q_max,
+    const Eigen::VectorXd &delta,
+    const std::vector<int> &velocity_to_config_index, int nv) {
+  if (delta.size() != nv) {
+    return;
+  }
+  for (int vi = 0; vi < nv; ++vi) {
+    if (vi >= static_cast<int>(velocity_to_config_index.size())) {
+      continue;
+    }
+    const int qi = velocity_to_config_index[vi];
+    if (qi < 0 || qi >= q_min.size() || qi >= q_max.size() ||
+        !std::isfinite(q_min[qi]) || !std::isfinite(q_max[qi])) {
+      continue;
+    }
+    q_min[qi] -= delta[vi];
+    q_max[qi] += delta[vi];
+  }
+}
+
 static ClassifiedOutcome classify_position_outcome(
     SolverStatus current_status, const std::string &current_status_message,
     bool converged_or_within_tolerance, bool stagnation_abort,
@@ -830,6 +889,223 @@ KinematicsSolver::add_absolute_frame_task(const std::string &name,
   tasks_.push_back(task);
   task_map_[name] = task;
   return task;
+}
+
+std::shared_ptr<PoseTaskGroup>
+KinematicsSolver::add_pose_task_group(const std::string &name,
+                                      const std::string &tcp_frame,
+                                      int base_priority,
+                                      int rotation_priority_offset,
+                                      bool merged_pose, bool auto_switch) {
+  if (pose_task_groups_.find(name) != pose_task_groups_.end()) {
+    throw std::runtime_error("Pose task group with name '" + name +
+                             "' already exists");
+  }
+  if (merged_pose && auto_switch) {
+    throw std::runtime_error("Pose task group '" + name +
+                             "' cannot use merged_pose and auto_switch "
+                             "together");
+  }
+
+  const auto position_name = name + "__position";
+  const auto orientation_name = name + "__orientation";
+  const auto task_name_conflicts = [&](const std::string &task_name) {
+    return task_map_.find(task_name) != task_map_.end();
+  };
+  if (task_name_conflicts(name) ||
+      (!merged_pose && task_name_conflicts(position_name)) ||
+      (!merged_pose && task_name_conflicts(orientation_name))) {
+    throw std::runtime_error("Pose task group '" + name +
+                             "' conflicts with an existing task name");
+  }
+
+  std::shared_ptr<PoseTaskGroup> group;
+  if (auto_switch) {
+    auto merged_task = std::make_shared<FrameTask>(name, robot_, tcp_frame,
+                                                   TaskType::FRAME_POSE);
+    auto position_task = std::make_shared<FrameTask>(
+        position_name, robot_, tcp_frame, TaskType::FRAME_POSITION);
+    auto orientation_task = std::make_shared<FrameTask>(
+        orientation_name, robot_, tcp_frame, TaskType::FRAME_ORIENTATION);
+    merged_task->setPriority(base_priority);
+    position_task->setPriority(base_priority);
+    orientation_task->setPriority(base_priority + rotation_priority_offset);
+    tasks_.push_back(merged_task);
+    task_map_[name] = merged_task;
+    tasks_.push_back(position_task);
+    task_map_[position_name] = position_task;
+    tasks_.push_back(orientation_task);
+    task_map_[orientation_name] = orientation_task;
+    group = std::make_shared<PoseTaskGroup>(
+        name, tcp_frame, base_priority, rotation_priority_offset, position_task,
+        orientation_task, merged_task);
+  } else if (merged_pose) {
+    auto pose_task = std::make_shared<FrameTask>(name, robot_, tcp_frame,
+                                                 TaskType::FRAME_POSE);
+    pose_task->setPriority(base_priority);
+    tasks_.push_back(pose_task);
+    task_map_[name] = pose_task;
+    group = std::make_shared<PoseTaskGroup>(name, tcp_frame, base_priority,
+                                            pose_task);
+  } else {
+    auto position_task = std::make_shared<FrameTask>(
+        position_name, robot_, tcp_frame, TaskType::FRAME_POSITION);
+    auto orientation_task = std::make_shared<FrameTask>(
+        orientation_name, robot_, tcp_frame, TaskType::FRAME_ORIENTATION);
+    position_task->setPriority(base_priority);
+    orientation_task->setPriority(base_priority + rotation_priority_offset);
+    tasks_.push_back(position_task);
+    task_map_[position_name] = position_task;
+    tasks_.push_back(orientation_task);
+    task_map_[orientation_name] = orientation_task;
+    group = std::make_shared<PoseTaskGroup>(
+        name, tcp_frame, base_priority, rotation_priority_offset, position_task,
+        orientation_task);
+  }
+
+  pose_task_groups_[name] = group;
+  sort_tasks_by_priority();
+  return group;
+}
+
+std::shared_ptr<PoseTaskGroup>
+KinematicsSolver::pose_task_group(const std::string &name) const {
+  auto it = pose_task_groups_.find(name);
+  return (it != pose_task_groups_.end()) ? it->second : nullptr;
+}
+
+void KinematicsSolver::reset_auto_task_layout_state() {
+  current_auto_task_layout_ = TaskLayout::kMerged;
+  auto_layout_below_low_count_ = 0;
+  auto_layout_has_feedback_ = false;
+  auto_layout_binding_score_ = 0.0;
+}
+
+void KinematicsSolver::select_auto_task_layout() {
+  if (!runtime_config_.enable_auto_task_layout) {
+    return;
+  }
+
+  if (auto_layout_has_feedback_) {
+    const double high = runtime_config_.auto_layout_binding_threshold_high;
+    const double low = runtime_config_.auto_layout_binding_threshold_low;
+    const int cooldown =
+        std::max(1, runtime_config_.auto_layout_cooldown_ticks);
+    if (current_auto_task_layout_ == TaskLayout::kMerged) {
+      if (auto_layout_binding_score_ > high) {
+        current_auto_task_layout_ = TaskLayout::kSplit;
+        auto_layout_below_low_count_ = 0;
+      }
+    } else {
+      if (auto_layout_binding_score_ < low) {
+        ++auto_layout_below_low_count_;
+        if (auto_layout_below_low_count_ >= cooldown) {
+          current_auto_task_layout_ = TaskLayout::kMerged;
+          auto_layout_below_low_count_ = 0;
+        }
+      } else {
+        auto_layout_below_low_count_ = 0;
+      }
+    }
+  }
+
+  for (auto &kv : pose_task_groups_) {
+    if (kv.second && kv.second->auto_switch()) {
+      kv.second->set_layout(current_auto_task_layout_);
+    }
+  }
+}
+
+VelocitySolverResult KinematicsSolver::retry_auto_task_layout_as_split_if_needed(
+    const Eigen::VectorXd &q, VelocitySolverResult result,
+    const std::vector<int> &velocity_lock_indices,
+    const std::optional<TorsoPoseConstraintOptions> &torso_constraint,
+    const std::optional<double> &step_validation_dt) {
+  const bool merged_succeeded = result.status == SolverStatus::kSuccess;
+  const bool merged_binds =
+      auto_layout_binding_score_ >
+      runtime_config_.auto_layout_binding_threshold_high;
+  if (!runtime_config_.enable_auto_task_layout ||
+      result.active_task_layout != TaskLayout::kMerged ||
+      (merged_succeeded && !merged_binds)) {
+    return result;
+  }
+
+  current_auto_task_layout_ = TaskLayout::kSplit;
+  auto_layout_below_low_count_ = 0;
+  for (auto &kv : pose_task_groups_) {
+    if (kv.second && kv.second->auto_switch()) {
+      kv.second->set_layout(TaskLayout::kSplit);
+    }
+  }
+
+  pending_velocity_lock_indices_ = velocity_lock_indices;
+  pending_step_torso_constraint_ = torso_constraint;
+  pending_step_validation_dt_ = step_validation_dt;
+  pending_reuse_current_kinematics_ = true;
+  VelocitySolverResult retry = solve_velocity(q, true);
+  const char *reason =
+      merged_succeeded ? "binding merged solve" : "non-success merged solve";
+  if (retry.status_message.empty()) {
+    retry.status_message =
+        std::string("auto task layout retried split after ") + reason;
+  } else {
+    retry.status_message = std::string("auto task layout retried split after ") +
+                           reason + ": " + retry.status_message;
+  }
+  if (merged_succeeded && retry.status != SolverStatus::kSuccess) {
+    if (result.status_message.empty()) {
+      result.status_message =
+          std::string("auto task layout kept successful merged solve after "
+                      "failed split retry: ") +
+          retry.status_message;
+    }
+    return result;
+  }
+  return retry;
+}
+
+void KinematicsSolver::update_auto_task_layout_feedback(
+    const VelocitySolverResult &result) {
+  if (!runtime_config_.enable_auto_task_layout) {
+    return;
+  }
+  auto clip01 = [](double x) {
+    if (!std::isfinite(x)) {
+      return 0.0;
+    }
+    return std::clamp(x, 0.0, 1.0);
+  };
+
+  double scale_binding = 0.0;
+  if (!result.task_scales.empty()) {
+    double min_scale = 1.0;
+    for (double s : result.task_scales) {
+      if (std::isfinite(s)) {
+        min_scale = std::min(min_scale, s);
+      }
+    }
+    scale_binding = clip01(1.0 - min_scale);
+  }
+
+  const double joint_clip_fraction =
+      robot_->nv() > 0 ? static_cast<double>(result.saturated_joints.size()) /
+                             static_cast<double>(robot_->nv())
+                       : 0.0;
+
+  double collision_binding = 0.0;
+  if (collision_constraint_.has_value() && collision_constraint_->enabled &&
+      std::isfinite(last_constraint_min_distance_)) {
+    const double margin =
+        std::max(collision_constraint_->constraint_activation_margin, 1e-9);
+    const double clearance =
+        last_constraint_min_distance_ - collision_constraint_->min_distance;
+    collision_binding = clip01(1.0 - clearance / margin);
+  }
+
+  auto_layout_binding_score_ =
+      std::max(scale_binding, std::max(joint_clip_fraction, collision_binding));
+  auto_layout_has_feedback_ = true;
 }
 
 void KinematicsSolver::configure_relative_pose_constraint(
@@ -1260,6 +1536,22 @@ KinematicsSolver::compute_relative_pose_constraint() {
 }
 
 void KinematicsSolver::remove_task(const std::string &name) {
+  auto group_it = pose_task_groups_.find(name);
+  if (group_it != pose_task_groups_.end()) {
+    auto group = group_it->second;
+    pose_task_groups_.erase(group_it);
+    if (group && group->position_task()) {
+      remove_task(group->position_task()->getName());
+    }
+    if (group && group->orientation_task()) {
+      remove_task(group->orientation_task()->getName());
+    }
+    if (group && group->merged_task()) {
+      remove_task(group->merged_task()->getName());
+    }
+    return;
+  }
+
   auto it = task_map_.find(name);
   if (it != task_map_.end()) {
     auto task = it->second;
@@ -1267,12 +1559,29 @@ void KinematicsSolver::remove_task(const std::string &name) {
 
     // Remove from tasks vector
     tasks_.erase(std::remove(tasks_.begin(), tasks_.end(), task), tasks_.end());
+    for (auto group_it = pose_task_groups_.begin();
+         group_it != pose_task_groups_.end();) {
+      const auto &group = group_it->second;
+      const bool references_removed_task =
+          group &&
+          ((group->position_task() &&
+            group->position_task()->getName() == name) ||
+           (group->orientation_task() &&
+            group->orientation_task()->getName() == name) ||
+           (group->merged_task() && group->merged_task()->getName() == name));
+      if (references_removed_task) {
+        group_it = pose_task_groups_.erase(group_it);
+      } else {
+        ++group_it;
+      }
+    }
   }
 }
 
 void KinematicsSolver::clear_tasks() {
   tasks_.clear();
   task_map_.clear();
+  pose_task_groups_.clear();
 }
 
 void KinematicsSolver::clear_all_target_velocities() {
@@ -1409,6 +1718,11 @@ void KinematicsSolver::configure_collision_constraint(
   }
   if (sphere_broadphase_enabled_ && !sphere_broadphase_.is_built()) {
     sphere_broadphase_.build(*collision_model_ptr);
+  }
+  if (!stall_user_configured_) {
+    stall_config_.stall_threshold = 3;
+    stall_config_.restore_rate = 0.2;
+    stall_config_.floor_fraction = 0.0;
   }
 #else
   (void)min_distance;
@@ -2044,6 +2358,7 @@ void KinematicsSolver::configure_stall_handler(int stall_threshold,
   stall_config_.stall_threshold = std::max(1, stall_threshold);
   stall_config_.restore_rate = std::max(0.0, restore_rate);
   stall_config_.floor_fraction = std::clamp(floor_fraction, 0.0, 1.0);
+  stall_user_configured_ = true;
 }
 
 bool KinematicsSolver::stall_handler_is_relaxed() const {
@@ -3697,6 +4012,7 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
   };
 
   VelocitySolverResult result;
+  select_auto_task_layout();
   struct ClearPendingVelocityLocks {
     KinematicsSolver *solver;
     ~ClearPendingVelocityLocks() {
@@ -3704,6 +4020,7 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
         solver->pending_velocity_lock_indices_.clear();
         solver->pending_step_torso_constraint_.reset();
         solver->pending_reuse_current_kinematics_ = false;
+        solver->pending_step_validation_dt_.reset();
       }
     }
   } clear_pending_locks{this};
@@ -4614,6 +4931,287 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
   config.regularization_config.epsilon = solver_tolerance_;
   config.regularization_config.regularization_factor = damping_;
 
+  WeightedAdvisoryResult advisory;
+  auto compute_weighted_advisory = [&]() -> WeightedAdvisoryResult {
+    auto weight_at_priority = [&](int priority) -> double {
+      double sum = 0.0;
+      int count = 0;
+      for (const auto &task : tasks_) {
+        if (!task || !task->isActive() || task->getPriority() != priority) {
+          continue;
+        }
+        if (std::isfinite(task->getWeight()) && task->getWeight() >= 0.0) {
+          sum += task->getWeight();
+          ++count;
+        }
+      }
+      return count > 0 ? sum / static_cast<double>(count) : 1.0;
+    };
+    auto type_at_priority = [&](int priority) -> TaskType {
+      bool saw_position = false;
+      bool saw_orientation = false;
+      bool saw_pose = false;
+      for (const auto &task : tasks_) {
+        if (!task || !task->isActive() || task->getPriority() != priority) {
+          continue;
+        }
+        const TaskType type = task->getType();
+        saw_position = saw_position || type == TaskType::FRAME_POSITION;
+        saw_orientation = saw_orientation || type == TaskType::FRAME_ORIENTATION;
+        saw_pose = saw_pose || type == TaskType::FRAME_POSE;
+      }
+      if (saw_pose) {
+        return TaskType::FRAME_POSE;
+      }
+      if (saw_position && !saw_orientation) {
+        return TaskType::FRAME_POSITION;
+      }
+      if (saw_orientation && !saw_position) {
+        return TaskType::FRAME_ORIENTATION;
+      }
+      return TaskType::POSTURE;
+    };
+
+    if (!runtime_config_.enable_advisor_scale_adapt) {
+      advisor_scale_current_ =
+          sanitize_advisor_scale(runtime_config_.advisor_position_weight_scale);
+    }
+    double position_weight_scale =
+        runtime_config_.enable_advisor_scale_adapt
+            ? advisor_scale_current_
+            : sanitize_advisor_scale(
+                  runtime_config_.advisor_position_weight_scale);
+    const double advisor_scale_min =
+        std::isfinite(runtime_config_.advisor_scale_min)
+            ? runtime_config_.advisor_scale_min
+            : 0.25;
+    const double advisor_scale_max =
+        std::isfinite(runtime_config_.advisor_scale_max)
+            ? runtime_config_.advisor_scale_max
+            : 8.0;
+    if (runtime_config_.enable_advisor_scale_adapt) {
+      const double lo =
+          std::max(0.0, std::min(advisor_scale_min, advisor_scale_max));
+      const double hi =
+          std::max(lo, std::max(advisor_scale_min, advisor_scale_max));
+      position_weight_scale = std::clamp(position_weight_scale, lo, hi);
+      advisor_scale_current_ = position_weight_scale;
+    }
+    double orientation_weight_scale =
+        runtime_config_.advisor_orientation_weight_scale;
+    if (!std::isfinite(orientation_weight_scale) ||
+        orientation_weight_scale < 0.0) {
+      orientation_weight_scale = 1.0;
+    }
+
+    auto sanitized_task_weight = [](const std::shared_ptr<Task> &task) {
+      if (!task || !std::isfinite(task->getWeight()) ||
+          task->getWeight() < 0.0) {
+        return 1.0;
+      }
+      return task->getWeight();
+    };
+    auto make_task_row_weights = [&](const std::shared_ptr<Task> &task) {
+      Eigen::VectorXd row_weights;
+      if (!task) {
+        return row_weights;
+      }
+      const int dimension = task->getDimension();
+      if (dimension <= 0) {
+        return row_weights;
+      }
+      row_weights =
+          Eigen::VectorXd::Constant(dimension, sanitized_task_weight(task));
+      const TaskType type = task->getType();
+      if (type == TaskType::FRAME_POSITION) {
+        row_weights.array() *= position_weight_scale;
+      } else if (type == TaskType::FRAME_ORIENTATION) {
+        row_weights.array() *= orientation_weight_scale;
+      } else if (type == TaskType::FRAME_POSE && dimension == 6) {
+        row_weights.head<3>().array() *= position_weight_scale;
+        row_weights.tail<3>().array() *= orientation_weight_scale;
+      }
+      return row_weights;
+    };
+    auto row_weights_at_priority = [&](int priority) {
+      int total_rows = 0;
+      for (const auto &task : tasks_) {
+        if (task && task->isActive() && task->getPriority() == priority) {
+          total_rows += task->getDimension();
+        }
+      }
+      Eigen::VectorXd row_weights;
+      if (total_rows <= 0) {
+        return row_weights;
+      }
+      row_weights.resize(total_rows);
+      int offset = 0;
+      for (const auto &task : tasks_) {
+        if (!task || !task->isActive() || task->getPriority() != priority) {
+          continue;
+        }
+        const Eigen::VectorXd task_weights = make_task_row_weights(task);
+        if (task_weights.size() == 0) {
+          continue;
+        }
+        row_weights.segment(offset, task_weights.size()) = task_weights;
+        offset += static_cast<int>(task_weights.size());
+      }
+      if (offset != total_rows) {
+        row_weights.conservativeResize(offset);
+      }
+      return row_weights;
+    };
+
+    std::vector<double> advisor_weights;
+    std::vector<Eigen::VectorXd> advisor_row_weights;
+    advisor_weights.reserve(goals.size());
+    advisor_row_weights.resize(goals.size());
+    for (size_t i = 0; i < objective_configs.size(); ++i) {
+      double w = 1.0;
+      TaskType type = TaskType::POSTURE;
+      if (i < objective_tasks.size() && objective_tasks[i]) {
+        w = objective_tasks[i]->getWeight();
+        type = objective_tasks[i]->getType();
+        advisor_row_weights[i] = make_task_row_weights(objective_tasks[i]);
+      } else {
+        w = weight_at_priority(objective_configs[i].priority);
+        type = type_at_priority(objective_configs[i].priority);
+        advisor_row_weights[i] =
+            row_weights_at_priority(objective_configs[i].priority);
+      }
+      if (!std::isfinite(w) || w < 0.0) {
+        w = 1.0;
+      }
+      if (type == TaskType::FRAME_POSITION) {
+        w *= position_weight_scale;
+      } else if (type == TaskType::FRAME_ORIENTATION) {
+        w *= orientation_weight_scale;
+      }
+      advisor_weights.push_back(w);
+    }
+
+    WeightedAdvisoryResult out = compute_constrained_weighted_advisory(
+        goals, jacobians, C, c_lower, c_upper, advisor_weights, config,
+        advisor_row_weights);
+    if (!out.available) {
+      return out;
+    }
+
+    result.weighted_advisory_available = true;
+    result.weighted_advisory_v_norm = out.v_norm;
+    result.weighted_advisory_condition_number = out.condition_number;
+
+    double position_error = std::numeric_limits<double>::quiet_NaN();
+    double orientation_error = std::numeric_limits<double>::quiet_NaN();
+    for (size_t i = 0; i < objective_configs.size() &&
+                       i < out.per_objective_error.size();
+         ++i) {
+      TaskType type = TaskType::POSTURE;
+      if (i < objective_tasks.size() && objective_tasks[i]) {
+        type = objective_tasks[i]->getType();
+      } else {
+        type = type_at_priority(objective_configs[i].priority);
+      }
+      if (type == TaskType::FRAME_POSITION &&
+          !std::isfinite(position_error)) {
+        position_error = out.per_objective_error[i];
+      } else if (type == TaskType::FRAME_ORIENTATION &&
+                 !std::isfinite(orientation_error)) {
+        orientation_error = out.per_objective_error[i];
+      } else if (type == TaskType::FRAME_POSE) {
+        const auto &J = jacobians[i];
+        const auto &b = goals[i];
+        if (J.rows() >= 6 && b.rows() >= 6 && out.v.size() == J.cols()) {
+          const Eigen::VectorXd residual = J * out.v - b;
+          if (i < objective_tasks.size() && objective_tasks[i]) {
+            if (!std::isfinite(position_error)) {
+              position_error = residual.head(3).norm();
+            }
+            if (!std::isfinite(orientation_error)) {
+              orientation_error = residual.tail(3).norm();
+            }
+          } else {
+            Eigen::Index offset = 0;
+            for (const auto &task : tasks_) {
+              if (!task || !task->isActive() ||
+                  task->getPriority() != objective_configs[i].priority) {
+                continue;
+              }
+              const Eigen::Index dim = task->getDimension();
+              if (offset + dim > residual.size()) {
+                break;
+              }
+              if (task->getType() == TaskType::FRAME_POSITION &&
+                  !std::isfinite(position_error)) {
+                position_error = residual.segment(offset, dim).norm();
+              } else if (task->getType() == TaskType::FRAME_ORIENTATION &&
+                         !std::isfinite(orientation_error)) {
+                orientation_error = residual.segment(offset, dim).norm();
+              } else if (task->getType() == TaskType::FRAME_POSE && dim >= 6) {
+                if (!std::isfinite(position_error)) {
+                  position_error = residual.segment(offset, 3).norm();
+                }
+                if (!std::isfinite(orientation_error)) {
+                  orientation_error = residual.segment(offset + dim - 3, 3).norm();
+                }
+              }
+              offset += dim;
+            }
+          }
+        }
+      }
+    }
+    result.weighted_advisory_pos_task_error_norm = position_error;
+    result.weighted_advisory_ori_task_error_norm = orientation_error;
+    result.advisor_position_weight_scale_current = position_weight_scale;
+    result.advisor_scale_adapt_active = false;
+    if (runtime_config_.enable_advisor_scale_adapt &&
+        std::isfinite(position_error) && std::isfinite(orientation_error)) {
+      const double denom = position_error + orientation_error;
+      if (denom > 1e-12) {
+        advisor_scale_ratio_sum_ += position_error / denom;
+        advisor_scale_epoch_time_s_ += std::max(dt_, 1e-9);
+        ++advisor_scale_sample_count_;
+      }
+      const double epoch_s =
+          (std::isfinite(runtime_config_.advisor_scale_epoch_s) &&
+           runtime_config_.advisor_scale_epoch_s > 0.0)
+              ? runtime_config_.advisor_scale_epoch_s
+              : 0.1;
+      if (advisor_scale_epoch_time_s_ >= epoch_s &&
+          advisor_scale_sample_count_ > 0) {
+        const double avg_ratio =
+            advisor_scale_ratio_sum_ /
+            static_cast<double>(advisor_scale_sample_count_);
+        const double target_ratio = std::clamp(
+            runtime_config_.advisor_scale_adapt_target_ratio, 0.0, 1.0);
+        const double ki =
+            std::isfinite(runtime_config_.advisor_scale_adapt_ki)
+                ? runtime_config_.advisor_scale_adapt_ki
+                : 0.0;
+        const double lo =
+            std::max(0.0, std::min(advisor_scale_min, advisor_scale_max));
+        const double hi =
+            std::max(lo, std::max(advisor_scale_min, advisor_scale_max));
+        const double exponent =
+            std::clamp(ki * (avg_ratio - target_ratio), -1.0, 1.0);
+        advisor_scale_current_ =
+            std::clamp(advisor_scale_current_ * std::exp(exponent), lo, hi);
+        advisor_scale_ratio_sum_ = 0.0;
+        advisor_scale_epoch_time_s_ = 0.0;
+        advisor_scale_sample_count_ = 0;
+        result.advisor_position_weight_scale_current = advisor_scale_current_;
+        result.advisor_scale_adapt_active = true;
+      }
+    }
+    return out;
+  };
+
+  if (runtime_config_.weighted_advisor_enabled && !goals.empty()) {
+    advisory = compute_weighted_advisory();
+  }
+
   warm_start_selector_cache_.reset();
   warm_start_constraint_rows_ = -1;
   auto backend_result = computeMultiObjectiveVelocitySolutionEigen(
@@ -4650,11 +5248,233 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
   }
   const double primary_goal_norm = goals.empty() ? 0.0 : goals[0].norm();
 
-  // Create velocity-specific result
-  const auto classified_velocity = classify_velocity_outcome(
+  auto classified_velocity = classify_velocity_outcome(
       backend_result.status, backend_result.status_message,
       backend_result.task_scales, primary_goal_norm,
       backend_result.task_modes_effective, backend_result.task_used_fallback);
+  auto clamp_final_velocity_candidate = [&](Eigen::VectorXd &candidate) {
+    if (apply_limits && c_lower.size() >= robot_->nv() &&
+        !use_contact_projection) {
+      clamp_joint_velocity_solution_in_place(
+          candidate, c_lower, c_upper, use_position_limits_, robot_->nv());
+      if (use_position_limits_) {
+        const int n_dq = static_cast<int>(candidate.size());
+        const int n_dens = static_cast<int>(dense_pos_lower_sp.size());
+        const int n_clamp = std::min(n_dq, n_dens);
+        for (int k = 0; k < n_clamp; ++k) {
+          if (dense_pos_lower_sp[k] < kNoPosBound)
+            candidate[k] = std::max(candidate[k], dense_pos_lower_sp[k]);
+          if (dense_pos_upper_sp[k] > -kNoPosBound)
+            candidate[k] = std::min(candidate[k], dense_pos_upper_sp[k]);
+        }
+      }
+    }
+  };
+  auto contact_velocity_norm = [&](const Eigen::VectorXd &candidate) {
+    double max_norm = 0.0;
+    for (const auto &cfg : contact_frames_) {
+      const Matrix6Xd J_full = robot_->get_frame_jacobian(cfg.frame_name);
+      Eigen::VectorXd v;
+      if (cfg.type == ContactType::kPointContact) {
+        v = J_full.topRows(3) * candidate;
+      } else {
+        v = J_full * candidate;
+      }
+      max_norm = std::max(max_norm, v.norm());
+    }
+    return max_norm;
+  };
+  auto com_max_violation = [&]() {
+    if (!com_constraint_.has_value() || !com_constraint_->enabled) {
+      return 0.0;
+    }
+    const auto &cfg = *com_constraint_;
+    const Eigen::Vector3d com_world = robot_->get_com_position();
+    Eigen::MatrixXd A_world = cfg.A;
+    Eigen::VectorXd b_world = cfg.b;
+    if (cfg.frame_name != "world") {
+      const auto frame_pose = robot_->get_frame_pose(cfg.frame_name);
+      const Eigen::Matrix3d R = frame_pose.rotation();
+      const Eigen::Vector3d t = frame_pose.translation();
+      const Eigen::Matrix2d R_xy = R.topLeftCorner<2, 2>();
+      A_world = cfg.A * R_xy.transpose();
+      b_world = cfg.b;
+      for (int i = 0; i < static_cast<int>(b_world.size()); ++i) {
+        b_world(i) += A_world.row(i).dot(t.head<2>());
+      }
+    }
+    const Eigen::VectorXd slack = b_world - A_world * com_world.head<2>();
+    double violation = 0.0;
+    for (int i = 0; i < slack.size(); ++i) {
+      violation = std::max(violation, -slack(i));
+    }
+    return violation;
+  };
+  auto relative_pose_max_violation = [&]() {
+    if (!relative_pose_constraint_.has_value() ||
+        !relative_pose_constraint_->enabled) {
+      return 0.0;
+    }
+    const auto &cfg = *relative_pose_constraint_;
+    const pinocchio::SE3 T_a = robot_->get_frame_pose(cfg.frame_a);
+    const pinocchio::SE3 T_b = robot_->get_frame_pose(cfg.frame_b);
+    const pinocchio::SE3 T_rel = compute_relative_frame(T_a, T_b);
+    Eigen::VectorXd rel_state = Eigen::VectorXd::Zero(6);
+    rel_state.head<3>() = T_rel.translation();
+    rel_state.tail<3>() = pinocchio::log3(T_rel.rotation());
+    double violation = 0.0;
+    for (int i = 0; i < 6; ++i) {
+      if (cfg.axis_mask(i) <= 0.5) {
+        continue;
+      }
+      violation = std::max(violation, cfg.lower_bounds(i) - rel_state(i));
+      violation = std::max(violation, rel_state(i) - cfg.upper_bounds(i));
+    }
+    return violation;
+  };
+  const double fallback_validation_dt =
+      (pending_step_validation_dt_.has_value() &&
+       std::isfinite(*pending_step_validation_dt_) &&
+       *pending_step_validation_dt_ > 0.0)
+          ? *pending_step_validation_dt_
+          : dt_;
+  auto weighted_fallback_candidate_acceptable =
+      [&](const Eigen::VectorXd &candidate) {
+        if (!candidate.allFinite() || candidate.size() != robot_->nv()) {
+          return false;
+        }
+        if (C.rows() > 0) {
+          const Eigen::VectorXd values = C * candidate;
+          const double feasibility_tol =
+              std::max(1e-8, 10.0 * constraint_tolerance_);
+          for (int i = 0; i < values.size(); ++i) {
+            if (values(i) < c_lower(i) - feasibility_tol ||
+                values(i) > c_upper(i) + feasibility_tol) {
+              return false;
+            }
+          }
+        }
+        if (use_contact_projection &&
+            contact_velocity_norm(candidate) >
+                std::max(1e-8, 10.0 * constraint_tolerance_)) {
+          return false;
+        }
+
+        const bool need_post_step_validation =
+            (collision_constraint_.has_value() &&
+             collision_constraint_->enabled) ||
+            (com_constraint_.has_value() && com_constraint_->enabled) ||
+            (relative_pose_constraint_.has_value() &&
+             relative_pose_constraint_->enabled);
+        if (!need_post_step_validation) {
+          return true;
+        }
+
+        const double current_com_violation = com_max_violation();
+        const double current_rel_violation = relative_pose_max_violation();
+        const std::optional<double> current_collision_distance =
+            (collision_constraint_.has_value() &&
+             collision_constraint_->enabled)
+                ? evaluate_post_step_collision_distance(q_eval)
+                : std::nullopt;
+
+        const Eigen::VectorXd q_candidate = pinocchio::integrate(
+            robot_->model(), q_eval, fallback_validation_dt * candidate);
+        robot_->update_kinematics(q_candidate);
+        const double candidate_com_violation = com_max_violation();
+        const double candidate_rel_violation = relative_pose_max_violation();
+        const std::optional<double> candidate_collision_distance =
+            (collision_constraint_.has_value() &&
+             collision_constraint_->enabled)
+                ? evaluate_post_step_collision_distance(q_candidate)
+                : std::nullopt;
+        robot_->update_kinematics(q_eval);
+
+        constexpr double kViolationImproveTolerance = 1e-9;
+        if (candidate_com_violation >
+            current_com_violation + kViolationImproveTolerance) {
+          return false;
+        }
+        if (candidate_rel_violation >
+            current_rel_violation + kViolationImproveTolerance) {
+          return false;
+        }
+        if (collision_constraint_.has_value() &&
+            collision_constraint_->enabled) {
+          const double safe_threshold =
+              collision_constraint_->min_distance - kCollisionTolerance;
+          if (!collision_recovery_candidate_acceptable(
+                  current_collision_distance, candidate_collision_distance,
+                  safe_threshold)) {
+            return false;
+          }
+        }
+        return true;
+      };
+  const bool can_try_weighted_fallback =
+      runtime_config_.weighted_fallback_enabled &&
+      classified_velocity.status != SolverStatus::kSuccess && !goals.empty();
+  if (can_try_weighted_fallback && !advisory.available) {
+    advisory = compute_weighted_advisory();
+  }
+  if (can_try_weighted_fallback && advisory.available) {
+    Eigen::VectorXd accepted_candidate = advisory.v;
+    if (use_contact_projection) {
+      accepted_candidate = contact_P_c * accepted_candidate;
+    }
+    clamp_final_velocity_candidate(accepted_candidate);
+    const bool accept_weighted_fallback =
+        weighted_fallback_candidate_acceptable(accepted_candidate);
+    if (accept_weighted_fallback) {
+      backend_result.solution.assign(
+          accepted_candidate.data(),
+          accepted_candidate.data() + accepted_candidate.size());
+      backend_result.status = SolverStatus::kSuccess;
+      backend_result.status_message =
+          "constrained weighted fallback accepted after prioritized solver: " +
+          classified_velocity.status_message;
+      backend_result.final_error = advisory.per_objective_error.empty()
+                                       ? 0.0
+                                       : advisory.per_objective_error.front();
+      backend_result.task_scales = {-1.0};
+      backend_result.task_errors = advisory.per_objective_error;
+      backend_result.task_modes_effective = {TaskSolveMode::kMinError};
+      backend_result.task_used_fallback = {false};
+      backend_result.condition_number = advisory.condition_number;
+      result.weighted_fallback_used = true;
+      result.recovery_stage = SolverRecoveryStage::kWeightedFallback;
+      classified_velocity = classify_velocity_outcome(
+          backend_result.status, backend_result.status_message,
+          backend_result.task_scales, primary_goal_norm,
+          backend_result.task_modes_effective,
+          backend_result.task_used_fallback);
+    }
+  }
+
+  auto infer_active_task_layout = [&]() {
+    bool saw_pose = false;
+    bool saw_split = false;
+    for (const auto &task : objective_tasks) {
+      if (!task) {
+        continue;
+      }
+      const TaskType type = task->getType();
+      saw_pose = saw_pose || type == TaskType::FRAME_POSE;
+      saw_split = saw_split || type == TaskType::FRAME_POSITION ||
+                              type == TaskType::FRAME_ORIENTATION;
+    }
+    if (runtime_config_.enable_auto_task_layout) {
+      return current_auto_task_layout_;
+    }
+    if (saw_pose && !saw_split) {
+      return TaskLayout::kMerged;
+    }
+    return TaskLayout::kSplit;
+  };
+  result.active_task_layout = infer_active_task_layout();
+  result.binding_score = auto_layout_binding_score_;
+
+  // Create velocity-specific result
   result.status = classified_velocity.status;
   result.solution = backend_result.solution;
   result.computation_time_ms = backend_result.computation_time_ms;
@@ -4742,6 +5562,7 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
 
   stall_handler_update(result);
   elastic_band_update(result);
+  update_auto_task_layout_feedback(result);
 
   return result;
 }
@@ -5396,6 +6217,18 @@ PositionIKResult KinematicsSolver::solve_position(
                                              /*include_position_rows=*/false,
                                              robot_->nv());
     }
+    if (use_position_limits_ && dq.size() == robot_->nv()) {
+      auto [q_min, q_max] = robot_->get_joint_limits();
+      if (elastic_band_config_.enabled &&
+          elastic_band_state_.delta.size() == robot_->nv()) {
+        expand_scalar_joint_limits_for_velocity_delta(
+            q_min, q_max, elastic_band_state_.delta, velocity_to_config_index,
+            robot_->nv());
+      }
+      clamp_joint_velocity_to_position_limits_for_integration(
+          dq, q_current, q_min, q_max, velocity_to_config_index, options.dt,
+          robot_->nv());
+    }
     Eigen::VectorXd q_pre_step = q_current;
     q_current =
         pinocchio::integrate(robot_->model(), q_current, options.dt * dq);
@@ -5759,10 +6592,20 @@ PositionIKResult KinematicsSolver::solve_position_step(
     }
     prev_combined_error = combined_error;
 
+    const double step_dt_eff = compute_adaptive_position_step_dt(
+        options, step_dt, error.head<3>().norm(),
+        collision_constraint_.has_value() && collision_constraint_->enabled,
+        collision_constraint_.has_value() ? collision_constraint_->min_distance
+                                          : 0.0,
+        last_constraint_min_distance_);
     pending_velocity_lock_indices_ = step_locked_indices;
     pending_step_torso_constraint_ = step_torso_constraint;
+    pending_step_validation_dt_ = step_dt_eff;
     pending_reuse_current_kinematics_ = true;
     VelocitySolverResult vel_out = solve_velocity(q, true);
+    vel_out = retry_auto_task_layout_as_split_if_needed(
+        q, std::move(vel_out), step_locked_indices, step_torso_constraint,
+        step_dt_eff);
     have_vel_result = true;
     last_vel_result = std::move(vel_out);
     ++steps_used;
@@ -5799,13 +6642,20 @@ PositionIKResult KinematicsSolver::solve_position_step(
     // error so large-jump approach is faster; reverts to base dt near target.
     // Proximity-aware cap: limit scale so the integration step cannot overshoot
     // past min_distance in one tick (scale * step_dt * max_ee_speed <= clearance).
-    const double step_dt_eff = compute_adaptive_position_step_dt(
-        options, step_dt, error.head<3>().norm(),
-        collision_constraint_.has_value() && collision_constraint_->enabled,
-        collision_constraint_.has_value() ? collision_constraint_->min_distance
-                                          : 0.0,
-        last_constraint_min_distance_);
     const bool adaptive_step_large = (step_dt_eff > step_dt * 1.01);
+    if (use_position_limits_ &&
+        last_vel_result.joint_velocities.size() == robot_->nv()) {
+      auto [q_min, q_max] = robot_->get_joint_limits();
+      if (elastic_band_config_.enabled &&
+          elastic_band_state_.delta.size() == robot_->nv()) {
+        expand_scalar_joint_limits_for_velocity_delta(
+            q_min, q_max, elastic_band_state_.delta, velocity_to_config_index,
+            robot_->nv());
+      }
+      clamp_joint_velocity_to_position_limits_for_integration(
+          last_vel_result.joint_velocities, q, q_min, q_max,
+          velocity_to_config_index, step_dt_eff, robot_->nv());
+    }
     q = pinocchio::integrate(robot_->model(), q,
                              step_dt_eff * last_vel_result.joint_velocities);
     robot_->update_configuration(q);
@@ -6305,6 +7155,11 @@ PositionIKResult KinematicsSolver::solve_position_step(
                                           last_vel_result.joint_velocities.size());
     }
     static_cast<VelocitySolverResult &>(result) = std::move(last_vel_result);
+    if (!runtime_config_.enable_auto_task_layout) {
+      result.active_task_layout =
+          frame_task->getType() == TaskType::FRAME_POSE ? TaskLayout::kMerged
+                                                        : TaskLayout::kSplit;
+    }
   }
   if (no_progress_exit && result.status != SolverStatus::kInvalidInput) {
     result.status = SolverStatus::kNoProgress;
@@ -6581,6 +7436,7 @@ PositionIKResult KinematicsSolver::solve_position_step(
   for (int step = 0; step < steps; ++step) {
     double combined_error = 0.0;
     double max_position_error = 0.0;
+    std::vector<Eigen::VectorXd> target_velocities(n_targets);
     bool task_apply_failed = false;
     std::string task_apply_error;
     for (size_t i = 0; i < n_targets; ++i) {
@@ -6637,7 +7493,7 @@ PositionIKResult KinematicsSolver::solve_position_step(
           max_position_error =
               std::max(max_position_error, task_position_error);
         }
-        rt.task->setTargetVelocity(v3);
+        target_velocities[i] = v3;
       } else if (error.size() >= 6) {
         const double task_position_error = error.head<3>().norm();
         combined_error += task_position_error + error.tail<3>().norm();
@@ -6646,7 +7502,7 @@ PositionIKResult KinematicsSolver::solve_position_step(
         vel.tail<3>() = target.orientation_gain * error.tail<3>();
         clamp_spatial_velocity_components(vel, options.max_linear_speed,
                                           options.max_angular_speed);
-        rt.task->setTargetVelocity(vel);
+        target_velocities[i] = vel;
       } else {
         task_apply_failed = true;
         task_apply_error =
@@ -6680,10 +7536,46 @@ PositionIKResult KinematicsSolver::solve_position_step(
     }
     prev_combined_error = combined_error;
 
+    for (size_t i = 0; i < n_targets; ++i) {
+      resolved[i].task->setTargetVelocity(target_velocities[i]);
+    }
+
+    const double step_dt_eff = compute_adaptive_position_step_dt(
+        options, step_dt, max_position_error,
+        collision_constraint_.has_value() && collision_constraint_->enabled,
+        collision_constraint_.has_value() ? collision_constraint_->min_distance
+                                          : 0.0,
+        last_constraint_min_distance_);
     pending_velocity_lock_indices_ = step_locked_indices;
     pending_step_torso_constraint_ = step_torso_constraint;
+    pending_step_validation_dt_ = step_dt_eff;
     pending_reuse_current_kinematics_ = true;
     VelocitySolverResult vel_out = solve_velocity(q, true);
+    vel_out = retry_auto_task_layout_as_split_if_needed(
+        q, std::move(vel_out), step_locked_indices, step_torso_constraint,
+        step_dt_eff);
+    const bool allow_backtrack =
+        options.stall_recovery && vel_out.status != SolverStatus::kSuccess &&
+        (vel_out.status == SolverStatus::kInfeasible ||
+         vel_out.status == SolverStatus::kNumericalError ||
+         vel_out.status == SolverStatus::kNoProgress) &&
+        vel_out.joint_velocities.size() == robot_->nv() &&
+        (!vel_out.joint_velocities.allFinite() ||
+         vel_out.joint_velocities.norm() <= stall_config_.dq_stall_eps);
+    if (allow_backtrack) {
+      for (size_t i = 0; i < n_targets; ++i) {
+        resolved[i].task->setTargetVelocity(kPositionStepBacktrackGainScale *
+                                            target_velocities[i]);
+      }
+      pending_velocity_lock_indices_ = step_locked_indices;
+      pending_step_torso_constraint_ = step_torso_constraint;
+      pending_step_validation_dt_ = step_dt_eff;
+      pending_reuse_current_kinematics_ = true;
+      VelocitySolverResult retry = solve_velocity(q, true);
+      if (retry.status == SolverStatus::kSuccess) {
+        vel_out = std::move(retry);
+      }
+    }
     have_vel_result = true;
     last_vel_result = std::move(vel_out);
     ++steps_used;
@@ -6716,13 +7608,20 @@ PositionIKResult KinematicsSolver::solve_position_step(
 
     Eigen::VectorXd q_pre_step = q;
     bool step_collision_rejected = false;
-    const double step_dt_eff = compute_adaptive_position_step_dt(
-        options, step_dt, max_position_error,
-        collision_constraint_.has_value() && collision_constraint_->enabled,
-        collision_constraint_.has_value() ? collision_constraint_->min_distance
-                                          : 0.0,
-        last_constraint_min_distance_);
     const bool adaptive_step_large = (step_dt_eff > step_dt * 1.01);
+    if (use_position_limits_ &&
+        last_vel_result.joint_velocities.size() == robot_->nv()) {
+      auto [q_min, q_max] = robot_->get_joint_limits();
+      if (elastic_band_config_.enabled &&
+          elastic_band_state_.delta.size() == robot_->nv()) {
+        expand_scalar_joint_limits_for_velocity_delta(
+            q_min, q_max, elastic_band_state_.delta, velocity_to_config_index,
+            robot_->nv());
+      }
+      clamp_joint_velocity_to_position_limits_for_integration(
+          last_vel_result.joint_velocities, q, q_min, q_max,
+          velocity_to_config_index, step_dt_eff, robot_->nv());
+    }
     q = pinocchio::integrate(robot_->model(), q,
                              step_dt_eff * last_vel_result.joint_velocities);
     robot_->update_configuration(q);
@@ -7232,6 +8131,22 @@ PositionIKResult KinematicsSolver::solve_position_step(
     if (saved_status == SolverStatus::kInvalidInput && !saved_msg.empty()) {
       result.status = saved_status;
       result.status_message = std::move(saved_msg);
+    }
+    if (!runtime_config_.enable_auto_task_layout) {
+      bool saw_pose = false;
+      bool saw_split = false;
+      for (const auto &rt : resolved) {
+        if (rt.kind != PoseTaskKind::kFrame) {
+          continue;
+        }
+        const auto *frame_task = static_cast<const FrameTask *>(rt.task.get());
+        const TaskType type = frame_task->getType();
+        saw_pose = saw_pose || type == TaskType::FRAME_POSE;
+        saw_split = saw_split || type == TaskType::FRAME_POSITION ||
+                                type == TaskType::FRAME_ORIENTATION;
+      }
+      result.active_task_layout =
+          (saw_pose && !saw_split) ? TaskLayout::kMerged : TaskLayout::kSplit;
     }
   } else if (result.status_message.empty()) {
     result.status = SolverStatus::kInvalidInput;

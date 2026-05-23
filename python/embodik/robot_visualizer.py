@@ -4,10 +4,11 @@ This module provides a unified interface for robot visualization that supports
 both Pinocchio ViserVisualizer and ViserUrdf backends.
 """
 
-from typing import Optional, Tuple, Literal
-from pathlib import Path
-import numpy as np
 import logging
+from pathlib import Path
+from typing import Literal, Optional, Tuple
+
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
@@ -87,8 +88,8 @@ class RobotVisualizer:
         """Initialize ViserUrdf backend."""
         try:
             import viser
-            from viser.extras import ViserUrdf
             from robot_descriptions.loaders.yourdfpy import load_robot_description
+            from viser.extras import ViserUrdf
         except ImportError as e:
             raise ImportError(
                 f"ViserUrdf backend requires 'viser' and 'robot_descriptions' packages. "

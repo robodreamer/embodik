@@ -25,9 +25,7 @@ import embodik
 # Helpers
 # ---------------------------------------------------------------------------
 
-_PANDA_DEFAULT_Q = np.array(
-    [0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785, 0.04, 0.04], dtype=float
-)
+_PANDA_DEFAULT_Q = np.array([0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785, 0.04, 0.04], dtype=float)
 
 
 def _ensure_ros_package_path(urdf_path: pathlib.Path) -> None:
@@ -38,9 +36,7 @@ def _ensure_ros_package_path(urdf_path: pathlib.Path) -> None:
         paths.add(str(p))
         p = p.parent
     new_path = ":".join(str(x) for x in paths)
-    os.environ["ROS_PACKAGE_PATH"] = (
-        f"{existing}:{new_path}" if existing else new_path
-    )
+    os.environ["ROS_PACKAGE_PATH"] = f"{existing}:{new_path}" if existing else new_path
 
 
 # ---------------------------------------------------------------------------
@@ -73,9 +69,7 @@ def panda_solver(panda_robot):
 class TestSuccessGuaranteesMinDistanceNotViolated:
     """SUCCESS results must never violate the configured min_distance."""
 
-    def test_success_guarantees_min_distance_not_violated(
-        self, panda_robot, panda_solver
-    ):
+    def test_success_guarantees_min_distance_not_violated(self, panda_robot, panda_solver):
         min_dist = 0.05
         panda_solver.configure_collision_constraint(
             min_distance=min_dist,
@@ -121,9 +115,7 @@ class TestSuccessGuaranteesMinDistanceNotViolated:
 class TestCollisionViolatedStatusFromSafeSeed:
     """COLLISION_VIOLATED is returned when a safe seed cannot make progress."""
 
-    def test_collision_violated_status_returned_from_safe_seed(
-        self, panda_robot, panda_solver
-    ):
+    def test_collision_violated_status_returned_from_safe_seed(self, panda_robot, panda_solver):
         # Very large min_distance to make almost any motion trigger violation
         tight_min_dist = 0.20
         panda_solver.configure_collision_constraint(
@@ -174,8 +166,7 @@ class TestCollisionViolatedStatusFromSafeSeed:
             # q_solution distance should not be deeply negative
             sol_dist = panda_solver.evaluate_min_collision_distance(q_sol)
             assert sol_dist > -0.05, (
-                f"COLLISION_VIOLATED q_solution in deep collision: "
-                f"dist={sol_dist:.4f}"
+                f"COLLISION_VIOLATED q_solution in deep collision: " f"dist={sol_dist:.4f}"
             )
         else:
             # Other statuses (INFEASIBLE, NO_PROGRESS, etc.) are valid when
@@ -192,9 +183,7 @@ class TestCollisionViolatedStatusFromSafeSeed:
 class TestPerPairMinDistanceOverride:
     """Per-pair min_distance override API: set / get / clear."""
 
-    def test_per_pair_min_distance_override_respected(
-        self, panda_robot, panda_solver
-    ):
+    def test_per_pair_min_distance_override_respected(self, panda_robot, panda_solver):
         # Global constraint at a low value
         panda_solver.configure_collision_constraint(
             min_distance=0.02,
@@ -208,30 +197,28 @@ class TestPerPairMinDistanceOverride:
         panda_solver.set_collision_pair_min_distance(link_a, link_b, override_dist)
 
         overrides = panda_solver.get_collision_pair_min_distance_overrides()
-        assert len(overrides) > 0, (
-            "Expected at least one override after set_collision_pair_min_distance"
-        )
+        assert (
+            len(overrides) > 0
+        ), "Expected at least one override after set_collision_pair_min_distance"
 
         # At least one override should be close to the specified distance
         distances = [d for _, d in overrides]
-        assert any(abs(d - override_dist) < 0.01 for d in distances), (
-            f"No override near {override_dist} found; overrides={overrides}"
-        )
+        assert any(
+            abs(d - override_dist) < 0.01 for d in distances
+        ), f"No override near {override_dist} found; overrides={overrides}"
 
         # Clear the override and verify removal
         panda_solver.clear_collision_pair_min_distance(link_a, link_b)
         overrides_after = panda_solver.get_collision_pair_min_distance_overrides()
-        assert len(overrides_after) == 0, (
-            f"Expected empty overrides after clear, got {overrides_after}"
-        )
+        assert (
+            len(overrides_after) == 0
+        ), f"Expected empty overrides after clear, got {overrides_after}"
 
 
 class TestViolatedSeedNeverReturnsCollisionViolated:
     """COLLISION_VIOLATED must never be returned from a violated (inside min_distance) seed."""
 
-    def test_violated_seed_never_returns_collision_violated(
-        self, panda_robot, panda_solver
-    ):
+    def test_violated_seed_never_returns_collision_violated(self, panda_robot, panda_solver):
         min_dist = 0.05
         panda_solver.configure_collision_constraint(
             min_distance=min_dist,
@@ -311,8 +298,7 @@ class TestViolatedSeedNeverReturnsCollisionViolated:
         seed_dist = panda_solver.evaluate_min_collision_distance(q0)
         if seed_dist >= min_dist:
             pytest.skip(
-                f"Default panda q is not inside min_distance "
-                f"({seed_dist:.4f} >= {min_dist})."
+                f"Default panda q is not inside min_distance " f"({seed_dist:.4f} >= {min_dist})."
             )
 
         panda_robot.update_configuration(q0)
@@ -442,6 +428,7 @@ class TestAdaptiveDtCollisionStall:
     @staticmethod
     def _make_exclusion_pairs(robot):
         import re
+
         all_pairs = robot.get_collision_pair_names()
         excl = []
         for a, b in all_pairs:
@@ -454,9 +441,7 @@ class TestAdaptiveDtCollisionStall:
                 excl.append((a, b))
         return excl
 
-    def test_adaptive_dt_proximity_cap_prevents_collision_stall(
-        self, panda_robot, panda_solver
-    ):
+    def test_adaptive_dt_proximity_cap_prevents_collision_stall(self, panda_robot, panda_solver):
         """With proximity cap: adaptive_dt must not enter a COLLISION_VIOLATED stall.
 
         Without the cap, large adaptive steps overshoot the ~2 mm clearance above
@@ -490,9 +475,7 @@ class TestAdaptiveDtCollisionStall:
         # Drive toward a target that requires the arm to sweep near link5/link7
         target = np.eye(4, dtype=float)
         target[:3, :3] = np.asarray(hand_pose.rotation, dtype=float)
-        target[:3, 3] = np.asarray(hand_pose.translation, dtype=float) + np.array(
-            [0.0, 0.3, -0.3]
-        )
+        target[:3, 3] = np.asarray(hand_pose.translation, dtype=float) + np.array([0.0, 0.3, -0.3])
 
         opts = embodik.PositionStepOptions()
         opts.max_steps = 1
@@ -555,9 +538,7 @@ class TestAdaptiveDtCollisionStall:
         hand_pose = panda_robot.get_frame_pose("panda_hand")
         target = np.eye(4, dtype=float)
         target[:3, :3] = np.asarray(hand_pose.rotation, dtype=float)
-        target[:3, 3] = np.asarray(hand_pose.translation, dtype=float) + np.array(
-            [0.0, 0.3, -0.3]
-        )
+        target[:3, 3] = np.asarray(hand_pose.translation, dtype=float) + np.array([0.0, 0.3, -0.3])
 
         opts = embodik.PositionStepOptions()
         opts.max_steps = 1

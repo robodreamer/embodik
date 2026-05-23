@@ -83,11 +83,13 @@ def _run_circular_trajectory(robot, solver, task, n_steps, q0=None):
     configs = [q.copy()]
     for step in range(n_steps):
         phase = 0.09 * step
-        target = base_pos + np.array([
-            0.04 * math.cos(phase),
-            0.04 * math.sin(phase),
-            0.02 * math.sin(0.5 * phase),
-        ])
+        target = base_pos + np.array(
+            [
+                0.04 * math.cos(phase),
+                0.04 * math.sin(phase),
+                0.02 * math.sin(0.5 * phase),
+            ]
+        )
         task.set_target_pose(target, base_rot)
         res = solver.solve_velocity(q, apply_limits=True)
         results.append(res)
@@ -132,9 +134,7 @@ class TestSphereBroadphaseCorrectness:
             if res_off.status != res_on.status:
                 mismatches += 1
 
-        assert mismatches == 0, (
-            f"Status mismatch in {mismatches}/50 configs"
-        )
+        assert mismatches == 0, f"Status mismatch in {mismatches}/50 configs"
 
 
 class TestSphereBroadphaseConservativeness:
@@ -169,9 +169,7 @@ class TestSphereBroadphaseConservativeness:
             )
             max_diff = max(max_diff, diff)
 
-        assert max_diff < 1e-6, (
-            f"Max velocity norm diff = {max_diff:.2e}, expected < 1e-6"
-        )
+        assert max_diff < 1e-6, f"Max velocity norm diff = {max_diff:.2e}, expected < 1e-6"
 
     def test_no_penetration_after_solve(self, panda_robot):
         """Broadphase must not introduce penetration beyond what the baseline produces.
@@ -183,9 +181,7 @@ class TestSphereBroadphaseConservativeness:
         n_steps = 200
 
         # Baseline without broadphase
-        solver_off, task_off = _make_solver_with_task(
-            panda_robot, enable_broadphase=False
-        )
+        solver_off, task_off = _make_solver_with_task(panda_robot, enable_broadphase=False)
         _, configs_off = _run_circular_trajectory(
             panda_robot, solver_off, task_off, n_steps=n_steps
         )
@@ -195,12 +191,8 @@ class TestSphereBroadphaseConservativeness:
             worst_off = min(worst_off, panda_robot.compute_min_collision_distance())
 
         # With broadphase
-        solver_on, task_on = _make_solver_with_task(
-            panda_robot, enable_broadphase=True
-        )
-        _, configs_on = _run_circular_trajectory(
-            panda_robot, solver_on, task_on, n_steps=n_steps
-        )
+        solver_on, task_on = _make_solver_with_task(panda_robot, enable_broadphase=True)
+        _, configs_on = _run_circular_trajectory(panda_robot, solver_on, task_on, n_steps=n_steps)
         worst_on = 1.0
         for q in configs_on:
             panda_robot.update_configuration(q)
@@ -226,9 +218,7 @@ class TestSphereBroadphasePerformance:
         solver, task = _make_solver_with_task(panda_robot, enable_broadphase=True)
         solver.enable_timing_breakdown(True)
 
-        results, _ = _run_circular_trajectory(
-            panda_robot, solver, task, n_steps=100
-        )
+        results, _ = _run_circular_trajectory(panda_robot, solver, task, n_steps=100)
 
         total_culled = sum(r.collision_sphere_culled_pairs for r in results)
         total_exact = sum(r.collision_exact_distance_queries for r in results)
@@ -246,9 +236,7 @@ class TestSphereBroadphasePerformance:
         n_steps = 100
 
         # --- Baseline (no broadphase) ---
-        solver_off, task_off = _make_solver_with_task(
-            panda_robot, enable_broadphase=False
-        )
+        solver_off, task_off = _make_solver_with_task(panda_robot, enable_broadphase=False)
         solver_off.enable_timing_breakdown(True)
         results_off, _ = _run_circular_trajectory(
             panda_robot, solver_off, task_off, n_steps=n_steps
@@ -256,13 +244,9 @@ class TestSphereBroadphasePerformance:
         times_off = [r.collision_constraint_time_ms for r in results_off]
 
         # --- With broadphase ---
-        solver_on, task_on = _make_solver_with_task(
-            panda_robot, enable_broadphase=True
-        )
+        solver_on, task_on = _make_solver_with_task(panda_robot, enable_broadphase=True)
         solver_on.enable_timing_breakdown(True)
-        results_on, _ = _run_circular_trajectory(
-            panda_robot, solver_on, task_on, n_steps=n_steps
-        )
+        results_on, _ = _run_circular_trajectory(panda_robot, solver_on, task_on, n_steps=n_steps)
         times_on = [r.collision_constraint_time_ms for r in results_on]
 
         median_off = float(np.median(times_off))

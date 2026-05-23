@@ -204,11 +204,15 @@ class TestApproachAHypothesis:
         _narrow_limits(robot, margin=0.15)
         return q_init
 
-    @pytest.mark.parametrize("axis,offset", [
-        ("X", np.array([0.08, 0.0, 0.0])),
-        ("Y", np.array([0.0, 0.08, 0.0])),
-        ("Z", np.array([0.0, 0.0, 0.08])),
-    ], ids=["X", "Y", "Z"])
+    @pytest.mark.parametrize(
+        "axis,offset",
+        [
+            ("X", np.array([0.08, 0.0, 0.0])),
+            ("Y", np.array([0.0, 0.08, 0.0])),
+            ("Z", np.array([0.0, 0.0, 0.08])),
+        ],
+        ids=["X", "Y", "Z"],
+    )
     def test_widened_limits_reduce_infeasible_or_stalls(self, panda_narrow, axis, offset):
         """Widening limits by 0.001 rad should reduce infeasible/stall count."""
         robot, solver = panda_narrow
@@ -225,14 +229,18 @@ class TestApproachAHypothesis:
         total_stalls_widened = widened.stall_steps_forward + widened.stall_steps_reverse
 
         print(f"\n--- Axis {axis} ---")
-        print(f"Baseline: stalls={total_stalls_baseline} (fwd={baseline.stall_steps_forward}, "
-              f"rev={baseline.stall_steps_reverse}), infeasible={baseline.infeasible_count}, "
-              f"min_scale={baseline.min_task_scale:.4f}, "
-              f"return_err={baseline.ee_return_error:.4f}")
-        print(f"Widened:  stalls={total_stalls_widened} (fwd={widened.stall_steps_forward}, "
-              f"rev={widened.stall_steps_reverse}), infeasible={widened.infeasible_count}, "
-              f"min_scale={widened.min_task_scale:.4f}, "
-              f"return_err={widened.ee_return_error:.4f}")
+        print(
+            f"Baseline: stalls={total_stalls_baseline} (fwd={baseline.stall_steps_forward}, "
+            f"rev={baseline.stall_steps_reverse}), infeasible={baseline.infeasible_count}, "
+            f"min_scale={baseline.min_task_scale:.4f}, "
+            f"return_err={baseline.ee_return_error:.4f}"
+        )
+        print(
+            f"Widened:  stalls={total_stalls_widened} (fwd={widened.stall_steps_forward}, "
+            f"rev={widened.stall_steps_reverse}), infeasible={widened.infeasible_count}, "
+            f"min_scale={widened.min_task_scale:.4f}, "
+            f"return_err={widened.ee_return_error:.4f}"
+        )
 
         # Decision gate: widened should show some improvement
         # Either fewer stalls, fewer infeasibles, or better return error
@@ -253,17 +261,15 @@ class TestApproachAHypothesis:
         q_lower_nom, q_upper_nom = robot.get_joint_limits()
 
         self._reset_panda(robot, solver)
-        metrics = _run_solve_loop(
-            robot, solver, np.array([0.08, 0.0, 0.0]), widen_amount=0.001
-        )
+        metrics = _run_solve_loop(robot, solver, np.array([0.08, 0.0, 0.0]), widen_amount=0.001)
 
         for i, q in enumerate(metrics.q_trace):
-            assert np.all(q >= q_lower_nom - 1e-10), (
-                f"Step {i}: q below lower limit: {q} < {q_lower_nom}"
-            )
-            assert np.all(q <= q_upper_nom + 1e-10), (
-                f"Step {i}: q above upper limit: {q} > {q_upper_nom}"
-            )
+            assert np.all(
+                q >= q_lower_nom - 1e-10
+            ), f"Step {i}: q below lower limit: {q} < {q_lower_nom}"
+            assert np.all(
+                q <= q_upper_nom + 1e-10
+            ), f"Step {i}: q above upper limit: {q} > {q_upper_nom}"
 
 
 # ---------------------------------------------------------------------------
@@ -317,9 +323,9 @@ class TestElasticBandStateDynamics:
             q = np.clip(q, q_lower, q_upper)
             robot.update_kinematics(q)
 
-        assert solver.elastic_band_max_delta() > 0.0, (
-            "Elastic band delta should grow after stalling at joint limits"
-        )
+        assert (
+            solver.elastic_band_max_delta() > 0.0
+        ), "Elastic band delta should grow after stalling at joint limits"
         solver.clear_tasks()
 
     def test_elastic_state_decays_when_healthy(self):
@@ -336,7 +342,9 @@ class TestElasticBandStateDynamics:
 
         solver.enable_elastic_band(delta_max=0.02)
         solver.configure_elastic_band(
-            delta_max=0.02, expand_rate=0.005, decay_rate=0.3,
+            delta_max=0.02,
+            expand_rate=0.005,
+            decay_rate=0.3,
             stall_threshold=2,
         )
 
@@ -360,9 +368,7 @@ class TestElasticBandStateDynamics:
             robot.update_kinematics(q)
 
         peak_delta = solver.elastic_band_max_delta()
-        assert peak_delta > 0.0, (
-            f"Should have expanded during stall phase (max_delta={peak_delta})"
-        )
+        assert peak_delta > 0.0, f"Should have expanded during stall phase (max_delta={peak_delta})"
 
         # Phase 2: Set target to current pose (trivially achievable)
         robot.update_kinematics(q)
@@ -394,7 +400,9 @@ class TestElasticBandStateDynamics:
         delta_max = 0.02
         solver.enable_elastic_band(delta_max=delta_max)
         solver.configure_elastic_band(
-            delta_max=delta_max, expand_rate=0.01, decay_rate=0.2,
+            delta_max=delta_max,
+            expand_rate=0.01,
+            decay_rate=0.2,
             stall_threshold=2,
         )
 
@@ -416,9 +424,9 @@ class TestElasticBandStateDynamics:
             q = np.clip(q, q_lower, q_upper)
             robot.update_kinematics(q)
 
-            assert solver.elastic_band_max_delta() <= delta_max + 1e-10, (
-                f"Delta {solver.elastic_band_max_delta():.6f} exceeded max {delta_max}"
-            )
+            assert (
+                solver.elastic_band_max_delta() <= delta_max + 1e-10
+            ), f"Delta {solver.elastic_band_max_delta():.6f} exceeded max {delta_max}"
         solver.clear_tasks()
 
     def test_elastic_only_saturated_joints_expand(self, panda_narrow):
@@ -430,8 +438,11 @@ class TestElasticBandStateDynamics:
 
         solver.enable_elastic_band(delta_max=0.05)
         solver.configure_elastic_band(
-            delta_max=0.05, expand_rate=0.01, decay_rate=0.2,
-            stall_threshold=3, expand_only_saturated=True,
+            delta_max=0.05,
+            expand_rate=0.01,
+            decay_rate=0.2,
+            stall_threshold=3,
+            expand_only_saturated=True,
         )
 
         solver.clear_tasks()
@@ -464,9 +475,7 @@ class TestElasticBandStateDynamics:
             if i not in last_saturated and deltas[i] > 1e-10:
                 # Allow gripper joints to be excluded from check
                 if i < len(_PANDA_DEFAULT_Q):
-                    assert False, (
-                        f"Joint {i} was never saturated but has delta={deltas[i]:.6f}"
-                    )
+                    assert False, f"Joint {i} was never saturated but has delta={deltas[i]:.6f}"
 
         solver.clear_tasks()
 
@@ -524,7 +533,9 @@ class TestElasticBandVelocityBox:
         robot.update_kinematics(q)
         solver.enable_elastic_band(delta_max=0.05)
         solver.configure_elastic_band(
-            delta_max=0.05, expand_rate=0.01, decay_rate=0.2,
+            delta_max=0.05,
+            expand_rate=0.01,
+            decay_rate=0.2,
             stall_threshold=3,
         )
         task.set_target_pose(target, ee_rot)
@@ -562,7 +573,9 @@ class TestElasticBandVelocityBox:
 
         solver.enable_elastic_band(delta_max=0.05)
         solver.configure_elastic_band(
-            delta_max=0.05, expand_rate=0.01, decay_rate=0.3,
+            delta_max=0.05,
+            expand_rate=0.01,
+            decay_rate=0.3,
             stall_threshold=3,
         )
 
@@ -602,9 +615,9 @@ class TestElasticBandVelocityBox:
             q = np.clip(q, q_lower, q_upper)
             robot.update_kinematics(q)
 
-        assert solver.elastic_band_max_delta() < 0.005, (
-            f"Deltas should decay: {solver.elastic_band_max_delta():.6f}"
-        )
+        assert (
+            solver.elastic_band_max_delta() < 0.005
+        ), f"Deltas should decay: {solver.elastic_band_max_delta():.6f}"
         solver.disable_elastic_band()
         solver.clear_tasks()
 
@@ -648,12 +661,14 @@ class TestElasticBandVelocityBox:
             robot.update_kinematics(q_run)
 
         max_scale_elastic = max(scales_elastic) if scales_elastic else 0.0
-        print(f"\nBaseline scale: {scale_baseline:.4f}, "
-              f"Max elastic scale: {max_scale_elastic:.4f}")
-
-        assert solver.elastic_band_is_expanded() or max_scale_elastic > scale_baseline, (
-            "Elastic band should be active or improve task scales"
+        print(
+            f"\nBaseline scale: {scale_baseline:.4f}, "
+            f"Max elastic scale: {max_scale_elastic:.4f}"
         )
+
+        assert (
+            solver.elastic_band_is_expanded() or max_scale_elastic > scale_baseline
+        ), "Elastic band should be active or improve task scales"
         solver.disable_elastic_band()
         solver.clear_tasks()
 
@@ -664,7 +679,11 @@ class TestElasticBandVelocityBox:
 
 
 def _run_elastic_round_trip(
-    offset, *, steps=200, enable_elastic=True, delta_max=0.05,
+    offset,
+    *,
+    steps=200,
+    enable_elastic=True,
+    delta_max=0.05,
 ):
     """Helper: run round-trip with optional elastic band.
 
@@ -676,7 +695,9 @@ def _run_elastic_round_trip(
     if enable_elastic:
         solver.enable_elastic_band(delta_max=delta_max)
         solver.configure_elastic_band(
-            delta_max=delta_max, expand_rate=0.01, decay_rate=0.2,
+            delta_max=delta_max,
+            expand_rate=0.01,
+            decay_rate=0.2,
             stall_threshold=3,
         )
 
@@ -701,7 +722,9 @@ class TestElasticBandRoundTrip:
 
         solver.enable_elastic_band(delta_max=0.05)
         solver.configure_elastic_band(
-            delta_max=0.05, expand_rate=0.01, decay_rate=0.3,
+            delta_max=0.05,
+            expand_rate=0.01,
+            decay_rate=0.3,
             stall_threshold=3,
         )
 
@@ -736,16 +759,20 @@ class TestElasticBandRoundTrip:
         # After the round trip, the elastic state should remain bounded and
         # finite. The exact decay target is tracked separately because the
         # current solver can hold residual expansion at saturated joints.
-        assert solver.elastic_band_max_delta() < 0.05, (
-            f"Deltas should stay bounded: {solver.elastic_band_max_delta():.6f}"
-        )
+        assert (
+            solver.elastic_band_max_delta() < 0.05
+        ), f"Deltas should stay bounded: {solver.elastic_band_max_delta():.6f}"
         solver.disable_elastic_band()
         solver.clear_tasks()
 
-    @pytest.mark.parametrize("axis,offset", [
-        ("X", np.array([0.08, 0.0, 0.0])),
-        ("Y", np.array([0.0, 0.08, 0.0])),
-    ], ids=["X", "Y"])
+    @pytest.mark.parametrize(
+        "axis,offset",
+        [
+            ("X", np.array([0.08, 0.0, 0.0])),
+            ("Y", np.array([0.0, 0.08, 0.0])),
+        ],
+        ids=["X", "Y"],
+    )
     def test_elastic_fewer_oscillations_than_min_error(self, axis, offset):
         """Test 12: elastic band has fewer oscillations than min_error fallback."""
         # Run with elastic band
@@ -790,7 +817,9 @@ class TestElasticBandRoundTrip:
         solver.clear_tasks()
 
         print(f"\n--- {axis} Oscillations ---")
-        print(f"Elastic: {elastic.oscillation_count}, MinError: {min_error_metrics.oscillation_count}")
+        print(
+            f"Elastic: {elastic.oscillation_count}, MinError: {min_error_metrics.oscillation_count}"
+        )
 
         # Elastic band may have more oscillations than min_error near limits
         # because SCALE mode naturally oscillates as joints saturate/unsaturate.
@@ -819,22 +848,22 @@ class TestElasticBandSafety:
 
         solver.enable_elastic_band(delta_max=0.05)
         solver.configure_elastic_band(
-            delta_max=0.05, expand_rate=0.02, decay_rate=0.1,
+            delta_max=0.05,
+            expand_rate=0.02,
+            decay_rate=0.1,
             stall_threshold=2,
         )
 
         metrics = _run_solve_loop(
-            robot, solver, np.array([0.05, 0.05, 0.05]),
+            robot,
+            solver,
+            np.array([0.05, 0.05, 0.05]),
             steps_per_phase=100,
         )
 
         for i, q in enumerate(metrics.q_trace):
-            assert np.all(q >= q_lower_nom - 1e-10), (
-                f"Step {i}: q below nominal lower limit"
-            )
-            assert np.all(q <= q_upper_nom + 1e-10), (
-                f"Step {i}: q above nominal upper limit"
-            )
+            assert np.all(q >= q_lower_nom - 1e-10), f"Step {i}: q below nominal lower limit"
+            assert np.all(q <= q_upper_nom + 1e-10), f"Step {i}: q above nominal upper limit"
         solver.disable_elastic_band()
 
     def test_no_divergence_extreme_params(self):
@@ -844,7 +873,9 @@ class TestElasticBandSafety:
 
         solver.enable_elastic_band(delta_max=0.2)
         solver.configure_elastic_band(
-            delta_max=0.2, expand_rate=0.05, decay_rate=0.05,
+            delta_max=0.2,
+            expand_rate=0.05,
+            decay_rate=0.05,
             stall_threshold=2,
         )
 
@@ -872,9 +903,9 @@ class TestElasticBandSafety:
 
             deltas = solver.elastic_band_deltas()
             assert np.all(np.isfinite(deltas)), "NaN in elastic band deltas"
-            assert solver.elastic_band_max_delta() <= 0.2 + 1e-10, (
-                f"Delta exceeded max: {solver.elastic_band_max_delta()}"
-            )
+            assert (
+                solver.elastic_band_max_delta() <= 0.2 + 1e-10
+            ), f"Delta exceeded max: {solver.elastic_band_max_delta()}"
 
         solver.disable_elastic_band()
         solver.clear_tasks()
@@ -951,9 +982,7 @@ class TestScaleElasticMode:
 
         # First solve should auto-enable elastic band
         result = solver.solve_velocity(q)
-        assert solver.elastic_band_enabled(), (
-            "SCALE_ELASTIC should auto-enable elastic band"
-        )
+        assert solver.elastic_band_enabled(), "SCALE_ELASTIC should auto-enable elastic band"
         assert np.all(np.isfinite(result.joint_velocities))
 
         solver.disable_elastic_band()
@@ -992,9 +1021,7 @@ class TestScaleElasticMode:
         # With 0.15 rad narrowed limits, baseline has ~43 infeasible.
         # SCALE_ELASTIC should have significantly fewer.
         print(f"\nSCALE_ELASTIC infeasible: {infeasible}")
-        assert infeasible < 30, (
-            f"SCALE_ELASTIC should reduce infeasible count: {infeasible}"
-        )
+        assert infeasible < 30, f"SCALE_ELASTIC should reduce infeasible count: {infeasible}"
 
         solver.disable_elastic_band()
         solver.clear_tasks()
@@ -1026,9 +1053,7 @@ class TestScaleElasticMode:
         opts.max_steps = 1
 
         result = solver.solve_position_step(q, target_pose, "ee", opts)
-        assert solver.elastic_band_enabled(), (
-            "opts.elastic_band should auto-enable elastic band"
-        )
+        assert solver.elastic_band_enabled(), "opts.elastic_band should auto-enable elastic band"
         assert np.all(np.isfinite(result.q_solution))
 
         solver.disable_elastic_band()

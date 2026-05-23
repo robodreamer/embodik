@@ -5,9 +5,10 @@ Bug: Calling solve_velocity once with all zero-weight tasks causes subsequent
 calls with non-zero weights to still return zero.
 """
 
-import numpy as np
-import tempfile
 import os
+import tempfile
+
+import numpy as np
 
 import embodik
 

@@ -15,7 +15,7 @@ Prerequisites:
        cd cusadi && python run_codegen.py --fn=fn_velocity_solve
 
 Usage:
-    python examples/04_gpu_batch_ik.py [--batch_sizes 10 100 1000] [--use_gpu]
+    python examples/gpu_batch_ik.py [--batch_sizes 10 100 1000] [--use_gpu]
 """
 
 from __future__ import annotations

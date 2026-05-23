@@ -13,25 +13,25 @@ URDF sources:
 
 Examples
 --------
-python 12_bimanual_whole_body_ik.py \
+python 06_bimanual_whole_body_ik.py \
     --variant sg2 \
     --ai-worker-root /path/to/ROBOTIS-GIT/ai_worker
 
-python 12_bimanual_whole_body_ik.py \
+python 06_bimanual_whole_body_ik.py \
     --variant bg2 \
     --urdf /path/to/base.urdf \
     --collision-urdf /path/to/collision.urdf
 
-python 12_bimanual_whole_body_ik.py --robot rby1
+python 06_bimanual_whole_body_ik.py --robot rby1
 """
 
 from __future__ import annotations
 
 import argparse
-from pathlib import Path
 import sys
 import tempfile
 import xml.etree.ElementTree as ET
+from pathlib import Path
 
 import numpy as np
 
@@ -40,13 +40,15 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 try:
-    from example_helpers.public_ai_worker_paths import resolve_public_ai_worker_urdf_paths
     import example_helpers.common_bimanual_teleop_app as common_app
+    from example_helpers.ik_common import DEFAULT_VISER_PORT
+    from example_helpers.public_ai_worker_paths import resolve_public_ai_worker_urdf_paths
 except ModuleNotFoundError as exc:
     if exc.name != "example_helpers" and not str(exc.name).startswith("example_helpers."):
         raise
-    from examples.example_helpers.public_ai_worker_paths import resolve_public_ai_worker_urdf_paths
     import examples.example_helpers.common_bimanual_teleop_app as common_app
+    from examples.example_helpers.ik_common import DEFAULT_VISER_PORT
+    from examples.example_helpers.public_ai_worker_paths import resolve_public_ai_worker_urdf_paths
 
 
 def parse_args() -> argparse.Namespace:
@@ -58,7 +60,7 @@ def parse_args() -> argparse.Namespace:
         help="Robot model family to load. 'ai-worker' uses the ROBOTIS FFW assets; 'rby1' uses robot_descriptions.rby1_description.",
     )
     parser.add_argument("--variant", choices=("sg2", "bg2"), default="sg2")
-    parser.add_argument("--port", type=int, default=8092)
+    parser.add_argument("--port", type=int, default=DEFAULT_VISER_PORT)
     parser.add_argument(
         "--ai-worker-root",
         type=str,

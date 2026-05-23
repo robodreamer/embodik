@@ -29,6 +29,19 @@ for _path in (_PYTHON_DIR, _EXAMPLES_DIR):
     if str(_path) not in sys.path:
         sys.path.insert(0, str(_path))
 
+from example_helpers.ik_common import COLLISION_TUNING_OPTIONS, DEFAULT_VISER_PORT
+from example_helpers.policy_runtime import DEFAULT_POLICY_RATE_HZ, RateLimitedOnnxPolicy
+from example_helpers.seer_teleop import (
+    DEFAULT_TELEOP_SCALE_FACTOR,
+    SeerController,
+    apply_controller_delta,
+)
+from example_helpers.seer_teleop import (
+    gripper_command_from_trigger_fraction as _shared_gripper_command_from_trigger_fraction,
+)
+from example_helpers.seer_teleop import (
+    pose_position_wxyz,
+)
 from example_helpers.spot_locomanip_policy import (
     DEFAULT_ARM_COMMAND,
     DEFAULT_BODY_ROLL_PITCH_HEIGHT,
@@ -69,18 +82,11 @@ from example_helpers.spot_mjviser_adapter import (
     load_spot_mujoco_model,
     resolve_spot_scene_arm_xml,
 )
-from example_helpers.seer_teleop import (
-    DEFAULT_TELEOP_SCALE_FACTOR,
-    SeerController,
-    apply_controller_delta,
-    gripper_command_from_trigger_fraction as _shared_gripper_command_from_trigger_fraction,
-    pose_position_wxyz,
+from example_helpers.spot_whole_body_ik import (
+    OptionalSpotWholeBodyIK,
+    resolve_spot_ik_urdf,
+    target_pose_from_wxyz,
 )
-from example_helpers.ik_common import COLLISION_TUNING_OPTIONS
-from example_helpers.policy_runtime import DEFAULT_POLICY_RATE_HZ, RateLimitedOnnxPolicy
-from example_helpers.spot_whole_body_ik import OptionalSpotWholeBodyIK
-from example_helpers.spot_whole_body_ik import resolve_spot_ik_urdf
-from example_helpers.spot_whole_body_ik import target_pose_from_wxyz
 
 ARM_UNSTOW_INTERPOLATION_SECONDS = 2.0
 AUTO_UNSTOW_DELAY_SECONDS = 1.0
@@ -392,7 +398,9 @@ class SpotLocomanipController:
         self.input_name = ""
         self.output_name = ""
         self.output_len = 12
-        self.policy_runtime = RateLimitedOnnxPolicy(rate_hz=policy_rate_hz, output_len=self.output_len)
+        self.policy_runtime = RateLimitedOnnxPolicy(
+            rate_hz=policy_rate_hz, output_len=self.output_len
+        )
         self.set_policy(policy)
         self.commands = CommandState(
             velocity=np.zeros(3, dtype=float),
@@ -424,13 +432,16 @@ class SpotLocomanipController:
         )
         self._ik_future: Future | None = None
         self._ik_generation = 0
-        self._pending_ik_request: tuple[
-            Mapping[str, np.ndarray],
-            np.ndarray,
-            object,
-            np.ndarray,
-            np.ndarray,
-        ] | None = None
+        self._pending_ik_request: (
+            tuple[
+                Mapping[str, np.ndarray],
+                np.ndarray,
+                object,
+                np.ndarray,
+                np.ndarray,
+            ]
+            | None
+        ) = None
         self._arm_unstow_elapsed = 0.0
         self._arm_unstow_active = False
         self._arm_unstow_start = DEFAULT_ARM_COMMAND.copy()
@@ -612,7 +623,9 @@ class SpotLocomanipController:
             if ARM_UNSTOW_INTERPOLATION_SECONDS <= 0.0
             else self._arm_unstow_elapsed / ARM_UNSTOW_INTERPOLATION_SECONDS
         )
-        self.commands.arm[:] = (1.0 - alpha) * self._arm_unstow_start + alpha * self._arm_unstow_target
+        self.commands.arm[:] = (
+            1.0 - alpha
+        ) * self._arm_unstow_start + alpha * self._arm_unstow_target
         if alpha >= 1.0:
             self._arm_unstow_active = False
 
@@ -667,7 +680,9 @@ class SpotLocomanipController:
             request,
         )
 
-    def _apply_ik_result(self, ik_result, *, gravity_compensation_enabled: bool) -> np.ndarray | None:
+    def _apply_ik_result(
+        self, ik_result, *, gravity_compensation_enabled: bool
+    ) -> np.ndarray | None:
         streamed_gripper_command = float(self.commands.arm[6])
         if ik_result.arm_command is not None:
             self.commands.arm[:6] = np.asarray(ik_result.arm_command, dtype=float)[:6]
@@ -1157,7 +1172,9 @@ def _add_gui(
             initial_value=float(getattr(controller.ik, "condition_arm_weight_scale", 3.0)),
         )
         collision_available = bool(getattr(controller.ik, "collision_available", False))
-        collision_debug_available = bool(controller.ik.enabled and controller.ik.collision_include_pairs)
+        collision_debug_available = bool(
+            controller.ik.enabled and controller.ik.collision_include_pairs
+        )
         collision_enable = server.gui.add_checkbox(
             "Enable collision constraint",
             initial_value=False,
@@ -1280,7 +1297,9 @@ def _add_gui(
             disabled=True,
         )
         teleop_streaming_text = server.gui.add_text("Streaming", initial_value="OFF", disabled=True)
-        teleop_gripper_text = server.gui.add_text("Gripper", initial_value="0% closed", disabled=True)
+        teleop_gripper_text = server.gui.add_text(
+            "Gripper", initial_value="0% closed", disabled=True
+        )
         teleop_reset_text = server.gui.add_text("Reset", initial_value="Button B", disabled=True)
         teleop_scale_slider = server.gui.add_slider(
             "Position Scale",
@@ -1290,7 +1309,9 @@ def _add_gui(
             initial_value=float(initial_teleop_scale),
             disabled=not teleop_connected,
         )
-        teleop_scale_slider.disabled = not (teleop_connected and bool(teleop_enabled_checkbox.value))
+        teleop_scale_slider.disabled = not (
+            teleop_connected and bool(teleop_enabled_checkbox.value)
+        )
     with server.gui.add_folder("Status"):
         step_text = server.gui.add_text("Policy steps", initial_value="0", disabled=True)
         ik_text = server.gui.add_text(
@@ -1436,7 +1457,9 @@ def _add_gui(
             return
         last_collision_debug_update_time = now
         debug_start = time.perf_counter()
-        solver_debug_rows = controller.collision_debug_rows() if controller.ik.enable_collision else []
+        solver_debug_rows = (
+            controller.collision_debug_rows() if controller.ik.enable_collision else []
+        )
         active_pairs = _collision_pairs_from_solver_debug_rows(
             solver_debug_rows,
             controller.ik.collision_include_pairs,
@@ -2116,7 +2139,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_false",
         help="Keep MuJoCo Menagerie's raw actuator gains for comparison.",
     )
-    parser.add_argument("--port", type=int, default=8080, help="Viser server port.")
+    parser.add_argument("--port", type=int, default=DEFAULT_VISER_PORT, help="Viser server port.")
     parser.add_argument(
         "--enable-teleop",
         action="store_true",

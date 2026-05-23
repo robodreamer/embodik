@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Tests for ECTS (Extended Cooperative Task Space) math utilities"""
 
-import pytest
-import numpy as np
-import tempfile
 import os
+import tempfile
+
+import numpy as np
+import pytest
 
 import embodik
 
@@ -289,3 +290,86 @@ class TestJacobianNumerical:
 
         robot.update_configuration(q)
         np.testing.assert_allclose(J_rel[:3, :], J_num, atol=1e-4)
+
+
+def _rot_z(angle):
+    c, s = np.cos(angle), np.sin(angle)
+    return np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
+
+
+def _rot_y(angle):
+    c, s = np.cos(angle), np.sin(angle)
+    return np.array([[c, 0.0, s], [0.0, 1.0, 0.0], [-s, 0.0, c]])
+
+
+def _rot_x(angle):
+    c, s = np.cos(angle), np.sin(angle)
+    return np.array([[1.0, 0.0, 0.0], [0.0, c, -s], [0.0, s, c]])
+
+
+class TestComputeAbsoluteFrame:
+    def test_pure_translation_midpoint(self):
+        identity = np.eye(3)
+        T_1 = embodik.SE3(rotation=identity, translation=np.array([1.0, 0.0, 0.0]))
+        T_2 = embodik.SE3(rotation=identity, translation=np.array([3.0, 0.0, 0.0]))
+
+        T_abs = embodik.compute_absolute_frame(T_1, T_2, 0.5)
+
+        np.testing.assert_allclose(T_abs.translation, np.array([2.0, 0.0, 0.0]), atol=1e-12)
+        np.testing.assert_allclose(T_abs.rotation, identity, atol=1e-12)
+
+    def test_slerp_rotation_midpoint(self):
+        identity = np.eye(3)
+        zero = np.zeros(3)
+        T_1 = embodik.SE3(rotation=identity, translation=zero)
+        T_2 = embodik.SE3(rotation=_rot_z(np.pi / 2.0), translation=zero)
+
+        T_abs = embodik.compute_absolute_frame(T_1, T_2, 0.5)
+
+        np.testing.assert_allclose(T_abs.rotation, _rot_z(np.pi / 4.0), atol=1e-9)
+        np.testing.assert_allclose(T_abs.translation, zero, atol=1e-12)
+
+    def test_alpha_one_returns_first_frame(self):
+        T_1 = embodik.SE3(rotation=_rot_z(0.7), translation=np.array([0.1, 0.2, 0.3]))
+        T_2 = embodik.SE3(rotation=_rot_y(0.4), translation=np.array([1.1, -0.4, 0.5]))
+
+        T_abs = embodik.compute_absolute_frame(T_1, T_2, 1.0)
+
+        np.testing.assert_allclose(T_abs.translation, T_1.translation, atol=1e-12)
+        np.testing.assert_allclose(T_abs.rotation, T_1.rotation, atol=1e-12)
+
+    def test_alpha_zero_returns_second_frame(self):
+        T_1 = embodik.SE3(rotation=_rot_z(0.7), translation=np.array([0.1, 0.2, 0.3]))
+        T_2 = embodik.SE3(rotation=_rot_y(0.4), translation=np.array([1.1, -0.4, 0.5]))
+
+        T_abs = embodik.compute_absolute_frame(T_1, T_2, 0.0)
+
+        np.testing.assert_allclose(T_abs.translation, T_2.translation, atol=1e-12)
+        np.testing.assert_allclose(T_abs.rotation, T_2.rotation, atol=1e-12)
+
+    def test_slerp_midpoint_is_not_endpoint_shortcut(self):
+        identity = np.eye(3)
+        T_1 = embodik.SE3(rotation=identity, translation=np.zeros(3))
+        T_2 = embodik.SE3(rotation=_rot_y(np.pi / 2.0), translation=np.zeros(3))
+
+        T_abs = embodik.compute_absolute_frame(T_1, T_2, 0.5)
+
+        assert not np.allclose(T_abs.rotation, T_1.rotation, atol=1e-6)
+        assert not np.allclose(T_abs.rotation, T_2.rotation, atol=1e-6)
+
+
+class TestComputeRelativeFrame:
+    def test_relative_frame_round_trip(self):
+        T_1 = embodik.SE3(
+            rotation=_rot_z(0.3) @ _rot_y(-0.2),
+            translation=np.array([0.2, -0.1, 0.4]),
+        )
+        T_2 = embodik.SE3(
+            rotation=_rot_x(0.5) @ _rot_z(-0.4),
+            translation=np.array([-0.3, 0.6, 0.05]),
+        )
+
+        T_rel = embodik.compute_relative_frame(T_1, T_2)
+        T_reconstructed = T_1 * T_rel
+
+        np.testing.assert_allclose(T_reconstructed.homogeneous(), T_2.homogeneous(), atol=1e-9)

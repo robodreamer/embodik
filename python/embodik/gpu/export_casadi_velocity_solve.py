@@ -123,8 +123,8 @@ def main():
         sys.exit(1)
 
     from embodik.gpu.casadi_fi_pesns import (
-        build_fi_pesns_velocity_solve,
         ROBOT_CONFIGS,
+        build_fi_pesns_velocity_solve,
     )
 
     print("Building FI-PeSNS velocity solver...")

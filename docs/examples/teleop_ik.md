@@ -104,4 +104,4 @@ workflow.
 - With no controller connected, drag `/ik_target` in the browser to exercise the
   same `backend.solve_step(goal_pose)` path.
 - For floating-base torso-oriented validation, use
-  `examples/10_floating_base_torso_hierarchy.py`.
+  `examples/floating_base_torso_hierarchy.py`.

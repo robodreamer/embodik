@@ -345,7 +345,11 @@ class TestVelocityAccelerationLimits:
 
         # Re-run with CoM constraint active.
         solver.configure_com_constraint(
-            shifted_square, margin=0.0, com_vel_max=0.4, com_acc_max=0.1, use_acceleration_limits=True
+            shifted_square,
+            margin=0.0,
+            com_vel_max=0.4,
+            com_acc_max=0.1,
+            use_acceleration_limits=True,
         )
         constrained_result = solver.solve_velocity(q0)
         assert constrained_result.status in (
@@ -380,7 +384,11 @@ class TestVelocityAccelerationLimits:
             robot.update_configuration(q)
             if apply_constraint:
                 solver.configure_com_constraint(
-                    shifted_square, margin=0.0, com_vel_max=0.4, com_acc_max=0.1, use_acceleration_limits=True
+                    shifted_square,
+                    margin=0.0,
+                    com_vel_max=0.4,
+                    com_acc_max=0.1,
+                    use_acceleration_limits=True,
                 )
             else:
                 solver.clear_com_constraint()
@@ -484,7 +492,10 @@ class TestVelocityAccelerationLimits:
             use_acceleration_limits=True,
         )
         vel_constrained = solver.solve_velocity(q0)
-        assert vel_constrained.status in (embodik.SolverStatus.SUCCESS, embodik.SolverStatus.INFEASIBLE)
+        assert vel_constrained.status in (
+            embodik.SolverStatus.SUCCESS,
+            embodik.SolverStatus.INFEASIBLE,
+        )
         q_vel_constrained = q0 + np.asarray(vel_constrained.joint_velocities) * solver.dt
         robot.update_configuration(q_vel_constrained)
         vel_violation_constrained = max(0.0, x_min - float(robot.get_com_position()[0]))
@@ -627,9 +638,9 @@ class TestVelocityAccelerationLimits:
 
         # Outside polygon means x < x_min. "Worsening outward" means x decreases.
         assert x_vel >= x0 - 1e-6, f"solve_velocity moved further outward: x0={x0}, x_vel={x_vel}"
-        assert x_step >= x0 - 1e-6, (
-            f"solve_position_step moved further outward: x0={x0}, x_step={x_step}"
-        )
+        assert (
+            x_step >= x0 - 1e-6
+        ), f"solve_position_step moved further outward: x0={x0}, x_step={x_step}"
 
         solver.clear_tasks()
         solver.clear_com_constraint()

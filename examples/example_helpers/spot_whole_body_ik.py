@@ -18,16 +18,19 @@ from typing import Mapping
 
 import numpy as np
 
-from .ik_common import DEFAULT_COLLISION_TUNING_MODE, apply_collision_tuning_mode
-from .robust_ik_runtime import configure_primary_solve_mode, robust_solve_position_step
+from .ik_common import (
+    DEFAULT_COLLISION_TUNING_MODE,
+    apply_collision_tuning_mode,
+    configure_solver_runtime_policy,
+)
 from .spot_locomanip_policy import (
     DEFAULT_ARM_COMMAND,
     DEFAULT_BODY_ROLL_PITCH_HEIGHT,
+    DEFAULT_STAND_BASE_HEIGHT,
+    DEFAULT_STAND_LEG_JOINTS,
     INITIAL_ARM_COMMAND,
     MJCF_ARM_JOINT_NAMES,
     MJCF_GRIPPER_JOINT_NAME,
-    DEFAULT_STAND_BASE_HEIGHT,
-    DEFAULT_STAND_LEG_JOINTS,
     SPOT_LEG_JOINT_NAMES,
     normalize_mjcf_joint_name,
 )
@@ -316,7 +319,9 @@ def _rotation_to_xyzw(rotation: np.ndarray) -> np.ndarray:
     return np.asarray(r2q(np.asarray(rotation, dtype=float), order="xyzs"), dtype=float)
 
 
-def _rotation_delta_rpy(seed_rotation: np.ndarray, command_rotation: np.ndarray) -> tuple[float, float, float]:
+def _rotation_delta_rpy(
+    seed_rotation: np.ndarray, command_rotation: np.ndarray
+) -> tuple[float, float, float]:
     delta = np.asarray(command_rotation, dtype=float) @ np.asarray(seed_rotation, dtype=float).T
     roll, pitch = _roll_pitch_from_rotation(delta)
     return roll, pitch, _yaw_from_rotation(delta)
@@ -345,12 +350,16 @@ def _pose_delta_exceeds(
     )
     if linear_delta > linear_eps:
         return True
-    rotation_delta = np.asarray(target_rotation, dtype=float) @ np.asarray(seed_rotation, dtype=float).T
+    rotation_delta = (
+        np.asarray(target_rotation, dtype=float) @ np.asarray(seed_rotation, dtype=float).T
+    )
     cos_angle = float(np.clip((np.trace(rotation_delta) - 1.0) * 0.5, -1.0, 1.0))
     return float(np.arccos(cos_angle)) > angular_eps
 
 
-def _commanded_base_pose_wxyz(body_command: np.ndarray, desired_pose_command: np.ndarray) -> np.ndarray:
+def _commanded_base_pose_wxyz(
+    body_command: np.ndarray, desired_pose_command: np.ndarray
+) -> np.ndarray:
     body = np.asarray(body_command, dtype=float)
     desired_pose = np.asarray(desired_pose_command, dtype=float)
     quat_xyzw = _rotation_to_xyzw(_rotation_from_rpy(body[0], body[1], desired_pose[2]))
@@ -552,8 +561,7 @@ class OptionalSpotWholeBodyIK:
         self.robot = eik.RobotModel(str(path), floating_base=True)
         self.solver = eik.KinematicsSolver(self.robot)
         self.solver.dt = dt
-        self.solver.set_damping(0.1)
-        self.solver.set_tolerance(0.1)
+        configure_solver_runtime_policy(self.solver)
         self._eik = eik
         self.tool_frame = _select_existing_frame(self.robot, TOOL_FRAME_CANDIDATES)
         self.body_frame = _select_existing_frame(self.robot, BODY_FRAME_CANDIDATES)
@@ -630,15 +638,15 @@ class OptionalSpotWholeBodyIK:
         self._ik_opts.torso_constraint.pose_lower_bounds = -_LOCO_TORSO_POSE_HALF_RANGE
         self._ik_opts.torso_constraint.pose_upper_bounds = _LOCO_TORSO_POSE_HALF_RANGE
         self._ik_opts.torso_constraint.pose_axis_mask = _ARM_TORSO_POSE_AXIS_MASK.copy()
-        self._ik_opts.torso_constraint.velocity_limits = np.full(
-            6, _LOCO_BASE_VEL_MAX, dtype=float
-        )
+        self._ik_opts.torso_constraint.velocity_limits = np.full(6, _LOCO_BASE_VEL_MAX, dtype=float)
         self._ik_opts.torso_constraint.acceleration_limits = np.full(
             6, _LOCO_BASE_ACC_MAX, dtype=float
         )
 
         self._q = np.asarray(self.robot.get_current_configuration(), dtype=float)
-        self._lower, self._upper = [np.asarray(v, dtype=float) for v in self.robot.get_joint_limits()]
+        self._lower, self._upper = [
+            np.asarray(v, dtype=float) for v in self.robot.get_joint_limits()
+        ]
         self._collision_include_pairs = spot_collision_pairs_from_references(self.robot)
         self.message = f"ready: {self.tool_frame} IK target"
 
@@ -657,15 +665,14 @@ class OptionalSpotWholeBodyIK:
                 self.adaptive_dt_reference_distance
             )
             if self._eik is not None:
-                configure_primary_solve_mode(
-                    self._step_opts,
-                    getattr(
+                if hasattr(self._step_opts, "primary_solve_mode"):
+                    self._step_opts.primary_solve_mode = getattr(
                         self._eik.TaskSolveMode,
                         str(self.target_solve_mode),
                         self._eik.TaskSolveMode.SCALE_ELASTIC,
-                    ),
-                    False,
-                )
+                    )
+                if hasattr(self._step_opts, "primary_allow_min_error_fallback"):
+                    self._step_opts.primary_allow_min_error_fallback = False
         if self._ik_opts is not None:
             self._ik_opts.dt = float(self.dt)
             self._ik_opts.position_gain = float(self.position_gain)
@@ -889,15 +896,13 @@ class OptionalSpotWholeBodyIK:
         q_target[3:7] = neutral_rotation_xyzw
         return q_target
 
-    def _normalize_and_clip(self, q: np.ndarray) -> np.ndarray:
+    def _normalize_floating_base(self, q: np.ndarray) -> np.ndarray:
         out = np.asarray(q, dtype=float).copy()
         if out.size >= 7:
             quat = out[3:7]
             norm = float(np.linalg.norm(quat))
             if norm > 1e-12:
                 out[3:7] = quat / norm
-        if out.size > 7:
-            out[7:] = np.clip(out[7:], self._lower[7:], self._upper[7:])
         return out
 
     def _limit_tangent_step(self, q_from: np.ndarray, q_to: np.ndarray) -> np.ndarray:
@@ -920,11 +925,9 @@ class OptionalSpotWholeBodyIK:
         q: np.ndarray,
         target_matrix: np.ndarray,
     ) -> tuple[np.ndarray, object]:
-        step = robust_solve_position_step(
-            robot=self.robot,
-            solver=self.solver,
-            q_current=np.asarray(q, dtype=float),
-            targets=[
+        result = self.solver.solve_position_step(
+            np.asarray(q, dtype=float),
+            [
                 self._eik.TaskTarget(
                     self._task_name,
                     target_matrix,
@@ -932,23 +935,15 @@ class OptionalSpotWholeBodyIK:
                     float(self._step_opts.orientation_gain),
                 )
             ],
-            options=self._step_opts,
-            q_lo=self._lower,
-            q_hi=self._upper,
-            zero_velocity_indices=self._step_opts.integration_zero_velocity_indices,
-            fallback_status_names=("INVALID_INPUT",),
-            hold_status_names=(
-                "NON_FINITE_INPUT",
-                "INFEASIBLE",
-                "NUMERICAL_ERROR",
-                "NO_PROGRESS",
-                "COLLISION_VIOLATED",
-            ),
-            allow_solver_intervention=True,
-            apply_collision_violated_q_solution=False,
+            self._step_opts,
         )
-        q_out = self._normalize_and_clip(self._limit_tangent_step(q, step.q_next))
-        return q_out, step.solver_result
+        q_candidate = (
+            np.asarray(result.q_solution, dtype=float)
+            if hasattr(result, "q_solution") and np.all(np.isfinite(result.q_solution))
+            else np.asarray(q, dtype=float)
+        )
+        q_out = self._normalize_floating_base(self._limit_tangent_step(q, q_candidate))
+        return q_out, result
 
     def arm_gravity_torque_from_configuration(self, q: np.ndarray) -> np.ndarray | None:
         """Return EmbodiK gravity-compensation torques for the six Spot arm joints."""
@@ -1126,7 +1121,9 @@ class OptionalSpotWholeBodyIK:
         self._posture_task.set_target_configuration(
             self._neutral_torso_posture_target(q, seed_torso_rotation)
         )
-        self._step_opts.torso_constraint.pose_bounds_reference_pose = self._torso_bounds_reference_pose
+        self._step_opts.torso_constraint.pose_bounds_reference_pose = (
+            self._torso_bounds_reference_pose
+        )
         self._configure_collision_constraint()
         target_matrix = np.eye(4, dtype=float)
         target_matrix[:3, :3] = np.asarray(target_pose.rotation, dtype=float)
@@ -1291,7 +1288,9 @@ def target_pose_from_wxyz(position: np.ndarray, quat_wxyz: np.ndarray):
 
     from embodik import Rt
 
-    return Rt(R=_quat_xyzw_to_rotation(_quat_wxyz_to_xyzw(quat_wxyz)), t=np.asarray(position, dtype=float))
+    return Rt(
+        R=_quat_xyzw_to_rotation(_quat_wxyz_to_xyzw(quat_wxyz)), t=np.asarray(position, dtype=float)
+    )
 
 
 class SpotFullBodyIK:
@@ -1325,6 +1324,7 @@ class SpotFullBodyIK:
         self.robot = eik.RobotModel(str(path), floating_base=True)
         self.solver = eik.KinematicsSolver(self.robot)
         self.solver.dt = float(self.config.dt)
+        configure_solver_runtime_policy(self.solver)
         self.solver.set_damping(float(self.config.damping))
         self.solver.set_tolerance(float(self.config.tolerance))
 
@@ -1368,7 +1368,9 @@ class SpotFullBodyIK:
         self._tool_task_name = "spot_tool_pose"
         self._torso_task_name = "spot_torso_pose"
         self._torso_bias_task_name = "spot_torso_secondary_bias"
-        self._foot_task_names = tuple(f"spot_foot_{i}_position" for i in range(len(self.foot_frames)))
+        self._foot_task_names = tuple(
+            f"spot_foot_{i}_position" for i in range(len(self.foot_frames))
+        )
         self._posture_task_name = "spot_full_body_posture"
 
         self._tool_task = self.solver.add_frame_task(
@@ -1378,7 +1380,9 @@ class SpotFullBodyIK:
         )
         self._tool_task.priority = 0
         self._tool_task.weight = 1.0
-        self._tool_task.solve_mode = getattr(eik.TaskSolveMode, "SCALE_ELASTIC", eik.TaskSolveMode.SCALE)
+        self._tool_task.solve_mode = getattr(
+            eik.TaskSolveMode, "SCALE_ELASTIC", eik.TaskSolveMode.SCALE
+        )
         self._tool_task.allow_min_error_fallback = False
 
         self._torso_task = self.solver.add_frame_task(
@@ -1388,7 +1392,9 @@ class SpotFullBodyIK:
         )
         self._torso_task.priority = 0
         self._torso_task.weight = 1.0
-        self._torso_task.solve_mode = getattr(eik.TaskSolveMode, "SCALE_ELASTIC", eik.TaskSolveMode.SCALE)
+        self._torso_task.solve_mode = getattr(
+            eik.TaskSolveMode, "SCALE_ELASTIC", eik.TaskSolveMode.SCALE
+        )
         self._torso_task.allow_min_error_fallback = False
 
         self._torso_bias_task = self.solver.add_frame_task(
@@ -1489,7 +1495,7 @@ class SpotFullBodyIK:
             self._set_joint_position(q, self._arm_joint_map[mjcf_name], float(value))
         if self._gripper_joint_name:
             self._set_joint_position(q, self._gripper_joint_name, float(command[6]))
-        self.q = self._normalize_and_clip(q)
+        self.q = self._normalize_floating_base(q)
         self.robot.update_configuration(self.q)
 
     def set_gripper_configuration(self, gripper_command: float) -> None:
@@ -1497,7 +1503,7 @@ class SpotFullBodyIK:
             return
         q = self.q.copy()
         self._set_joint_position(q, self._gripper_joint_name, float(gripper_command))
-        self.q = self._normalize_and_clip(q)
+        self.q = self._normalize_floating_base(q)
         self.robot.update_configuration(self.q)
 
     def _pose_homogeneous(self, frame_name: str) -> np.ndarray:
@@ -1532,11 +1538,14 @@ class SpotFullBodyIK:
             opts.no_progress_error_tolerance = 1e-5
         if hasattr(opts, "no_progress_dq_norm_tolerance"):
             opts.no_progress_dq_norm_tolerance = 1e-6
-        configure_primary_solve_mode(
-            opts,
-            getattr(self.eik.TaskSolveMode, str(self.config.target_solve_mode), self.eik.TaskSolveMode.SCALE_ELASTIC),
-            False,
-        )
+        if hasattr(opts, "primary_solve_mode"):
+            opts.primary_solve_mode = getattr(
+                self.eik.TaskSolveMode,
+                str(self.config.target_solve_mode),
+                self.eik.TaskSolveMode.SCALE_ELASTIC,
+            )
+        if hasattr(opts, "primary_allow_min_error_fallback"):
+            opts.primary_allow_min_error_fallback = False
         opts.excluded_joint_indices = sorted(set(int(i) for i in excluded))
         opts.integration_zero_velocity_indices = sorted(set(self._gripper_velocity_indices))
         opts.torso_constraint.enabled = True
@@ -1627,15 +1636,13 @@ class SpotFullBodyIK:
             return targets
         return [*targets, *self._foot_targets()]
 
-    def _normalize_and_clip(self, q: np.ndarray) -> np.ndarray:
+    def _normalize_floating_base(self, q: np.ndarray) -> np.ndarray:
         out = np.asarray(q, dtype=float).copy()
         if out.size >= 7:
             quat = out[3:7]
             norm = float(np.linalg.norm(quat))
             if norm > 1e-12:
                 out[3:7] = quat / norm
-        if out.size > 7:
-            out[7:] = np.clip(out[7:], self._lower[7:], self._upper[7:])
         return out
 
     def _accept_solution(self, result) -> bool:
@@ -1649,7 +1656,10 @@ class SpotFullBodyIK:
         step_component = float(np.max(np.abs(q_step))) if q_step.size else 0.0
         if step_component <= max_component or step_component <= 1e-12:
             return np.asarray(q_to, dtype=float)
-        return np.asarray(self.robot.integrate(q_from, q_step * (max_component / step_component), 1.0), dtype=float)
+        return np.asarray(
+            self.robot.integrate(q_from, q_step * (max_component / step_component), 1.0),
+            dtype=float,
+        )
 
     def _solve_position_step_guarded(
         self,
@@ -1657,28 +1667,14 @@ class SpotFullBodyIK:
         targets: list[object],
         opts: object,
     ) -> tuple[np.ndarray, object]:
-        step = robust_solve_position_step(
-            robot=self.robot,
-            solver=self.solver,
-            q_current=np.asarray(q, dtype=float),
-            targets=targets,
-            options=opts,
-            q_lo=self._lower,
-            q_hi=self._upper,
-            zero_velocity_indices=self._gripper_velocity_indices,
-            fallback_status_names=("INVALID_INPUT",),
-            hold_status_names=(
-                "NON_FINITE_INPUT",
-                "INFEASIBLE",
-                "NUMERICAL_ERROR",
-                "NO_PROGRESS",
-                "COLLISION_VIOLATED",
-            ),
-            allow_solver_intervention=True,
-            apply_collision_violated_q_solution=False,
+        result = self.solver.solve_position_step(np.asarray(q, dtype=float), targets, opts)
+        q_candidate = (
+            np.asarray(result.q_solution, dtype=float)
+            if hasattr(result, "q_solution") and np.all(np.isfinite(result.q_solution))
+            else np.asarray(q, dtype=float)
         )
-        q_out = self._normalize_and_clip(self._limit_tangent_step(q, step.q_next))
-        return q_out, step.solver_result
+        q_out = self._normalize_floating_base(self._limit_tangent_step(q, q_candidate))
+        return q_out, result
 
     def _update_posture_target(self) -> None:
         self._posture_task.weight = float(self.config.nullspace_gain)
@@ -1736,7 +1732,9 @@ class SpotFullBodyIK:
         ]
         return self._solve_position_step_guarded(q, targets, opts)
 
-    def _solve_torso_with_legs_from(self, q: np.ndarray, torso_target_pose) -> tuple[np.ndarray, object]:
+    def _solve_torso_with_legs_from(
+        self, q: np.ndarray, torso_target_pose
+    ) -> tuple[np.ndarray, object]:
         self.robot.update_configuration(q)
         self._update_posture_target()
         self._set_posture_bias_scope(stage1=False)
@@ -1755,7 +1753,9 @@ class SpotFullBodyIK:
             float(self.config.position_gain),
             float(self.config.orientation_gain),
         )
-        return self._solve_position_step_guarded(q, self._append_foot_targets_if_needed([target]), opts)
+        return self._solve_position_step_guarded(
+            q, self._append_foot_targets_if_needed([target]), opts
+        )
 
     def _solve_full_body_from(self, q: np.ndarray, target_pose) -> tuple[np.ndarray, object]:
         self.robot.update_configuration(q)
@@ -1774,7 +1774,9 @@ class SpotFullBodyIK:
             ),
             self._torso_bias_target(),
         ]
-        return self._solve_position_step_guarded(q, self._append_foot_targets_if_needed(targets), opts)
+        return self._solve_position_step_guarded(
+            q, self._append_foot_targets_if_needed(targets), opts
+        )
 
     def reset(self) -> None:
         self.q = self.q0.copy()

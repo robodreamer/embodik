@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Tests for embodiK Task framework"""
 
-import pytest
-import numpy as np
-import tempfile
 import os
 import sys
+import tempfile
+
+import numpy as np
+import pytest
 
 import embodik
 

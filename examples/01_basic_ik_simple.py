@@ -14,11 +14,9 @@ import argparse
 import time
 from typing import Any
 
-import numpy as np
-
 import embodik
-from embodik import Rt, q2r, r2q
-from embodik import create_robot_visualizer
+import numpy as np
+from embodik import Rt, create_robot_visualizer, q2r, r2q
 from example_helpers.ik_common import (
     DEFAULT_ADAPTIVE_DT,
     DEFAULT_ADAPTIVE_DT_MAX_SCALE,
@@ -28,10 +26,11 @@ from example_helpers.ik_common import (
     DEFAULT_POS_GAIN,
     DEFAULT_ROT_GAIN,
     DEFAULT_SOLVER_DT,
+    DEFAULT_VISER_PORT,
+    configure_solver_runtime_policy,
     quiet_websocket_handshake_logs,
 )
 from utils.robot_models import load_robot_presets, resolve_robot_configuration
-
 
 quiet_websocket_handshake_logs()
 
@@ -48,7 +47,7 @@ def parse_args() -> argparse.Namespace:
         default="pinocchio",
         help="Use Pinocchio's ViserVisualizer or ViserUrdf.",
     )
-    parser.add_argument("--port", type=int, default=8080)
+    parser.add_argument("--port", type=int, default=DEFAULT_VISER_PORT)
     return parser.parse_args()
 
 
@@ -71,8 +70,7 @@ def main(args: argparse.Namespace) -> None:
 
     solver = embodik.KinematicsSolver(robot)
     solver.dt = DEFAULT_SOLVER_DT
-    solver.set_damping(0.1)
-    solver.set_tolerance(0.1)
+    configure_solver_runtime_policy(solver)
 
     ee_task = solver.add_frame_task("ee_task", target_link)
     ee_task.priority = 0
@@ -89,7 +87,6 @@ def main(args: argparse.Namespace) -> None:
 
     q = q_default.copy()
     robot.update_configuration(q)
-    lower, upper = robot.get_joint_limits()
 
     preset = load_robot_presets()[args.robot.lower()]
     viz = create_robot_visualizer(
@@ -144,7 +141,7 @@ def main(args: argparse.Namespace) -> None:
         result = solver.solve_position_step(q, target_pose, "ee_task", step_opts)
 
         if result.status in accepted_statuses:
-            q = np.clip(np.asarray(result.q_solution, dtype=float), lower, upper)
+            q = np.asarray(result.q_solution, dtype=float)
             robot.update_configuration(q)
             viz.display(q)
 

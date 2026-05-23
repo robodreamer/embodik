@@ -4,9 +4,10 @@ This module uses Pinocchio's native ViserVisualizer when available,
 falling back to the custom implementation if needed.
 """
 
-import numpy as np
-from typing import Optional, Tuple, List, Dict, Any
 import warnings
+from typing import Any, Dict, List, Optional, Tuple
+
+import numpy as np
 
 # Try to import Pinocchio's ViserVisualizer
 # Note: This module is optional and requires 'pin' package (pip install pin)
@@ -14,7 +15,7 @@ try:
     import pinocchio as pin
 
     try:
-        from pinocchio.visualize import ViserVisualizer, BaseVisualizer
+        from pinocchio.visualize import BaseVisualizer, ViserVisualizer
 
         _PINOCCHIO_VISER_AVAILABLE = True
     except ImportError:

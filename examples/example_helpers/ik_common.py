@@ -14,6 +14,7 @@ DEFAULT_NULLSPACE_ENABLED = True
 DEFAULT_ADAPTIVE_DT = True
 DEFAULT_ADAPTIVE_DT_MAX_SCALE = 10.0
 DEFAULT_ADAPTIVE_DT_REFERENCE_DISTANCE = 0.02
+DEFAULT_VISER_PORT = 8080
 
 DEFAULT_COLLISION_TUNING_MODE = "balanced"
 COLLISION_TUNING_OPTIONS = ("speed", "balanced", "precise")
@@ -25,6 +26,22 @@ def quiet_websocket_handshake_logs() -> None:
 
     for logger_name in ("websockets.server", "websockets.asyncio.server"):
         logging.getLogger(logger_name).setLevel(logging.CRITICAL)
+
+
+def configure_solver_runtime_policy(solver: embodik.KinematicsSolver) -> None:
+    """Use the solver-owned robust layout/fallback policy in public examples."""
+
+    if not (
+        hasattr(embodik, "SolverRuntimeConfig")
+        and hasattr(solver, "runtime_config")
+        and hasattr(solver, "configure_runtime")
+    ):
+        return
+
+    cfg = solver.runtime_config()
+    cfg.enable_auto_task_layout = True
+    cfg.weighted_fallback_enabled = True
+    solver.configure_runtime(cfg)
 
 
 def apply_collision_tuning_mode(
@@ -40,9 +57,7 @@ def apply_collision_tuning_mode(
             "balanced": embodik.CollisionTuningMode.BALANCED,
             "speed": embodik.CollisionTuningMode.SPEED,
         }
-        solver.set_collision_tuning_mode(
-            enum_map.get(label, embodik.CollisionTuningMode.BALANCED)
-        )
+        solver.set_collision_tuning_mode(enum_map.get(label, embodik.CollisionTuningMode.BALANCED))
         if label != "precise" and hasattr(solver, "enable_sphere_broadphase"):
             solver.enable_sphere_broadphase(True)
         return

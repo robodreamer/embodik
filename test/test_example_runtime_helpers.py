@@ -6,8 +6,8 @@ from __future__ import annotations
 import numpy as np
 
 from embodik.interactive_ik import (
-    ConstraintBoundary,
     ConstrainedStepGuard,
+    ConstraintBoundary,
     clip_configuration,
     robust_solve_position_step,
 )
@@ -44,7 +44,9 @@ class _Task:
         self.orientation_targets = []
 
     def set_target_pose(self, position, rotation) -> None:
-        self.pose_targets.append((np.asarray(position, dtype=float), np.asarray(rotation, dtype=float)))
+        self.pose_targets.append(
+            (np.asarray(position, dtype=float), np.asarray(rotation, dtype=float))
+        )
 
     def set_target_position(self, position) -> None:
         self.position_targets.append(np.asarray(position, dtype=float))
@@ -62,7 +64,9 @@ class _Solver:
         self.calls = []
 
     def solve_position_step(self, q_current, targets, options):
-        self.calls.append(("step", np.asarray(q_current, dtype=float), len(targets), options.max_steps))
+        self.calls.append(
+            ("step", np.asarray(q_current, dtype=float), len(targets), options.max_steps)
+        )
         return self._step_result
 
     def solve_velocity(self, q_current, apply_limits=True):
@@ -71,13 +75,6 @@ class _Solver:
 
     def get_task(self, name: str) -> _Task:
         return self.tasks[name]
-
-
-class _Robot:
-    is_floating_base = False
-
-    def integrate(self, q_current, dq, dt):
-        return np.asarray(q_current, dtype=float) + float(dt) * np.asarray(dq, dtype=float)
 
 
 class _FloatingRobot:
@@ -106,46 +103,47 @@ def test_clip_configuration_normalizes_floating_base_quaternion() -> None:
     assert np.isclose(np.linalg.norm(clipped[3:7]), 1.0)
 
 
-def test_robust_solve_position_step_falls_back_to_velocity_and_zeros_locked_indices() -> None:
+def test_robust_solve_position_step_does_not_retry_or_post_clip() -> None:
     solver = _Solver(
-        step_result=_Result("INVALID_INPUT"),
+        step_result=_Result("INVALID_INPUT", q_solution=np.array([2.0, -2.0, 0.5], dtype=float)),
         velocity_result=_Result("SUCCESS", joint_velocities=np.array([1.0, 2.0, 3.0], dtype=float)),
     )
-    robot = _Robot()
     target = _Target()
     options = _Options()
     out = robust_solve_position_step(
-        robot=robot,
         solver=solver,
         q_current=np.zeros(3, dtype=float),
         targets=[target],
         options=options,
-        q_lo=-np.ones(3, dtype=float),
-        q_hi=np.ones(3, dtype=float),
-        zero_velocity_indices=[1],
-        fallback_status_names=("INVALID_INPUT",),
     )
-    np.testing.assert_allclose(out.q_next, np.array([0.1, 0.0, 0.3], dtype=float))
-    assert out.solver_result.status.name == "SUCCESS"
-    assert solver.calls[0][0] == "step"
-    assert solver.calls[1][0] == "velocity"
-    assert len(solver.tasks["ee_task"].pose_targets) == 1
+    np.testing.assert_allclose(out.q_next, np.array([2.0, -2.0, 0.5], dtype=float))
+    assert out.solver_result.status.name == "INVALID_INPUT"
+    assert [call[0] for call in solver.calls] == ["step"]
+    assert len(solver.tasks["ee_task"].pose_targets) == 0
 
 
 def test_robust_solve_position_step_holds_previous_configuration_on_non_finite() -> None:
     solver = _Solver(step_result=_Result("NON_FINITE_INPUT"))
-    robot = _Robot()
     q_current = np.array([0.2, -0.1], dtype=float)
     out = robust_solve_position_step(
-        robot=robot,
         solver=solver,
         q_current=q_current,
         targets=[_Target()],
         options=_Options(),
-        q_lo=-np.ones(2, dtype=float),
-        q_hi=np.ones(2, dtype=float),
     )
     np.testing.assert_allclose(out.q_next, q_current)
+    assert out.solver_calls == 1
+
+
+def test_robust_solve_position_step_trusts_solver_q_solution_limits() -> None:
+    solver = _Solver(step_result=_Result("SUCCESS", q_solution=np.array([1.2, -1.2], dtype=float)))
+    out = robust_solve_position_step(
+        solver=solver,
+        q_current=np.zeros(2, dtype=float),
+        targets=[_Target()],
+        options=_Options(),
+    )
+    np.testing.assert_allclose(out.q_next, np.array([1.2, -1.2], dtype=float))
     assert out.solver_calls == 1
 
 
@@ -158,17 +156,11 @@ def test_robust_solve_position_step_accepts_solver_intervention_without_fallback
         ),
         velocity_result=_Result("SUCCESS", joint_velocities=np.array([1.0, 1.0], dtype=float)),
     )
-    robot = _Robot()
     out = robust_solve_position_step(
-        robot=robot,
         solver=solver,
         q_current=np.zeros(2, dtype=float),
         targets=[_Target()],
         options=_Options(),
-        q_lo=-np.ones(2, dtype=float),
-        q_hi=np.ones(2, dtype=float),
-        fallback_status_names=("INFEASIBLE",),
-        allow_solver_intervention=True,
     )
     np.testing.assert_allclose(out.q_next, np.array([0.4, -0.2], dtype=float))
     assert out.solver_result.status.name == "INFEASIBLE"
@@ -182,17 +174,11 @@ def test_robust_solve_position_step_applies_collision_violated_safe_hold() -> No
             q_solution=np.array([0.15, -0.05], dtype=float),
         ),
     )
-    robot = _Robot()
     out = robust_solve_position_step(
-        robot=robot,
         solver=solver,
         q_current=np.zeros(2, dtype=float),
         targets=[_Target()],
         options=_Options(),
-        q_lo=-np.ones(2, dtype=float),
-        q_hi=np.ones(2, dtype=float),
-        fallback_status_names=("COLLISION_VIOLATED",),
-        apply_collision_violated_q_solution=True,
     )
     np.testing.assert_allclose(out.q_next, np.array([0.15, -0.05], dtype=float))
     assert out.solver_result.status.name == "COLLISION_VIOLATED"

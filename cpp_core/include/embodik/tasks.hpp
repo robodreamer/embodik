@@ -694,6 +694,43 @@ public:
      */
     void setObjectCenterFrame(const Eigen::Matrix4d& object_frame);
 
+    /**
+     * @brief Diagnostic structure for inconsistent left/right grasp targets.
+     */
+    struct GraspDivergenceDiagnostic {
+        double linear_m = 0.0;
+        double angular_rad = 0.0;
+    };
+
+    /**
+     * @brief Calibrate rigid arm-to-object offsets at the current task pose.
+     *
+     * The task must have been updated at least once so current_position and
+     * current_orientation represent the calibration object frame.
+     */
+    void calibrate_grasp_offsets(const pinocchio::SE3& T_L_FK,
+                                 const pinocchio::SE3& T_R_FK);
+    void calibrate_grasp_offsets(const Eigen::Matrix4d& T_L_FK,
+                                 const Eigen::Matrix4d& T_R_FK);
+
+    /**
+     * @brief Set this absolute task target from calibrated per-arm targets.
+     *
+     * Each arm target implies an object pose through the calibrated rigid
+     * offsets. Consistent arm targets recover the same object pose; divergent
+     * targets are blended through compute_absolute_frame(..., 0.5) and reported
+     * through get_grasp_divergence().
+     */
+    void set_target_from_arm_targets(const pinocchio::SE3& T_L_target,
+                                     const pinocchio::SE3& T_R_target);
+    void set_target_from_arm_targets(const Eigen::Matrix4d& T_L_target,
+                                     const Eigen::Matrix4d& T_R_target);
+
+    const GraspDivergenceDiagnostic& get_grasp_divergence() const {
+        return last_grasp_divergence_;
+    }
+    bool grasp_offsets_calibrated() const { return grasp_offsets_calibrated_; }
+
     const Eigen::Vector3d& getCurrentPosition() const { return current_abs_position_; }
     const Eigen::Matrix3d& getCurrentOrientation() const { return current_abs_orientation_; }
 
@@ -721,6 +758,13 @@ private:
 
     pinocchio::SE3 offset_a_ = pinocchio::SE3::Identity();
     pinocchio::SE3 offset_b_ = pinocchio::SE3::Identity();
+    pinocchio::SE3 L_in_obj_ = pinocchio::SE3::Identity();
+    pinocchio::SE3 R_in_obj_ = pinocchio::SE3::Identity();
+    pinocchio::SE3 inv_L_in_obj_ = pinocchio::SE3::Identity();
+    pinocchio::SE3 inv_R_in_obj_ = pinocchio::SE3::Identity();
+    bool current_abs_pose_valid_ = false;
+    bool grasp_offsets_calibrated_ = false;
+    GraspDivergenceDiagnostic last_grasp_divergence_;
 
     Eigen::Vector3d position_mask_ = Eigen::Vector3d::Ones();
     Eigen::Vector3d orientation_mask_ = Eigen::Vector3d::Ones();
