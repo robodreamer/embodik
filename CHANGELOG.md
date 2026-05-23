@@ -20,9 +20,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Enabled constrained weighted fallback recovery by default for
   `solve_position_step()` runtime policy when a prioritized candidate fails but
   a weighted same-priority candidate satisfies solver-owned hard constraints.
-- Kept PyPI `pin` build dependencies on the tested Pinocchio 3.x line and made
-  release repair scripts locate the cmeel prefix without importing Pinocchio
-  first.
+- Kept PyPI `pin` build dependencies on the tested Pinocchio 3.x line, pinned
+  the matching cmeel urdfdom native dependency, and made release repair scripts
+  locate the cmeel prefix without importing Pinocchio first.
 - Renumbered the highlighted public examples to keep the recommended demos
   first, moved narrower examples out of the numbered path, and standardized
   Viser examples on the shared `http://localhost:8080` default endpoint.
