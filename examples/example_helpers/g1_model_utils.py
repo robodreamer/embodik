@@ -90,6 +90,8 @@ def resolve_g1_urdf_path() -> Path:
         raise FileNotFoundError(f"EMBODIK_G1_URDF does not exist: {p}")
 
     candidates = [
+        Path(__file__).resolve().parents[1]
+        / "assets/g1/generated/g1_29dof_rev_1_0_with_inspire_hand_FTP_box_collision.urdf",
         Path(
             "/path/to/local/Projects/repos/robot-model-repos/unitree_ros/robots/g1_description/g1_29dof_rev_1_0_with_inspire_hand_FTP.urdf"
         ),
