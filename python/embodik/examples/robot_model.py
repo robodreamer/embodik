@@ -4,6 +4,7 @@ This example demonstrates how to load and work with robot models.
 """
 
 import numpy as np
+
 import embodik
 
 

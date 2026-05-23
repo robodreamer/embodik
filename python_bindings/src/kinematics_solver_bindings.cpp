@@ -100,6 +100,17 @@ void bind_kinematics_solver(nb::module_ &m) {
            nb::arg("alpha") = 0.5,
            "Add an absolute frame task (weighted average of two frames)")
 
+      .def("add_pose_task_group", &KinematicsSolver::add_pose_task_group,
+           nb::arg("name"), nb::arg("tcp_frame"),
+           nb::arg("base_priority") = 0,
+           nb::arg("rotation_priority_offset") = 1,
+           nb::arg("merged_pose") = false,
+           nb::arg("auto_switch") = false,
+           "Add a pose task group adapter backed by regular frame tasks")
+
+      .def("pose_task_group", &KinematicsSolver::pose_task_group,
+           nb::arg("name"), "Get a pose task group by name")
+
       .def(
           "configure_relative_pose_constraint",
           [](KinematicsSolver &self, const std::string &frame_a,
@@ -245,7 +256,7 @@ void bind_kinematics_solver(nb::module_ &m) {
       .def("set_tolerance", &KinematicsSolver::set_tolerance,
            nb::arg("tolerance"),
            "Set singular-value damping threshold for the regularized "
-           "pseudoinverse (default 1e-6).")
+           "pseudoinverse (default 0.1).")
       .def("set_regularization_epsilon",
            &KinematicsSolver::set_regularization_epsilon, nb::arg("epsilon"),
            "Alias of set_tolerance(): set singular-value damping threshold "
@@ -265,6 +276,20 @@ void bind_kinematics_solver(nb::module_ &m) {
 
       .def("set_damping", &KinematicsSolver::set_damping, nb::arg("damping"),
            "Set singularity robust damping factor")
+      .def("configure_runtime", &KinematicsSolver::configure_runtime,
+           nb::arg("config"),
+           "Apply bundled runtime defaults. Stamps damping immediately and "
+           "stores position-step defaults for make_position_step_options().")
+      .def("reset_adaptive_state", &KinematicsSolver::reset_adaptive_state,
+           "Reset default-off stateful runtime adapters without changing the "
+           "stored runtime configuration.")
+      .def(
+          "runtime_config",
+          [](const KinematicsSolver &self) { return self.runtime_config(); },
+          "Return the last-applied runtime defaults.")
+      .def("make_position_step_options",
+           &KinematicsSolver::make_position_step_options,
+           "Return fresh PositionStepOptions populated from runtime defaults.")
       .def("set_limit_recovery_gain",
            &KinematicsSolver::set_limit_recovery_gain, nb::arg("gain"),
            "Set joint limit recovery gain in [0, 1]")
@@ -484,6 +509,15 @@ void bind_kinematics_solver(nb::module_ &m) {
       .def("stall_handler_consecutive_stall_steps",
            &KinematicsSolver::stall_handler_consecutive_stall_steps,
            "Return the number of consecutive stall steps.")
+      .def("stall_handler_threshold",
+           &KinematicsSolver::stall_handler_threshold,
+           "Return the current stall threshold.")
+      .def("stall_handler_restore_rate",
+           &KinematicsSolver::stall_handler_restore_rate,
+           "Return the current stall-handler restore rate.")
+      .def("stall_handler_floor_fraction",
+           &KinematicsSolver::stall_handler_floor_fraction,
+           "Return the current stall-handler floor fraction.")
 
       // Elastic band joint limit expansion
       .def("enable_elastic_band",

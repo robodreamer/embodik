@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """Tests for relative pose inequality constraint"""
 
-import pytest
-import numpy as np
-import tempfile
 import os
+import tempfile
+
+import numpy as np
+import pytest
+from test_ects import create_dual_arm_urdf
 
 import embodik
-
-from test_ects import create_dual_arm_urdf
 
 
 @pytest.fixture
@@ -29,6 +29,132 @@ def get_relative_position(robot, frame_a, frame_b):
     T_b = robot.get_frame_pose(frame_b).homogeneous()
     T_rel = np.linalg.inv(T_a) @ T_b
     return T_rel[:3, 3]
+
+
+def test_weighted_fallback_accepts_useful_limit_solution_with_active_relative_pose_constraint(
+    dual_arm_solver,
+):
+    """Fallback may recover when loose relative-pose bounds are active."""
+    solver, robot, q = dual_arm_solver
+    lower, upper = robot.get_joint_limits()
+    lower = np.asarray(lower, dtype=float)
+    upper = np.asarray(upper, dtype=float)
+    q = np.clip(q, lower + 0.02, upper - 0.02)
+    q[0] = upper[0]
+    robot.update_configuration(q)
+
+    solver.enable_position_limits(True)
+    solver.enable_velocity_limits(True)
+
+    blocked = solver.add_joint_task("blocked_left_j1", "left_j1", target_value=upper[0] + 1.0)
+    blocked.priority = 0
+    blocked.weight = 1.0
+    blocked.allow_min_error_fallback = False
+
+    useful = solver.add_posture_task("useful_left_j2", [1])
+    useful.priority = 1
+    useful.weight = 1.0
+    useful.allow_min_error_fallback = False
+    useful.set_controlled_joint_targets(np.array([q[1] + 0.3]))
+
+    initial_rel = get_relative_position(robot, "left_ee", "right_ee")
+    rel_lower = np.array(
+        [initial_rel[0] - 1.0, initial_rel[1] - 1.0, initial_rel[2] - 1.0, -10.0, -10.0, -10.0]
+    )
+    rel_upper = np.array(
+        [initial_rel[0] + 1.0, initial_rel[1] + 1.0, initial_rel[2] + 1.0, 10.0, 10.0, 10.0]
+    )
+    mask = np.array([1, 1, 1, 0, 0, 0], dtype=np.float64)
+    solver.configure_relative_pose_constraint("left_ee", "right_ee", rel_lower, rel_upper, mask)
+
+    runtime = embodik.SolverRuntimeConfig()
+    runtime.weighted_fallback_enabled = True
+    solver.configure_runtime(runtime)
+
+    result = solver.solve_velocity(q, apply_limits=True)
+    solution = np.asarray(result.solution, dtype=float)
+    q_next = q + solver.dt * solution
+    robot.update_configuration(q_next)
+    final_rel = get_relative_position(robot, "left_ee", "right_ee")
+
+    assert result.status == embodik.SolverStatus.SUCCESS
+    assert result.weighted_fallback_used is True
+    assert abs(solution[0]) <= 1e-9
+    assert solution[1] > 0.25
+    assert np.all(final_rel >= rel_lower[:3] - 1e-9)
+    assert np.all(final_rel <= rel_upper[:3] + 1e-9)
+
+
+def _relative_position_violation(
+    rel_pos: np.ndarray, lower: np.ndarray, upper: np.ndarray
+) -> float:
+    return float(np.max(np.maximum(np.maximum(lower[:3] - rel_pos, rel_pos - upper[:3]), 0.0)))
+
+
+def test_weighted_fallback_enabled_with_violated_relative_pose_constraint_reduces_violation(
+    dual_arm_solver,
+):
+    """A violated relative-pose row should not be worsened by the recovery path."""
+    solver, robot, q = dual_arm_solver
+    lower, upper = robot.get_joint_limits()
+    lower = np.asarray(lower, dtype=float)
+    upper = np.asarray(upper, dtype=float)
+    q = np.clip(q, lower + 0.02, upper - 0.02)
+    q[0] = upper[0]
+    robot.update_configuration(q)
+
+    solver.enable_position_limits(True)
+    solver.enable_velocity_limits(True)
+
+    blocked = solver.add_joint_task("blocked_left_j1", "left_j1", target_value=upper[0] + 1.0)
+    blocked.priority = 0
+    blocked.weight = 1.0
+    blocked.allow_min_error_fallback = False
+
+    useful = solver.add_posture_task("useful_left_j2", [1])
+    useful.priority = 1
+    useful.weight = 1.0
+    useful.allow_min_error_fallback = False
+    useful.set_controlled_joint_targets(np.array([q[1] + 0.3]))
+
+    initial_rel = get_relative_position(robot, "left_ee", "right_ee")
+    rel_lower = np.array(
+        [
+            initial_rel[0] - 1.0,
+            initial_rel[1] - 1.0,
+            initial_rel[2] - 1.0,
+            -10.0,
+            -10.0,
+            -10.0,
+        ]
+    )
+    rel_upper = np.array(
+        [
+            initial_rel[0] + 1.0,
+            initial_rel[1] + 1.0,
+            initial_rel[2] - 0.01,
+            10.0,
+            10.0,
+            10.0,
+        ]
+    )
+    mask = np.array([1, 1, 1, 0, 0, 0], dtype=np.float64)
+    solver.configure_relative_pose_constraint("left_ee", "right_ee", rel_lower, rel_upper, mask)
+
+    runtime = embodik.SolverRuntimeConfig()
+    runtime.weighted_fallback_enabled = True
+    solver.configure_runtime(runtime)
+
+    current_violation = _relative_position_violation(initial_rel, rel_lower, rel_upper)
+    result = solver.solve_velocity(q, apply_limits=True)
+    solution = np.asarray(result.solution, dtype=float)
+    q_next = q + solver.dt * solution
+    robot.update_configuration(q_next)
+    final_rel = get_relative_position(robot, "left_ee", "right_ee")
+    next_violation = _relative_position_violation(final_rel, rel_lower, rel_upper)
+
+    assert result.status == embodik.SolverStatus.SUCCESS
+    assert next_violation < current_violation
 
 
 class TestRelativePoseConstraint:
@@ -224,9 +350,7 @@ class TestRelativePoseConstraint:
             q = q0.copy()
             robot.update_configuration(q)
             if apply_constraint:
-                solver.configure_relative_pose_constraint(
-                    "left_ee", "right_ee", lower, upper, mask
-                )
+                solver.configure_relative_pose_constraint("left_ee", "right_ee", lower, upper, mask)
             else:
                 solver.clear_relative_pose_constraint()
 

@@ -25,9 +25,7 @@ def _load_panda() -> tuple[eik.RobotModel, eik.KinematicsSolver]:
     return robot, solver
 
 
-def _narrow_limits(
-    robot: eik.RobotModel, margin: float = 0.20
-) -> tuple[np.ndarray, np.ndarray]:
+def _narrow_limits(robot: eik.RobotModel, margin: float = 0.20) -> tuple[np.ndarray, np.ndarray]:
     """Narrow Panda arm limits around the default configuration."""
     q_lower_orig, q_upper_orig = robot.get_joint_limits()
     q_lower = q_lower_orig.copy()
@@ -105,9 +103,9 @@ def test_min_error_mode_keeps_making_progress_on_panda():
     errors, _, result = _run_tracking_trace(eik.TaskSolveMode.MIN_ERROR)
 
     # Must reduce error by a meaningful fraction over the rollout.
-    assert errors[-1] < 0.90 * errors[0], (
-        f"MIN_ERROR progress too small: initial={errors[0]:.5f}, final={errors[-1]:.5f}"
-    )
+    assert (
+        errors[-1] < 0.90 * errors[0]
+    ), f"MIN_ERROR progress too small: initial={errors[0]:.5f}, final={errors[-1]:.5f}"
     assert result.task_modes_effective == [eik.TaskSolveMode.MIN_ERROR]
 
 

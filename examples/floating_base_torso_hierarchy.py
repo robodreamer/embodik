@@ -17,11 +17,11 @@ import sys
 import time
 from pathlib import Path
 
+import embodik as eik
 import numpy as np
 import pinocchio as pin
-
-import embodik as eik
 from embodik import r2q
+from example_helpers.ik_common import DEFAULT_VISER_PORT, configure_solver_runtime_policy
 
 try:
     from robot_descriptions.loaders.yourdfpy import load_robot_description
@@ -193,7 +193,9 @@ def _vis_cfg_from_actuated(
     return cfg_vec
 
 
-def _se3_wxyz_pos(pose: object) -> tuple[tuple[float, float, float], tuple[float, float, float, float]]:
+def _se3_wxyz_pos(
+    pose: object,
+) -> tuple[tuple[float, float, float], tuple[float, float, float, float]]:
     R = np.asarray(pose.rotation, dtype=float)
     t = np.asarray(pose.translation, dtype=float)
     quat_xyzw = r2q(R, order="xyzs")
@@ -220,7 +222,7 @@ def run_headless(args: argparse.Namespace) -> None:
     robot, q = _init_floating_panda()
     solver = eik.KinematicsSolver(robot)
     solver.dt = args.dt
-    solver.set_damping(0.1)
+    configure_solver_runtime_policy(solver)
 
     torso_frame = _resolve_torso_frame(robot, EE_FRAME)
     torso_pose = robot.get_frame_pose(torso_frame)
@@ -321,6 +323,7 @@ def run_viser(args: argparse.Namespace) -> None:
     robot.update_configuration(q)
     solver = eik.KinematicsSolver(robot)
     solver.dt = args.dt
+    configure_solver_runtime_policy(solver)
     solver.set_damping(float(args.damping))
 
     torso_frame = _resolve_torso_frame(robot, EE_FRAME)
@@ -363,8 +366,12 @@ def run_viser(args: argparse.Namespace) -> None:
     # --- GUI: bounds & limits (half-range per axis) ---
     with server.gui.add_folder("Torso pose box (vs anchored reference)"):
         enable_box = server.gui.add_checkbox("Enable torso pose bounds", initial_value=True)
-        enable_trans_bounds = server.gui.add_checkbox("Enable translation bounds (x,y,z)", initial_value=True)
-        enable_rot_bounds = server.gui.add_checkbox("Enable rotation bounds (rx,ry,rz)", initial_value=True)
+        enable_trans_bounds = server.gui.add_checkbox(
+            "Enable translation bounds (x,y,z)", initial_value=True
+        )
+        enable_rot_bounds = server.gui.add_checkbox(
+            "Enable rotation bounds (rx,ry,rz)", initial_value=True
+        )
         lock_opt_checkbox = server.gui.add_checkbox(
             "Optimize full lock with base joint lock (fixed-base emulation)", initial_value=False
         )
@@ -375,11 +382,13 @@ def run_viser(args: argparse.Namespace) -> None:
         half_rrx = server.gui.add_slider("±rx half (deg)", 0.0, 45.0, initial_value=15.0, step=0.5)
         half_rry = server.gui.add_slider("±ry half (deg)", 0.0, 45.0, initial_value=15.0, step=0.5)
         half_rrz = server.gui.add_slider("±rz half (deg)", 0.0, 45.0, initial_value=15.0, step=0.5)
-        vlim = server.gui.add_slider("Vel limit (all axes)", 0.05, 1.0, initial_value=0.8, step=0.05)
-        alim = server.gui.add_slider("Accel limit (all axes)", 0.1, 1.0, initial_value=1.0, step=0.05)
-        soften_bounds = server.gui.add_checkbox(
-            "Enable torso bound softening", initial_value=True
+        vlim = server.gui.add_slider(
+            "Vel limit (all axes)", 0.05, 1.0, initial_value=0.8, step=0.05
         )
+        alim = server.gui.add_slider(
+            "Accel limit (all axes)", 0.1, 1.0, initial_value=1.0, step=0.05
+        )
+        soften_bounds = server.gui.add_checkbox("Enable torso bound softening", initial_value=True)
         soften_frac = server.gui.add_slider(
             "Bound softening fraction", 0.0, 0.4, initial_value=0.10, step=0.01
         )
@@ -397,12 +406,18 @@ def run_viser(args: argparse.Namespace) -> None:
         primary_mode = server.gui.add_dropdown(
             "Primary solve mode", ("MIN_ERROR", "SCALE", "SCALE_ELASTIC"), initial_value="MIN_ERROR"
         )
-        pos_gain_s = server.gui.add_slider("EE position gain", 1.0, 80.0, initial_value=10.0, step=1.0)
-        rot_gain_s = server.gui.add_slider("EE orientation gain", 1.0, 80.0, initial_value=10.0, step=1.0)
+        pos_gain_s = server.gui.add_slider(
+            "EE position gain", 1.0, 80.0, initial_value=10.0, step=1.0
+        )
+        rot_gain_s = server.gui.add_slider(
+            "EE orientation gain", 1.0, 80.0, initial_value=10.0, step=1.0
+        )
         torso_ori_gain_s = server.gui.add_slider(
             "Torso orientation gain", 0.0, 0.3, initial_value=0.05, step=0.005
         )
-        ns_gain_s = server.gui.add_slider("Nullspace gain", 0.0, 0.02, initial_value=0.002, step=0.0005)
+        ns_gain_s = server.gui.add_slider(
+            "Nullspace gain", 0.0, 0.02, initial_value=0.002, step=0.0005
+        )
         max_iter_s = server.gui.add_slider("max_iterations", 1, 25, initial_value=10, step=1)
         dt_s = server.gui.add_slider("dt (s)", 0.005, 0.03, initial_value=args.dt, step=0.001)
         allow_fallback = server.gui.add_checkbox(
@@ -506,7 +521,6 @@ def run_viser(args: argparse.Namespace) -> None:
     target_homog = np.eye(4, dtype=float, order="F")
     filtered_target_pos = np.asarray(robot.get_frame_pose(EE_FRAME).translation, dtype=float).copy()
     filtered_target_R = np.asarray(robot.get_frame_pose(EE_FRAME).rotation, dtype=float).copy()
-    q_lower, q_upper = robot.get_joint_limits()
     # For floating-base systems, keep nullspace posture on articulated joints by default.
     nullspace_active = list(range(6, robot.nv)) if robot.nv > 6 else list(range(robot.nv))
     last_feasible_q = q.copy()
@@ -652,10 +666,16 @@ def run_viser(args: argparse.Namespace) -> None:
         torso_secondary_enabled = bool(torso_task_enabled.value)
         torso_bounds_enabled = bool(enable_box.value)
         full_lock_active = (
-            torso_bounds_enabled and (not enable_trans_bounds.value) and (not enable_rot_bounds.value)
+            torso_bounds_enabled
+            and (not enable_trans_bounds.value)
+            and (not enable_rot_bounds.value)
         )
-        use_base_joint_lock_optimization = bool(lock_opt_checkbox.value) and full_lock_active and robot.nv >= 6
-        torso_secondary_effective = torso_secondary_enabled and (not use_base_joint_lock_optimization)
+        use_base_joint_lock_optimization = (
+            bool(lock_opt_checkbox.value) and full_lock_active and robot.nv >= 6
+        )
+        torso_secondary_effective = torso_secondary_enabled and (
+            not use_base_joint_lock_optimization
+        )
         torso_bounds_effective = torso_bounds_enabled and (not use_base_joint_lock_optimization)
 
         if use_base_joint_lock_optimization:
@@ -702,9 +722,6 @@ def run_viser(args: argparse.Namespace) -> None:
                 quat_norm = float(np.linalg.norm(quat))
                 if quat_norm > 1e-12:
                     q_next[3:7] = quat / quat_norm
-            # Clamp articulated joints only; keep free-flyer part untouched.
-            if q_next.size > 7:
-                q_next[7:] = np.clip(q_next[7:], q_lower[7:], q_upper[7:])
             q[:] = q_next
             last_feasible_q[:] = q
             infeasible_streak = 0
@@ -719,8 +736,6 @@ def run_viser(args: argparse.Namespace) -> None:
                     quat_norm = float(np.linalg.norm(quat))
                     if quat_norm > 1e-12:
                         q_next[3:7] = quat / quat_norm
-                if q_next.size > 7:
-                    q_next[7:] = np.clip(q_next[7:], q_lower[7:], q_upper[7:])
                 q[:] = q_next
                 last_feasible_q[:] = q
                 prev_position_error = float(out.position_error)
@@ -736,8 +751,6 @@ def run_viser(args: argparse.Namespace) -> None:
                         quat_norm = float(np.linalg.norm(quat))
                         if quat_norm > 1e-12:
                             q_next[3:7] = quat / quat_norm
-                    if q_next.size > 7:
-                        q_next[7:] = np.clip(q_next[7:], q_lower[7:], q_upper[7:])
                     q[:] = q_next
                     last_feasible_q[:] = q
                     prev_position_error = float(out.position_error)
@@ -768,7 +781,9 @@ def run_viser(args: argparse.Namespace) -> None:
             upper_slack = effective_half - rel6
             min_slack = float(np.minimum(lower_slack, upper_slack).min())
             last_torso_min_slack = min_slack
-            torso_slack_txt.value = f"{min_slack:.4f} ({'inside' if min_slack >= 0.0 else 'outside'})"
+            torso_slack_txt.value = (
+                f"{min_slack:.4f} ({'inside' if min_slack >= 0.0 else 'outside'})"
+            )
         elif enable_box.value and use_base_joint_lock_optimization:
             last_torso_min_slack = float("nan")
             torso_slack_txt.value = "joint-lock optimization active"
@@ -814,13 +829,20 @@ def run_viser(args: argparse.Namespace) -> None:
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     p.add_argument(
         "--headless",
         action="store_true",
         help="Run scripted timing benchmark (no Viser).",
     )
-    p.add_argument("--port", type=int, default=8080, help="Viser server port (default: 8080).")
+    p.add_argument(
+        "--port",
+        type=int,
+        default=DEFAULT_VISER_PORT,
+        help=f"Viser server port (default: {DEFAULT_VISER_PORT}).",
+    )
     p.add_argument("--steps", type=int, default=5000, help="Headless: number of IK steps.")
     p.add_argument("--dt", type=float, default=0.01, help="Solver / integration timestep (s).")
     p.add_argument("--damping", type=float, default=0.01, help="Viser: solver damping.")

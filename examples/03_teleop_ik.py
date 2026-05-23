@@ -32,11 +32,8 @@ for _path in (_PYTHON_DIR, _EXAMPLES_DIR):
 
 import numpy as np
 import viser
-from robot_descriptions.loaders.yourdfpy import load_robot_description
-from viser.extras import ViserUrdf
-
 from embodik import r2q
-from example_helpers.ik_common import quiet_websocket_handshake_logs
+from example_helpers.ik_common import DEFAULT_VISER_PORT, quiet_websocket_handshake_logs
 from example_helpers.seer_teleop import (
     DEFAULT_TELEOP_SCALE_FACTOR,
     SeerController,
@@ -45,8 +42,9 @@ from example_helpers.seer_teleop import (
     set_transform_control_pose,
 )
 from example_helpers.teleop_ik_backend import TeleopIKBackend
+from robot_descriptions.loaders.yourdfpy import load_robot_description
 from utils.robot_models import load_robot_presets
-
+from viser.extras import ViserUrdf
 
 quiet_websocket_handshake_logs()
 
@@ -71,7 +69,7 @@ def parse_args() -> argparse.Namespace:
     presets = load_robot_presets()
     parser = argparse.ArgumentParser(description="Minimal teleop input to embodiK IK demo.")
     parser.add_argument("--robot", choices=sorted(presets), default="panda")
-    parser.add_argument("--port", type=int, default=8080)
+    parser.add_argument("--port", type=int, default=DEFAULT_VISER_PORT)
     parser.add_argument(
         "--enable-teleop",
         action="store_true",
@@ -127,8 +125,12 @@ def main() -> None:
         reset_hint = server.gui.add_text("Reset", initial_value="Button B")
         status_text = server.gui.add_text("Status", initial_value="Ready")
         timing_ms = server.gui.add_number("IK Time (ms)", 0.001, disabled=True)
-        scale_slider = server.gui.add_slider("Position Scale", min=0.5, max=3.0, initial_value=args.scale, step=0.1)
-        manual_mode = server.gui.add_checkbox("Manual Target", initial_value=not controller_connected)
+        scale_slider = server.gui.add_slider(
+            "Position Scale", min=0.5, max=3.0, initial_value=args.scale, step=0.1
+        )
+        manual_mode = server.gui.add_checkbox(
+            "Manual Target", initial_value=not controller_connected
+        )
         reset_button = server.gui.add_button("Reset Robot & Controller")
 
     arm_stream_start_pose = backend.get_pose()
@@ -196,9 +198,7 @@ def main() -> None:
                 urdf_vis.update_cfg(make_visual_config(result.joints))
                 timing_ms.value = 0.9 * timing_ms.value + 0.1 * result.elapsed_ms
                 if frame_count % 50 == 0:
-                    status_text.value = (
-                        f"{result.status}: pos={result.position_error * 1e3:.1f} mm"
-                    )
+                    status_text.value = f"{result.status}: pos={result.position_error * 1e3:.1f} mm"
 
             gripper_text.value = "CLOSED" if controller.gripper_closed else "OPEN"
             reset_hint.value = "Button B"

@@ -4,7 +4,7 @@
 Runs scripted target trajectories through the same solver configuration the
 interactive example uses and reports stall / infeasible / constraint-breach
 counts. Designed to be driven by ``autoresearch:fix`` so every fix in
-``12_bimanual_whole_body_ik.py`` has a numeric signal.
+``06_bimanual_whole_body_ik.py`` has a numeric signal.
 
 Usage::
 
@@ -29,6 +29,11 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 import embodik  # noqa: E402
+from embodik.interactive_ik import (  # noqa: E402
+    clear_all_target_velocities_if_available,
+    configure_primary_solve_mode,
+    robust_solve_position_step,
+)
 
 from examples.example_helpers.common_bimanual_solver_fixture import (  # noqa: E402
     build_common_bimanual_solver_fixture,
@@ -37,11 +42,6 @@ from examples.example_helpers.common_bimanual_solver_fixture import (  # noqa: E
 from examples.example_helpers.common_bimanual_teleop_app import (  # noqa: E402
     EE_POSITION_DEADBAND,
     _polygon_slack,
-)
-from examples.example_helpers.robust_ik_runtime import (  # noqa: E402
-    clear_all_target_velocities_if_available,
-    configure_primary_solve_mode,
-    robust_solve_position_step,
 )
 
 SCENARIO_NAMES = (
@@ -240,7 +240,11 @@ def _trajectory_for_scenario(
         # most likely to leave the solver in an oscillating stall.
         direction = left_start_pose[:3, 3] - right_start_pose[:3, 3]
         direction_norm = float(np.linalg.norm(direction))
-        unit = direction / direction_norm if direction_norm > 1e-9 else np.array([0.0, -1.0, 0.0], dtype=float)
+        unit = (
+            direction / direction_norm
+            if direction_norm > 1e-9
+            else np.array([0.0, -1.0, 0.0], dtype=float)
+        )
         # Zigzag amplitude alternates between 0 and direction_norm + 30cm every 40 steps.
         period = 40
         phase = np.floor(t / period) % 2.0  # 0, 1, 0, 1, ...
@@ -253,7 +257,11 @@ def _trajectory_for_scenario(
         forward = np.array([1.0, 0.0, 0.0], dtype=float)
         direction = left_start_pose[:3, 3] - right_start_pose[:3, 3]
         direction_norm = float(np.linalg.norm(direction))
-        unit = direction / direction_norm if direction_norm > 1e-9 else np.array([0.0, -1.0, 0.0], dtype=float)
+        unit = (
+            direction / direction_norm
+            if direction_norm > 1e-9
+            else np.array([0.0, -1.0, 0.0], dtype=float)
+        )
         # push during first half, release to 0 during second half
         profile = np.where(
             t < (n * 0.5),
@@ -347,7 +355,6 @@ def run_scenario(
     rot_gain: float,
     enable_collision: bool,
     enable_com: bool,
-    fallback_status_names: tuple[str, ...],
     verbose: bool = False,
 ) -> ScenarioMetrics:
     fx = build_common_bimanual_solver_fixture(
@@ -385,7 +392,9 @@ def run_scenario(
         rot_gain=rot_gain,
         stall_recovery=(enable_collision or enable_com),
     )
-    active_solve_mode = getattr(embodik.TaskSolveMode, solve_mode_label, embodik.TaskSolveMode.SCALE)
+    active_solve_mode = getattr(
+        embodik.TaskSolveMode, solve_mode_label, embodik.TaskSolveMode.SCALE
+    )
     for task in (fx.right_task, fx.left_task):
         if hasattr(task, "solve_mode"):
             task.solve_mode = active_solve_mode
@@ -411,17 +420,10 @@ def run_scenario(
 
         t0 = time.perf_counter()
         step = robust_solve_position_step(
-            robot=robot,
             solver=solver,
             q_current=q,
             targets=targets,
             options=opts,
-            q_lo=fx.q_lo,
-            q_hi=fx.q_hi,
-            zero_velocity_indices=fx.locked_velocity_indices,
-            fallback_status_names=fallback_status_names,
-            allow_solver_intervention=True,
-            apply_collision_violated_q_solution=False,
         )
         elapsed_ms = (time.perf_counter() - t0) * 1e3
         cumulative_solve_ms += elapsed_ms
@@ -438,8 +440,12 @@ def run_scenario(
         robot.update_configuration(q)
         dq_norm = float(np.linalg.norm(np.asarray(result.joint_velocities, dtype=float)))
 
-        right_now = np.asarray(robot.get_frame_pose(fx.frame_map["right_tool"]).translation, dtype=float)
-        left_now = np.asarray(robot.get_frame_pose(fx.frame_map["left_tool"]).translation, dtype=float)
+        right_now = np.asarray(
+            robot.get_frame_pose(fx.frame_map["right_tool"]).translation, dtype=float
+        )
+        left_now = np.asarray(
+            robot.get_frame_pose(fx.frame_map["left_tool"]).translation, dtype=float
+        )
         right_err = float(np.linalg.norm(right_positions[step_idx] - right_now))
         left_err = float(np.linalg.norm(left_positions[step_idx] - left_now))
 
@@ -476,14 +482,21 @@ def run_scenario(
             if step_idx >= duration_steps // 2:
                 metrics.late_stall_count += 1
         stall_window.append(stalled)
-        if len(stall_window) == UNRECOVERABLE_WINDOW and sum(stall_window) >= UNRECOVERABLE_STALL_FRAMES:
+        if (
+            len(stall_window) == UNRECOVERABLE_WINDOW
+            and sum(stall_window) >= UNRECOVERABLE_STALL_FRAMES
+        ):
             metrics.unrecoverable_stall_count += 1
 
         # Breach thresholds: only count meaningful (>1mm) violations, since the
         # solver may leave micrometer-scale slack at the boundary even when the
         # constraint is correctly active.
         breach_slack_m = 1e-3
-        if enable_collision and np.isfinite(collision_min) and collision_min < (collision_min_distance_m - breach_slack_m):
+        if (
+            enable_collision
+            and np.isfinite(collision_min)
+            and collision_min < (collision_min_distance_m - breach_slack_m)
+        ):
             metrics.collision_breach_count += 1
         if enable_com and np.isfinite(com_inner) and com_inner < -breach_slack_m:
             metrics.com_breach_count += 1
@@ -545,20 +558,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--duration-steps", type=int, default=500)
     parser.add_argument("--collision-min-distance", type=float, default=0.035)
     parser.add_argument("--max-collision-constraints", type=int, default=2)
-    parser.add_argument("--com-margin-pct", type=float, default=10.0, help="Percent of support polygon (0-100)")
-    parser.add_argument("--collision-tuning-mode", default="balanced", choices=("speed", "balanced", "precise"))
-    parser.add_argument("--solve-mode", default="SCALE_ELASTIC", choices=("SCALE", "SCALE_ELASTIC", "MIN_ERROR"))
+    parser.add_argument(
+        "--com-margin-pct", type=float, default=10.0, help="Percent of support polygon (0-100)"
+    )
+    parser.add_argument(
+        "--collision-tuning-mode", default="balanced", choices=("speed", "balanced", "precise")
+    )
+    parser.add_argument(
+        "--solve-mode", default="SCALE_ELASTIC", choices=("SCALE", "SCALE_ELASTIC", "MIN_ERROR")
+    )
     parser.add_argument("--allow-fallback", action="store_true")
     parser.add_argument("--pos-gain", type=float, default=10.0)
     parser.add_argument("--rot-gain", type=float, default=10.0)
     parser.add_argument("--no-collision", action="store_true")
     parser.add_argument("--no-com", action="store_true")
-    parser.add_argument(
-        "--fallback-status-names",
-        nargs="*",
-        default=("INVALID_INPUT", "INFEASIBLE", "NUMERICAL_ERROR", "NO_PROGRESS"),
-        help="Status names that trigger velocity-solve fallback.",
-    )
     parser.add_argument("--output-json", type=Path, default=None)
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--seed", type=int, default=0)
@@ -588,7 +601,6 @@ def main() -> int:
             rot_gain=float(args.rot_gain),
             enable_collision=not args.no_collision,
             enable_com=not args.no_com,
-            fallback_status_names=tuple(args.fallback_status_names),
             verbose=bool(args.verbose),
         )
         record = metrics.as_dict()

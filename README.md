@@ -67,21 +67,21 @@ The pip-facing examples are intentionally split by purpose:
 | `01_basic_ik_simple.py` | Minimal fixed-base IK bring-up for a robot preset or new URDF. |
 | `02_collision_aware_IK.py` | Collision-aware IK behavior demo and advanced tuning surface. |
 | `03_teleop_ik.py` | Small adapter showing how teleop input drives the same IK step. |
-| `08_com_constraint_example.py` | CoM support-polygon constraint visualization. |
-| `09_dual_arm_ects.py` | Dual-arm ECTS and orthogonal coordination modes. |
-| `12_bimanual_whole_body_ik.py` | Bimanual whole-body teleop, defaulting to AI Worker and optionally supporting RB-Y1, with CoM and collision handling. |
-| `13_unitree_g1_retargeting_ik.py` | Unitree G1 whole-body retargeting IK with CoM and optional collision handling. |
-| `14_spot_full_body_ik_viser.py` | Spot full-body IK in regular Viser with arm+torso, torso-only, full-body, and two-stage modes. |
-| `15_spot_locomanip_mjviser.py` | Spot locomanipulation ONNX policy rollout in MuJoCo through mjviser. |
+| `04_com_constraint_example.py` | CoM support-polygon constraint visualization. |
+| `05_dual_arm_ects.py` | Dual-arm ECTS and orthogonal coordination modes. |
+| `06_bimanual_whole_body_ik.py` | Bimanual whole-body teleop, defaulting to AI Worker and optionally supporting RB-Y1, with CoM and collision handling. |
+| `07_unitree_g1_retargeting_ik.py` | Unitree G1 whole-body retargeting IK with CoM and optional collision handling. |
+| `08_spot_full_body_ik_viser.py` | Spot full-body IK in regular Viser with arm+torso, torso-only, full-body, and two-stage modes. |
+| `09_spot_locomanip_mjviser.py` | Spot locomanipulation ONNX policy rollout in MuJoCo through mjviser. |
 
 Run them from a copied example directory:
 
 ```bash
 python 02_collision_aware_IK.py
 python 03_teleop_ik.py
-python 12_bimanual_whole_body_ik.py
-python 13_unitree_g1_retargeting_ik.py
-python 14_spot_full_body_ik_viser.py
+python 06_bimanual_whole_body_ik.py
+python 07_unitree_g1_retargeting_ik.py
+python 08_spot_full_body_ik_viser.py
 ```
 
 The regular Viser Spot full-body IK example uses the standard example
@@ -97,11 +97,11 @@ optional Seer/xvisio controller dependencies, so use it only when running
 python -m pip install "embodik[mjviser]"
 embodik-examples --copy
 cd embodik_examples
-python 15_spot_locomanip_mjviser.py --policy locomanip
-python 15_spot_locomanip_mjviser.py --policy locomanip-stationary
+python 09_spot_locomanip_mjviser.py --policy locomanip
+python 09_spot_locomanip_mjviser.py --policy locomanip-stationary
 # add the optional Seer controller extra when needed:
 python -m pip install "embodik[mjviser,teleop]"
-python 15_spot_locomanip_mjviser.py --enable-teleop --policy locomanip
+python 09_spot_locomanip_mjviser.py --enable-teleop --policy locomanip
 ```
 
 From a repository checkout, run the same example from the repository root with

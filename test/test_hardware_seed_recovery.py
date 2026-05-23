@@ -13,6 +13,7 @@ import tempfile
 import textwrap
 from dataclasses import dataclass, field
 from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -119,9 +120,7 @@ def two_link_path():
     os.remove(p)
 
 
-_PANDA_DEFAULT_Q = np.array(
-    [0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785], dtype=float
-)
+_PANDA_DEFAULT_Q = np.array([0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785], dtype=float)
 _PANDA_GRIPPER_Q = np.array([0.02, 0.02], dtype=float)
 _PANDA_EE_FRAME = "panda_hand"
 
@@ -137,8 +136,7 @@ def _dual_iiwa_exclusions(robot: eik.RobotModel) -> list[tuple[str, str]]:
     exclusions: list[tuple[str, str]] = []
     for a, b in robot.get_collision_pair_names():
         a_l, b_l = a.lower(), b.lower()
-        same_arm = (("left" in a_l and "left" in b_l) or
-                    ("right" in a_l and "right" in b_l))
+        same_arm = ("left" in a_l and "left" in b_l) or ("right" in a_l and "right" in b_l)
         if same_arm:
             ia, ib = _extract_link_index(a_l), _extract_link_index(b_l)
             if ia is not None and ib is not None and abs(ia - ib) <= 3:
@@ -186,7 +184,6 @@ def _setup_dual_iiwa_stall_case():
     solver = eik.KinematicsSolver(robot)
     solver.dt = 0.01
     solver.enable_position_limits(True)
-    solver.set_damping(0.1)
 
     q = np.array(get_dual_iiwa_default_configuration(), dtype=float)
     robot.update_configuration(q)
@@ -285,7 +282,6 @@ def test_solve_position_step_from_limit_violation_moves_toward_feasible_region(o
     solver = eik.KinematicsSolver(robot)
     solver.dt = 0.05
     solver.enable_position_limits(True)
-    solver.set_damping(0.1)
     solver.clear_tasks()
     ft = solver.add_frame_task("ee", "link1")
     ft.weight = 1.0
@@ -296,9 +292,7 @@ def test_solve_position_step_from_limit_violation_moves_toward_feasible_region(o
     pose0 = robot.get_frame_pose("link1")
     T = np.eye(4, dtype=float)
     T[:3, :3] = np.asarray(pose0.rotation, dtype=float)
-    T[:3, 3] = np.asarray(pose0.translation, dtype=float) + np.array(
-        [0.06, 0.0, 0.0], dtype=float
-    )
+    T[:3, 3] = np.asarray(pose0.translation, dtype=float) + np.array([0.06, 0.0, 0.0], dtype=float)
 
     opts = eik.PositionStepOptions()
     opts.dt = 0.05
@@ -328,7 +322,6 @@ def test_panda_solve_velocity_recovers_from_slight_limit_violation(seed_side: st
     solver = eik.KinematicsSolver(robot)
     solver.dt = 0.01
     solver.enable_position_limits(True)
-    solver.set_damping(0.1)
     solver.clear_tasks()
     joint_task = solver.add_joint_task("panda_joint1_center", "panda_joint1", 0.0)
     joint_task.priority = 0
@@ -365,7 +358,6 @@ def test_panda_position_step_recovers_from_slight_upper_limit_violation():
     solver = eik.KinematicsSolver(robot)
     solver.dt = 0.05
     solver.enable_position_limits(True)
-    solver.set_damping(0.1)
 
     q_lo, q_hi = robot.get_joint_limits()
     q = np.concatenate([_PANDA_DEFAULT_Q, _PANDA_GRIPPER_Q])
@@ -405,7 +397,6 @@ def test_penetrating_seed_strict_collision_stalls_without_stall_handler(two_link
     solver = eik.KinematicsSolver(robot)
     solver.dt = 0.02
     solver.enable_position_limits(True)
-    solver.set_damping(0.1)
     solver.configure_collision_constraint(0.03, [], [])
     assert not solver.stall_handler_enabled()
     solver.clear_tasks()
@@ -436,7 +427,6 @@ def test_penetrating_seed_stall_handler_improves_clearance(two_link_path, use_st
     solver = eik.KinematicsSolver(robot)
     solver.dt = 0.02
     solver.enable_position_limits(True)
-    solver.set_damping(0.1)
     solver.configure_collision_constraint(0.03, [], [])
     if use_stall:
         solver.enable_stall_handler(0.03)
@@ -473,7 +463,6 @@ def test_solve_position_step_stall_recovery_on_penetrating_seed(two_link_path):
     solver = eik.KinematicsSolver(robot)
     solver.dt = 0.02
     solver.enable_position_limits(True)
-    solver.set_damping(0.1)
     solver.configure_collision_constraint(0.03, [], [])
     solver.clear_tasks()
     ft = solver.add_frame_task("ee", "link1")
@@ -516,7 +505,6 @@ def test_combined_joint_at_limit_and_penetration_with_stall(two_link_path):
     solver = eik.KinematicsSolver(robot)
     solver.dt = 0.02
     solver.enable_position_limits(True)
-    solver.set_damping(0.1)
     solver.configure_collision_constraint(0.03, [], [])
     solver.enable_stall_handler(0.03)
     solver.configure_stall_handler(stall_threshold=3, restore_rate=0.2, floor_fraction=0.0)

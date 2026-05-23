@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Headless regression harnesses for the G1 retargeting Viser example.
 
-Kept separate from ``13_unitree_g1_retargeting_ik.py`` so the example
+Kept separate from ``07_unitree_g1_retargeting_ik.py`` so the example
 script stays focused on the interactive Viser application.
 """
 
@@ -21,7 +21,6 @@ try:
         _configure_g1_posture_task,
         _configure_interactive_elastic_band,
         _limit_tangent_step,
-        _needs_min_error_recovery,
         _percentile,
         _solve_quality_step,
         _target_position_error,
@@ -51,7 +50,6 @@ except ModuleNotFoundError as exc:
         _configure_g1_posture_task,
         _configure_interactive_elastic_band,
         _limit_tangent_step,
-        _needs_min_error_recovery,
         _percentile,
         _solve_quality_step,
         _target_position_error,
@@ -195,8 +193,6 @@ def run_headless_ik_smoke(steps: int, reset_interval: int = 0) -> None:
     retarget_neutral_offsets = get_retargeting_presets()["neutral"]
     solver = embodik.KinematicsSolver(robot)
     solver.dt = 0.01
-    solver.set_damping(0.1)
-    solver.set_tolerance(0.1)
     solver.enable_position_limits(True)
     solver.enable_velocity_limits(True)
     _configure_interactive_elastic_band(solver)
@@ -317,8 +313,6 @@ def run_headless_ik_smoke(steps: int, reset_interval: int = 0) -> None:
                 solver,
                 robot,
                 q,
-                q_lo,
-                q_hi,
                 targets,
                 opts,
                 [right_task, left_task, right_foot_task, left_foot_task],
@@ -333,7 +327,7 @@ def run_headless_ik_smoke(steps: int, reset_interval: int = 0) -> None:
                 stability_ticks = max(0, stability_ticks - 1)
             statuses.append(result.status.name)
             if hasattr(result, "q_solution") and result.status.name != "COLLISION_VIOLATED":
-                q = _clip_q(robot, np.asarray(result.q_solution, dtype=float), q_lo, q_hi)
+                q = np.asarray(result.q_solution, dtype=float).copy()
                 robot.update_configuration(q)
                 accepted += 1
 
@@ -371,8 +365,6 @@ def run_headless_ik_smoke(steps: int, reset_interval: int = 0) -> None:
             solver,
             robot,
             q,
-            q_lo,
-            q_hi,
             targets,
             opts,
             [right_task, left_task, right_foot_task, left_foot_task],
@@ -388,7 +380,7 @@ def run_headless_ik_smoke(steps: int, reset_interval: int = 0) -> None:
         statuses.append(result.status.name)
         if not hasattr(result, "q_solution") or result.status.name == "COLLISION_VIOLATED":
             continue
-        q_next = _clip_q(robot, np.asarray(result.q_solution, dtype=float), q_lo, q_hi)
+        q_next = np.asarray(result.q_solution, dtype=float).copy()
         if np.all(np.isfinite(q_next)):
             q = q_next
             robot.update_configuration(q)
@@ -427,8 +419,6 @@ def run_headless_ik_smoke(steps: int, reset_interval: int = 0) -> None:
             solver,
             robot,
             q,
-            q_lo,
-            q_hi,
             targets,
             opts,
             [right_task, left_task, right_foot_task, left_foot_task],
@@ -444,7 +434,7 @@ def run_headless_ik_smoke(steps: int, reset_interval: int = 0) -> None:
         statuses.append(result.status.name)
         if not hasattr(result, "q_solution") or result.status.name == "COLLISION_VIOLATED":
             continue
-        q_next = _clip_q(robot, np.asarray(result.q_solution, dtype=float), q_lo, q_hi)
+        q_next = np.asarray(result.q_solution, dtype=float).copy()
         if np.all(np.isfinite(q_next)):
             q = q_next
             robot.update_configuration(q)
@@ -523,8 +513,6 @@ def run_headless_ik_smoke(steps: int, reset_interval: int = 0) -> None:
             solver,
             robot,
             q,
-            q_lo,
-            q_hi,
             targets,
             opts,
             [right_task, left_task, right_foot_task, left_foot_task],
@@ -553,10 +541,10 @@ def run_headless_ik_smoke(steps: int, reset_interval: int = 0) -> None:
                 worst = max(current_errors, key=current_errors.get)
                 bad_statuses.append(f"{result.status.name}@{worst}={current_target_error:.4f}")
             continue
-        q_next = _clip_q(robot, np.asarray(result.q_solution, dtype=float), q_lo, q_hi)
+        q_next = np.asarray(result.q_solution, dtype=float).copy()
         if np.all(np.isfinite(q_next)):
             q_next, q_step_component = _limit_tangent_step(robot, q_before, q_next, 0.8)
-            q = _clip_q(robot, q_next, q_lo, q_hi)
+            q = q_next
             robot.update_configuration(q)
             max_q_step = max(max_q_step, q_step_component)
             current_errors = {
@@ -569,7 +557,7 @@ def run_headless_ik_smoke(steps: int, reset_interval: int = 0) -> None:
                 max_target_errors[key] = max(max_target_errors[key], value)
             current_target_error = max(current_errors.values())
             max_all_target_error = max(max_all_target_error, current_target_error)
-            if _needs_min_error_recovery(result) and current_target_error > 0.03:
+            if result.status == embodik.SolverStatus.NO_PROGRESS and current_target_error > 0.03:
                 worst = max(current_errors, key=current_errors.get)
                 bad_statuses.append(f"{result.status.name}@{worst}={current_target_error:.4f}")
             accepted += 1
@@ -627,8 +615,6 @@ def run_headless_ik_smoke(steps: int, reset_interval: int = 0) -> None:
         solver,
         robot,
         q,
-        q_lo,
-        q_hi,
         reset_targets,
         opts,
         [right_task, left_task, right_foot_task, left_foot_task],
@@ -701,8 +687,6 @@ def run_headless_reset_smoke() -> None:
 
     solver = embodik.KinematicsSolver(robot)
     solver.dt = 0.01
-    solver.set_damping(0.1)
-    solver.set_tolerance(0.1)
     solver.enable_position_limits(True)
     solver.enable_velocity_limits(True)
     _configure_interactive_elastic_band(solver)
@@ -798,8 +782,6 @@ def run_headless_reset_smoke() -> None:
         solver,
         robot,
         q,
-        q_lo,
-        q_hi,
         targets,
         opts,
         [right_task, left_task, right_foot_task, left_foot_task],
@@ -906,8 +888,6 @@ def run_headless_single_target_oscillation(target_key: str, steps: int) -> None:
 
     solver = embodik.KinematicsSolver(robot)
     solver.dt = 0.01
-    solver.set_damping(0.1)
-    solver.set_tolerance(0.1)
     solver.enable_position_limits(True)
     solver.enable_velocity_limits(True)
     _configure_interactive_elastic_band(solver)
@@ -1013,8 +993,6 @@ def run_headless_single_target_oscillation(target_key: str, steps: int) -> None:
             solver,
             robot,
             q,
-            q_lo,
-            q_hi,
             targets,
             opts,
             [right_task, left_task, right_foot_task, left_foot_task, pelvis_task],
@@ -1031,7 +1009,7 @@ def run_headless_single_target_oscillation(target_key: str, steps: int) -> None:
                 max_consecutive_nonproductive, consecutive_nonproductive
             )
             continue
-        q_candidate = _clip_q(robot, np.asarray(result.q_solution, dtype=float), q_lo, q_hi)
+        q_candidate = np.asarray(result.q_solution, dtype=float).copy()
         if not np.all(np.isfinite(q_candidate)):
             statuses.append(result.status.name)
             consecutive_nonproductive += 1
@@ -1040,7 +1018,7 @@ def run_headless_single_target_oscillation(target_key: str, steps: int) -> None:
             )
             continue
         q_limited, q_step_component = _limit_tangent_step(robot, q_before, q_candidate, 0.8)
-        q = _clip_q(robot, q_limited, q_lo, q_hi)
+        q = q_limited
         robot.update_configuration(q)
         accepted += 1
         max_q_step = max(max_q_step, q_step_component)

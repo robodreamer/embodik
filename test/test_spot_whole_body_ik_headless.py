@@ -20,16 +20,16 @@ embodik = pytest.importorskip("embodik")
 from example_helpers.spot_locomanip_policy import (  # noqa: E402
     DEFAULT_ARM_COMMAND,
     DEFAULT_BODY_ROLL_PITCH_HEIGHT,
-    HEIGHT_RANGE,
-    INITIAL_ARM_COMMAND,
     DEFAULT_STAND_BASE_HEIGHT,
     DEFAULT_STAND_LEG_JOINTS,
+    HEIGHT_RANGE,
+    INITIAL_ARM_COMMAND,
 )
 from example_helpers.spot_whole_body_ik import OptionalSpotWholeBodyIK  # noqa: E402
 from example_helpers.spot_whole_body_ik import (  # noqa: E402
+    SPOT_COLLISION_MIN_DISTANCE_M,
     SPOT_URDF_ENV_VAR,
     STANDARD_FULL_BODY_TORSO_POSE_HALF_RANGE,
-    SPOT_COLLISION_MIN_DISTANCE_M,
     SpotFullBodyIK,
     SpotFullBodyIKConfig,
     SpotFullBodyIKMode,
@@ -57,7 +57,7 @@ def _resolve_spot_ik_urdf() -> Path:
 
 
 def _load_full_body_viser_module():
-    path = _EXAMPLES_DIR / "14_spot_full_body_ik_viser.py"
+    path = _EXAMPLES_DIR / "08_spot_full_body_ik_viser.py"
     spec = importlib.util.spec_from_file_location("spot_full_body_ik_viser_example", path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -328,7 +328,9 @@ def test_spot_full_body_two_stage_reduces_tool_position_error() -> None:
     )
 
     assert final_error < initial_error
-    assert _max_joint_delta(backend.robot, q0, backend.q, list(backend._arm_joint_map.values())) > 1e-7
+    assert (
+        _max_joint_delta(backend.robot, q0, backend.q, list(backend._arm_joint_map.values())) > 1e-7
+    )
     assert backend.solver.has_contact_frames() is True
     assert backend.foot_anchor_error() < 1e-4
 
@@ -348,7 +350,9 @@ def test_spot_full_body_two_stage_uses_two_solves_and_arm_residual_torso_target(
 
     def wrapped_tool(q: np.ndarray, target_pose, *, maintain_contacts: bool, lock_base: bool):
         tool_calls.append((np.asarray(q, dtype=float).copy(), bool(lock_base)))
-        return original_tool(q, target_pose, maintain_contacts=maintain_contacts, lock_base=lock_base)
+        return original_tool(
+            q, target_pose, maintain_contacts=maintain_contacts, lock_base=lock_base
+        )
 
     def wrapped_torso(q: np.ndarray, torso_target_pose):
         torso_calls.append(np.asarray(torso_target_pose, dtype=float).copy())
@@ -396,7 +400,10 @@ def test_spot_full_body_two_stage_restores_torso_bias_while_arm_compensates() ->
 
     final_error = torso_bias_error()
     assert np.linalg.norm(final_error) < 0.65 * np.linalg.norm(initial_error)
-    assert _max_joint_delta(backend.robot, q_initial, backend.q, list(backend._arm_joint_map.values())) > 1e-3
+    assert (
+        _max_joint_delta(backend.robot, q_initial, backend.q, list(backend._arm_joint_map.values()))
+        > 1e-3
+    )
     assert backend.foot_anchor_error() < 1e-3
 
 
@@ -636,7 +643,9 @@ def test_spot_full_body_posture_bias_is_not_retargeted_to_current_state() -> Non
     assert abs(float(error[2])) > 1e-3
 
 
-def test_spot_full_body_biases_remain_at_initial_configuration_after_reanchor_and_arm_buttons() -> None:
+def test_spot_full_body_biases_remain_at_initial_configuration_after_reanchor_and_arm_buttons() -> (
+    None
+):
     backend = SpotFullBodyIK(_resolve_spot_ik_urdf(), config=SpotFullBodyIKConfig())
     initial_bias = backend._posture_bias_q.copy()
     initial_torso_bias = backend._torso_bias_pose.copy()
@@ -740,9 +749,7 @@ def test_spot_whole_body_ik_uses_commanded_torso_state_for_integration() -> None
 def test_spot_whole_body_ik_uses_commanded_arm_state_for_integration() -> None:
     ik = OptionalSpotWholeBodyIK(_resolve_spot_ik_urdf(), dt=0.01)
     observation = _policy_observation()
-    observation["arm_state"] = np.concatenate(
-        [DEFAULT_ARM_COMMAND[:6], np.zeros(6, dtype=float)]
-    )
+    observation["arm_state"] = np.concatenate([DEFAULT_ARM_COMMAND[:6], np.zeros(6, dtype=float)])
     observation["gripper_state"] = np.array([DEFAULT_ARM_COMMAND[6], 0.0], dtype=float)
     ik._sync_configuration(
         observation,
@@ -871,7 +878,8 @@ def test_spot_whole_body_ik_forward_target_uses_base_assist_and_locks_legs() -> 
     current_tool = ik.robot.get_frame_pose(ik.tool_frame)
     target_pose = embodik.Rt(
         R=np.asarray(current_tool.rotation, dtype=float),
-        t=np.asarray(current_tool.translation, dtype=float) + np.array([0.04, 0.0, 0.0], dtype=float),
+        t=np.asarray(current_tool.translation, dtype=float)
+        + np.array([0.04, 0.0, 0.0], dtype=float),
     )
 
     result = ik.solve_command(observation, INITIAL_ARM_COMMAND, target_pose=target_pose)
@@ -903,18 +911,12 @@ def test_spot_whole_body_ik_forward_target_uses_base_assist_and_locks_legs() -> 
         ik._step_opts.torso_constraint.pose_upper_bounds[[3, 4]],
         np.deg2rad([15.0, 15.0]),
     )
-    assert ik._step_opts.torso_constraint.pose_upper_bounds[5] == pytest.approx(
-        np.deg2rad(60.0)
-    )
+    assert ik._step_opts.torso_constraint.pose_upper_bounds[5] == pytest.approx(np.deg2rad(60.0))
     assert HEIGHT_RANGE[0] <= result.body_command[2] <= HEIGHT_RANGE[1]
     assert list(ik._step_opts.locked_joint_indices) == []
     excluded = sorted(set(ik._step_opts.excluded_joint_indices))
     expected_excluded = sorted(
-        set(
-            ik._velocity_indices(
-                (*ik._leg_joint_map.values(), ik._gripper_joint_name)
-            )
-        )
+        set(ik._velocity_indices((*ik._leg_joint_map.values(), ik._gripper_joint_name)))
     )
     assert excluded == expected_excluded
     locked = sorted(set(ik._step_opts.integration_zero_velocity_indices))
@@ -922,9 +924,7 @@ def test_spot_whole_body_ik_forward_target_uses_base_assist_and_locks_legs() -> 
 
     q_after = np.asarray(ik.robot.get_current_configuration(), dtype=float)
     for mjcf_name, urdf_name in ik._leg_joint_map.items():
-        expected = DEFAULT_STAND_LEG_JOINTS[
-            tuple(ik._leg_joint_map.keys()).index(mjcf_name)
-        ]
+        expected = DEFAULT_STAND_LEG_JOINTS[tuple(ik._leg_joint_map.keys()).index(mjcf_name)]
         assert _joint_value(ik, q_after, urdf_name) == pytest.approx(expected, abs=1e-9)
     assert _joint_value(ik, q_after, ik._gripper_joint_name) == pytest.approx(
         INITIAL_ARM_COMMAND[6], abs=1e-9
@@ -1288,7 +1288,8 @@ def test_spot_whole_body_ik_small_forward_target_uses_arm_after_pose_nudge() -> 
     current_tool = ik.robot.get_frame_pose(ik.tool_frame)
     target_pose = embodik.Rt(
         R=np.asarray(current_tool.rotation, dtype=float),
-        t=np.asarray(current_tool.translation, dtype=float) + np.array([0.02, 0.0, 0.0], dtype=float),
+        t=np.asarray(current_tool.translation, dtype=float)
+        + np.array([0.02, 0.0, 0.0], dtype=float),
     )
 
     arm = INITIAL_ARM_COMMAND.copy()

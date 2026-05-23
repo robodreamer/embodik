@@ -10,7 +10,7 @@ Prerequisites:
     python -m pip install "embodik[gpu-collision]"
 
 Usage:
-    python examples/05_gpu_collision_batch.py [--batch_sizes 10 100 500]
+    python examples/gpu_collision_batch.py [--batch_sizes 10 100 500]
 """
 
 from __future__ import annotations

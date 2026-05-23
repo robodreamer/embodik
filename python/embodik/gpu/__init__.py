@@ -90,14 +90,14 @@ except ImportError:
 # Import solver builders if CasADi is available
 if HAS_CASADI:
     from embodik.gpu.casadi_fi_pesns import (
-        build_fi_pesns_velocity_solve,
-        build_fi_pesns_single_task,
         build_fi_pesns_for_robot,
+        build_fi_pesns_single_task,
+        build_fi_pesns_velocity_solve,
     )
     from embodik.gpu.casadi_pph_sns import (
-        build_pph_sns_velocity_solve,
-        build_pph_sns_single_task,
         build_pph_sns_for_robot,
+        build_pph_sns_single_task,
+        build_pph_sns_velocity_solve,
     )
 
 __all__ = [

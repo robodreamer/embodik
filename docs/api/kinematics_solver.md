@@ -19,6 +19,37 @@ manipulability metric and does not indicate a separate solver mode. A high but
 finite value can explain weak or unstable-looking motion even when the solve
 returns `SUCCESS`.
 
+## Runtime Policy
+
+`SolverRuntimeConfig` stores runtime defaults that are useful for interactive
+loops. Weighted fallback is enabled by default in the solver runtime config, so
+non-success prioritized solves may use the constrained weighted candidate when
+that candidate satisfies the same hard constraints. Maintained examples also
+call the shared helper `configure_solver_runtime_policy(solver)` to make that
+policy explicit and to enable pose-task auto layout:
+
+```python
+cfg = solver.runtime_config()
+cfg.enable_auto_task_layout = True
+cfg.weighted_fallback_enabled = True
+solver.configure_runtime(cfg)
+```
+
+`enable_auto_task_layout` applies to `PoseTaskGroup` adapters. It lets the solver
+try the merged pose layout first, then switch to split position/orientation
+tasks when the merged rows are binding poorly. The switch happens at solve
+boundaries, not by mutating the caller's configuration after a rejected attempt.
+
+`weighted_fallback_enabled` keeps the prioritized solver authoritative on
+success. If the prioritized path does not find a useful step, the solver may
+accept a constrained weighted candidate. The candidate uses the same hard
+constraint machinery, so it is still subject to configured joint limits,
+collision, CoM, relative-pose, contact projection, and linear constraints.
+
+Disable `weighted_fallback_enabled` only when you are running an A/B benchmark
+or need to reproduce historical strict-priority behavior. Disable
+`enable_auto_task_layout` when you need a fixed merged or split pose-task layout.
+
 ## Position IK Objective Order
 
 `solve_position()` now supports a three-level stack:

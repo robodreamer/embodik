@@ -42,6 +42,16 @@ enum class CollisionTuningMode {
   kSpeed = 2,
 };
 
+enum class TaskLayout {
+  kSplit = 0,
+  kMerged = 1,
+};
+
+enum class SolverRecoveryStage {
+  kPrioritized = 0,
+  kWeightedFallback = 1,
+};
+
 enum class SolverStatus {
   kSuccess = 0,
   kInvalidInput = 1,
@@ -104,6 +114,37 @@ struct VelocitySolverResult : public SolverResult {
   std::uint64_t collision_bound_culled_pairs = 0;
   bool collision_budget_exhausted = false;
   std::uint64_t collision_sphere_culled_pairs = 0;
+
+  /// Read-only weighted-advisor diagnostics. These fields are populated only
+  /// when SolverRuntimeConfig::weighted_advisor_enabled is true. The advisor
+  /// never overwrites the prioritized solver output unless the separate
+  /// weighted_fallback_enabled runtime flag is enabled.
+  bool weighted_advisory_available = false;
+  bool weighted_fallback_used = false;
+  double weighted_advisory_v_norm = std::numeric_limits<double>::quiet_NaN();
+  double weighted_advisory_pos_task_error_norm =
+      std::numeric_limits<double>::quiet_NaN();
+  double weighted_advisory_ori_task_error_norm =
+      std::numeric_limits<double>::quiet_NaN();
+  double weighted_advisory_condition_number =
+      std::numeric_limits<double>::quiet_NaN();
+  /// Advisor position-weight scale used for this solve. When PI adaptation is
+  /// disabled, this mirrors SolverRuntimeConfig::advisor_position_weight_scale.
+  double advisor_position_weight_scale_current = 1.0;
+  /// True when the advisor-scale PI controller updated its internal state on
+  /// this solve.
+  bool advisor_scale_adapt_active = false;
+
+  /// Active pose-task layout used by the solve.
+  TaskLayout active_task_layout = TaskLayout::kSplit;
+  /// Recovery stage that supplied the accepted velocity. This is separate from
+  /// task layout: weighted fallback solves the active layout's constrained
+  /// stacked objective; it is not a pose-task layout.
+  SolverRecoveryStage recovery_stage = SolverRecoveryStage::kPrioritized;
+  /// Bounded binding score from the previous constrained velocity solve used by
+  /// the optional stateful layout switcher. Zero when the switcher is disabled
+  /// or has not yet seen a prior solve.
+  double binding_score = 0.0;
 };
 
 // Configuration for regularized matrix inversion
@@ -332,6 +373,116 @@ struct PositionIKResult : public VelocitySolverResult {
   /// Number of steps where a Jacobian-based escape nudge was applied to
   /// move the configuration out of collision penetration during a stall.
   int stall_escape_count = 0;
+};
+
+/// Lightweight, derived bundle of diagnostics from a PositionIKResult.
+///
+/// Exposed in Python as ``PositionIKResult.diagnostics`` so wrappers can read
+/// one object instead of scattered top-level fields. The struct holds copies,
+/// not references, and does not add solver state.
+struct SolveDiagnostics {
+  /// Mirrors PositionIKResult::collision_rejection_count.
+  int collision_rejection_count = 0;
+  /// Mirrors PositionIKResult::stall_escape_count.
+  int stall_escape_count = 0;
+  /// Mirrors SolverResult::condition_number.
+  double condition_number = 1.0;
+  /// Mirrors SolverResult::task_scales.
+  std::vector<double> task_scales;
+  /// Mirrors SolverResult::task_used_fallback.
+  std::vector<bool> task_used_fallback;
+  /// Mirrors SolverResult::task_modes_effective.
+  std::vector<TaskSolveMode> task_modes_effective;
+  /// True when an existing intervention counter indicates a non-nominal solve.
+  bool any_intervention = false;
+  /// Mirrors VelocitySolverResult::weighted_advisory_available.
+  bool weighted_advisory_available = false;
+  /// Mirrors VelocitySolverResult::weighted_fallback_used.
+  bool weighted_fallback_used = false;
+  /// Mirrors VelocitySolverResult::weighted_advisory_v_norm.
+  double weighted_advisory_v_norm = std::numeric_limits<double>::quiet_NaN();
+  /// Mirrors VelocitySolverResult::weighted_advisory_pos_task_error_norm.
+  double weighted_advisory_pos_task_error_norm =
+      std::numeric_limits<double>::quiet_NaN();
+  /// Mirrors VelocitySolverResult::weighted_advisory_ori_task_error_norm.
+  double weighted_advisory_ori_task_error_norm =
+      std::numeric_limits<double>::quiet_NaN();
+  /// Mirrors VelocitySolverResult::weighted_advisory_condition_number.
+  double weighted_advisory_condition_number =
+      std::numeric_limits<double>::quiet_NaN();
+  /// Mirrors VelocitySolverResult::advisor_position_weight_scale_current.
+  double advisor_position_weight_scale_current = 1.0;
+  /// Mirrors VelocitySolverResult::advisor_scale_adapt_active.
+  bool advisor_scale_adapt_active = false;
+  /// Mirrors VelocitySolverResult::active_task_layout.
+  TaskLayout active_task_layout = TaskLayout::kSplit;
+  /// Mirrors VelocitySolverResult::recovery_stage.
+  SolverRecoveryStage recovery_stage = SolverRecoveryStage::kPrioritized;
+  /// Mirrors VelocitySolverResult::binding_score.
+  double binding_score = 0.0;
+};
+
+/// Bundled runtime defaults for interactive solve loops.
+///
+/// Purely additive: existing setters and per-call PositionStepOptions remain
+/// authoritative. KinematicsSolver::configure_runtime() stamps ``damping`` onto
+/// the solver and stores the position-step fields so callers can materialize
+/// fresh options through make_position_step_options().
+struct SolverRuntimeConfig {
+  /// Singular-value damping for the regularized pseudoinverse.
+  double damping = 0.1;
+  /// Default PositionStepOptions::max_steps value.
+  int position_step_max_steps = 1;
+  /// Default PositionStepOptions::adaptive_dt value.
+  bool adaptive_dt = false;
+  /// Default PositionStepOptions::adaptive_dt_max_scale value.
+  double adaptive_dt_max_scale = 5.0;
+  /// Default PositionStepOptions::adaptive_dt_reference_distance value.
+  double adaptive_dt_reference_distance = 0.05;
+  /// Enable read-only constrained weighted-advisor diagnostics. When true, each
+  /// velocity solve also computes a weighted stacked MIN_ERROR candidate under
+  /// the same hard constraints. The prioritized SNS output remains
+  /// authoritative unless weighted_fallback_enabled also accepts the candidate.
+  bool weighted_advisor_enabled = false;
+  /// Allow the constrained weighted candidate to replace a non-success
+  /// prioritized solve when the candidate satisfies the hard constraints.
+  /// Default true; the candidate is computed lazily only after a non-success
+  /// prioritized solve unless weighted_advisor_enabled is also true.
+  bool weighted_fallback_enabled = true;
+  /// Multiplicative weight scale for FRAME_POSITION objectives in the
+  /// diagnostic advisor only. Non-finite or negative values are treated as 1.0.
+  double advisor_position_weight_scale = 1.0;
+  /// Multiplicative weight scale for FRAME_ORIENTATION objectives in the
+  /// diagnostic advisor only. Non-finite or negative values are treated as 1.0.
+  double advisor_orientation_weight_scale = 1.0;
+  /// Enable default-off advisor-scale PI adaptation for experiments. The
+  /// adapted value affects only constrained weighted-advisor/fallback row
+  /// weights; it never changes prioritized task targets or hard constraints.
+  bool enable_advisor_scale_adapt = false;
+  /// Integral gain for advisor-scale adaptation. Positive error means the
+  /// weighted advisor's position residual ratio is above target, so the
+  /// position weight is increased.
+  double advisor_scale_adapt_ki = 0.25;
+  /// Target residual ratio: pos_error / (pos_error + ori_error).
+  double advisor_scale_adapt_target_ratio = 0.5;
+  /// Lower bound for the adapted advisor position-weight scale.
+  double advisor_scale_min = 0.25;
+  /// Upper bound for the adapted advisor position-weight scale.
+  double advisor_scale_max = 8.0;
+  /// Minimum accumulated solver time between advisor-scale PI updates.
+  double advisor_scale_epoch_s = 0.1;
+  /// Enable opt-in stateful PoseTaskGroup layout switching. Auto-switch groups
+  /// own both a merged FRAME_POSE task and split FRAME_POSITION/FRAME_ORIENTATION
+  /// tasks; the solver toggles active tasks only at solve boundaries based on
+  /// the previous constrained solve's binding score.
+  bool enable_auto_task_layout = false;
+  /// Switch from merged to split when binding_score exceeds this value.
+  double auto_layout_binding_threshold_high = 0.30;
+  /// Switch back from split to merged after cooldown_ticks consecutive scores
+  /// below this value.
+  double auto_layout_binding_threshold_low = 0.15;
+  /// Hysteresis count for returning from split to merged.
+  int auto_layout_cooldown_ticks = 20;
 };
 
 } // namespace embodik

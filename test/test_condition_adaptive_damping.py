@@ -11,10 +11,10 @@ import pytest
 
 import embodik as eik
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture
 def panda_setup():
@@ -25,7 +25,6 @@ def panda_setup():
     robot = eik.RobotModel(URDF_PATH, floating_base=False)
     solver = eik.KinematicsSolver(robot)
     solver.dt = 0.01
-    solver.set_damping(1e-1)
     solver.set_tolerance(1e-6)
     return robot, solver
 
@@ -68,9 +67,7 @@ def _branch_reference_srinv(
     sigma_values = np.linalg.svd(jacobian, compute_uv=False)
     sigma_min = float(sigma_values[-1])
     condition_number = (
-        float(sigma_values[0]) / sigma_min
-        if sigma_min > epsilon * 1e-4
-        else float("inf")
+        float(sigma_values[0]) / sigma_min if sigma_min > epsilon * 1e-4 else float("inf")
     )
     return inverse, condition_number
 
@@ -78,6 +75,7 @@ def _branch_reference_srinv(
 # ---------------------------------------------------------------------------
 # Low-level solver tests (verify damping properties directly)
 # ---------------------------------------------------------------------------
+
 
 class TestConditionAdaptiveDampingLowLevel:
     """Test damping properties using the low-level Eigen solver API."""
@@ -92,8 +90,13 @@ class TestConditionAdaptiveDampingLowLevel:
         upper = np.full(n, 10.0)
 
         result = eik.computeMultiObjectiveVelocitySolutionEigen(
-            [goal], [J], C, lower, upper,
-            sr_tolerance=1e-6, sr_damping=1e-1,
+            [goal],
+            [J],
+            C,
+            lower,
+            upper,
+            sr_tolerance=1e-6,
+            sr_damping=1e-1,
         )
         assert result.status == eik.SolverStatus.SUCCESS
         np.testing.assert_allclose(np.array(result.solution), goal, atol=1e-10)
@@ -108,8 +111,13 @@ class TestConditionAdaptiveDampingLowLevel:
         upper = np.full(n, 100.0)
 
         result = eik.computeMultiObjectiveVelocitySolutionEigen(
-            [goal], [J], C, lower, upper,
-            sr_tolerance=1e-6, sr_damping=1e-1,
+            [goal],
+            [J],
+            C,
+            lower,
+            upper,
+            sr_tolerance=1e-6,
+            sr_damping=1e-1,
         )
         assert result.status == eik.SolverStatus.SUCCESS
         dq = np.array(result.solution)
@@ -156,7 +164,11 @@ class TestConditionAdaptiveDampingLowLevel:
         # Well-conditioned
         J_good = np.eye(n)
         res_good = eik.computeMultiObjectiveVelocitySolutionEigen(
-            [goal], [J_good], C, lower, upper,
+            [goal],
+            [J_good],
+            C,
+            lower,
+            upper,
         )
         assert hasattr(res_good, "condition_number")
         assert not hasattr(res_good, "manipulability")
@@ -165,7 +177,11 @@ class TestConditionAdaptiveDampingLowLevel:
         # Ill-conditioned
         J_bad = np.diag([1.0, 1.0, 0.001])
         res_bad = eik.computeMultiObjectiveVelocitySolutionEigen(
-            [goal], [J_bad], C, lower, upper,
+            [goal],
+            [J_bad],
+            C,
+            lower,
+            upper,
         )
         assert res_bad.condition_number > res_good.condition_number
         assert res_bad.condition_number > 100.0  # condition number ~1000
@@ -174,6 +190,7 @@ class TestConditionAdaptiveDampingLowLevel:
 # ---------------------------------------------------------------------------
 # Panda integration tests
 # ---------------------------------------------------------------------------
+
 
 class TestConditionAdaptiveDampingPanda:
     """Integration tests with realistic Panda robot."""
@@ -212,8 +229,9 @@ class TestConditionAdaptiveDampingPanda:
         assert len(velocities) > 50, "Solve should not fail early"
 
         # Smoothness: max velocity jump (jerk proxy) should be bounded
-        jumps = np.array([np.linalg.norm(velocities[i+1] - velocities[i])
-                          for i in range(len(velocities) - 1)])
+        jumps = np.array(
+            [np.linalg.norm(velocities[i + 1] - velocities[i]) for i in range(len(velocities) - 1)]
+        )
         max_jump = jumps.max()
         mean_jump = jumps.mean()
         smoothness_ratio = max_jump / mean_jump if mean_jump > 1e-12 else 1.0

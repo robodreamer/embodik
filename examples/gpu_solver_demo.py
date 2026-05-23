@@ -13,13 +13,13 @@ Key benefits demonstrated:
 
 Usage:
     # CPU-only mode (default)
-    python examples/06_gpu_solver_demo.py
+    python examples/gpu_solver_demo.py
 
     # With GPU (requires CusADi + CUDA)
-    python examples/06_gpu_solver_demo.py --gpu --casadi_path path/to/fn_velocity_solve.casadi
+    python examples/gpu_solver_demo.py --gpu --casadi_path path/to/fn_velocity_solve.casadi
 
     # Specific batch sizes
-    python examples/06_gpu_solver_demo.py --batch_sizes 100 500 1000 2000 4000
+    python examples/gpu_solver_demo.py --batch_sizes 100 500 1000 2000 4000
 """
 
 import argparse
@@ -393,16 +393,16 @@ def main():
         epilog="""
 Examples:
   # Basic CPU benchmark
-  python examples/06_gpu_solver_demo.py
+  python examples/gpu_solver_demo.py
 
   # With GPU acceleration
-  python examples/06_gpu_solver_demo.py --gpu --casadi_path /path/to/fn_velocity_solve.casadi
+  python examples/gpu_solver_demo.py --gpu --casadi_path /path/to/fn_velocity_solve.casadi
 
   # Custom batch sizes
-  python examples/06_gpu_solver_demo.py --batch_sizes 100 500 1000 2000 4000
+  python examples/gpu_solver_demo.py --batch_sizes 100 500 1000 2000 4000
 
   # Save plot
-  python examples/06_gpu_solver_demo.py --plot benchmark_results.png
+  python examples/gpu_solver_demo.py --plot benchmark_results.png
 """
     )
 

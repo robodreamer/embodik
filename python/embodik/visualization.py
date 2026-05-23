@@ -1,17 +1,18 @@
 """Real-time 3D visualization for embodiK using Viser directly."""
 
-import numpy as np
-from typing import Dict, Optional, Tuple, List, Any, Callable
-import trimesh
 import threading
 import time
 from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional, Tuple
+
+import numpy as np
+import trimesh
 
 # Import Viser and related libraries directly
 import viser
+import yourdfpy
 from viser import ViserServer
 from viser.extras import ViserUrdf
-import yourdfpy
 
 # Use native bindings for transforms and quaternions
 from . import _embodik_impl as _native

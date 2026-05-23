@@ -181,6 +181,77 @@ def test_adaptive_dt_applies_to_multi_target_overload():
         os.unlink(urdf_path)
 
 
+def test_adaptive_dt_respects_position_limits_during_single_target_integration():
+    """Adaptive integration must not step past native position limits."""
+    urdf_path = _create_two_joint_urdf()
+    try:
+        robot = eik.RobotModel(urdf_path, floating_base=False)
+        solver = eik.KinematicsSolver(robot)
+        solver.enable_position_limits(True)
+        task = solver.add_frame_task("ee_task", "ee")
+        task.priority = 0
+        task.weight = 1.0
+
+        q = np.array([3.13, 0.0], dtype=float)
+        robot.update_configuration(q)
+        pose = robot.get_frame_pose("ee")
+        target = np.eye(4, dtype=float)
+        target[:3, :3] = np.asarray(pose.rotation, dtype=float)
+        target[:3, 3] = np.asarray(pose.translation, dtype=float)
+        target[1, 3] -= 0.2
+
+        opts = eik.PositionStepOptions()
+        opts.dt = 0.01
+        opts.max_steps = 1
+        opts.position_gain = 50.0
+        opts.orientation_gain = 50.0
+        opts.adaptive_dt = True
+        opts.adaptive_dt_max_scale = 10.0
+        opts.adaptive_dt_reference_distance = 0.01
+
+        res = solver.solve_position_step(q, target, "ee_task", opts)
+
+        assert res.status == eik.SolverStatus.SUCCESS
+        assert np.asarray(res.q_solution, dtype=float)[0] <= 3.14
+    finally:
+        os.unlink(urdf_path)
+
+
+def test_adaptive_dt_respects_position_limits_during_multi_target_integration():
+    """Multi-target adaptive integration must use the effective dt for limits."""
+    urdf_path = _create_two_joint_urdf()
+    try:
+        robot = eik.RobotModel(urdf_path, floating_base=False)
+        solver = eik.KinematicsSolver(robot)
+        solver.enable_position_limits(True)
+        task = solver.add_frame_task("ee_task", "ee")
+        task.priority = 0
+        task.weight = 1.0
+
+        q = np.array([3.13, 0.0], dtype=float)
+        robot.update_configuration(q)
+        pose = robot.get_frame_pose("ee")
+        target = np.eye(4, dtype=float)
+        target[:3, :3] = np.asarray(pose.rotation, dtype=float)
+        target[:3, 3] = np.asarray(pose.translation, dtype=float)
+        target[1, 3] -= 0.2
+        targets = [eik.TaskTarget("ee_task", target, 50.0, 50.0)]
+
+        opts = eik.PositionStepOptions()
+        opts.dt = 0.01
+        opts.max_steps = 1
+        opts.adaptive_dt = True
+        opts.adaptive_dt_max_scale = 10.0
+        opts.adaptive_dt_reference_distance = 0.01
+
+        res = solver.solve_position_step(q, targets, opts)
+
+        assert res.status == eik.SolverStatus.SUCCESS
+        assert np.asarray(res.q_solution, dtype=float)[0] <= 3.14
+    finally:
+        os.unlink(urdf_path)
+
+
 def test_locked_joint_indices_qp_zero_and_consistent_velocity():
     urdf_path, robot, solver, _, _ = _make_solver_with_posture()
     try:
@@ -331,6 +402,40 @@ def test_excluded_joint_indices_step_matches_solve_position_lock_behavior():
 
         assert abs(float(np.asarray(step_out.q_solution, dtype=float)[1]) - q[1]) < 1e-9
         assert abs(float(np.asarray(ik_out.q_solution, dtype=float)[1]) - q[1]) < 1e-9
+    finally:
+        os.unlink(urdf_path)
+
+
+def test_solve_position_integrates_inside_scalar_joint_limits_without_python_clip():
+    urdf_path = _create_two_joint_urdf(velocity_limit=1000.0)
+    try:
+        robot = eik.RobotModel(urdf_path, floating_base=False)
+        solver = eik.KinematicsSolver(robot)
+        q_lower, q_upper = robot.get_joint_limits()
+
+        q = np.array([q_upper[0] - 5e-5, 0.0], dtype=float)
+        robot.update_configuration(q)
+        pose = robot.get_frame_pose("ee")
+        target = np.eye(4, dtype=float)
+        target[:3, :3] = np.array(pose.rotation, dtype=float)
+        target[:3, 3] = np.array(pose.translation, dtype=float)
+        target[1, 3] += 0.5
+
+        opts = eik.PositionIKOptions()
+        opts.max_iterations = 1
+        opts.dt = 0.05
+        opts.position_gain = 500.0
+        opts.orientation_gain = 0.0
+        opts.max_linear_step = 0.0
+        opts.max_angular_step = 0.0
+        opts.primary_solve_mode = eik.TaskSolveMode.MIN_ERROR
+        opts.primary_allow_min_error_fallback = True
+        out = solver.solve_position(q, target, "ee", opts)
+
+        assert out.status in (eik.SolverStatus.SUCCESS, eik.SolverStatus.INFEASIBLE)
+        q_solution = np.asarray(out.q_solution, dtype=float)
+        assert q_solution[0] <= q_upper[0] - 1e-4 + 1e-10
+        assert q_solution[0] >= q_lower[0] + 1e-4 - 1e-10
     finally:
         os.unlink(urdf_path)
 
@@ -917,7 +1022,6 @@ def test_position_ik_torso_pose_bound_softening_reduces_jump_infeasible_count():
         torso_ref = np.asarray(robot.get_frame_pose("base_link").homogeneous(), dtype=float)
         ee_pose = robot.get_frame_pose("ee")
         base_target = np.asarray(ee_pose.homogeneous(), dtype=float)
-        q_lower, q_upper = robot.get_joint_limits()
         excluded = [robot.nv - 2, robot.nv - 1]
 
         def _run_sequence(enable_softening: bool) -> int:
@@ -974,7 +1078,6 @@ def test_position_ik_torso_pose_bound_softening_reduces_jump_infeasible_count():
                 if out.status == eik.SolverStatus.SUCCESS:
                     q_next = np.asarray(out.q_solution, dtype=float).copy()
                     q_next[3:7] /= max(np.linalg.norm(q_next[3:7]), 1e-12)
-                    q_next[7:] = np.clip(q_next[7:], q_lower[7:], q_upper[7:])
                     q[:] = q_next
                     last_feasible_q[:] = q
                     prev_pos_error = float(out.position_error)
@@ -983,7 +1086,6 @@ def test_position_ik_torso_pose_bound_softening_reduces_jump_infeasible_count():
                     if improved:
                         q_next = np.asarray(out.q_solution, dtype=float).copy()
                         q_next[3:7] /= max(np.linalg.norm(q_next[3:7]), 1e-12)
-                        q_next[7:] = np.clip(q_next[7:], q_lower[7:], q_upper[7:])
                         q[:] = q_next
                         last_feasible_q[:] = q
                         prev_pos_error = float(out.position_error)
@@ -1069,7 +1171,11 @@ def test_position_step_orientation_only_task_uses_orientation_gain():
         opts.position_gain = 0.0
         opts.orientation_gain = 40.0
         out = solver.solve_position_step(q, target, "ori_task", opts)
-        assert out.status in (eik.SolverStatus.SUCCESS, eik.SolverStatus.INFEASIBLE, eik.SolverStatus.NO_PROGRESS)
+        assert out.status in (
+            eik.SolverStatus.SUCCESS,
+            eik.SolverStatus.INFEASIBLE,
+            eik.SolverStatus.NO_PROGRESS,
+        )
         dq = np.asarray(out.joint_velocities, dtype=float)
         assert np.linalg.norm(dq) > 1e-6
     finally:
@@ -1107,7 +1213,11 @@ def test_multi_target_orientation_task_uses_orientation_gain():
         opts.max_steps = 3
         targets = [eik.TaskTarget("ori_task", target, 0.0, 40.0)]
         out = solver.solve_position_step(q, targets, opts)
-        assert out.status in (eik.SolverStatus.SUCCESS, eik.SolverStatus.INFEASIBLE, eik.SolverStatus.NO_PROGRESS)
+        assert out.status in (
+            eik.SolverStatus.SUCCESS,
+            eik.SolverStatus.INFEASIBLE,
+            eik.SolverStatus.NO_PROGRESS,
+        )
         dq = np.asarray(out.joint_velocities, dtype=float)
         assert np.linalg.norm(dq) > 1e-6
     finally:

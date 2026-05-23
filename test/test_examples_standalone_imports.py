@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import importlib
+import re
 import runpy
 import shutil
 import sys
@@ -39,7 +40,7 @@ def test_bimanual_example_imports_from_copied_examples_layout(monkeypatch, tmp_p
     monkeypatch.syspath_prepend(str(copied_examples_dir))
 
     module_globals = runpy.run_path(
-        str(copied_examples_dir / "12_bimanual_whole_body_ik.py"),
+        str(copied_examples_dir / "06_bimanual_whole_body_ik.py"),
         run_name="embodik_bimanual_import_check",
     )
 
@@ -49,13 +50,38 @@ def test_bimanual_example_imports_from_copied_examples_layout(monkeypatch, tmp_p
     ).is_relative_to(copied_examples_dir)
     assert Path(module_globals["common_app"].__file__).is_relative_to(copied_examples_dir)
 
+
+def test_public_viser_examples_use_shared_default_port() -> None:
+    examples_dir = Path(__file__).resolve().parents[1] / "examples"
+    hardcoded_port_patterns = (
+        re.compile(r"--port[\s\S]{0,100}default\s*=\s*80[0-9]{2}"),
+        re.compile(r"port\s*=\s*80[0-9]{2}"),
+        re.compile(r"localhost:80[0-9]{2}"),
+    )
+    allowed_files = {
+        examples_dir / "example_helpers" / "ik_common.py",
+    }
+
+    offenders: list[str] = []
+    for path in sorted(examples_dir.rglob("*.py")):
+        if path in allowed_files or "assets" in path.parts:
+            continue
+        source = path.read_text(encoding="utf-8")
+        for pattern in hardcoded_port_patterns:
+            for match in pattern.finditer(source):
+                line_no = source[: match.start()].count("\n") + 1
+                offenders.append(f"{path.relative_to(examples_dir)}:{line_no}: {match.group(0)!r}")
+
+    assert offenders == []
+
+
 def test_unitree_g1_example_imports_from_copied_examples_layout(monkeypatch, tmp_path) -> None:
     copied_examples_dir = _copy_examples_dir(tmp_path)
     _clear_example_helper_imports()
     monkeypatch.syspath_prepend(str(copied_examples_dir))
 
     module_globals = runpy.run_path(
-        str(copied_examples_dir / "13_unitree_g1_retargeting_ik.py"),
+        str(copied_examples_dir / "07_unitree_g1_retargeting_ik.py"),
         run_name="embodik_g1_import_check",
     )
 
@@ -113,3 +139,24 @@ def test_ai_worker_visual_entrypoint_can_require_public_visual_urdf(monkeypatch,
     assert collision_urdf_path.is_relative_to(
         copied_examples_dir / "assets" / "ai_worker" / "generated" / "sg2"
     )
+
+
+def test_examples_copy_hides_internal_harnesses(monkeypatch, tmp_path) -> None:
+    copied_examples_dir = _copy_examples_dir(tmp_path)
+    from embodik import cli
+
+    dest = tmp_path / "public_examples"
+    monkeypatch.setattr(cli, "_find_examples_dir", lambda: copied_examples_dir)
+
+    assert cli.examples_cmd(["--copy", str(dest)]) == 0
+    assert (dest / "01_basic_ik_simple.py").is_file()
+    assert not (dest / "harnesses").exists()
+
+
+def test_package_configs_hide_internal_harnesses_from_public_examples() -> None:
+    root = Path(__file__).resolve().parents[1]
+    cmake = (root / "CMakeLists.txt").read_text(encoding="utf-8")
+    pyproject = (root / "pyproject.toml").read_text(encoding="utf-8")
+
+    assert 'PATTERN "harnesses" EXCLUDE' in cmake
+    assert '"examples/harnesses/**"' in pyproject

@@ -79,7 +79,6 @@ def _make_solver_with_hand_task(urdf_path: str):
     robot = eik.RobotModel(urdf_path, floating_base=True)
     solver = eik.KinematicsSolver(robot)
     solver.dt = 0.01
-    solver.set_damping(0.1)
     solver.enable_position_limits(True)
     solver.enable_velocity_limits(True)
     task = solver.add_frame_task("hand_pose", "hand_link", eik.TaskType.FRAME_POSE)
@@ -221,8 +220,12 @@ def _run_position_loop(mode: str, steps: int = 50):
 
             left_now = robot.get_frame_pose("left_contact")
             right_now = robot.get_frame_pose("right_contact")
-            max_left = max(max_left, float(np.max(np.abs(_foot_pose_error6(left_anchor, left_now)))))
-            max_right = max(max_right, float(np.max(np.abs(_foot_pose_error6(right_anchor, right_now)))))
+            max_left = max(
+                max_left, float(np.max(np.abs(_foot_pose_error6(left_anchor, left_now))))
+            )
+            max_right = max(
+                max_right, float(np.max(np.abs(_foot_pose_error6(right_anchor, right_now))))
+            )
         return max(max_left, max_right), status_ok
     finally:
         os.remove(urdf)

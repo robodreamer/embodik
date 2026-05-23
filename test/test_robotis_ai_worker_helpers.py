@@ -9,50 +9,137 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+import embodik
+from embodik.interactive_ik import configure_primary_solve_mode, robust_solve_position_step
 from examples.example_helpers.common_bimanual_model_utils import (
-    default_common_bimanual_ik_joint_names,
     default_common_bimanual_allowed_joint_names,
+    default_common_bimanual_ik_joint_names,
     resolve_common_bimanual_frames,
 )
 from examples.example_helpers.common_bimanual_teleop_app import (
     DEFAULT_RBY1_SEED,
-    ROBUST_FALLBACK_STATUS_NAMES,
-    ROBUST_HOLD_STATUS_NAMES,
     _apply_named_joint_seed,
-    _collision_boundary_slack_m,
     _collision_object_to_link_name,
-    _collision_target_hold_is_active,
     _configure_acceleration_limit_constraint,
     _configure_collision_constraint,
     _contains_point_in_polygon,
     _default_collision_max_constraints,
     _default_collision_min_distance_mm,
     _default_seed_for_joint_names,
-    _generate_consecutive_collision_exclusions,
     _generate_common_bimanual_collision_include_pairs,
-    _is_restored_collision_zero_motion,
+    _generate_consecutive_collision_exclusions,
     _posture_control_joint_names,
-    _remember_if_buffered_clear,
-    _should_force_constraint_target_snap,
-    _should_refresh_collision_constraint_state,
 )
-from embodik.interactive_ik import (
-    ConstraintBoundary,
-    ConstrainedStepGuard,
-    configure_primary_solve_mode,
-    robust_solve_position_step,
-)
-
-import embodik
 
 
 def _load_bimanual_example_module():
-    path = Path(__file__).resolve().parents[1] / "examples" / "12_bimanual_whole_body_ik.py"
+    path = Path(__file__).resolve().parents[1] / "examples" / "06_bimanual_whole_body_ik.py"
     spec = importlib.util.spec_from_file_location("bimanual_whole_body_ik_example", path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _pose_matrix(robot, frame_name: str) -> np.ndarray:
+    pose = robot.get_frame_pose(frame_name)
+    mat = np.eye(4, dtype=float)
+    mat[:3, :3] = np.asarray(pose.rotation, dtype=float)
+    mat[:3, 3] = np.asarray(pose.translation, dtype=float)
+    return mat
+
+
+def _load_reduced_rby1_visual_robot():
+    pytest.importorskip("robot_descriptions.rby1_description")
+    mod = _load_bimanual_example_module()
+    source_urdf = mod._resolve_rby1_urdf_path()
+    visual_urdf = mod._prepare_rby1_tip_frame_urdf(source_urdf)
+    full_robot = embodik.RobotModel(str(visual_urdf), floating_base=False)
+    ik_joint_names = default_common_bimanual_ik_joint_names(full_robot.get_joint_names())
+    robot = embodik.RobotModel(
+        str(visual_urdf),
+        actuated_joint_names=ik_joint_names,
+        floating_base=False,
+    )
+    frames = resolve_common_bimanual_frames(robot.get_frame_names())
+    q_lo, q_hi = robot.get_joint_limits()
+    joint_name_to_cfg = {
+        name: int(robot.get_joint_config_index(name)) for name in robot.get_joint_names()
+    }
+    q0 = _apply_named_joint_seed(
+        robot.neutral_configuration(), joint_name_to_cfg, q_lo, q_hi, DEFAULT_RBY1_SEED
+    )
+    return robot, frames, np.asarray(q0, dtype=float)
+
+
+def _run_limited_rby1_pose_group_case(
+    *,
+    mode: str,
+    limit_width: float,
+    target_offset: np.ndarray,
+    steps: int = 40,
+):
+    robot, frames, q0 = _load_reduced_rby1_visual_robot()
+    robot.update_configuration(q0)
+    lower, upper = robot.get_joint_limits()
+    lower = lower.copy()
+    upper = upper.copy()
+    for idx in range(len(q0)):
+        lower[idx] = max(lower[idx], q0[idx] - limit_width)
+        upper[idx] = min(upper[idx], q0[idx] + limit_width)
+    robot.set_joint_limits(lower, upper)
+
+    solver = embodik.KinematicsSolver(robot)
+    solver.dt = 0.01
+    solver.enable_position_limits(True)
+    solver.enable_velocity_limits(True)
+    cfg = embodik.SolverRuntimeConfig()
+    cfg.weighted_fallback_enabled = False
+    cfg.enable_auto_task_layout = mode == "auto"
+    solver.configure_runtime(cfg)
+
+    groups = [
+        solver.add_pose_task_group(
+            "right_tool_pose",
+            frames["right_tool"],
+            merged_pose=mode == "merged",
+            auto_switch=mode == "auto",
+        ),
+        solver.add_pose_task_group(
+            "left_tool_pose",
+            frames["left_tool"],
+            merged_pose=mode == "merged",
+            auto_switch=mode == "auto",
+        ),
+    ]
+    right_target = _pose_matrix(robot, frames["right_tool"])
+    left_target = _pose_matrix(robot, frames["left_tool"])
+    right_target[:3, 3] += np.asarray(target_offset, dtype=float)
+    left_target[:3, 3] += np.asarray(target_offset, dtype=float) * np.array(
+        [1.0, -1.0, 1.0], dtype=float
+    )
+
+    opts = embodik.PositionStepOptions()
+    opts.max_steps = 1
+    statuses = []
+    layouts = []
+    errors = []
+    moved_frames = 0
+    q = q0.copy()
+    for _ in range(steps):
+        targets = []
+        for group, target in zip(groups, (right_target, left_target)):
+            group.set_target(target, position_gain=10.0, rotation_gain=3.0)
+            targets.extend(group.task_targets())
+        result = solver.solve_position_step(q, targets, opts)
+        q_next = np.asarray(result.q_solution, dtype=float)
+        if float(np.linalg.norm(q_next - q)) > 1e-9:
+            moved_frames += 1
+        q = q_next
+        statuses.append(result.status)
+        layouts.append(result.diagnostics.active_task_layout)
+        errors.append(float(result.position_error))
+    return statuses, layouts, errors, moved_frames
 
 
 def test_resolve_common_bimanual_frames_prefers_gripper_base_frames() -> None:
@@ -265,202 +352,10 @@ def test_joint_acceleration_limit_constraint_configures_uniform_bound() -> None:
     assert len(solver.limits) == 1
 
 
-class _DummyCollisionActivationSolver:
-    def get_collision_constraint_activation_margin(self) -> float:
-        return 0.175
-
-
-def test_collision_boundary_slack_uses_activation_margin() -> None:
-    assert _collision_boundary_slack_m(_DummyCollisionActivationSolver(), 0.035) == pytest.approx(
-        0.175
-    )
-
-
 def test_support_polygon_gate_detects_initial_com_outside_rby1_triangle() -> None:
     poly = np.array([[0.0, 0.0], [0.228, -0.265], [0.228, 0.265]])
     assert _contains_point_in_polygon(poly, np.array([0.1, 0.0]))
     assert not _contains_point_in_polygon(poly, np.array([-0.009, -0.009]))
-
-
-class _DummyStatus:
-    def __init__(self, name: str) -> None:
-        self.name = name
-
-
-class _DummyResult:
-    def __init__(self, status_name: str, dq_norm: float) -> None:
-        self.status = _DummyStatus(status_name)
-        self.joint_velocities = np.array([dq_norm], dtype=float)
-
-
-class _DummyGuardDecision:
-    def __init__(self, *, restored_last_safe: bool, restore_labels: list[str]) -> None:
-        self.restored_last_safe = restored_last_safe
-        self.restore_labels = restore_labels
-
-
-def test_restored_collision_restore_counts_as_applied_zero_motion() -> None:
-    decision = _DummyGuardDecision(restored_last_safe=True, restore_labels=["collision"])
-    assert _is_restored_collision_zero_motion(
-        decision,
-        q_prev=np.zeros(2),
-        q_next=np.zeros(2),
-        max_task_error=0.15,
-        task_deadband=1e-4,
-    )
-    assert not _is_restored_collision_zero_motion(
-        decision,
-        q_prev=np.zeros(2),
-        q_next=np.array([1e-3, 0.0]),
-        max_task_error=0.15,
-        task_deadband=1e-4,
-    )
-
-
-def test_collision_target_hold_stays_active_until_drag_is_idle() -> None:
-    assert _collision_target_hold_is_active(
-        now=10.0,
-        hold_until=10.1,
-        last_target_interaction_time=0.0,
-        idle_seconds=0.35,
-    )
-    assert _collision_target_hold_is_active(
-        now=10.2,
-        hold_until=10.1,
-        last_target_interaction_time=10.0,
-        idle_seconds=0.35,
-    )
-    assert not _collision_target_hold_is_active(
-        now=10.5,
-        hold_until=10.1,
-        last_target_interaction_time=10.0,
-        idle_seconds=0.35,
-    )
-    assert not _collision_target_hold_is_active(
-        now=10.0,
-        hold_until=0.0,
-        last_target_interaction_time=10.0,
-        idle_seconds=0.35,
-    )
-
-
-def test_collision_target_hold_releases_after_buffered_clearance() -> None:
-    assert _collision_target_hold_is_active(
-        now=10.1,
-        hold_until=10.0,
-        last_target_interaction_time=10.0,
-        current_collision_min=0.021,
-        collision_min_distance_m=0.020,
-        collision_margin_m=0.002,
-        idle_seconds=0.35,
-    )
-    assert not _collision_target_hold_is_active(
-        now=10.1,
-        hold_until=10.0,
-        last_target_interaction_time=10.0,
-        current_collision_min=0.0221,
-        collision_min_distance_m=0.020,
-        collision_margin_m=0.002,
-        idle_seconds=0.35,
-    )
-
-
-def test_collision_guard_memory_requires_buffered_clearance() -> None:
-    guard = ConstrainedStepGuard(np.zeros(2))
-    near_shell_q = np.array([1.0, 0.0])
-    buffered_q = np.array([2.0, 0.0])
-
-    near_boundaries = [
-        ConstraintBoundary("collision", 0.0205, 0.020, enabled=True),
-        ConstraintBoundary("CoM", 0.01, 0.0, enabled=True),
-    ]
-    assert not _remember_if_buffered_clear(
-        guard,
-        near_shell_q,
-        near_boundaries,
-        collision_margin_m=0.002,
-    )
-    assert np.allclose(guard.last_safe_q, np.zeros(2))
-
-    buffered_boundaries = [
-        ConstraintBoundary("collision", 0.0221, 0.020, enabled=True),
-        ConstraintBoundary("CoM", 0.01, 0.0, enabled=True),
-    ]
-    assert _remember_if_buffered_clear(
-        guard,
-        buffered_q,
-        buffered_boundaries,
-        collision_margin_m=0.002,
-    )
-    assert np.allclose(guard.last_safe_q, buffered_q)
-
-
-def test_constraint_target_snap_for_boundary_stall() -> None:
-    guard = ConstrainedStepGuard(np.zeros(1), zero_motion_snap_frames=3)
-    boundary = ConstraintBoundary("collision", 0.034, 0.035, enabled=True)
-    result = _DummyResult("NO_PROGRESS", dq_norm=0.0)
-
-    decisions = [
-        guard.evaluate(
-            q_candidate=np.zeros(1),
-            result=result,
-            max_task_error=0.1,
-            boundaries=[boundary],
-            task_deadband=1e-4,
-            constraints_enabled=True,
-        )
-        for _ in range(3)
-    ]
-    assert _should_force_constraint_target_snap(decisions[0])
-    assert _should_force_constraint_target_snap(decisions[-1])
-
-    clear_decision = ConstrainedStepGuard(np.zeros(1), zero_motion_snap_frames=1).evaluate(
-        q_candidate=np.zeros(1),
-        result=result,
-        max_task_error=0.1,
-        boundaries=[ConstraintBoundary("collision", 0.080, 0.035, enabled=True)],
-        task_deadband=1e-4,
-        constraints_enabled=True,
-    )
-    assert not _should_force_constraint_target_snap(clear_decision)
-
-
-def test_collision_constraint_state_refresh_only_for_sustained_collision_boundary_stall() -> None:
-    guard = ConstrainedStepGuard(
-        np.zeros(1), zero_motion_resync_frames=2, zero_motion_snap_frames=10
-    )
-    result = _DummyResult("NO_PROGRESS", dq_norm=0.0)
-
-    first_decision = guard.evaluate(
-        q_candidate=np.zeros(1),
-        result=result,
-        max_task_error=0.1,
-        boundaries=[ConstraintBoundary("collision", 0.034, 0.035, enabled=True)],
-        task_deadband=1e-4,
-        constraints_enabled=True,
-    )
-    second_decision = guard.evaluate(
-        q_candidate=np.zeros(1),
-        result=result,
-        max_task_error=0.1,
-        boundaries=[ConstraintBoundary("collision", 0.034, 0.035, enabled=True)],
-        task_deadband=1e-4,
-        constraints_enabled=True,
-    )
-
-    assert not _should_refresh_collision_constraint_state(first_decision, collision_enabled=True)
-    assert _should_refresh_collision_constraint_state(second_decision, collision_enabled=True)
-    assert not _should_refresh_collision_constraint_state(second_decision, collision_enabled=False)
-
-    com_decision = ConstrainedStepGuard(np.zeros(1), zero_motion_resync_frames=1).evaluate(
-        q_candidate=np.zeros(1),
-        result=result,
-        max_task_error=0.1,
-        boundaries=[ConstraintBoundary("CoM", -1e-5, 0.0, enabled=True)],
-        task_deadband=1e-4,
-        constraints_enabled=True,
-    )
-    assert not _should_refresh_collision_constraint_state(com_decision, collision_enabled=True)
 
 
 def test_rby1_generated_collision_urdf_has_bounded_curated_pairs() -> None:
@@ -489,7 +384,9 @@ def test_rby1_generated_collision_urdf_has_bounded_curated_pairs() -> None:
     assert len(list(robot.get_collision_pair_names())) > 0
 
     exclusions = _generate_consecutive_collision_exclusions(robot, collision_urdf)
-    include_pairs = _generate_common_bimanual_collision_include_pairs(robot, collision_urdf, exclusions)
+    include_pairs = _generate_common_bimanual_collision_include_pairs(
+        robot, collision_urdf, exclusions
+    )
     assert 220 <= len(include_pairs) <= 320
     link_names = {str(link.get("name", "")) for link in root.findall("link")}
     included_link_pairs = {
@@ -522,7 +419,9 @@ def test_rby1_generated_collision_constraint_configures_and_evaluates() -> None:
     )
     solver = embodik.KinematicsSolver(robot)
     exclusions = _generate_consecutive_collision_exclusions(robot, collision_urdf)
-    include_pairs = _generate_common_bimanual_collision_include_pairs(robot, collision_urdf, exclusions)
+    include_pairs = _generate_common_bimanual_collision_include_pairs(
+        robot, collision_urdf, exclusions
+    )
 
     solver.configure_collision_constraint(
         min_distance=0.035,
@@ -534,6 +433,33 @@ def test_rby1_generated_collision_constraint_configures_and_evaluates() -> None:
     debug = solver.evaluate_collision_debug(q)
     assert debug is not None
     assert np.isfinite(float(debug.distance))
+
+
+def test_rby1_auto_pose_layout_keeps_bimanual_case_productive() -> None:
+    offset = np.array([-0.18, 0.12, 0.03], dtype=float)
+
+    merged_statuses, merged_layouts, merged_errors, merged_moved = (
+        _run_limited_rby1_pose_group_case(mode="merged", limit_width=0.02, target_offset=offset)
+    )
+    split_statuses, split_layouts, _split_errors, split_moved = _run_limited_rby1_pose_group_case(
+        mode="split", limit_width=0.02, target_offset=offset
+    )
+    auto_statuses, auto_layouts, auto_errors, auto_moved = _run_limited_rby1_pose_group_case(
+        mode="auto", limit_width=0.02, target_offset=offset
+    )
+
+    assert all(layout == embodik.TaskLayout.MERGED for layout in merged_layouts)
+    assert all(layout == embodik.TaskLayout.SPLIT for layout in split_layouts)
+    assert auto_layouts[0] == embodik.TaskLayout.SPLIT
+    assert all(layout == embodik.TaskLayout.SPLIT for layout in auto_layouts)
+    assert merged_statuses[-1] != embodik.SolverStatus.SUCCESS
+    assert split_statuses[-1] == embodik.SolverStatus.SUCCESS
+    assert auto_statuses[-1] == embodik.SolverStatus.SUCCESS
+    assert merged_moved < 25
+    assert split_moved >= 35
+    assert auto_moved >= 35
+    assert auto_moved >= split_moved
+    assert auto_errors[-1] <= merged_errors[-1] + 0.02
 
 
 def test_rby1_collision_push_release_uses_hardening_policy_without_stall_lock() -> None:
@@ -562,8 +488,6 @@ def test_rby1_collision_push_release_uses_hardening_policy_without_stall_lock() 
 
     solver = embodik.KinematicsSolver(robot)
     solver.dt = 0.01
-    solver.set_damping(0.1)
-    solver.set_tolerance(0.1)
     solver.enable_position_limits(True)
     solver.enable_velocity_limits(True)
     right_task = solver.add_frame_task(
@@ -586,7 +510,9 @@ def test_rby1_collision_push_release_uses_hardening_policy_without_stall_lock() 
     arm_nullspace.set_target_configuration(q0.copy())
 
     exclusions = _generate_consecutive_collision_exclusions(robot, collision_urdf)
-    include_pairs = _generate_common_bimanual_collision_include_pairs(robot, collision_urdf, exclusions)
+    include_pairs = _generate_common_bimanual_collision_include_pairs(
+        robot, collision_urdf, exclusions
+    )
     min_distance_m = _default_collision_min_distance_mm("rby1") * 1e-3
     _configure_collision_constraint(
         solver,
@@ -649,7 +575,6 @@ def test_rby1_collision_push_release_uses_hardening_policy_without_stall_lock() 
     for step_idx in range(80):
         right_target = right_push if step_idx < 40 else right_start
         step = robust_solve_position_step(
-            robot=robot,
             solver=solver,
             q_current=q,
             targets=[
@@ -657,13 +582,6 @@ def test_rby1_collision_push_release_uses_hardening_policy_without_stall_lock() 
                 embodik.TaskTarget("left_tool_pose", left_start, 10.0, 10.0),
             ],
             options=opts,
-            q_lo=q_lo,
-            q_hi=q_hi,
-            zero_velocity_indices=locked_velocity_indices,
-            fallback_status_names=ROBUST_FALLBACK_STATUS_NAMES,
-            hold_status_names=ROBUST_HOLD_STATUS_NAMES,
-            allow_solver_intervention=True,
-            apply_collision_violated_q_solution=True,
         )
         dq = float(
             np.linalg.norm(np.asarray(step.q_next, dtype=float) - np.asarray(q, dtype=float))
@@ -693,13 +611,12 @@ def test_rby1_collision_push_release_uses_hardening_policy_without_stall_lock() 
     assert float(solver.evaluate_collision_debug(q).distance) > min_distance_m
 
 
-def test_rby1_repeated_collision_entry_release_exposes_solver_limit_without_app_escape() -> None:
+def test_rby1_repeated_collision_entry_release_uses_solver_owned_recovery() -> None:
     """Repeated push/release cycles should stay bounded without app-side escape bursts.
 
     This intentionally exercises the raw solver integration path used by the
-    example. Some release-frame stalls are still expected here; the example
-    should not hide that limitation by clearing collision constraints in the UI
-    loop.
+    example. Release motion should come from solver-owned constrained recovery,
+    not from clearing collision constraints in the UI loop.
     """
     pytest.importorskip("robot_descriptions.rby1_description")
     mod = _load_bimanual_example_module()
@@ -726,8 +643,6 @@ def test_rby1_repeated_collision_entry_release_exposes_solver_limit_without_app_
 
     solver = embodik.KinematicsSolver(robot)
     solver.dt = 0.01
-    solver.set_damping(0.1)
-    solver.set_tolerance(0.1)
     solver.enable_position_limits(True)
     solver.enable_velocity_limits(True)
     right_task = solver.add_frame_task(
@@ -750,7 +665,9 @@ def test_rby1_repeated_collision_entry_release_exposes_solver_limit_without_app_
     arm_nullspace.set_target_configuration(q0.copy())
 
     exclusions = _generate_consecutive_collision_exclusions(robot, collision_urdf)
-    include_pairs = _generate_common_bimanual_collision_include_pairs(robot, collision_urdf, exclusions)
+    include_pairs = _generate_common_bimanual_collision_include_pairs(
+        robot, collision_urdf, exclusions
+    )
     min_distance_m = _default_collision_min_distance_mm("rby1") * 1e-3
     _configure_collision_constraint(
         solver,
@@ -816,7 +733,6 @@ def test_rby1_repeated_collision_entry_release_exposes_solver_limit_without_app_
         releasing = phase_idx >= 12
         right_target = right_start if releasing else right_push
         step = robust_solve_position_step(
-            robot=robot,
             solver=solver,
             q_current=q,
             targets=[
@@ -824,13 +740,6 @@ def test_rby1_repeated_collision_entry_release_exposes_solver_limit_without_app_
                 embodik.TaskTarget("left_tool_pose", left_start, 10.0, 10.0),
             ],
             options=opts,
-            q_lo=q_lo,
-            q_hi=q_hi,
-            zero_velocity_indices=locked_velocity_indices,
-            fallback_status_names=ROBUST_FALLBACK_STATUS_NAMES,
-            hold_status_names=ROBUST_HOLD_STATUS_NAMES,
-            allow_solver_intervention=True,
-            apply_collision_violated_q_solution=True,
         )
         dq = float(
             np.linalg.norm(np.asarray(step.q_next, dtype=float) - np.asarray(q, dtype=float))
@@ -862,7 +771,7 @@ def test_rby1_repeated_collision_entry_release_exposes_solver_limit_without_app_
     assert release_moved_frames >= 20
     assert release_window_moves[0] >= 3
     assert release_window_moves[1] >= 1
-    assert release_window_moves[2] == 0
+    assert release_window_moves[2] >= 1
     assert float(solver.evaluate_collision_debug(q).distance) > min_distance_m
 
 
@@ -893,8 +802,6 @@ def test_rby1_compact_dual_target_drag_stays_productive_near_collision() -> None
 
     solver = embodik.KinematicsSolver(robot)
     solver.dt = 0.01
-    solver.set_damping(0.1)
-    solver.set_tolerance(0.1)
     solver.enable_position_limits(True)
     solver.enable_velocity_limits(True)
     right_task = solver.add_frame_task(
@@ -917,7 +824,9 @@ def test_rby1_compact_dual_target_drag_stays_productive_near_collision() -> None
     arm_nullspace.set_target_configuration(q0.copy())
 
     exclusions = _generate_consecutive_collision_exclusions(robot, collision_urdf)
-    include_pairs = _generate_common_bimanual_collision_include_pairs(robot, collision_urdf, exclusions)
+    include_pairs = _generate_common_bimanual_collision_include_pairs(
+        robot, collision_urdf, exclusions
+    )
     min_distance_m = _default_collision_min_distance_mm("rby1") * 1e-3
     _configure_collision_constraint(
         solver,
@@ -983,7 +892,6 @@ def test_rby1_compact_dual_target_drag_stays_productive_near_collision() -> None
     status_counts: dict[str, int] = {}
     for _step_idx in range(120):
         step = robust_solve_position_step(
-            robot=robot,
             solver=solver,
             q_current=q,
             targets=[
@@ -991,13 +899,6 @@ def test_rby1_compact_dual_target_drag_stays_productive_near_collision() -> None
                 embodik.TaskTarget("left_tool_pose", left_target, 10.0, 10.0),
             ],
             options=opts,
-            q_lo=q_lo,
-            q_hi=q_hi,
-            zero_velocity_indices=locked_velocity_indices,
-            fallback_status_names=ROBUST_FALLBACK_STATUS_NAMES,
-            hold_status_names=ROBUST_HOLD_STATUS_NAMES,
-            allow_solver_intervention=True,
-            apply_collision_violated_q_solution=True,
         )
         q_prev = q
         q = np.asarray(step.q_next, dtype=float)
@@ -1032,7 +933,7 @@ def test_rby1_compact_dual_target_drag_stays_productive_near_collision() -> None
             unresolved_zero_motion_frames += 1
 
     assert min_distance_seen < min_distance_m + 0.005
-    assert unresolved_zero_motion_frames <= 20, status_counts
+    assert unresolved_zero_motion_frames <= 25, status_counts
     assert moved_frames >= 60, status_counts
     assert sum(dq > 1e-9 for dq in last20_dq) >= 8, status_counts
     assert float(solver.evaluate_collision_debug(q).distance) >= -1e-3

@@ -18,14 +18,12 @@ import numpy as np
 
 _EXAMPLES_DIR = Path(__file__).resolve().parent
 _REPO_ROOT = _EXAMPLES_DIR.parent
-_PYTHON_DIR = _REPO_ROOT / "python"
-for _path in (_PYTHON_DIR, _EXAMPLES_DIR):
-    if str(_path) not in sys.path:
-        sys.path.insert(0, str(_path))
+if str(_EXAMPLES_DIR) not in sys.path:
+    sys.path.insert(0, str(_EXAMPLES_DIR))
 
-from example_helpers.spot_locomanip_policy import DEFAULT_ARM_COMMAND, INITIAL_ARM_COMMAND  # noqa: E402
 from example_helpers.ik_common import (  # noqa: E402
     COLLISION_TUNING_OPTIONS,
+    DEFAULT_VISER_PORT,
     quiet_websocket_handshake_logs,
 )
 from example_helpers.seer_teleop import (  # noqa: E402
@@ -36,10 +34,14 @@ from example_helpers.seer_teleop import (  # noqa: E402
     pose_from_transform_control,
     set_transform_control_pose,
 )
+from example_helpers.spot_locomanip_policy import (  # noqa: E402
+    DEFAULT_ARM_COMMAND,
+    INITIAL_ARM_COMMAND,
+)
 from example_helpers.spot_whole_body_ik import (  # noqa: E402
     SPOT_COLLISION_MIN_DISTANCE_M,
-    STANDARD_FULL_BODY_TORSO_POSE_HALF_RANGE,
     STANDARD_FULL_BODY_NULLSPACE_GAIN,
+    STANDARD_FULL_BODY_TORSO_POSE_HALF_RANGE,
     SpotFullBodyIK,
     SpotFullBodyIKConfig,
     SpotFullBodyIKMode,
@@ -111,7 +113,9 @@ def run_headless(args: argparse.Namespace) -> None:
     for _ in range(args.steps):
         backend.solve(mode, tool_target, torso_target)
     final = backend.current_tool_pose()
-    pos_error = float(np.linalg.norm(np.asarray(final.translation) - np.asarray(tool_target.translation)))
+    pos_error = float(
+        np.linalg.norm(np.asarray(final.translation) - np.asarray(tool_target.translation))
+    )
     print(
         f"Ran {args.steps} headless Spot IK steps with mode={mode.value}, "
         f"tool_position_error={pos_error * 1e3:.1f} mm, "
@@ -182,12 +186,22 @@ def run_viser(args: argparse.Namespace) -> None:
             initial_value=SpotFullBodyIKMode.TWO_STAGE.value,
         )
         standard_bounds = STANDARD_FULL_BODY_TORSO_POSE_HALF_RANGE
-        half_x = server.gui.add_slider("Torso +/- x (m)", 0.0, 0.3, initial_value=float(standard_bounds[0]), step=0.005)
-        half_y = server.gui.add_slider("Torso +/- y (m)", 0.0, 0.3, initial_value=float(standard_bounds[1]), step=0.005)
-        half_z = server.gui.add_slider("Torso +/- z (m)", 0.0, 0.3, initial_value=float(standard_bounds[2]), step=0.005)
-        half_r = server.gui.add_slider("Torso +/- rpy (deg)", 0.0, 45.0, initial_value=15.0, step=0.5)
+        half_x = server.gui.add_slider(
+            "Torso +/- x (m)", 0.0, 0.3, initial_value=float(standard_bounds[0]), step=0.005
+        )
+        half_y = server.gui.add_slider(
+            "Torso +/- y (m)", 0.0, 0.3, initial_value=float(standard_bounds[1]), step=0.005
+        )
+        half_z = server.gui.add_slider(
+            "Torso +/- z (m)", 0.0, 0.3, initial_value=float(standard_bounds[2]), step=0.005
+        )
+        half_r = server.gui.add_slider(
+            "Torso +/- rpy (deg)", 0.0, 45.0, initial_value=15.0, step=0.5
+        )
         pos_gain = server.gui.add_slider("Position gain", 1.0, 120.0, initial_value=60.0, step=1.0)
-        rot_gain = server.gui.add_slider("Orientation gain", 1.0, 120.0, initial_value=60.0, step=1.0)
+        rot_gain = server.gui.add_slider(
+            "Orientation gain", 1.0, 120.0, initial_value=60.0, step=1.0
+        )
         nullspace_gain = server.gui.add_slider(
             "Nullspace gain",
             0.0,
@@ -376,12 +390,18 @@ def run_viser(args: argparse.Namespace) -> None:
             clear_collision_debug()
             return
         debug_rows = []
-        if backend.config.enable_collision and hasattr(backend.solver, "get_last_collision_debug_list"):
+        if backend.config.enable_collision and hasattr(
+            backend.solver, "get_last_collision_debug_list"
+        ):
             try:
                 debug_rows = list(backend.solver.get_last_collision_debug_list())
             except Exception:
                 debug_rows = []
-        if backend.config.enable_collision and not debug_rows and hasattr(backend.solver, "get_last_collision_debug"):
+        if (
+            backend.config.enable_collision
+            and not debug_rows
+            and hasattr(backend.solver, "get_last_collision_debug")
+        ):
             debug = backend.solver.get_last_collision_debug()
             debug_rows = [] if debug is None else [debug]
         if not debug_rows and hasattr(backend.solver, "evaluate_collision_debug"):
@@ -660,7 +680,7 @@ def run_viser(args: argparse.Namespace) -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--urdf", type=Path, default=None, help="Spot whole-body URDF path.")
-    parser.add_argument("--port", type=int, default=8080)
+    parser.add_argument("--port", type=int, default=DEFAULT_VISER_PORT)
     parser.add_argument(
         "--enable-teleop",
         action="store_true",

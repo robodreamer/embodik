@@ -156,7 +156,6 @@ def run_mode(
     torso_ref_h = np.asarray(torso_ref_pose.homogeneous(), dtype=float)
     base_target_h = np.asarray(robot.get_frame_pose(ee_frame).homogeneous(), dtype=float, order="F")
 
-    q_lower, q_upper = robot.get_joint_limits()
     nullspace_active = list(range(6, robot.nv)) if robot.nv > 6 else list(range(robot.nv))
     last_feasible_q = q.copy()
     prev_position_error = float("inf")
@@ -250,7 +249,6 @@ def run_mode(
             n = float(np.linalg.norm(quat))
             if n > 1e-12:
                 q_next[3:7] = quat / n
-            q_next[7:] = np.clip(q_next[7:], q_lower[7:], q_upper[7:])
             q[:] = q_next
             last_feasible_q[:] = q
             prev_position_error = float(out.position_error)
@@ -262,7 +260,6 @@ def run_mode(
                 n = float(np.linalg.norm(quat))
                 if n > 1e-12:
                     q_next[3:7] = quat / n
-                q_next[7:] = np.clip(q_next[7:], q_lower[7:], q_upper[7:])
                 q[:] = q_next
                 last_feasible_q[:] = q
                 prev_position_error = float(out.position_error)
@@ -276,7 +273,6 @@ def run_mode(
                     n = float(np.linalg.norm(quat))
                     if n > 1e-12:
                         q_next[3:7] = quat / n
-                    q_next[7:] = np.clip(q_next[7:], q_lower[7:], q_upper[7:])
                     q[:] = q_next
                     last_feasible_q[:] = q
                     prev_position_error = float(out.position_error)
@@ -435,4 +431,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

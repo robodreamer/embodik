@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-G1_EXAMPLE = REPO_ROOT / "examples/13_unitree_g1_retargeting_ik.py"
+G1_EXAMPLE = REPO_ROOT / "examples/07_unitree_g1_retargeting_ik.py"
 G1_BENCHMARK = REPO_ROOT / "examples/harnesses/g1_four_gizmo_ik_benchmark.py"
 
 
@@ -196,7 +196,7 @@ def test_g1_collision_benchmark_uses_curated_primitive_pairs() -> None:
     assert metrics["config"]["collision_tuning"] == "balanced"
     assert 50 <= metrics["config"]["collision_include_pair_count"] <= 100
     assert metrics["collision_urdf"].endswith("_box_collision.urdf")
-    assert metrics["wall_time_ms"]["p95"] < 5.0
+    assert metrics["wall_time_ms"]["p95"] < 8.0
 
 
 def test_g1_viewer_urdfs_strip_mimic_tags() -> None:

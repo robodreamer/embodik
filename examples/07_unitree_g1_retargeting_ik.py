@@ -17,12 +17,6 @@ from pathlib import Path
 
 import embodik
 import numpy as np
-from embodik.interactive_ik import (
-    ConstrainedStepGuard,
-    ConstraintBoundary,
-    clear_all_target_velocities_if_available,
-    joint_velocity_norm,
-)
 from embodik.utils import r2q
 
 EXAMPLES_ROOT = Path(__file__).resolve().parent
@@ -33,13 +27,11 @@ try:
     from example_helpers.g1_ik_runtime import (
         _apply_g1_soft_knee_seed,
         _apply_zero_based_task_hierarchy,
-        _attempt_g1_penetration_escape_burst,
         _clear_interactive_solver_transients,
         _clip_q,
         _configure_g1_collision_constraint,
         _configure_g1_posture_task,
         _configure_interactive_elastic_band,
-        _current_collision_min_distance,
         _enum_names,
         _frame_delta6,
         _g1_interactive_hold_error_threshold,
@@ -47,7 +39,6 @@ try:
         _max_frame_target_position_error,
         _pose_from_ctrl,
         _pose_signature,
-        _post_step_collision_distance,
         _set_ctrl_from_pose,
         _sleep_for_loop_rate,
         _solve_quality_step,
@@ -74,19 +65,18 @@ try:
         sample_retargeting_clip,
         shrink_polygon_xy,
     )
+    from example_helpers.ik_common import DEFAULT_VISER_PORT, configure_solver_runtime_policy
 except ModuleNotFoundError as exc:
     if exc.name != "example_helpers" and not str(exc.name).startswith("example_helpers."):
         raise
     from examples.example_helpers.g1_ik_runtime import (
         _apply_g1_soft_knee_seed,
         _apply_zero_based_task_hierarchy,
-        _attempt_g1_penetration_escape_burst,
         _clear_interactive_solver_transients,
         _clip_q,
         _configure_g1_collision_constraint,
         _configure_g1_posture_task,
         _configure_interactive_elastic_band,
-        _current_collision_min_distance,
         _enum_names,
         _frame_delta6,
         _g1_interactive_hold_error_threshold,
@@ -94,7 +84,6 @@ except ModuleNotFoundError as exc:
         _max_frame_target_position_error,
         _pose_from_ctrl,
         _pose_signature,
-        _post_step_collision_distance,
         _set_ctrl_from_pose,
         _sleep_for_loop_rate,
         _solve_quality_step,
@@ -121,11 +110,15 @@ except ModuleNotFoundError as exc:
         sample_retargeting_clip,
         shrink_polygon_xy,
     )
+    from examples.example_helpers.ik_common import (
+        DEFAULT_VISER_PORT,
+        configure_solver_runtime_policy,
+    )
 
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--port", type=int, default=8087)
+    p.add_argument("--port", type=int, default=DEFAULT_VISER_PORT)
     p.add_argument("--headless-smoke-steps", type=int, default=0)
     p.add_argument("--headless-ik-smoke-steps", type=int, default=0)
     p.add_argument("--headless-gizmo-stress-steps", type=int, default=0)
@@ -257,8 +250,7 @@ def main() -> None:
 
     solver = embodik.KinematicsSolver(robot)
     solver.dt = 0.01
-    solver.set_damping(0.1)
-    solver.set_tolerance(0.1)
+    configure_solver_runtime_policy(solver)
     solver.enable_position_limits(True)
     solver.enable_velocity_limits(True)
     collision_available = (
@@ -544,11 +536,6 @@ def main() -> None:
     ]
     collision_debug_lines = [None for _ in collision_debug_colors]
     opts = embodik.PositionStepOptions()
-    constraint_guard = ConstrainedStepGuard(
-        q,
-        zero_motion_resync_frames=4,
-        zero_motion_snap_frames=12,
-    )
     no_progress_streak = 0
     collision_include_pair_cache: dict[str, list[tuple[str, str]]] = {}
     collision_total_pairs: int | None = None
@@ -785,15 +772,6 @@ def main() -> None:
             com_prox_display.value = round(float(solver.get_com_proximity_threshold()), 4)
         last_com_cfg = next_cfg
 
-    def _current_com_min_slack(support_polygon: np.ndarray) -> float | None:
-        if not bool(enable_com.value):
-            return None
-        return com_min_slack(
-            support_polygon,
-            np.asarray(robot.get_com_position(), dtype=float)[:2],
-            margin_fraction=_margin_frac(),
-        )
-
     def _update_com_visualization(support_polygon: np.ndarray) -> None:
         inner_polygon = shrink_polygon_xy(support_polygon, _margin_frac())
         outer_seg = polygon_segments_xy(support_polygon, z=0.002)
@@ -859,7 +837,6 @@ def main() -> None:
         retarget_enable.value = False
         retarget_time.value = 0.0
         collision_pairs_stats.value = "disabled"
-        constraint_guard.reset(q)
         _clear_collision_debug()
         _clear_interactive_solver_transients(solver)
         _recapture_upright_targets()
@@ -1060,7 +1037,6 @@ def main() -> None:
                     tuning_mode=str(collision_tuning.value),
                     include_pairs=[],
                 )
-                constraint_guard.reset(q)
                 collision_pairs_stats.value = "disabled"
                 collision_debug_text.value = "collision disabled"
             last_collision_cfg = cfg_tuple
@@ -1202,8 +1178,6 @@ def main() -> None:
                 solver,
                 robot,
                 q,
-                q_lo,
-                q_hi,
                 targets,
                 opts,
                 tracked_tasks,
@@ -1233,133 +1207,13 @@ def main() -> None:
         status_override: str | None = None
         q_step_component = 0.0
         if accepted_step:
-            q_candidate = _clip_q(robot, np.asarray(result.q_solution, dtype=float), q_lo, q_hi)
+            q_candidate = np.asarray(result.q_solution, dtype=float).copy()
             q_limited, q_step_component = _limit_tangent_step(robot, q_prev, q_candidate, 0.8)
-            q = _clip_q(robot, q_limited, q_lo, q_hi)
+            q = q_limited
         else:
             q = q_prev
-        if (
-            accepted_step
-            and enable_collision.value
-            and (
-                hasattr(solver, "evaluate_post_step_collision_distance")
-                or hasattr(solver, "evaluate_min_collision_distance")
-            )
-        ):
-            post_distance = _post_step_collision_distance(solver, q)
-            if post_distance < float(collision_min_dist_mm.value) * 1e-3 - 1e-4:
-                q = q_prev
-                no_progress_streak = max(no_progress_streak, 1)
-                status_override = f"HELD_LAST_SAFE_COLLISION d={post_distance:.4f} m"
         robot.update_configuration(q)
         current_target_error = _max_frame_target_position_error(robot, frame_targets)
-        collision_min_distance_m = float(collision_min_dist_mm.value) * 1e-3
-        current_collision_min = (
-            _current_collision_min_distance(solver) if bool(enable_collision.value) else None
-        )
-        current_com_min_slack = _current_com_min_slack(active_support_polygon)
-        boundaries = [
-            ConstraintBoundary(
-                "collision",
-                current_collision_min,
-                collision_min_distance_m,
-                enabled=bool(enable_collision.value),
-                violation_tolerance=1e-5,
-            ),
-            ConstraintBoundary(
-                "CoM",
-                current_com_min_slack,
-                0.0,
-                enabled=bool(enable_com.value),
-                violation_tolerance=1e-4,
-            ),
-        ]
-        guard_decision = constraint_guard.evaluate(
-            q_candidate=q,
-            result=result,
-            max_task_error=current_target_error,
-            boundaries=boundaries,
-            task_deadband=_g1_interactive_hold_error_threshold(),
-            constraints_enabled=bool(enable_collision.value or enable_com.value),
-        )
-        if guard_decision.restored_last_safe:
-            q = _clip_q(robot, guard_decision.q_next, q_lo, q_hi)
-            robot.update_configuration(q)
-            current_target_error = _max_frame_target_position_error(robot, frame_targets)
-            current_collision_min = _current_collision_min_distance(solver, q)
-            current_com_min_slack = _current_com_min_slack(active_support_polygon)
-            status_override = (
-                f"{' + '.join(guard_decision.restore_labels)} guard restored last safe pose"
-            )
-
-        if (
-            bool(enable_collision.value)
-            and current_collision_min is not None
-            and float(current_collision_min) < collision_min_distance_m
-            and result.status
-            in {
-                embodik.SolverStatus.INFEASIBLE,
-                embodik.SolverStatus.NUMERICAL_ERROR,
-                embodik.SolverStatus.NO_PROGRESS,
-            }
-            and joint_velocity_norm(result) <= 1e-8
-        ):
-            escaped_q = _attempt_g1_penetration_escape_burst(
-                robot=robot,
-                solver=solver,
-                q_current=q,
-                targets=targets,
-                options=opts,
-                target_tasks=tracked_tasks,
-                frame_targets=quality_frame_targets,
-                q_lo=q_lo,
-                q_hi=q_hi,
-                min_distance_m=collision_min_distance_m,
-                max_constraints=int(collision_max_rows.value),
-                tuning_mode=str(collision_tuning.value),
-                include_pairs=active_collision_include_pairs,
-            )
-            if escaped_q is not None:
-                q = _clip_q(robot, escaped_q, q_lo, q_hi)
-                robot.update_configuration(q)
-                current_target_error = _max_frame_target_position_error(robot, frame_targets)
-                current_collision_min = _current_collision_min_distance(solver, q)
-                current_com_min_slack = _current_com_min_slack(active_support_polygon)
-                constraint_guard.reset(q)
-                status_override = "penetration escape burst accepted"
-
-        boundaries = [
-            ConstraintBoundary(
-                "collision",
-                current_collision_min,
-                collision_min_distance_m,
-                enabled=bool(enable_collision.value),
-                violation_tolerance=1e-5,
-            ),
-            ConstraintBoundary(
-                "CoM",
-                current_com_min_slack,
-                0.0,
-                enabled=bool(enable_com.value),
-                violation_tolerance=1e-4,
-            ),
-        ]
-        constraint_guard.remember_if_clear(q, boundaries)
-        active_constraint_labels = list(guard_decision.boundary_stall_labels)
-        if guard_decision.zero_motion_resync:
-            clear_all_target_velocities_if_available(solver)
-            status_override = status_override or "constrained zero-motion; solver state re-synced"
-        if guard_decision.zero_motion_snap:
-            _recapture_target_controls_from_robot()
-            status_override = (
-                status_override
-                or "constrained zero-motion persisted; targets snapped to current frames"
-            )
-        elif active_constraint_labels:
-            _recapture_target_controls_from_robot()
-            status_override = status_override or (
-                f"{' + '.join(active_constraint_labels)} limited; targets snapped to current frames"
-            )
         productive_no_progress = (
             result.status == embodik.SolverStatus.NO_PROGRESS
             and accepted_step

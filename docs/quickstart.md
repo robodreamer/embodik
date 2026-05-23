@@ -27,7 +27,8 @@ instantiate task objects directly.
 | Step | API calls | Purpose |
 | --- | --- | --- |
 | Load or resolve a robot | `RobotModel(...)` or an example `resolve_robot_configuration(...)` helper | Provide the kinematic model, default configuration, and target frame names. |
-| Create a solver | `KinematicsSolver(robot)`, `solver.dt`, `set_damping()` | Configure numerical stepping behavior. |
+| Create a solver | `KinematicsSolver(robot)`, `solver.dt` | Configure numerical stepping behavior. |
+| Enable example runtime policy | `configure_solver_runtime_policy(solver)` | Public examples opt into solver-owned pose-layout auto-switching and constrained weighted fallback. |
 | Register a frame task | `solver.add_frame_task("ee_task", target_link)` | Track an end-effector pose target. |
 | Add posture bias | `solver.add_posture_task("posture")`, `set_target_configuration(q_default)` | Keep unused freedom near a preferred posture. |
 | Configure options | `PositionIKOptions()` or `PositionStepOptions()` | Set gains, iteration counts, timestep behavior, torso constraints, or stall recovery. |
@@ -78,6 +79,27 @@ q_current = result.q_solution
 Examples `01_basic_ik_simple.py`, `02_collision_aware_IK.py`, `03_teleop_ik.py`,
 and the bimanual demos use this pattern.
 
+## Example Runtime Policy
+
+Maintained interactive examples call
+`examples/example_helpers/ik_common.py::configure_solver_runtime_policy()` after
+constructing the solver. `weighted_fallback_enabled` is already true by default
+in `SolverRuntimeConfig`; the helper keeps that default explicit for examples
+and enables pose-task auto layout:
+
+- `SolverRuntimeConfig.enable_auto_task_layout = True`
+- `SolverRuntimeConfig.weighted_fallback_enabled = True`
+
+The first option lets solver-owned `PoseTaskGroup` adapters switch between
+merged and split pose-task layouts at solve boundaries. The second option allows
+the constrained weighted candidate to replace a non-success prioritized solve
+only when it satisfies the active hard constraints. It does not replace collision,
+CoM, relative-pose, contact projection, or joint-limit constraints with an
+unconstrained least-squares solve.
+
+For controlled comparisons, copy the current config, set either flag to `False`,
+and call `solver.configure_runtime(cfg)`.
+
 ## Adding Constraints
 
 Constraints are configured on the solver and are enforced during the next solve:
@@ -85,7 +107,7 @@ Constraints are configured on the solver and are enforced during the next solve:
 | Constraint | API | Used by |
 | --- | --- | --- |
 | Self-collision avoidance | `solver.configure_collision_constraint(...)` | `02_collision_aware_IK.py`, dual-arm and whole-body examples |
-| CoM support polygon | `solver.configure_com_constraint(...)` | `08_com_constraint_example.py`, whole-body examples |
+| CoM support polygon | `solver.configure_com_constraint(...)` | `04_com_constraint_example.py`, whole-body examples |
 | Torso orientation or pose bounds | `opts.torso_constraint...` | floating-base and whole-body position solves |
 
 ## Configuration-Space Operations

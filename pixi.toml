@@ -1,6 +1,6 @@
 [workspace]
 name = "embodik"
-version = "0.20.10"
+version = "0.20.11"
 description = "High-performance inverse kinematics solver optimized for cross-embodiment VLA/AI applications"
 authors = ["Andy Park <andypark.purdue@gmail.com>"]
 channels = ["conda-forge"]
@@ -73,14 +73,14 @@ verify-alpha-wheelbase = "python scripts/verify_optional_wheelbase_robustness.py
 # GPU solver tests (requires CUDA)
 test-gpu = "EMBODIK_GPU_TESTS=1 pytest test/test_gpu_solver.py test/test_gpu_collision.py -v"
 # GPU benchmarks
-benchmark-gpu = "python examples/04_gpu_batch_ik.py --batch_sizes 10 100 500 1000"
+benchmark-gpu = "python examples/gpu_batch_ik.py --batch_sizes 10 100 500 1000"
 benchmark-gpu-batched = "python scripts/benchmark_gpu_batched.py"
 benchmark-fi-pesns = "python scripts/benchmark_fi_pesns.py"
-benchmark-collision = "python examples/05_gpu_collision_batch.py"
+benchmark-collision = "python examples/gpu_collision_batch.py"
 benchmark-transforms = "python scripts/benchmark_transforms.py"
 # Parallel trajectory demo (real FK/Jacobians via pytorch_kinematics)
-demo-parallel-tracking = "python examples/07_parallel_trajectory_tracking.py --n-robots 100 --viz-mode hybrid --n-viz-full 9 --spacing 1.2"
-demo-parallel-tracking-benchmark = "python examples/07_parallel_trajectory_tracking.py --n-robots 1000 --benchmark"
+demo-parallel-tracking = "python examples/parallel_trajectory_tracking.py --n-robots 100 --viz-mode hybrid --n-viz-full 9 --spacing 1.2"
+demo-parallel-tracking-benchmark = "python examples/parallel_trajectory_tracking.py --n-robots 1000 --benchmark"
 # Export CasADi function for GPU solver
 export-casadi = "python -m embodik.gpu.export_casadi_velocity_solve --robot panda --out build/casadi/fn_velocity_solve.casadi"
 lint = "black --check python/ test/ && isort --check python/ test/"
@@ -121,7 +121,7 @@ mujoco = ">=3.6.0,<3.9"
 onnxruntime = ">=1.18,<2"
 
 [feature.mjviser.tasks]
-spot-locomanip-mjviser = { cmd = "python examples/15_spot_locomanip_mjviser.py", depends-on = [
+spot-locomanip-mjviser = { cmd = "python examples/09_spot_locomanip_mjviser.py", depends-on = [
     "install",
 ] }
 test-spot-locomanip = { cmd = "python -m pytest test/test_spot_locomanip_mjviser.py -v", depends-on = [
@@ -145,10 +145,10 @@ install-cusadi = "bash scripts/install_cusadi.sh"
 check-cuda = "python -c \"import torch; print(f'PyTorch {torch.__version__}'); print(f'CUDA available: {torch.cuda.is_available()}'); print(f'CUDA version: {torch.version.cuda}' if torch.cuda.is_available() else 'No CUDA')\""
 check-gpu = "python -c \"from embodik.gpu import HAS_CASADI, HAS_CUSADI, HAS_TORCH_CUDA; print(f'CasADi: {HAS_CASADI}, CusADi: {HAS_CUSADI}, CUDA: {HAS_TORCH_CUDA}')\""
 test-gpu = "EMBODIK_GPU_TESTS=1 pytest test/test_gpu_solver.py test/test_gpu_collision.py -v"
-benchmark-gpu = "python examples/04_gpu_batch_ik.py --batch_sizes 10 100 500 1000"
-benchmark-collision = "python examples/05_gpu_collision_batch.py"
+benchmark-gpu = "python examples/gpu_batch_ik.py --batch_sizes 10 100 500 1000"
+benchmark-collision = "python examples/gpu_collision_batch.py"
 export-casadi = "python -m embodik.gpu.export_casadi_velocity_solve --robot panda --out build/casadi/fn_velocity_solve.casadi"
-demo-gpu = "python examples/06_gpu_solver_demo.py --batch_sizes 10 100 500 1000 2000"
+demo-gpu = "python examples/gpu_solver_demo.py --batch_sizes 10 100 500 1000 2000"
 demo-ik-gpu = "python examples/02_collision_aware_IK.py --robot panda --gpu"
 # Compare FI-PeSNS vs PPH-SNS solvers
 benchmark-solver-comparison = "python scripts/benchmark_pph_sns_comparison.py --problems 10 --runs 50"

@@ -21,6 +21,7 @@
 
 #include <embodik/ik_baseline.hpp>
 #include <embodik/types.hpp>
+#include <embodik/weighted_advisor.hpp>
 #include <pinocchio/spatial/se3.hpp>
 
 namespace nb = nanobind;
@@ -57,6 +58,17 @@ NB_MODULE(_embodik_impl, m) {
       .value("PRECISE", eik::CollisionTuningMode::kPrecise)
       .value("BALANCED", eik::CollisionTuningMode::kBalanced)
       .value("SPEED", eik::CollisionTuningMode::kSpeed);
+
+  nb::enum_<eik::TaskLayout>(m, "TaskLayout")
+      .value("SPLIT", eik::TaskLayout::kSplit)
+      .value("MERGED", eik::TaskLayout::kMerged)
+      .export_values();
+
+  nb::enum_<eik::SolverRecoveryStage>(m, "SolverRecoveryStage")
+      .value("PRIORITIZED", eik::SolverRecoveryStage::kPrioritized)
+      .value("WEIGHTED_FALLBACK",
+             eik::SolverRecoveryStage::kWeightedFallback)
+      .export_values();
 
   // Types
   nb::class_<eik::BasicSolverConfig>(m, "BasicSolverConfig",
@@ -123,7 +135,39 @@ NB_MODULE(_embodik_impl, m) {
               "Whether the collision refinement budget was exhausted")
       .def_ro("collision_sphere_culled_pairs",
               &eik::VelocitySolverResult::collision_sphere_culled_pairs,
-              "Number of collision pairs culled by sphere broadphase.");
+              "Number of collision pairs culled by sphere broadphase")
+      .def_ro("weighted_advisory_available",
+              &eik::VelocitySolverResult::weighted_advisory_available,
+              "Whether constrained weighted-advisor diagnostics are available")
+      .def_ro("weighted_fallback_used",
+              &eik::VelocitySolverResult::weighted_fallback_used,
+              "Whether the constrained weighted fallback replaced the "
+              "prioritized solver output")
+      .def_ro("weighted_advisory_v_norm",
+              &eik::VelocitySolverResult::weighted_advisory_v_norm,
+              "Norm of the constrained weighted-advisor velocity")
+      .def_ro("weighted_advisory_pos_task_error_norm",
+              &eik::VelocitySolverResult::weighted_advisory_pos_task_error_norm,
+              "Position residual norm from the read-only weighted advisor")
+      .def_ro("weighted_advisory_ori_task_error_norm",
+              &eik::VelocitySolverResult::weighted_advisory_ori_task_error_norm,
+              "Orientation residual norm from the read-only weighted advisor")
+      .def_ro("weighted_advisory_condition_number",
+              &eik::VelocitySolverResult::weighted_advisory_condition_number,
+              "Condition number from the read-only weighted advisor")
+      .def_ro("advisor_position_weight_scale_current",
+              &eik::VelocitySolverResult::advisor_position_weight_scale_current,
+              "Current advisor position-weight scale")
+      .def_ro("advisor_scale_adapt_active",
+              &eik::VelocitySolverResult::advisor_scale_adapt_active,
+              "Whether advisor-scale PI updated this solve")
+      .def_ro("active_task_layout",
+              &eik::VelocitySolverResult::active_task_layout,
+              "Active TaskLayout selected by the optional auto-switcher")
+      .def_ro("recovery_stage", &eik::VelocitySolverResult::recovery_stage,
+              "Recovery stage that supplied the accepted velocity")
+      .def_ro("binding_score", &eik::VelocitySolverResult::binding_score,
+              "Binding score used by the optional auto-switcher");
 
   nb::class_<eik::VelocityBoxHeadroomPolicy>(
       m, "VelocityBoxHeadroomPolicy",
@@ -436,6 +480,89 @@ NB_MODULE(_embodik_impl, m) {
       .def_rw("position_gain", &eik::TaskTarget::position_gain)
       .def_rw("orientation_gain", &eik::TaskTarget::orientation_gain);
 
+  nb::class_<eik::SolveDiagnostics>(
+      m, "SolveDiagnostics",
+      "Bundled diagnostics copied from a single PositionIKResult.")
+      .def_ro("collision_rejection_count",
+              &eik::SolveDiagnostics::collision_rejection_count)
+      .def_ro("stall_escape_count", &eik::SolveDiagnostics::stall_escape_count)
+      .def_ro("condition_number", &eik::SolveDiagnostics::condition_number)
+      .def_ro("task_scales", &eik::SolveDiagnostics::task_scales)
+      .def_ro("task_used_fallback",
+              &eik::SolveDiagnostics::task_used_fallback)
+      .def_ro("task_modes_effective",
+              &eik::SolveDiagnostics::task_modes_effective)
+      .def_ro("any_intervention", &eik::SolveDiagnostics::any_intervention)
+      .def_ro("weighted_advisory_available",
+              &eik::SolveDiagnostics::weighted_advisory_available)
+      .def_ro("weighted_fallback_used",
+              &eik::SolveDiagnostics::weighted_fallback_used)
+      .def_ro("weighted_advisory_v_norm",
+              &eik::SolveDiagnostics::weighted_advisory_v_norm)
+      .def_ro("weighted_advisory_pos_task_error_norm",
+              &eik::SolveDiagnostics::weighted_advisory_pos_task_error_norm)
+      .def_ro("weighted_advisory_ori_task_error_norm",
+              &eik::SolveDiagnostics::weighted_advisory_ori_task_error_norm)
+      .def_ro("weighted_advisory_condition_number",
+              &eik::SolveDiagnostics::weighted_advisory_condition_number)
+      .def_ro("advisor_position_weight_scale_current",
+              &eik::SolveDiagnostics::advisor_position_weight_scale_current)
+      .def_ro("advisor_scale_adapt_active",
+              &eik::SolveDiagnostics::advisor_scale_adapt_active)
+      .def_ro("active_task_layout", &eik::SolveDiagnostics::active_task_layout)
+      .def_ro("recovery_stage", &eik::SolveDiagnostics::recovery_stage)
+      .def_ro("binding_score", &eik::SolveDiagnostics::binding_score);
+
+  nb::class_<eik::SolverRuntimeConfig>(
+      m, "SolverRuntimeConfig",
+      "Bundled runtime defaults for interactive solver loops.")
+      .def(nb::init<>())
+      .def_rw("damping", &eik::SolverRuntimeConfig::damping)
+      .def_rw("position_step_max_steps",
+              &eik::SolverRuntimeConfig::position_step_max_steps)
+      .def_rw("adaptive_dt", &eik::SolverRuntimeConfig::adaptive_dt)
+      .def_rw("adaptive_dt_max_scale",
+              &eik::SolverRuntimeConfig::adaptive_dt_max_scale)
+      .def_rw("adaptive_dt_reference_distance",
+              &eik::SolverRuntimeConfig::adaptive_dt_reference_distance)
+      .def_rw("weighted_advisor_enabled",
+              &eik::SolverRuntimeConfig::weighted_advisor_enabled,
+              "Enable constrained weighted-advisor diagnostics without changing "
+              "the prioritized solver output")
+      .def_rw("weighted_fallback_enabled",
+              &eik::SolverRuntimeConfig::weighted_fallback_enabled,
+              "Allow a feasible constrained weighted candidate to replace a "
+              "non-success prioritized solve")
+      .def_rw("advisor_position_weight_scale",
+              &eik::SolverRuntimeConfig::advisor_position_weight_scale,
+              "Diagnostic advisor-only multiplier for FRAME_POSITION objective "
+              "weights")
+      .def_rw("advisor_orientation_weight_scale",
+              &eik::SolverRuntimeConfig::advisor_orientation_weight_scale,
+              "Diagnostic advisor-only multiplier for FRAME_ORIENTATION "
+              "objective weights")
+      .def_rw("enable_advisor_scale_adapt",
+              &eik::SolverRuntimeConfig::enable_advisor_scale_adapt,
+              "Enable default-off advisor-scale PI adaptation for experiments")
+      .def_rw("advisor_scale_adapt_ki",
+              &eik::SolverRuntimeConfig::advisor_scale_adapt_ki)
+      .def_rw("advisor_scale_adapt_target_ratio",
+              &eik::SolverRuntimeConfig::advisor_scale_adapt_target_ratio)
+      .def_rw("advisor_scale_min", &eik::SolverRuntimeConfig::advisor_scale_min)
+      .def_rw("advisor_scale_max", &eik::SolverRuntimeConfig::advisor_scale_max)
+      .def_rw("advisor_scale_epoch_s",
+              &eik::SolverRuntimeConfig::advisor_scale_epoch_s)
+      .def_rw("enable_auto_task_layout",
+              &eik::SolverRuntimeConfig::enable_auto_task_layout,
+              "Enable opt-in stateful PoseTaskGroup merged/split layout "
+              "switching at solve boundaries")
+      .def_rw("auto_layout_binding_threshold_high",
+              &eik::SolverRuntimeConfig::auto_layout_binding_threshold_high)
+      .def_rw("auto_layout_binding_threshold_low",
+              &eik::SolverRuntimeConfig::auto_layout_binding_threshold_low)
+      .def_rw("auto_layout_cooldown_ticks",
+              &eik::SolverRuntimeConfig::auto_layout_cooldown_ticks);
+
   nb::class_<eik::PositionIKResult, eik::VelocitySolverResult>(
       m, "PositionIKResult", "Result from position-level IK solving")
       .def_ro("q_solution", &eik::PositionIKResult::q_solution)
@@ -452,7 +579,36 @@ NB_MODULE(_embodik_impl, m) {
       .def_ro("collision_rejection_count",
               &eik::PositionIKResult::collision_rejection_count)
       .def_ro("stall_escape_count",
-              &eik::PositionIKResult::stall_escape_count);
+              &eik::PositionIKResult::stall_escape_count)
+      .def_prop_ro(
+          "diagnostics",
+          [](const eik::PositionIKResult &r) {
+            eik::SolveDiagnostics d;
+            d.collision_rejection_count = r.collision_rejection_count;
+            d.stall_escape_count = r.stall_escape_count;
+            d.condition_number = r.condition_number;
+            d.task_scales = r.task_scales;
+            d.task_used_fallback = r.task_used_fallback;
+            d.task_modes_effective = r.task_modes_effective;
+            d.any_intervention = (r.collision_rejection_count > 0) ||
+                                 (r.stall_escape_count > 0);
+            d.weighted_advisory_available = r.weighted_advisory_available;
+            d.weighted_fallback_used = r.weighted_fallback_used;
+            d.weighted_advisory_v_norm = r.weighted_advisory_v_norm;
+            d.weighted_advisory_pos_task_error_norm =
+                r.weighted_advisory_pos_task_error_norm;
+            d.weighted_advisory_ori_task_error_norm =
+                r.weighted_advisory_ori_task_error_norm;
+            d.weighted_advisory_condition_number =
+                r.weighted_advisory_condition_number;
+            d.advisor_position_weight_scale_current =
+                r.advisor_position_weight_scale_current;
+            d.advisor_scale_adapt_active = r.advisor_scale_adapt_active;
+            d.active_task_layout = r.active_task_layout;
+            d.recovery_stage = r.recovery_stage;
+            d.binding_score = r.binding_score;
+            return d;
+          });
 
   m.def("pose_error_norm", &eik::calculateConfigurationDistance, "current"_a,
         "target"_a,
@@ -491,6 +647,41 @@ NB_MODULE(_embodik_impl, m) {
       "sr_damping"_a = 1e-1,
       R"pbdoc(
           Full multi-task velocity IK using Eigen types. Preferred API.
+          )pbdoc");
+
+  m.def(
+      "computeConstrainedWeightedVelocitySolutionEigen",
+      [](const std::vector<Eigen::VectorXd> &goals,
+         const std::vector<Eigen::MatrixXd> &jacobians,
+         const Eigen::MatrixXd &C, const Eigen::VectorXd &lower_limits,
+         const Eigen::VectorXd &upper_limits,
+         const std::vector<double> &objective_weights,
+         double solver_tolerance, double solver_tight_tolerance,
+         unsigned int max_iters, double norm_threshold,
+         unsigned int max_zero_scale_iters, double sr_tolerance,
+         double sr_damping) {
+        eik::VelocitySolverConfig p;
+        p.epsilon = solver_tolerance;
+        p.precision_threshold = solver_tight_tolerance;
+        p.iteration_limit = max_iters;
+        p.magnitude_limit = norm_threshold;
+        p.stall_detection_count = max_zero_scale_iters;
+        p.regularization_config.epsilon = sr_tolerance;
+        p.regularization_config.regularization_factor = sr_damping;
+        return eik::computeConstrainedWeightedVelocitySolutionEigen(
+            goals, jacobians, C, lower_limits, upper_limits, objective_weights,
+            p);
+      },
+      "goals"_a, "jacobians"_a, "C"_a, "lower_limits"_a, "upper_limits"_a,
+      "objective_weights"_a = std::vector<double>{},
+      "solver_tolerance"_a = 1e-6, "solver_tight_tolerance"_a = 1e-10,
+      "max_iters"_a = 20, "norm_threshold"_a = 1e10,
+      "max_zero_scale_iters"_a = 2, "sr_tolerance"_a = 1e-6,
+      "sr_damping"_a = 1e-1,
+      R"pbdoc(
+          Constrained weighted velocity IK. Stacks all objectives with
+          sqrt(weight) row scaling and solves one hard-constrained MIN_ERROR
+          objective against C/lower/upper.
           )pbdoc");
 
   // Module metadata

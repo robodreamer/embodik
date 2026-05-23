@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """Tests for AbsoluteFrameTask"""
 
-import pytest
-import numpy as np
-import tempfile
 import os
+import tempfile
+
+import numpy as np
+import pytest
+from test_ects import create_dual_arm_urdf
 
 import embodik
-
-from test_ects import create_dual_arm_urdf
 
 
 @pytest.fixture

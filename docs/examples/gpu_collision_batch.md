@@ -1,6 +1,6 @@
 # GPU Collision Batch Example Overview
 
-Overview for `examples/05_gpu_collision_batch.py`.
+Overview for `examples/gpu_collision_batch.py`.
 
 ## What It Demonstrates
 
@@ -11,5 +11,5 @@ Overview for `examples/05_gpu_collision_batch.py`.
 ## Run
 
 ```bash
-python3 examples/05_gpu_collision_batch.py --batch_sizes 10 100 500
+python3 examples/gpu_collision_batch.py --batch_sizes 10 100 500
 ```

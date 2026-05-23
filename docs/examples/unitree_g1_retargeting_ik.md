@@ -1,6 +1,6 @@
 # Unitree G1 Retargeting IK Example
 
-`examples/13_unitree_g1_retargeting_ik.py` is a Viser-based whole-body IK demo
+`examples/07_unitree_g1_retargeting_ik.py` is a Viser-based whole-body IK demo
 for Unitree G1. It exposes palm, foot, and pelvis target frames, synthetic
 retargeting playback, CoM support-polygon visualization, and optional
 self-collision constraints.
@@ -26,13 +26,13 @@ Install and copy the example bundle once using the
 
 ```bash
 cd embodik_examples
-python 13_unitree_g1_retargeting_ik.py
+python 07_unitree_g1_retargeting_ik.py
 ```
 
 From a repository checkout, use Pixi:
 
 ```bash
-pixi run python examples/13_unitree_g1_retargeting_ik.py
+pixi run python examples/07_unitree_g1_retargeting_ik.py
 ```
 
 ## Assets
@@ -51,9 +51,9 @@ The reduced box-collision URDF used for collision-aware IK is bundled under
 The public example keeps smoke-test flags for regression coverage:
 
 ```bash
-python 13_unitree_g1_retargeting_ik.py --headless-smoke-steps 4
-python 13_unitree_g1_retargeting_ik.py --headless-com-smoke
-python 13_unitree_g1_retargeting_ik.py --headless-ik-smoke-steps 20 --headless-reset-interval 8
+python 07_unitree_g1_retargeting_ik.py --headless-smoke-steps 4
+python 07_unitree_g1_retargeting_ik.py --headless-com-smoke
+python 07_unitree_g1_retargeting_ik.py --headless-ik-smoke-steps 20 --headless-reset-interval 8
 ```
 
 The performance harness lives separately:

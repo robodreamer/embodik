@@ -29,9 +29,13 @@ pytestmark = pytest.mark.skipif(
     reason="Spot locomanipulation tests require the optional spot environment",
 )
 
+from example_helpers.policy_runtime import RateLimitedOnnxPolicy
+from example_helpers.seer_teleop import DEFAULT_TELEOP_SCALE_FACTOR
 from example_helpers.spot_locomanip_policy import (
     DEFAULT_ARM_COMMAND,
     DEFAULT_BODY_ROLL_PITCH_HEIGHT,
+    DEFAULT_STAND_BASE_HEIGHT,
+    DEFAULT_STAND_LEG_JOINTS,
     HEIGHT_RANGE,
     HEIGHT_STEP,
     INITIAL_ARM_COMMAND,
@@ -46,8 +50,6 @@ from example_helpers.spot_locomanip_policy import (
     ROLL_PITCH_RANGE,
     ROLL_PITCH_STEP,
     SPOT_LEG_JOINT_NAMES,
-    DEFAULT_STAND_BASE_HEIGHT,
-    DEFAULT_STAND_LEG_JOINTS,
     VELOCITY_COMMAND_RANGE,
     VELOCITY_COMMAND_STEP,
     YAW_COMMAND_RANGE,
@@ -59,7 +61,6 @@ from example_helpers.spot_locomanip_policy import (
     policy_action_to_mujoco_ctrl,
     policy_checkpoint_path,
 )
-from example_helpers.policy_runtime import RateLimitedOnnxPolicy
 from example_helpers.spot_mjviser_adapter import (
     DEFAULT_ACTUATOR_GAINS,
     DEFAULT_LEG_GAIN_SCALE,
@@ -74,11 +75,10 @@ from example_helpers.spot_mjviser_adapter import (
     load_spot_mujoco_model,
     resolve_spot_scene_arm_xml,
 )
-from example_helpers.seer_teleop import DEFAULT_TELEOP_SCALE_FACTOR
 
 
 def _load_example_module():
-    path = _EXAMPLES_DIR / "15_spot_locomanip_mjviser.py"
+    path = _EXAMPLES_DIR / "09_spot_locomanip_mjviser.py"
     spec = importlib.util.spec_from_file_location("spot_locomanip_example", path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -158,10 +158,16 @@ def test_rate_limited_onnx_policy_reuses_output_between_50hz_ticks() -> None:
 def test_gripper_trigger_fraction_maps_continuously_to_command() -> None:
     module = _load_example_module()
 
-    assert module.gripper_command_from_trigger_fraction(0.0) == pytest.approx(INITIAL_ARM_COMMAND[6])
+    assert module.gripper_command_from_trigger_fraction(0.0) == pytest.approx(
+        INITIAL_ARM_COMMAND[6]
+    )
     assert module.gripper_command_from_trigger_fraction(1.0) == pytest.approx(0.0)
-    assert module.gripper_command_from_trigger_fraction(0.5) == pytest.approx(0.5 * INITIAL_ARM_COMMAND[6])
-    assert module.gripper_command_from_trigger_fraction(-1.0) == pytest.approx(INITIAL_ARM_COMMAND[6])
+    assert module.gripper_command_from_trigger_fraction(0.5) == pytest.approx(
+        0.5 * INITIAL_ARM_COMMAND[6]
+    )
+    assert module.gripper_command_from_trigger_fraction(-1.0) == pytest.approx(
+        INITIAL_ARM_COMMAND[6]
+    )
     assert module.gripper_command_from_trigger_fraction(2.0) == pytest.approx(0.0)
 
 
@@ -368,9 +374,9 @@ def test_controller_reset_is_independent_of_adversarial_runtime_state() -> None:
     adversarial_data.qvel[:] = np.linspace(8.0, -8.0, model.nv)
     adversarial_data.ctrl[:] = np.linspace(-3.0, 3.0, model.nu)
     adversarial_data.qfrc_applied[:] = np.linspace(4.0, -4.0, model.nv)
-    adversarial_data.xfrc_applied[:] = np.linspace(2.0, -2.0, adversarial_data.xfrc_applied.size).reshape(
-        adversarial_data.xfrc_applied.shape
-    )
+    adversarial_data.xfrc_applied[:] = np.linspace(
+        2.0, -2.0, adversarial_data.xfrc_applied.size
+    ).reshape(adversarial_data.xfrc_applied.shape)
     adversarial_data.qacc_warmstart[:] = np.linspace(-5.0, 5.0, model.nv)
     if getattr(adversarial_data, "act", None) is not None and adversarial_data.act.size:
         adversarial_data.act[:] = np.linspace(-1.0, 1.0, adversarial_data.act.size)
@@ -388,8 +394,12 @@ def test_controller_reset_is_independent_of_adversarial_runtime_state() -> None:
     np.testing.assert_allclose(adversarial_data.qpos, baseline_data.qpos, atol=1e-12)
     np.testing.assert_allclose(adversarial_data.qvel, baseline_data.qvel, atol=1e-12)
     np.testing.assert_allclose(adversarial_data.ctrl, baseline_data.ctrl, atol=1e-12)
-    np.testing.assert_allclose(adversarial_data.qfrc_applied, baseline_data.qfrc_applied, atol=1e-12)
-    np.testing.assert_allclose(adversarial_data.xfrc_applied, baseline_data.xfrc_applied, atol=1e-12)
+    np.testing.assert_allclose(
+        adversarial_data.qfrc_applied, baseline_data.qfrc_applied, atol=1e-12
+    )
+    np.testing.assert_allclose(
+        adversarial_data.xfrc_applied, baseline_data.xfrc_applied, atol=1e-12
+    )
     np.testing.assert_allclose(
         adversarial_data.qacc_warmstart,
         baseline_data.qacc_warmstart,
@@ -479,7 +489,9 @@ def test_button_reset_settle_barrier_holds_home_before_unstow() -> None:
     for _ in range(settle_steps):
         controller.commands.arm[:] = INITIAL_ARM_COMMAND
         controller.commands.velocity[:] = [1.0, -1.0, 0.5]
-        controller.step(model, data, control_mode="velocity", ik_enabled=True, ik_target_pose=object())
+        controller.step(
+            model, data, control_mode="velocity", ik_enabled=True, ik_target_pose=object()
+        )
         mujoco.mj_step(model, data)
         np.testing.assert_allclose(controller.commands.arm, DEFAULT_ARM_COMMAND)
         np.testing.assert_allclose(controller.commands.velocity, np.zeros(3))
@@ -487,7 +499,9 @@ def test_button_reset_settle_barrier_holds_home_before_unstow() -> None:
         assert controller.last_ik_status == "reset settling"
 
     # The auto-unstow countdown starts only after the settle barrier has elapsed.
-    assert controller._auto_unstow_delay_remaining == pytest.approx(module.AUTO_UNSTOW_DELAY_SECONDS)
+    assert controller._auto_unstow_delay_remaining == pytest.approx(
+        module.AUTO_UNSTOW_DELAY_SECONDS
+    )
 
 
 def test_controller_interpolates_arm_command_from_current_state_when_requested() -> None:
@@ -513,8 +527,8 @@ def test_controller_interpolates_arm_command_from_current_state_when_requested()
     np.testing.assert_allclose(controller.commands.arm, expected)
     assert controller.arm_unstow_active
 
-    controller._arm_unstow_elapsed = (
-        module.ARM_UNSTOW_INTERPOLATION_SECONDS - float(model.opt.timestep)
+    controller._arm_unstow_elapsed = module.ARM_UNSTOW_INTERPOLATION_SECONDS - float(
+        model.opt.timestep
     )
     controller.step(model, data, control_mode="pose", ik_enabled=False)
 

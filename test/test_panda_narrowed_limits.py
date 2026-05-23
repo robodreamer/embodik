@@ -35,6 +35,9 @@ def _load_panda() -> tuple[eik.RobotModel, eik.KinematicsSolver]:
     robot.update_configuration(q_init)
     solver = eik.KinematicsSolver(robot)
     solver.dt = 0.01
+    cfg = eik.SolverRuntimeConfig()
+    cfg.weighted_fallback_enabled = False
+    solver.configure_runtime(cfg)
     return robot, solver
 
 

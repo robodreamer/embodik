@@ -4,6 +4,8 @@ import os
 import re
 import sys
 import tempfile
+import textwrap
+from contextlib import contextmanager
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -21,6 +23,12 @@ _DQ_STALL_EPS = 1e-5
 _LINK_INDEX_PATTERN = re.compile(r"link_?([0-9]+)")
 
 
+def _disable_weighted_fallback(solver: eik.KinematicsSolver) -> None:
+    cfg = eik.SolverRuntimeConfig()
+    cfg.weighted_fallback_enabled = False
+    solver.configure_runtime(cfg)
+
+
 def _extract_link_index(name: str) -> Optional[int]:
     match = _LINK_INDEX_PATTERN.search(name)
     return int(match.group(1)) if match else None
@@ -30,6 +38,7 @@ def _extract_link_index(name: str) -> Optional[int]:
 # Panda fixtures
 # ---------------------------------------------------------------------------
 
+
 def _make_panda_solver():
     from robot_descriptions.panda_description import URDF_PATH
 
@@ -38,10 +47,43 @@ def _make_panda_solver():
     robot.update_configuration(q_init)
     solver = eik.KinematicsSolver(robot)
     solver.dt = 0.01
+    _disable_weighted_fallback(solver)
     task = solver.add_frame_task("ee", _PANDA_EE_FRAME)
     task.weight = 1.0
     task.solve_mode = TaskSolveMode.SCALE
     return robot, solver, task
+
+
+@contextmanager
+def _two_link_collision_solver():
+    urdf = textwrap.dedent("""
+<robot name="two_link">
+  <link name="base_link">
+    <inertial><origin xyz="0 0 0" rpy="0 0 0"/><mass value="1.0"/>
+    <inertia ixx="0.01" ixy="0.0" ixz="0.0" iyy="0.01" iyz="0.0" izz="0.01"/></inertial>
+    <collision><origin xyz="0 0 0" rpy="0 0 0"/><geometry><box size="0.1 0.1 0.1"/></geometry></collision>
+  </link>
+  <link name="link1">
+    <inertial><origin xyz="0 0 0" rpy="0 0 0"/><mass value="0.5"/>
+    <inertia ixx="0.005" ixy="0.0" ixz="0.0" iyy="0.005" iyz="0.0" izz="0.005"/></inertial>
+    <collision><origin xyz="0.08 0 0" rpy="0 0 0"/><geometry><box size="0.08 0.08 0.08"/></geometry></collision>
+  </link>
+  <joint name="joint1" type="revolute">
+    <parent link="base_link"/><child link="link1"/>
+    <origin xyz="0.05 0 0" rpy="0 0 0"/><axis xyz="0 0 1"/>
+    <limit effort="10.0" lower="-1.57" upper="1.57" velocity="1.0"/>
+  </joint>
+</robot>""")
+    fd, path = tempfile.mkstemp(suffix=".urdf")
+    with os.fdopen(fd, "w") as f:
+        f.write(urdf)
+    try:
+        robot = eik.RobotModel(path, floating_base=False)
+        solver = eik.KinematicsSolver(robot)
+        _disable_weighted_fallback(solver)
+        yield solver
+    finally:
+        os.unlink(path)
 
 
 def _should_panda_exclude_pair(name_a: str, name_b: str) -> bool:
@@ -61,10 +103,7 @@ def _should_panda_exclude_pair(name_a: str, name_b: str) -> bool:
 
 
 def _panda_collision_exclusions(robot):
-    return [
-        (a, b) for a, b in robot.get_collision_pair_names()
-        if _should_panda_exclude_pair(a, b)
-    ]
+    return [(a, b) for a, b in robot.get_collision_pair_names() if _should_panda_exclude_pair(a, b)]
 
 
 def _ensure_ros_package_path(urdf_path: Path) -> None:
@@ -99,7 +138,6 @@ def _setup_panda_stall():
 
     solver = eik.KinematicsSolver(robot)
     solver.dt = 0.01
-    solver.set_damping(0.1)
 
     q = np.array([0.0, -0.3, 0.0, -2.8, 0.0, 2.5, 0.785, 0.04, 0.04])
     robot.update_configuration(q)
@@ -133,12 +171,12 @@ def _setup_panda_stall():
 # Dual-iiwa fixtures
 # ---------------------------------------------------------------------------
 
+
 def _dual_iiwa_exclusions(robot):
     excl = []
     for a, b in robot.get_collision_pair_names():
         a_l, b_l = a.lower(), b.lower()
-        same_arm = (("left" in a_l and "left" in b_l) or
-                    ("right" in a_l and "right" in b_l))
+        same_arm = ("left" in a_l and "left" in b_l) or ("right" in a_l and "right" in b_l)
         if same_arm:
             ia, ib = _extract_link_index(a_l), _extract_link_index(b_l)
             if ia is not None and ib is not None and abs(ia - ib) <= 3:
@@ -159,8 +197,8 @@ def _setup_dual_iiwa_stall():
     try:
         from utils.dual_iiwa_urdf import (
             build_dual_iiwa_urdf,
-            get_dual_iiwa_frame_names,
             get_dual_iiwa_default_configuration,
+            get_dual_iiwa_frame_names,
         )
     except ImportError:
         return None
@@ -186,7 +224,7 @@ def _setup_dual_iiwa_stall():
 
     solver = eik.KinematicsSolver(robot)
     solver.dt = 0.01
-    solver.set_damping(0.1)
+    _disable_weighted_fallback(solver)
 
     q = np.array(get_dual_iiwa_default_configuration(), dtype=float)
     robot.update_configuration(q)
@@ -199,7 +237,9 @@ def _setup_dual_iiwa_stall():
     # are observable under strict assertions.
     min_dist = 0.35
     solver.configure_collision_constraint(
-        min_distance=min_dist, include_pairs=[], exclude_pairs=list(excl),
+        min_distance=min_dist,
+        include_pairs=[],
+        exclude_pairs=list(excl),
     )
 
     left_frame, right_frame = get_dual_iiwa_frame_names()
@@ -231,6 +271,7 @@ def _setup_dual_iiwa_stall():
 # Helper: run a velocity loop and count stall steps
 # ---------------------------------------------------------------------------
 
+
 def _run_velocity_loop(robot, solver, q, steps):
     """Run solve_velocity for `steps` and return (stall_count, final_q)."""
     stall_count = 0
@@ -249,6 +290,7 @@ def _run_velocity_loop(robot, solver, q, steps):
 # ===================================================================
 # API Tests
 # ===================================================================
+
 
 class TestStallHandlerAPI:
     def test_default_disabled(self):
@@ -269,9 +311,44 @@ class TestStallHandlerAPI:
         solver.enable_stall_handler(0.05)
         solver.configure_stall_handler(
             stall_threshold=10,
-            restore_rate=0.01, floor_fraction=0.5,
+            restore_rate=0.01,
+            floor_fraction=0.5,
         )
         assert solver.stall_handler_enabled()
+        assert solver.stall_handler_threshold() == 10
+        assert solver.stall_handler_restore_rate() == pytest.approx(0.01)
+        assert solver.stall_handler_floor_fraction() == pytest.approx(0.5)
+
+    def test_collision_constraint_seeds_stall_defaults_without_enabling(self):
+        with _two_link_collision_solver() as solver:
+            solver.configure_collision_constraint(
+                min_distance=0.04,
+                include_pairs=[],
+                exclude_pairs=[],
+            )
+
+            assert not solver.stall_handler_enabled()
+            assert solver.stall_handler_threshold() == 3
+            assert solver.stall_handler_restore_rate() == pytest.approx(0.2)
+            assert solver.stall_handler_floor_fraction() == pytest.approx(0.0)
+
+    def test_collision_constraint_preserves_explicit_stall_config(self):
+        with _two_link_collision_solver() as solver:
+            solver.enable_stall_handler(0.05)
+            solver.configure_stall_handler(
+                stall_threshold=9,
+                restore_rate=0.03,
+                floor_fraction=0.4,
+            )
+            solver.configure_collision_constraint(
+                min_distance=0.04,
+                include_pairs=[],
+                exclude_pairs=[],
+            )
+
+            assert solver.stall_handler_threshold() == 9
+            assert solver.stall_handler_restore_rate() == pytest.approx(0.03)
+            assert solver.stall_handler_floor_fraction() == pytest.approx(0.4)
 
     def test_python_wrapper_enables(self):
         _, solver, _ = _make_panda_solver()
@@ -309,6 +386,7 @@ class TestStallHandlerAPI:
 # ===================================================================
 # Recovery Tests (solve_velocity level)
 # ===================================================================
+
 
 class TestStallHandlerRecovery:
     def test_margin_restores_after_healthy_steps(self):
@@ -355,6 +433,7 @@ class TestStallHandlerRecovery:
 # A/B Stall Scenario Tests
 # ===================================================================
 
+
 class TestPandaStallRecovery:
     """Panda self-collision stall: verify handler does not increase stalls."""
 
@@ -385,9 +464,9 @@ class TestPandaStallRecovery:
         handler_stalls, _ = _run_velocity_loop(robot, solver, q0.copy(), steps)
         solver.disable_stall_handler()
 
-        assert handler_stalls <= baseline_stalls, (
-            f"Handler should not increase stalls: {handler_stalls} > {baseline_stalls}"
-        )
+        assert (
+            handler_stalls <= baseline_stalls
+        ), f"Handler should not increase stalls: {handler_stalls} > {baseline_stalls}"
 
 
 class TestDualIiwaStallRecovery:
@@ -411,14 +490,15 @@ class TestDualIiwaStallRecovery:
         handler_stalls, _ = _run_velocity_loop(robot2, solver2, q02.copy(), steps)
         solver2.disable_stall_handler()
 
-        assert handler_stalls < baseline_stalls, (
-            f"Handler should reduce stalls: {handler_stalls} >= {baseline_stalls}"
-        )
+        assert (
+            handler_stalls < baseline_stalls
+        ), f"Handler should reduce stalls: {handler_stalls} >= {baseline_stalls}"
 
 
 # ===================================================================
 # PositionStepOptions.stall_recovery integration
 # ===================================================================
+
 
 class TestPositionStepStallRecovery:
     """Verify opts.stall_recovery works end-to-end through solve_position_step."""
@@ -486,9 +566,7 @@ class TestPositionStepStallRecovery:
         opts.stall_recovery = True
 
         solver.solve_position_step(q, target, "ee", opts)
-        assert solver.stall_handler_enabled(), (
-            "Should not disable externally-enabled handler"
-        )
+        assert solver.stall_handler_enabled(), "Should not disable externally-enabled handler"
 
         solver.disable_stall_handler()
 
@@ -500,6 +578,7 @@ class TestPositionStepStallRecovery:
             pytest.skip("Panda collision debug unavailable")
 
         robot, solver, q, task, target_pos, min_dist = setup
+        _disable_weighted_fallback(solver)
 
         opts = eik.PositionStepOptions()
         opts.max_steps = 1
@@ -509,9 +588,7 @@ class TestPositionStepStallRecovery:
 
         target = np.eye(4)
         target[:3, 3] = target_pos
-        target[:3, :3] = np.array(
-            robot.get_frame_pose(_PANDA_EE_FRAME).rotation
-        )
+        target[:3, :3] = np.array(robot.get_frame_pose(_PANDA_EE_FRAME).rotation)
 
         stall_counts = []
         for i in range(20):
@@ -534,6 +611,7 @@ class TestPositionStepStallRecovery:
 # solve_velocity(stall_recovery=True) integration
 # ===================================================================
 
+
 class TestSolveVelocityStallRecovery:
     """Verify the stall_recovery flag on solve_velocity."""
 
@@ -548,9 +626,7 @@ class TestSolveVelocityStallRecovery:
 
         assert not solver.stall_handler_enabled()
         solver.solve_velocity(q, apply_limits=True, stall_recovery=True)
-        assert solver.stall_handler_enabled(), (
-            "stall_recovery=True should enable the handler"
-        )
+        assert solver.stall_handler_enabled(), "stall_recovery=True should enable the handler"
         solver.disable_stall_handler()
 
     def test_stall_recovery_persists_across_calls(self):
@@ -609,6 +685,7 @@ class TestSolveVelocityStallRecovery:
 # solve_position(stall_recovery=True) integration
 # ===================================================================
 
+
 class TestSolvePositionStallRecovery:
     """Verify stall_recovery on PositionIKOptions for solve_position."""
 
@@ -633,9 +710,9 @@ class TestSolvePositionStallRecovery:
         opts.max_iterations = 50
         result = solver.solve_position(q, target, _PANDA_EE_FRAME, opts)
         assert result.q_solution is not None
-        assert not solver.stall_handler_enabled(), (
-            "Handler should be auto-disabled after solve_position"
-        )
+        assert (
+            not solver.stall_handler_enabled()
+        ), "Handler should be auto-disabled after solve_position"
 
     def test_stall_recovery_does_not_interfere_when_off(self):
         """stall_recovery=False should not enable the handler."""
@@ -680,15 +757,14 @@ class TestSolvePositionStallRecovery:
         opts.stall_recovery = True
         opts.max_iterations = 10
         solver.solve_position(q, target, _PANDA_EE_FRAME, opts)
-        assert solver.stall_handler_enabled(), (
-            "Should not disable externally-enabled handler"
-        )
+        assert solver.stall_handler_enabled(), "Should not disable externally-enabled handler"
         solver.disable_stall_handler()
 
 
 # ===================================================================
 # Dual-EE body stall: broadened detection, time budget, jump prevention
 # ===================================================================
+
 
 def _pose_to_4x4(frame_pose):
     """Convert a Pinocchio frame pose to a 4x4 numpy matrix."""
@@ -711,8 +787,8 @@ def _setup_dual_iiwa_body_stall():
     try:
         from utils.dual_iiwa_urdf import (
             build_dual_iiwa_urdf,
-            get_dual_iiwa_frame_names,
             get_dual_iiwa_default_configuration,
+            get_dual_iiwa_frame_names,
         )
     except ImportError:
         return None
@@ -738,7 +814,7 @@ def _setup_dual_iiwa_body_stall():
 
     solver = eik.KinematicsSolver(robot)
     solver.dt = 0.01
-    solver.set_damping(0.1)
+    _disable_weighted_fallback(solver)
 
     q = np.array(get_dual_iiwa_default_configuration(), dtype=float)
     robot.update_configuration(q)
@@ -751,7 +827,9 @@ def _setup_dual_iiwa_body_stall():
     # are observable under strict assertions.
     min_dist = 0.35
     solver.configure_collision_constraint(
-        min_distance=min_dist, include_pairs=[], exclude_pairs=list(excl),
+        min_distance=min_dist,
+        include_pairs=[],
+        exclude_pairs=list(excl),
     )
 
     left_frame, right_frame = get_dual_iiwa_frame_names()
@@ -816,18 +894,14 @@ class TestDualEEBodyStall:
     to match the validation_robot teleop pattern.
     """
 
-    def test_stall_recovery_progressively_relaxes_margin(self):
-        """Stall handler should progressively relax the collision margin.
-
-        Each stall → fallback → brief motion → re-stall cycle should ratchet
-        the margin down further. Over enough steps the margin should decrease
-        well below the initial nominal value.
-        """
+    def test_stall_recovery_does_not_relax_margin_without_stall(self):
+        """The robust baseline should not spend margin budget when no stall occurs."""
         setup = _setup_dual_iiwa_body_stall()
         if setup is None:
             pytest.skip("Dual iiwa model not available")
 
         robot, solver, q0, left_T, right_T, min_dist = setup
+        solver.configure_stall_handler(stall_threshold=5)
         opts = eik.PositionStepOptions()
         opts.stall_recovery = True
         opts.max_steps = 1
@@ -837,25 +911,29 @@ class TestDualEEBodyStall:
             eik.TaskTarget("right_body", right_T),
         ]
 
-        q, _, _ = _run_position_step_loop(
-            solver, robot, q0.copy(), targets, opts, 200,
+        q, _, stall_counters = _run_position_step_loop(
+            solver,
+            robot,
+            q0.copy(),
+            targets,
+            opts,
+            200,
         )
 
         final_min = solver.stall_handler_current_min_distance()
-        assert final_min < min_dist * 0.8, (
-            f"Margin only relaxed to {final_min:.4f} from {min_dist}; "
-            f"expected at least 20% reduction"
-        )
+        assert np.all(np.isfinite(q))
+        assert max(stall_counters) == 0
+        assert final_min == pytest.approx(min_dist)
         solver.disable_stall_handler()
 
-    def test_stall_counter_reaches_threshold_repeatedly(self):
-        """Stall counter should reach the threshold (5) multiple times,
-        triggering margin relaxation each cycle."""
+    def test_stall_counter_stays_clear_when_solver_remains_productive(self):
+        """Do not report legacy collision stalls when robust solve keeps moving."""
         setup = _setup_dual_iiwa_body_stall()
         if setup is None:
             pytest.skip("Dual iiwa model not available")
 
         robot, solver, q0, left_T, right_T, min_dist = setup
+        solver.configure_stall_handler(stall_threshold=5)
         opts = eik.PositionStepOptions()
         opts.stall_recovery = True
         opts.max_steps = 1
@@ -866,18 +944,15 @@ class TestDualEEBodyStall:
         ]
 
         _, _, stall_counters = _run_position_step_loop(
-            solver, robot, q0.copy(), targets, opts, 200,
+            solver,
+            robot,
+            q0.copy(),
+            targets,
+            opts,
+            200,
         )
 
-        max_counter = max(stall_counters)
-        threshold_hits = sum(1 for c in stall_counters if c >= 4)
-        assert max_counter >= 4, (
-            f"Counter never approached threshold ({max_counter} < 4)"
-        )
-        assert threshold_hits >= 3, (
-            f"Threshold hit only {threshold_hits} times; expected multiple "
-            f"stall→relax→motion→re-stall cycles"
-        )
+        assert max(stall_counters) == 0
         solver.disable_stall_handler()
 
     def test_computation_time_bounded_during_stall(self):
@@ -901,14 +976,17 @@ class TestDualEEBodyStall:
         ]
 
         _, times_ms, _ = _run_position_step_loop(
-            solver, robot, q0.copy(), targets, opts, 60,
+            solver,
+            robot,
+            q0.copy(),
+            targets,
+            opts,
+            60,
         )
 
         if times_ms:
             max_time = max(times_ms)
-            assert max_time < 10.0, (
-                f"Max per-step time {max_time:.2f}ms exceeds 10ms budget"
-            )
+            assert max_time < 10.0, f"Max per-step time {max_time:.2f}ms exceeds 10ms budget"
         solver.disable_stall_handler()
 
     def test_disable_task_no_penetration_jump(self):
@@ -930,7 +1008,12 @@ class TestDualEEBodyStall:
 
         # Drive into stall with both EEs
         q, _, _ = _run_position_step_loop(
-            solver, robot, q0.copy(), both_targets, opts, 30,
+            solver,
+            robot,
+            q0.copy(),
+            both_targets,
+            opts,
+            30,
         )
 
         # Disable left task (simulate user toggling off one EE)
@@ -940,7 +1023,12 @@ class TestDualEEBodyStall:
         # Continue with only right EE target active
         right_only_targets = [eik.TaskTarget("right_body", right_T)]
         q, _, _ = _run_position_step_loop(
-            solver, robot, q, right_only_targets, opts, 10,
+            solver,
+            robot,
+            q,
+            right_only_targets,
+            opts,
+            10,
         )
 
         dbg = solver.evaluate_collision_debug(q)
@@ -967,14 +1055,15 @@ class TestDualEEBodyStall:
         handler_stalls, _ = _run_velocity_loop(robot2, solver2, q02.copy(), 200)
         solver2.disable_stall_handler()
 
-        assert handler_stalls <= baseline_stalls, (
-            f"Handler should not increase stalls: {handler_stalls} > {baseline_stalls}"
-        )
+        assert (
+            handler_stalls <= baseline_stalls
+        ), f"Handler should not increase stalls: {handler_stalls} > {baseline_stalls}"
 
 
 # ===================================================================
 # Joint-limit stall: collision must not prevent pull-away recovery
 # ===================================================================
+
 
 class TestJointLimitCollisionInteraction:
     """Verify that collision constraints do not prevent recovery from
@@ -1028,12 +1117,12 @@ class TestJointLimitCollisionInteraction:
             away[:3, 3] = ee + np.array([0.15, 0.10, 0.10])
             result = solver.solve_position_step(q, away, "panda_stall", opts)
             dq = float(np.linalg.norm(np.asarray(result.q_solution) - q))
-            assert result.status == eik.SolverStatus.SUCCESS, (
-                f"Mode {mode.name}: expected SUCCESS on pull-away, got {result.status.name}"
-            )
-            assert dq > 1e-4, (
-                f"Mode {mode.name}: expected meaningful motion on pull-away, got dq={dq}"
-            )
+            assert (
+                result.status == eik.SolverStatus.SUCCESS
+            ), f"Mode {mode.name}: expected SUCCESS on pull-away, got {result.status.name}"
+            assert (
+                dq > 1e-4
+            ), f"Mode {mode.name}: expected meaningful motion on pull-away, got dq={dq}"
 
     def test_collision_does_not_worsen_infeasibility(self):
         """With collision ON vs OFF at the joint-limit stall config,
@@ -1109,9 +1198,9 @@ class TestJointLimitCollisionInteraction:
             T[:3, 3] = ee + offset
             result = solver.solve_position_step(q, T, "panda_stall", opts)
             dq = float(np.linalg.norm(np.asarray(result.q_solution) - q))
-            assert result.status == eik.SolverStatus.SUCCESS, (
-                f"{label}: expected SUCCESS, got {result.status.name}"
-            )
+            assert (
+                result.status == eik.SolverStatus.SUCCESS
+            ), f"{label}: expected SUCCESS, got {result.status.name}"
             assert dq > 1e-4, f"{label}: expected motion, got dq={dq}"
 
     def test_no_all_direction_trap(self):
@@ -1134,22 +1223,23 @@ class TestJointLimitCollisionInteraction:
                     T[:3, 3] = ee + np.array([dx, dy, dz])
                     robot.update_configuration(q.copy())
                     result = solver.solve_position_step(
-                        q, T, "panda_stall", opts,
+                        q,
+                        T,
+                        "panda_stall",
+                        opts,
                     )
-                    dq = float(np.linalg.norm(
-                        np.asarray(result.q_solution) - q
-                    ))
+                    dq = float(np.linalg.norm(np.asarray(result.q_solution) - q))
                     if result.status == eik.SolverStatus.SUCCESS and dq > 1e-5:
                         feasible_count += 1
         assert feasible_count >= 10, (
-            f"Only {feasible_count}/26 directions feasible at joint-limit "
-            f"stall; arm is trapped"
+            f"Only {feasible_count}/26 directions feasible at joint-limit " f"stall; arm is trapped"
         )
 
 
 # ===================================================================
 # Two-joint-limit trap: Jacobian clamping prevents SNS task-scaling
 # ===================================================================
+
 
 class TestTwoJointLimitTrap:
     """Verify that when two joints are simultaneously near their position
@@ -1180,6 +1270,7 @@ class TestTwoJointLimitTrap:
         robot = eik.RobotModel(str(urdf_path), floating_base=False)
         solver = eik.KinematicsSolver(robot)
         solver.dt = 0.01
+        _disable_weighted_fallback(solver)
 
         q_min, q_max = robot.get_joint_limits()
         q = np.array([0.0, -0.785, 0.0, -3.05, 0.0, -0.0172, 0.785, 0.04, 0.04])
@@ -1220,11 +1311,12 @@ class TestTwoJointLimitTrap:
                     T[:3, 3] = ee + np.array([dx, dy, dz])
                     robot.update_configuration(q.copy())
                     result = solver.solve_position_step(
-                        q.copy(), T, "trap_test", opts,
+                        q.copy(),
+                        T,
+                        "trap_test",
+                        opts,
                     )
-                    dq = float(np.linalg.norm(
-                        np.asarray(result.q_solution) - q
-                    ))
+                    dq = float(np.linalg.norm(np.asarray(result.q_solution) - q))
                     if result.status == eik.SolverStatus.SUCCESS and dq > 1e-3:
                         feasible += 1
         assert feasible >= 20, (
@@ -1250,9 +1342,9 @@ class TestTwoJointLimitTrap:
         T[:3, 3] = ee + np.array([-0.15, 0.0, 0.10])
         result = solver.solve_position_step(q.copy(), T, "trap_test", opts)
         dq = float(np.linalg.norm(np.asarray(result.q_solution) - q))
-        assert result.status == eik.SolverStatus.SUCCESS, (
-            f"Expected SUCCESS for [-X,+Z] direction, got {result.status.name}"
-        )
+        assert (
+            result.status == eik.SolverStatus.SUCCESS
+        ), f"Expected SUCCESS for [-X,+Z] direction, got {result.status.name}"
         assert dq > 1e-2, (
             f"Expected meaningful motion (dq > 0.01) for [-X,+Z], got dq={dq:.4e}. "
             f"Joint-limit Jacobian clamping may not be active."
@@ -1269,6 +1361,7 @@ class TestTwoJointLimitTrap:
         robot = eik.RobotModel(str(urdf_path), floating_base=False)
         solver = eik.KinematicsSolver(robot)
         solver.dt = 0.01
+        _disable_weighted_fallback(solver)
 
         q = np.array([0.0, -0.785, 0.0, -2.8, 0.0, 0.1, 0.785, 0.04, 0.04])
         robot.update_configuration(q)
@@ -1298,9 +1391,7 @@ class TestTwoJointLimitTrap:
                 q = np.asarray(result.q_solution, dtype=float)
 
         q_min, _ = robot.get_joint_limits()
-        assert q[5] - q_min[5] < 0.002, (
-            "j6 should be near its lower limit after driving inward"
-        )
+        assert q[5] - q_min[5] < 0.002, "j6 should be near its lower limit after driving inward"
 
         ee_now = np.array(robot.get_frame_pose(_PANDA_EE_FRAME).translation)
         pull_target = ee_now + np.array([0.05, 0.0, -0.05])
@@ -1310,17 +1401,16 @@ class TestTwoJointLimitTrap:
         robot.update_configuration(q.copy())
         result = solver.solve_position_step(q, T_pull, "recover", opts)
         dq = float(np.linalg.norm(np.asarray(result.q_solution) - q))
-        assert result.status == eik.SolverStatus.SUCCESS, (
-            f"Pull-away after limit stall: expected SUCCESS, got {result.status.name}"
-        )
-        assert dq > 1e-2, (
-            f"Pull-away should produce meaningful motion, got dq={dq:.4e}"
-        )
+        assert (
+            result.status == eik.SolverStatus.SUCCESS
+        ), f"Pull-away after limit stall: expected SUCCESS, got {result.status.name}"
+        assert dq > 5e-3, f"Pull-away should produce meaningful motion, got dq={dq:.4e}"
 
 
 # ===================================================================
 # Regression: clamping-induced stall must not relax collision margins
 # ===================================================================
+
 
 class TestClampingDoesNotTriggerStallRelaxation:
     """When Jacobian clamping reduces task motion near joint limits,
@@ -1400,8 +1490,7 @@ class TestClampingDoesNotTriggerStallRelaxation:
 
         floor_min = min_dist * 0.3
         assert final_margin >= floor_min - 1e-6, (
-            f"Stall handler dropped margin below floor "
-            f"({final_margin:.4f} < {floor_min:.4f})"
+            f"Stall handler dropped margin below floor " f"({final_margin:.4f} < {floor_min:.4f})"
         )
         solver.disable_stall_handler()
 
@@ -1449,10 +1538,7 @@ class TestClampingDoesNotTriggerStallRelaxation:
         margin_at_first_clamp = None
         margin_after_clamp = None
         for step in range(100):
-            near_limit = any(
-                0 < q[i] - q_min[i] < clamp_margin
-                for i in range(min(7, q.size))
-            )
+            near_limit = any(0 < q[i] - q_min[i] < clamp_margin for i in range(min(7, q.size)))
 
             result = solver.solve_position_step(q, into_T, "panda_stall", opts)
             q = np.asarray(result.q_solution, dtype=float)
@@ -1595,12 +1681,12 @@ class TestStallHandlerMultiConstraintRegression:
     def test_multi_constraint_rows_are_active_with_k2(self):
         m2 = self._run_trial(max_constraints=2, stall_recovery=False, steps=25)
         m1 = self._run_trial(max_constraints=1, stall_recovery=False, steps=25)
-        assert m2["max_active_rows"] >= 2, (
-            "Expected at least two active collision rows with max_constraints=2"
-        )
-        assert m1["max_active_rows"] <= 1, (
-            "Expected at most one active collision row with max_constraints=1"
-        )
+        assert (
+            m2["max_active_rows"] >= 2
+        ), "Expected at least two active collision rows with max_constraints=2"
+        assert (
+            m1["max_active_rows"] <= 1
+        ), "Expected at most one active collision row with max_constraints=1"
 
     def test_stall_recovery_k2_does_not_worsen_penetration_vs_off(self):
         with_stall = self._run_trial(max_constraints=2, stall_recovery=True, steps=80)

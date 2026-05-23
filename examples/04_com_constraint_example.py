@@ -13,7 +13,7 @@ Demonstrates the ``configure_com_constraint`` API.  Visualization style:
 Usage
 -----
     cd examples/
-    python 08_com_constraint_example.py [--robot KEY] [--visualizer pinocchio]
+    python 04_com_constraint_example.py [--robot KEY] [--visualizer pinocchio]
 
 Interact
 --------
@@ -28,11 +28,10 @@ import logging
 import time
 import warnings
 
-import numpy as np
-
 import embodik
-from embodik import r2q, q2r, Rt
-from embodik import create_robot_visualizer
+import numpy as np
+from embodik import Rt, create_robot_visualizer, q2r, r2q
+from example_helpers.ik_common import DEFAULT_VISER_PORT, configure_solver_runtime_policy
 from utils.robot_models import load_robot_presets, resolve_robot_configuration
 
 logging.basicConfig(
@@ -45,13 +44,13 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Colours (RGB 0-255)
 # ---------------------------------------------------------------------------
-COLOR_OUTER_POLY = (30, 120, 220)     # blue – outer boundary
-COLOR_INNER_POLY = (50, 200, 80)      # green – active (margined) boundary
-COLOR_COM_INSIDE = (50, 200, 80)      # green – CoM inside
-COLOR_COM_NEAR   = (255, 180, 0)      # orange – CoM near boundary
-COLOR_COM_OUTSIDE = (220, 50, 30)     # red – CoM outside
-COLOR_DROP_LINE  = (180, 180, 180)    # light grey
-COLOR_FLOOR_DISK = (180, 180, 180)    # light grey
+COLOR_OUTER_POLY = (30, 120, 220)  # blue – outer boundary
+COLOR_INNER_POLY = (50, 200, 80)  # green – active (margined) boundary
+COLOR_COM_INSIDE = (50, 200, 80)  # green – CoM inside
+COLOR_COM_NEAR = (255, 180, 0)  # orange – CoM near boundary
+COLOR_COM_OUTSIDE = (220, 50, 30)  # red – CoM outside
+COLOR_DROP_LINE = (180, 180, 180)  # light grey
+COLOR_FLOOR_DISK = (180, 180, 180)  # light grey
 
 # ---------------------------------------------------------------------------
 # Default support polygon (world XY).
@@ -59,12 +58,15 @@ COLOR_FLOOR_DISK = (180, 180, 180)    # light grey
 # deliberately snug: moving the EE forward ~15 cm will push the CoM to the
 # right boundary and the constraint visibly saturates.
 # ---------------------------------------------------------------------------
-DEFAULT_POLYGON = np.array([
-    [-0.08, -0.10],
-    [ 0.18, -0.10],
-    [ 0.18,  0.10],
-    [-0.08,  0.10],
-], dtype=float)
+DEFAULT_POLYGON = np.array(
+    [
+        [-0.08, -0.10],
+        [0.18, -0.10],
+        [0.18, 0.10],
+        [-0.08, 0.10],
+    ],
+    dtype=float,
+)
 
 # How close to the boundary before the CoM sphere turns orange (metres).
 NEAR_BOUNDARY_THRESHOLD = 0.02
@@ -73,6 +75,7 @@ NEAR_BOUNDARY_THRESHOLD = 0.02
 # ---------------------------------------------------------------------------
 # Geometry helpers
 # ---------------------------------------------------------------------------
+
 
 def _polygon_edge_pts(poly_xy: np.ndarray, z: float = 0.002) -> np.ndarray:
     """Return (N, 2, 3) array of line segments for the polygon boundary."""
@@ -132,11 +135,10 @@ def _com_color(min_slack: float) -> tuple:
 # CLI
 # ---------------------------------------------------------------------------
 
+
 def parse_args() -> argparse.Namespace:
     presets = load_robot_presets()
-    parser = argparse.ArgumentParser(
-        description="embodiK CoM support-polygon constraint demo."
-    )
+    parser = argparse.ArgumentParser(description="embodiK CoM support-polygon constraint demo.")
     parser.add_argument(
         "--robot",
         choices=sorted(presets.keys()),
@@ -147,12 +149,14 @@ def parse_args() -> argparse.Namespace:
         choices=["pinocchio", "viserurdf"],
         default="pinocchio",
     )
+    parser.add_argument("--port", type=int, default=DEFAULT_VISER_PORT, help="Viser server port.")
     return parser.parse_args()
 
 
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+
 
 def main(args: argparse.Namespace) -> None:
     # ------------------------------------------------------------------
@@ -168,7 +172,6 @@ def main(args: argparse.Namespace) -> None:
     q_current = q_default.copy()
     robot.update_configuration(q_current)
 
-    q_lower, q_upper = robot.get_joint_limits()
     initial_ee_pose = robot.get_frame_pose(target_link)
 
     # ------------------------------------------------------------------
@@ -176,8 +179,7 @@ def main(args: argparse.Namespace) -> None:
     # ------------------------------------------------------------------
     solver = embodik.KinematicsSolver(robot)
     solver.dt = 0.01
-    solver.set_damping(0.1)
-    solver.set_tolerance(0.1)
+    configure_solver_runtime_policy(solver)
 
     frame_task = solver.add_frame_task("ee_task", target_link)
     frame_task.priority = 0
@@ -201,7 +203,7 @@ def main(args: argparse.Namespace) -> None:
         robot_model=robot,
         backend=args.visualizer,
         description_name=description_name,
-        port=8080,
+        port=args.port,
         open_browser=True,
     )
     viz.add_grid("/ground", width=2, height=2)
@@ -216,9 +218,7 @@ def main(args: argparse.Namespace) -> None:
         margin_pct_slider = server.gui.add_slider(
             "Safety margin (%)", min=0.0, max=40.0, initial_value=5.0, step=1.0
         )
-        proximity_checkbox = server.gui.add_checkbox(
-            "Use proximity activation", initial_value=True
-        )
+        proximity_checkbox = server.gui.add_checkbox("Use proximity activation", initial_value=True)
         # Read-only display: shows the auto-computed threshold (5 % of inradius).
         prox_display = server.gui.add_number(
             "Proximity threshold (m)", initial_value=0.0, disabled=True
@@ -238,9 +238,15 @@ def main(args: argparse.Namespace) -> None:
 
     with server.gui.add_folder("IK Controls"):
         timing_handle = server.gui.add_number("Elapsed (ms)", 0.001, disabled=True)
-        pos_gain = server.gui.add_slider("Position Gain", min=0.1, max=200, initial_value=10.0, step=1.0)
-        rot_gain = server.gui.add_slider("Orientation Gain", min=0.1, max=200, initial_value=10.0, step=1.0)
-        iterations_slider = server.gui.add_slider("IK Iterations", min=1, max=20, initial_value=1, step=1)
+        pos_gain = server.gui.add_slider(
+            "Position Gain", min=0.1, max=200, initial_value=10.0, step=1.0
+        )
+        rot_gain = server.gui.add_slider(
+            "Orientation Gain", min=0.1, max=200, initial_value=10.0, step=1.0
+        )
+        iterations_slider = server.gui.add_slider(
+            "IK Iterations", min=1, max=20, initial_value=1, step=1
+        )
         ee_mode_dropdown = server.gui.add_dropdown(
             "EE Solve Mode",
             options=("SCALE", "SCALE_ELASTIC", "MIN_ERROR"),
@@ -250,7 +256,9 @@ def main(args: argparse.Namespace) -> None:
             "Allow SCALE fallback to MIN_ERROR",
             initial_value=False,
         )
-        solve_diag = server.gui.add_text("Solve Diagnostic", initial_value="mode=SCALE, fb=False, scale=1.000")
+        solve_diag = server.gui.add_text(
+            "Solve Diagnostic", initial_value="mode=SCALE, fb=False, scale=1.000"
+        )
         reset_btn = server.gui.add_button("Reset Arm")
 
     # ------------------------------------------------------------------
@@ -300,9 +308,15 @@ def main(args: argparse.Namespace) -> None:
             solver.clear_com_constraint()
             prox_display.value = 0.0
 
-    for handle in (enable_com, margin_pct_slider,
-                   proximity_checkbox, com_vel_max_slider,
-                   com_acc_max_slider, use_acc_limits):
+    for handle in (
+        enable_com,
+        margin_pct_slider,
+        proximity_checkbox,
+        com_vel_max_slider,
+        com_acc_max_slider,
+        use_acc_limits,
+    ):
+
         @handle.on_update
         def _(_):
             reconfigure_com()
@@ -367,7 +381,7 @@ def main(args: argparse.Namespace) -> None:
         start_t = time.time()
 
         robot.update_configuration(q_current)
-        com_pos = robot.get_com_position()            # (3,)
+        com_pos = robot.get_com_position()  # (3,)
         com_xy = com_pos[:2]
 
         # ---- Compute active (margined) polygon ----
@@ -397,10 +411,14 @@ def main(args: argparse.Namespace) -> None:
         _floor_disk_h.visible = show_com_viz.value
 
         # ---- Update drop line ---- shape (1, 2, 3)
-        _drop_line_h.points = np.array([[
-            [float(com_xy[0]), float(com_xy[1]), float(com_pos[2])],
-            [float(com_xy[0]), float(com_xy[1]), 0.001],
-        ]])
+        _drop_line_h.points = np.array(
+            [
+                [
+                    [float(com_xy[0]), float(com_xy[1]), float(com_pos[2])],
+                    [float(com_xy[0]), float(com_xy[1]), 0.001],
+                ]
+            ]
+        )
         _drop_line_h.visible = show_com_viz.value and show_drop_line.value
 
         # ---- IK ----
@@ -418,20 +436,12 @@ def main(args: argparse.Namespace) -> None:
         step_opts.max_steps = int(iterations_slider.value)
         result = solver.solve_position_step(q_current, target_pose, "ee_task", step_opts)
         effective_mode = (
-            result.task_modes_effective[0].name
-            if len(result.task_modes_effective) > 0
-            else "SCALE"
+            result.task_modes_effective[0].name if len(result.task_modes_effective) > 0 else "SCALE"
         )
         used_fallback = (
-            bool(result.task_used_fallback[0])
-            if len(result.task_used_fallback) > 0
-            else False
+            bool(result.task_used_fallback[0]) if len(result.task_used_fallback) > 0 else False
         )
-        scale_value = (
-            float(result.task_scales[0])
-            if len(result.task_scales) > 0
-            else 1.0
-        )
+        scale_value = float(result.task_scales[0]) if len(result.task_scales) > 0 else 1.0
         solve_diag.value = f"mode={effective_mode}, fb={used_fallback}, scale={scale_value:.3f}"
 
         if result.status in (
@@ -439,7 +449,7 @@ def main(args: argparse.Namespace) -> None:
             embodik.SolverStatus.INFEASIBLE,
             embodik.SolverStatus.NUMERICAL_ERROR,
         ):
-            q_current = np.clip(np.array(result.q_solution), q_lower, q_upper)
+            q_current = np.asarray(result.q_solution, dtype=float)
             robot.update_configuration(q_current)
             viz.display(q_current)
         else:

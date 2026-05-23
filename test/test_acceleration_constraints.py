@@ -13,7 +13,6 @@ import pytest
 
 import embodik as eik
 
-
 PANDA_HOME = np.array([0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785, 0.04, 0.04])
 
 
@@ -25,8 +24,6 @@ def panda_setup():
     robot = eik.RobotModel(URDF_PATH, floating_base=False)
     solver = eik.KinematicsSolver(robot)
     solver.dt = 0.01
-    solver.set_damping(1e-1)
-    solver.set_tolerance(1e-6)
     return robot, solver
 
 
@@ -35,12 +32,12 @@ class TestAccelerationConstraints:
     def test_acceleration_limits_api_exists(self, panda_setup):
         """KinematicsSolver should expose acceleration limit methods."""
         _, solver = panda_setup
-        assert hasattr(solver, "enable_acceleration_limits"), (
-            "KinematicsSolver should have enable_acceleration_limits method"
-        )
-        assert hasattr(solver, "set_acceleration_limits"), (
-            "KinematicsSolver should have set_acceleration_limits method"
-        )
+        assert hasattr(
+            solver, "enable_acceleration_limits"
+        ), "KinematicsSolver should have enable_acceleration_limits method"
+        assert hasattr(
+            solver, "set_acceleration_limits"
+        ), "KinematicsSolver should have set_acceleration_limits method"
 
     def test_acceleration_limits_validate_shape_and_values(self, panda_setup):
         """Acceleration limits should reject invalid vectors before solving."""
@@ -148,8 +145,10 @@ class TestAccelerationConstraints:
         def max_jerk(velocities):
             if len(velocities) < 2:
                 return 0.0
-            jumps = [np.max(np.abs(velocities[i+1] - velocities[i]))
-                     for i in range(len(velocities) - 1)]
+            jumps = [
+                np.max(np.abs(velocities[i + 1] - velocities[i]))
+                for i in range(len(velocities) - 1)
+            ]
             return max(jumps)
 
         jerk_no_accel = max_jerk(vel_no_accel)
@@ -195,16 +194,15 @@ class TestAccelerationConstraints:
 
             if step > 0:  # skip first step (no previous velocity)
                 accel = np.abs(dq - prev_dq) / dt
-                max_accel_violation = max(max_accel_violation,
-                                          np.max(accel) - a_max)
+                max_accel_violation = max(max_accel_violation, np.max(accel) - a_max)
 
             prev_dq = dq.copy()
             q = q + dq * dt
 
         # Allow small numerical tolerance
-        assert max_accel_violation < 0.1, (
-            f"Acceleration violation {max_accel_violation:.4f} exceeds tolerance"
-        )
+        assert (
+            max_accel_violation < 0.1
+        ), f"Acceleration violation {max_accel_violation:.4f} exceeds tolerance"
 
     def test_tracking_not_catastrophically_degraded(self, panda_setup):
         """Acceleration limits should not degrade EE tracking by more than 15%."""

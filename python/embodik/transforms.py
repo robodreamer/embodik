@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-import numpy as np
 from typing import Union
+
+import numpy as np
 
 from . import _embodik_impl as _native
 
@@ -52,7 +53,9 @@ class Rotation:
         return cls(np.array(R))
 
     @classmethod
-    def from_euler(cls, seq: str, angles: Union[float, np.ndarray], degrees: bool = False) -> "Rotation":
+    def from_euler(
+        cls, seq: str, angles: Union[float, np.ndarray], degrees: bool = False
+    ) -> "Rotation":
         """
         Create from Euler angles.
 

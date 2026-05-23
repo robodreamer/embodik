@@ -28,7 +28,7 @@ The public script uses the current registered-task API:
 | Step | API calls | Purpose |
 | --- | --- | --- |
 | Resolve a robot preset | `resolve_robot_configuration("panda")` | Get the `RobotModel`, target link, and default configuration used by the script. |
-| Create the solver | `KinematicsSolver(robot)`, `solver.dt`, `set_damping()`, `set_tolerance()` | Configure the stepping IK solver. |
+| Create the solver | `KinematicsSolver(robot)`, `solver.dt` | Configure the stepping IK solver. |
 | Register the primary task | `solver.add_frame_task("ee_task", target_link)` | Track the draggable end-effector target. |
 | Register posture bias | `solver.add_posture_task("posture_bias")`, `set_target_configuration(q_default)` | Keep unused freedom near the default posture. |
 | Configure stepping | `PositionStepOptions()` | Set gains, one inner step, and adaptive timestep behavior. |

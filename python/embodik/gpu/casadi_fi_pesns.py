@@ -22,6 +22,7 @@ try:
 except ImportError:
     ca = None
 
+from embodik.gpu.casadi_srinv import srinv as _casadi_srinv
 
 # Default parameters matching C++ VelocitySolverConfig
 DEFAULT_EPSILON = 1e-6
@@ -38,39 +39,8 @@ def srinv(
     tol: float = DEFAULT_EPSILON,
     damping: float = DEFAULT_DAMPING,
 ) -> "ca.SX":
-    """
-    Singularity-Robust Inverse (SRINV) matching C++ ComputeRegularizedInverse.
-
-    For A (m x n), computes A^+ = A.T @ inv(A @ A.T + regularization).
-    Regularization uses determinant-based + fixed damping for numerical stability.
-
-    Args:
-        A: Input matrix (m x n), typically m <= n
-        tol: Tolerance threshold for determinant check
-        damping: Additional diagonal damping factor
-
-    Returns:
-        Pseudo-inverse (n x m)
-    """
-    if ca is None:
-        raise RuntimeError("CasADi is required")
-
-    AAT = A @ A.T
-    m = AAT.size1()
-    threshold_sq = tol * tol
-
-    # Determinant-based regularization (matches C++ ComputeRegularizedInverse)
-    det_val = ca.det(AAT)
-    lam = ca.if_else(
-        det_val < threshold_sq,
-        (1.0 - (det_val / threshold_sq) ** 2) * threshold_sq,
-        0.0,
-    )
-    AAT_reg = AAT + lam * ca.SX.eye(m)
-    # Additional damping for stability
-    AAT_reg = AAT_reg + damping * tol * ca.SX.eye(m)
-
-    return A.T @ ca.inv(AAT_reg)
+    """Compatibility wrapper around the shared CasADi regularized inverse."""
+    return _casadi_srinv(A, tol=tol, damping=damping)
 
 
 def get_feasible_task_scale(

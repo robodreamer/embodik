@@ -1,6 +1,6 @@
 # Spot Full-Body IK Example
 
-`examples/14_spot_full_body_ik_viser.py` is a regular Viser Spot arm IK demo.
+`examples/08_spot_full_body_ik_viser.py` is a regular Viser Spot arm IK demo.
 It exposes arm+torso, torso-only, full-body, and two-stage solve modes so the
 same target can be tested with different whole-body coordination policies.
 
@@ -25,7 +25,7 @@ python -m pip install -U pip
 python -m pip install "embodik[examples]"
 embodik-examples --copy
 cd embodik_examples
-python 14_spot_full_body_ik_viser.py
+python 08_spot_full_body_ik_viser.py
 ```
 
 The copied example bundle includes a Spot-with-arm URDF, so no `--urdf`
@@ -36,11 +36,11 @@ override the bundled model.
 From a repository checkout, use Pixi:
 
 ```bash
-pixi run python examples/14_spot_full_body_ik_viser.py
+pixi run python examples/08_spot_full_body_ik_viser.py
 ```
 
 For Seer controller teleop from a checkout, use the teleop environment:
 
 ```bash
-pixi run -e teleop python examples/14_spot_full_body_ik_viser.py --enable-teleop
+pixi run -e teleop python examples/08_spot_full_body_ik_viser.py --enable-teleop
 ```

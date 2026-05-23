@@ -9,9 +9,9 @@ Key features:
 - Handles geometry model loading with fallbacks
 """
 
-from typing import Optional, Tuple, TYPE_CHECKING
-from pathlib import Path
 import logging
+from pathlib import Path
+from typing import TYPE_CHECKING, Optional, Tuple
 
 # Note: This module is optional and requires 'pin' package (pip install pin)
 try:

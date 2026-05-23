@@ -2,7 +2,7 @@
 """Headless performance harness for the G1 four-gizmo IK path.
 
 The harness mirrors the four transform controls in
-``examples/13_unitree_g1_retargeting_ik.py``: right hand, left hand, right foot,
+``examples/07_unitree_g1_retargeting_ik.py``: right hand, left hand, right foot,
 and left foot are all driven as FRAME_POSE targets. Collision and CoM
 constraints are intentionally left disabled so the measured path isolates
 multi-target IK solve cost and tracking quality.
@@ -27,6 +27,12 @@ for path in (EXAMPLES_ROOT, REPO_ROOT):
         sys.path.insert(0, str(path))
 
 try:
+    from example_helpers.g1_ik_runtime import (  # noqa: E402
+        _apply_g1_soft_knee_seed,
+        _clip_q,
+        _configure_g1_posture_task,
+        _percentile,
+    )
     from example_helpers.g1_model_utils import (  # noqa: E402
         create_g1_robot_model,
         g1_collision_pair_preset_options,
@@ -39,6 +45,12 @@ try:
 except ModuleNotFoundError as exc:
     if exc.name != "example_helpers" and not str(exc.name).startswith("example_helpers."):
         raise
+    from examples.example_helpers.g1_ik_runtime import (  # noqa: E402
+        _apply_g1_soft_knee_seed,
+        _clip_q,
+        _configure_g1_posture_task,
+        _percentile,
+    )
     from examples.example_helpers.g1_model_utils import (  # noqa: E402
         create_g1_robot_model,
         g1_collision_pair_preset_options,
@@ -106,37 +118,6 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--quiet", action="store_true", help="Only print the final JSON summary.")
     return parser.parse_args()
-
-
-def _clip_q(robot, q: np.ndarray, q_lo: np.ndarray, q_hi: np.ndarray) -> np.ndarray:
-    q = np.asarray(q, dtype=float).copy()
-    if getattr(robot, "is_floating_base", False) and q.size >= 7:
-        q[7:] = np.clip(q[7:], q_lo[7:], q_hi[7:])
-        quat = q[3:7]
-        n = float(np.linalg.norm(quat))
-        q[3:7] = quat / n if n > 1e-12 else np.array([0.0, 0.0, 0.0, 1.0], dtype=float)
-        return q
-    return np.clip(q, q_lo, q_hi)
-
-
-def _apply_g1_soft_knee_seed(robot, q: np.ndarray) -> np.ndarray:
-    q = np.asarray(q, dtype=float).copy()
-    seed = {
-        "left_hip_pitch_joint": -0.18,
-        "left_knee_joint": 0.36,
-        "left_ankle_pitch_joint": -0.18,
-        "right_hip_pitch_joint": -0.18,
-        "right_knee_joint": 0.36,
-        "right_ankle_pitch_joint": -0.18,
-    }
-    for joint_name, value in seed.items():
-        try:
-            idx = int(robot.get_joint_config_index(joint_name))
-        except Exception:
-            continue
-        if 0 <= idx < q.size:
-            q[idx] = float(value)
-    return q
 
 
 def _pose_matrix(robot, frame_name: str) -> np.ndarray:
@@ -207,24 +188,6 @@ def _frame_errors(
     return errors
 
 
-def _percentile(values: list[float], pct: float) -> float:
-    if not values:
-        return 0.0
-    return float(np.percentile(np.asarray(values, dtype=float), pct))
-
-
-def _g1_posture_controlled_joint_indices(robot) -> list[int]:
-    if getattr(robot, "is_floating_base", False) and int(robot.nv) > 6:
-        return list(range(6, int(robot.nv)))
-    return list(range(int(robot.nv)))
-
-
-def _configure_g1_posture_task(posture, robot, q_target: np.ndarray) -> None:
-    posture.set_target_configuration(np.asarray(q_target, dtype=float).copy())
-    if hasattr(posture, "set_controlled_joint_indices"):
-        posture.set_controlled_joint_indices(_g1_posture_controlled_joint_indices(robot))
-
-
 def run_benchmark(args: argparse.Namespace) -> dict[str, object]:
     robot = create_g1_robot_model(floating_base=True, reduced_ik=not bool(args.full_ik_model))
     q = _apply_g1_soft_knee_seed(robot, robot.neutral_configuration())
@@ -241,8 +204,6 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, object]:
 
     solver = embodik.KinematicsSolver(robot)
     solver.dt = 0.01
-    solver.set_damping(0.1)
-    solver.set_tolerance(0.1)
     solver.enable_position_limits(True)
     solver.enable_velocity_limits(True)
     if hasattr(solver, "clear_collision_constraint"):
@@ -420,7 +381,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, object]:
         status_name = getattr(result.status, "name", str(result.status))
 
         if hasattr(result, "q_solution") and status_name != "COLLISION_VIOLATED":
-            q_candidate = _clip_q(robot, np.asarray(result.q_solution, dtype=float), q_lo, q_hi)
+            q_candidate = np.asarray(result.q_solution, dtype=float).copy()
             if np.all(np.isfinite(q_candidate)):
                 q = q_candidate
                 robot.update_configuration(q)

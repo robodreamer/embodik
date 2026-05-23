@@ -9,6 +9,7 @@ identify where SCALE_ELASTIC is slow.
 from __future__ import annotations
 
 import numpy as np
+
 import embodik as eik
 
 _PANDA_DEFAULT_Q = np.array([0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785])
@@ -18,6 +19,7 @@ _PANDA_EE_FRAME = "panda_hand"
 
 def _load_panda_narrow(margin=0.15):
     from robot_descriptions.panda_description import URDF_PATH
+
     robot = eik.RobotModel(URDF_PATH, floating_base=False)
     q_init = np.concatenate([_PANDA_DEFAULT_Q, _PANDA_GRIPPER_EXTRA])
     robot.update_configuration(q_init)
@@ -36,8 +38,7 @@ def _load_panda_narrow(margin=0.15):
     return robot, solver
 
 
-def run_mode(mode_name, solve_mode, allow_fallback=False, steps=100,
-             offset=None, margin=0.15):
+def run_mode(mode_name, solve_mode, allow_fallback=False, steps=100, offset=None, margin=0.15):
     """Run a trajectory and collect per-step diagnostics."""
     robot, solver = _load_panda_narrow(margin=margin)
     q = np.concatenate([_PANDA_DEFAULT_Q, _PANDA_GRIPPER_EXTRA])
@@ -83,7 +84,7 @@ def run_mode(mode_name, solve_mode, allow_fallback=False, steps=100,
         ee_positions.append(np.array(task.current_position).copy())
 
     solver.clear_tasks()
-    if hasattr(solver, 'disable_elastic_band') and solver.elastic_band_enabled():
+    if hasattr(solver, "disable_elastic_band") and solver.elastic_band_enabled():
         solver.disable_elastic_band()
 
     return {
@@ -103,15 +104,19 @@ def print_comparison(results, offset_label=""):
     print(f"{'='*90}")
 
     # Summary stats
-    print(f"\n{'Mode':20s} {'MeanScale':>10s} {'MinScale':>10s} {'MeanDqNorm':>11s} "
-          f"{'ZeroScaleN':>11s} {'MeanSat':>8s} {'EE_Dist':>10s}")
+    print(
+        f"\n{'Mode':20s} {'MeanScale':>10s} {'MinScale':>10s} {'MeanDqNorm':>11s} "
+        f"{'ZeroScaleN':>11s} {'MeanSat':>8s} {'EE_Dist':>10s}"
+    )
     print("-" * 90)
     for r in results:
         ee_dist = float(np.linalg.norm(r["ee_positions"][-1] - r["ee_positions"][0]))
         zero_scale_count = int(np.sum(r["scales"] < 1e-6))
-        print(f"{r['name']:20s} {np.mean(r['scales']):10.4f} {np.min(r['scales']):10.4f} "
-              f"{np.mean(r['dq_norms']):11.6f} {zero_scale_count:11d} "
-              f"{np.mean(r['saturated_counts']):8.1f} {ee_dist:10.4f}")
+        print(
+            f"{r['name']:20s} {np.mean(r['scales']):10.4f} {np.min(r['scales']):10.4f} "
+            f"{np.mean(r['dq_norms']):11.6f} {zero_scale_count:11d} "
+            f"{np.mean(r['saturated_counts']):8.1f} {ee_dist:10.4f}"
+        )
 
     # Per-step trace (first 30 steps where differences matter most)
     print(f"\n--- Per-step trace (first 30 steps) ---")
@@ -130,14 +135,16 @@ def print_comparison(results, offset_label=""):
     # Identify sluggish region: steps where SCALE_ELASTIC has low scale but MIN_ERROR has high dq
     if len(results) >= 3:
         elastic = results[1]  # SCALE_ELASTIC
-        minerr = results[2]   # MIN_ERROR
+        minerr = results[2]  # MIN_ERROR
         sluggish_steps = []
         for i in range(len(elastic["scales"])):
             if elastic["scales"][i] < 0.3 and minerr["dq_norms"][i] > 0.1:
                 sluggish_steps.append(i)
         if sluggish_steps:
-            print(f"\n--- Sluggish steps (elastic scale<0.3, min_error dq>0.1): "
-                  f"{len(sluggish_steps)} steps ---")
+            print(
+                f"\n--- Sluggish steps (elastic scale<0.3, min_error dq>0.1): "
+                f"{len(sluggish_steps)} steps ---"
+            )
             print(f"Steps: {sluggish_steps[:20]}{'...' if len(sluggish_steps) > 20 else ''}")
 
 
@@ -149,11 +156,21 @@ if __name__ == "__main__":
         (0.10, "X +0.05, margin=0.10 (very narrow)", np.array([0.05, 0.0, 0.0])),
     ]:
         results = [
-            run_mode("SCALE", eik.TaskSolveMode.SCALE, steps=100,
-                     offset=offset, margin=margin),
-            run_mode("SCALE_ELASTIC", eik.TaskSolveMode.SCALE_ELASTIC, steps=100,
-                     offset=offset, margin=margin),
-            run_mode("MIN_ERROR", eik.TaskSolveMode.SCALE, allow_fallback=True,
-                     steps=100, offset=offset, margin=margin),
+            run_mode("SCALE", eik.TaskSolveMode.SCALE, steps=100, offset=offset, margin=margin),
+            run_mode(
+                "SCALE_ELASTIC",
+                eik.TaskSolveMode.SCALE_ELASTIC,
+                steps=100,
+                offset=offset,
+                margin=margin,
+            ),
+            run_mode(
+                "MIN_ERROR",
+                eik.TaskSolveMode.SCALE,
+                allow_fallback=True,
+                steps=100,
+                offset=offset,
+                margin=margin,
+            ),
         ]
         print_comparison(results, offset_label)

@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.11] - 2026-05-23
+
+### Added
+- Added solver runtime diagnostics and `SolverRuntimeConfig` controls for
+  solver-owned pose-task layout auto-switching and constrained weighted
+  fallback recovery.
+- Added `PoseTaskGroup` support for switching between merged and split
+  same-priority pose task layouts while preserving existing task ownership.
+
+### Changed
+- Enabled constrained weighted fallback recovery by default for
+  `solve_position_step()` runtime policy when a prioritized candidate fails but
+  a weighted same-priority candidate satisfies solver-owned hard constraints.
+- Renumbered the highlighted public examples to keep the recommended demos
+  first, moved narrower examples out of the numbered path, and standardized
+  Viser examples on the shared `http://localhost:8080` default endpoint.
+- Simplified public examples to call the C++ solver runtime policy directly
+  instead of maintaining Python-side constraint clipping, retry, or last-safe
+  guard helpers.
+
+### Removed
+- Removed the public `TaskLayout.WEIGHTED_FALLBACK` enum value before release;
+  weighted fallback is reported through `SolverRecoveryStage.WEIGHTED_FALLBACK`
+  while `TaskLayout` remains limited to merged vs. split pose-task layout.
+- Removed internal harness files from the installed/copied public examples
+  surface while keeping them available in the source tree for release
+  validation.
+
 ## [0.20.10] - 2026-05-21
 
 ### Changed
@@ -68,7 +96,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - Added `SolverResult.condition_number` reporting for singularity/conditioning diagnostics without changing the SRINV damping law.
 - Added opt-in joint acceleration limits (`enable_acceleration_limits()` / `set_acceleration_limits()`) with Python bindings, tests, and example controls.
-- Added the unified `examples/12_bimanual_whole_body_ik.py` entrypoint, defaulting to AI Worker and optionally supporting RB-Y1 with generated bounded primitive collision geometry.
+- Added the unified `examples/06_bimanual_whole_body_ik.py` entrypoint, defaulting to AI Worker and optionally supporting RB-Y1 with generated bounded primitive collision geometry.
 
 ### Changed
 - Renamed shared bimanual example helpers and docs away from AI-worker-specific filenames.
@@ -78,7 +106,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.20.5] - 2026-05-09
 
 ### Added
-- Added `examples/13_unitree_g1_retargeting_ik.py`, a Unitree G1 whole-body retargeting IK example with palm, pelvis, and foot target controls.
+- Added `examples/07_unitree_g1_retargeting_ik.py`, a Unitree G1 whole-body retargeting IK example with palm, pelvis, and foot target controls.
 - Added G1 CoM visualization, optional self-collision handling, collision-geometry inspection, and headless smoke checks for the new example.
 - Bundled the generated G1 collision URDF asset so copied and pip-installed examples can run without source-tree asset paths.
 
@@ -109,7 +137,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.20.2] - 2026-04-28
 
 ### Added
-- Public ROBOTIS AI Worker constrained dual-arm teleop example (`examples/12_bimanual_whole_body_ik.py`) with cached public URDF resolution and reduced collision assets.
+- Public ROBOTIS AI Worker constrained dual-arm teleop example (`examples/06_bimanual_whole_body_ik.py`) with cached public URDF resolution and reduced collision assets.
 - Shared `embodik.interactive_ik` runtime helpers for robust interactive IK stepping, constrained last-safe restoration, and boundary stall classification.
 - AI Worker robustness harness and headless regression coverage for collision/CoM boundary behavior.
 
@@ -131,7 +159,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`PositionStepOptions.adaptive_dt`**: scales the integration timestep proportional to current position error for faster large-jump convergence without tuning gains. Configurable via `adaptive_dt_max_scale` and `adaptive_dt_reference_distance`. Includes proximity-aware cap to prevent overshoot stalls near collision boundaries.
 - **Collision boundary tuning API**: `set_collision_repulsion_deadband()`, `set_collision_recovery_scale()`, `set_collision_max_separation_speed_nonpenetrating()` for runtime sweep/autoresearch without recompiling.
 - **`evaluate_per_pair_override_violations(q)`**: returns the worst margin across active per-pair override pairs; used internally in post-step rejection.
-- Example `11_collision_hardening_demo.py` (Franka Panda interactive demo with collision status, per-pair sliders, nearest-point visualization).
+- Example `collision_hardening_demo.py` (Franka Panda interactive demo with collision status, per-pair sliders, nearest-point visualization).
 - Benchmarks: `benchmark_position_step_responsiveness.py`, `benchmark_boundary_oscillation.py`.
 - Test suite: `test/test_collision_hardening.py` (7 tests covering all new collision guarantees).
 
@@ -617,7 +645,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `add_frame_task()`: Single-frame pose task for Orthogonal mode.
   - `embodik.map_ects_mode()`, `map_ects_mode_blended()`: ECTS config mapping.
 - **Relative pose constraint**: `configure_relative_pose_constraint()`, `clear_relative_pose_constraint()` for bounds on stored relative target.
-- **Interactive example** (`09_dual_arm_ects.py`): Dual LBR iiwa ECTS demo with Viser.
+- **Interactive example** (`05_dual_arm_ects.py`): Dual LBR iiwa ECTS demo with Viser.
   - Six coordination modes (Orthogonal, Serial L/R, Blended, Parallel).
   - Orthogonal mode: two independent EE pose controls (blue marker → left EE, green → right EE).
   - Mode-change snap keeps arms at current config; markers snap to effective frames.
@@ -678,7 +706,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and acceleration terms; epsilon dead-zone (0.1 mm) prevents sign-flip
   oscillation from numerical noise. Matches the `kMarginEpsilon` pattern used
   in joint position-limit constraints.
-- **Interactive Viser example** (`examples/08_com_constraint_example.py`):
+- **Interactive Viser example** (`examples/04_com_constraint_example.py`):
   CoM sphere, floor projection disk, vertical drop line, inner/outer polygon
   boundaries, and color-coded status (green/orange/red). GUI sliders for all
   constraint parameters.
