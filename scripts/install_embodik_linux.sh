@@ -119,7 +119,7 @@ if [[ ! -d "$VENV_DIR" ]]; then
 fi
 
 "$VENV_DIR/bin/python" -m pip install -U pip
-"$VENV_DIR/bin/python" -m pip install "pin>=3.8.0,<4" "cmeel-urdfdom>=4,<5" scikit-build-core nanobind cmake ninja
+"$VENV_DIR/bin/python" -m pip install "pin>=3.8.0,<4" "cmeel-urdfdom>=4,<5" "cmeel-tinyxml2>=10,<11" scikit-build-core nanobind cmake ninja
 
 echo "==> Configuring CMAKE_PREFIX_PATH (PyPI pin first)..."
 if [[ "$CLEAN_ENV" -eq 1 ]]; then
