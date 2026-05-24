@@ -28,6 +28,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   regression tests.
 - Made the RB-Y1 auto-layout regression accept platforms where the merged pose
   layout already succeeds while still requiring split/auto to stay productive.
+- Kept optional RB-Y1 `robot_descriptions` regressions from failing CI when the
+  external model repository cannot be fetched by the runner.
 - Renumbered the highlighted public examples to keep the recommended demos
   first, moved narrower examples out of the numbered path, and standardized
   Viser examples on the shared `http://localhost:8080` default endpoint.

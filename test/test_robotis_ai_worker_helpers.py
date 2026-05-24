@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import importlib
 import importlib.util
 from pathlib import Path
 
@@ -41,6 +42,16 @@ def _load_bimanual_example_module():
     return module
 
 
+def _require_rby1_description() -> None:
+    try:
+        importlib.import_module("robot_descriptions.rby1_description")
+    except Exception as exc:
+        pytest.skip(
+            "robot_descriptions.rby1_description could not be resolved; "
+            f"optional external asset fetch failed: {exc}"
+        )
+
+
 def _pose_matrix(robot, frame_name: str) -> np.ndarray:
     pose = robot.get_frame_pose(frame_name)
     mat = np.eye(4, dtype=float)
@@ -50,7 +61,7 @@ def _pose_matrix(robot, frame_name: str) -> np.ndarray:
 
 
 def _load_reduced_rby1_visual_robot():
-    pytest.importorskip("robot_descriptions.rby1_description")
+    _require_rby1_description()
     mod = _load_bimanual_example_module()
     source_urdf = mod._resolve_rby1_urdf_path()
     visual_urdf = mod._prepare_rby1_tip_frame_urdf(source_urdf)
@@ -359,7 +370,7 @@ def test_support_polygon_gate_detects_initial_com_outside_rby1_triangle() -> Non
 
 
 def test_rby1_generated_collision_urdf_has_bounded_curated_pairs() -> None:
-    pytest.importorskip("robot_descriptions.rby1_description")
+    _require_rby1_description()
     mod = _load_bimanual_example_module()
     source_urdf = mod._resolve_rby1_urdf_path()
     visual_urdf = mod._prepare_rby1_tip_frame_urdf(source_urdf)
@@ -405,7 +416,7 @@ def test_rby1_generated_collision_urdf_has_bounded_curated_pairs() -> None:
 
 
 def test_rby1_generated_collision_constraint_configures_and_evaluates() -> None:
-    pytest.importorskip("robot_descriptions.rby1_description")
+    _require_rby1_description()
     mod = _load_bimanual_example_module()
     source_urdf = mod._resolve_rby1_urdf_path()
     visual_urdf = mod._prepare_rby1_tip_frame_urdf(source_urdf)
@@ -463,7 +474,7 @@ def test_rby1_auto_pose_layout_keeps_bimanual_case_productive() -> None:
 
 
 def test_rby1_collision_push_release_uses_hardening_policy_without_stall_lock() -> None:
-    pytest.importorskip("robot_descriptions.rby1_description")
+    _require_rby1_description()
     mod = _load_bimanual_example_module()
     source_urdf = mod._resolve_rby1_urdf_path()
     visual_urdf = mod._prepare_rby1_tip_frame_urdf(source_urdf)
@@ -618,7 +629,7 @@ def test_rby1_repeated_collision_entry_release_uses_solver_owned_recovery() -> N
     example. Release motion should come from solver-owned constrained recovery,
     not from clearing collision constraints in the UI loop.
     """
-    pytest.importorskip("robot_descriptions.rby1_description")
+    _require_rby1_description()
     mod = _load_bimanual_example_module()
     source_urdf = mod._resolve_rby1_urdf_path()
     visual_urdf = mod._prepare_rby1_tip_frame_urdf(source_urdf)
@@ -777,7 +788,7 @@ def test_rby1_repeated_collision_entry_release_uses_solver_owned_recovery() -> N
 
 def test_rby1_compact_dual_target_drag_stays_productive_near_collision() -> None:
     """Both active targets near the torso should not collapse into zero motion."""
-    pytest.importorskip("robot_descriptions.rby1_description")
+    _require_rby1_description()
     mod = _load_bimanual_example_module()
     source_urdf = mod._resolve_rby1_urdf_path()
     visual_urdf = mod._prepare_rby1_tip_frame_urdf(source_urdf)
