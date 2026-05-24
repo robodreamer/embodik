@@ -26,6 +26,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Included the mesh loader used by generated RB-Y1 collision fixtures in the
   examples extra and made CI check out LFS-backed robot assets for collision
   regression tests.
+- Made the RB-Y1 auto-layout regression accept platforms where the merged pose
+  layout already succeeds while still requiring split/auto to stay productive.
 - Renumbered the highlighted public examples to keep the recommended demos
   first, moved narrower examples out of the numbered path, and standardized
   Viser examples on the shared `http://localhost:8080` default endpoint.

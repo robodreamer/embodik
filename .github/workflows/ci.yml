@@ -83,7 +83,7 @@ jobs:
             --editable "$PWD" \
             --clean-env
           source .venv/bin/activate
-          python -m pip install pytest pytest-benchmark robot_descriptions casadi trimesh
+          python -m pip install pytest pytest-benchmark robot_descriptions casadi trimesh pycollada
 
       - name: Run tests
         run: |

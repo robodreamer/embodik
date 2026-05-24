@@ -68,6 +68,7 @@ examples = [
     "pin>=3.8.0,<4",
     "cmeel-urdfdom>=4,<5",
     "cmeel-tinyxml2>=10,<11",
+    "pycollada>=0.8",
     "pyyaml>=6.0",
     "robot_descriptions>=1.0.0",
     "trimesh>=3.0.0",
