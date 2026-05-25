@@ -12,6 +12,8 @@ theme:
   name: material
   custom_dir: overrides
   copyright: Copyright &copy; 2026 Andy Park
+  logo: assets/brand/embodik-logo-nav.svg
+  favicon: assets/brand/embodik-logo-dark.svg
   palette:
     - scheme: default
       primary: indigo
@@ -36,6 +38,9 @@ theme:
 
 hooks:
   - docs/hooks.py
+
+extra_css:
+  - stylesheets/brand.css
 
 plugins:
   - search

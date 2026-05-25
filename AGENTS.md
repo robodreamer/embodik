@@ -105,6 +105,18 @@ PDFs, private repos, or non-indexed docs). In those cases:
 
 See `agent guidance` for build/test commands and release steps. Always run via `pixi run <task>` so the hermetic environment is used.
 
+## GitHub Actions Cost Policy
+
+Default automation is intentionally targeted to reduce maintainer spend:
+
+- Keep automatic CI cheap and Ubuntu-focused.
+- Keep macOS, source-install matrices, and full wheel builds manual or release/tag-gated.
+- Keep macOS validation opt-in even inside manual validation workflows; do not make it a default checkbox.
+- Do not re-enable full wheel builds or macOS full tests on every PR/push unless the user explicitly requests that policy change.
+- Use `workflow_dispatch` for release-candidate validation and platform-sensitive changes.
+- Keep `v*` tag release workflows unfiltered and protected.
+- See `private maintainer notes/github_actions_cost_policy_2026-05-25.md` before editing `.github/workflows/`.
+
 ---
 
 ## Best Practices (Discovered)

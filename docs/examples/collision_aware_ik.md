@@ -4,7 +4,7 @@ Interactive collision-aware IK behavior demo for development and testing.
 
 ## Overview
 
-`examples/02_collision_aware_IK.py` extends the minimal `01` stepping IK pattern
+`examples/02_collision_aware_IK.py` extends the minimal `01` prioritized IK setup
 with self-collision constraints, collision-debug visualization, tuning modes, and
 an optional GPU benchmark panel.
 
@@ -86,5 +86,5 @@ pixi run -e cuda python examples/02_collision_aware_IK.py --gpu
 ## Next Steps
 
 - [Basic IK Example](basic_ik.md) — minimal bring-up without collision UI
-- [Teleop IK Example](teleop_ik.md) — feed controller targets into the same stepping IK path
+- [Teleop IK Example](teleop_ik.md) — feed controller targets into the same registered-task IK path
 - [CoM Constraint Example](com_constraint_ik.md) — support-polygon inequality constraints

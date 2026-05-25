@@ -11,7 +11,7 @@ Overview for `examples/04_com_constraint_example.py`.
 
 ## API Walkthrough
 
-The example keeps the same registered-task stepping path and adds a hard CoM
+The example keeps the same registered-task IK path and adds a hard CoM
 support-polygon constraint:
 
 | Step | API calls | Purpose |
@@ -19,7 +19,7 @@ support-polygon constraint:
 | Register IK tasks | `add_frame_task("ee_task", target_link)`, `add_posture_task("posture")` | Track the end-effector marker with a posture bias underneath. |
 | Configure support polygon | `configure_com_constraint(...)` | Keep the 2D CoM projection inside the active polygon. |
 | Tune relaxation | `frame_task.solve_mode`, `allow_min_error_fallback`, `posture_task.solve_mode` | Explore strict scaling versus minimum-error fallback near constraints. |
-| Step IK | `solve_position_step(q_current, target_pose, "ee_task", step_opts)` | Apply one interactive IK update using the registered tasks and CoM constraint. |
+| Solve update | `solve_position_step(q_current, target_pose, "ee_task", step_opts)` | Apply one IK update using the registered tasks and CoM constraint. |
 | Inspect diagnostics | `result.task_modes_effective`, `result.task_used_fallback`, `result.task_scales` | Display effective mode, fallback use, and scale while the demo runs. |
 
 Use `examples/04_com_constraint_example.py` for the exact slider values,

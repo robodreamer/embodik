@@ -27,7 +27,7 @@ instantiate task objects directly.
 | Step | API calls | Purpose |
 | --- | --- | --- |
 | Load or resolve a robot | `RobotModel(...)` or an example `resolve_robot_configuration(...)` helper | Provide the kinematic model, default configuration, and target frame names. |
-| Create a solver | `KinematicsSolver(robot)`, `solver.dt` | Configure numerical stepping behavior. |
+| Create a solver | `KinematicsSolver(robot)`, `solver.dt` | Configure solver timing for position updates. |
 | Enable example runtime policy | `configure_solver_runtime_policy(solver)` | Public examples opt into solver-owned pose-layout auto-switching and constrained weighted fallback. |
 | Register a frame task | `solver.add_frame_task("ee_task", target_link)` | Track an end-effector pose target. |
 | Add posture bias | `solver.add_posture_task("posture")`, `set_target_configuration(q_default)` | Keep unused freedom near a preferred posture. |

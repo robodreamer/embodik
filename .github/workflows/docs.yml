@@ -3,6 +3,13 @@ name: Documentation
 on:
   push:
     branches: [ main ]
+    paths:
+      - "README.md"
+      - ".github/workflows/docs.yml"
+      - "docs/**"
+      - "mkdocs.yml"
+      - "python/embodik/**"
+      - "pyproject.toml"
   workflow_dispatch:
 
 permissions:
@@ -12,7 +19,7 @@ permissions:
 
 concurrency:
   group: "pages"
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   build:
