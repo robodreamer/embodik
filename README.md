@@ -1,3 +1,8 @@
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/brand/embodik-wordmark-dark.svg">
+  <img align="right" src="docs/assets/brand/embodik-wordmark-light.svg" alt="EmbodiK logo" width="220">
+</picture>
+
 # EmbodiK
 
 ![Python](https://img.shields.io/badge/Python-3.10--3.12-3776AB?logo=python&logoColor=white)
@@ -9,22 +14,27 @@
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
 [![GitHub stars](https://img.shields.io/github/stars/robodreamer/embodik?style=social)](https://github.com/robodreamer/embodik/stargazers)
 
-EmbodiK is a high-performance inverse kinematics library for cross-embodiment robotics and VLA/AI applications. It pairs a C++ core with Python bindings, exposes robot-model utilities without requiring the Python `pin` package at runtime, and includes interactive examples for collision-aware IK, CoM constraints, teleop, GPU batch solving, and dual-arm coordination.
+EmbodiK is a high-performance prioritized numerical inverse kinematics library for cross-embodiment robotics and VLA/AI applications. It pairs a C++ core with Python bindings, exposes robot-model utilities without requiring the Python `pin` package at runtime, and includes interactive examples for collision-aware IK, CoM constraints, teleop, whole-body robots, GPU batch solving, and dual-arm coordination.
 
-## Overview
+## ✨ Overview
 
 EmbodiK is designed for bringing up IK behavior across different robot bodies without rewriting the solver stack for each model. The public examples focus on a practical path:
 
-- start with the smallest fixed-base IK loop.
-- add collision-aware behavior and visualization.
-- connect the same stepping IK pattern to teleop input.
-- use richer clone-only examples for development and stress testing.
+- 🧭 start with the smallest fixed-base IK loop.
+- 🛡️ add collision, joint-limit, and CoM constraints.
+- 🎮 connect the same prioritized IK solver path to teleop input.
+- 🤖 scale to bimanual, humanoid, and Spot whole-body examples.
+- 🧪 use richer clone-only examples for development, stress testing, and policy rollout.
+
+The intent is to keep Python examples lean: visualization and target plumbing
+stay in Python, while constraint handling and recovery policy stay in the C++
+solver.
 
 The detailed installation notes, API reference, and example walkthroughs live in the official documentation:
 
 https://robodreamer.github.io/embodik/
 
-## Quick Start
+## 🚀 Quick Start
 
 Fastest path for most users is the wheel-only PyPI install inside a virtual
 environment:
@@ -58,7 +68,7 @@ Source builds use `pin` or a system Pinocchio install as the native library
 provider; keep that provider installed in the environment used to import
 EmbodiK.
 
-## Examples
+## 🎮 Examples
 
 The pip-facing examples are intentionally split by purpose:
 
@@ -66,7 +76,7 @@ The pip-facing examples are intentionally split by purpose:
 | --- | --- |
 | `01_basic_ik_simple.py` | Minimal fixed-base IK bring-up for a robot preset or new URDF. |
 | `02_collision_aware_IK.py` | Collision-aware IK behavior demo and advanced tuning surface. |
-| `03_teleop_ik.py` | Small adapter showing how teleop input drives the same IK step. |
+| `03_teleop_ik.py` | Small adapter showing how teleop input drives the same IK solver path. |
 | `04_com_constraint_example.py` | CoM support-polygon constraint visualization. |
 | `05_dual_arm_ects.py` | Dual-arm ECTS and orthogonal coordination modes. |
 | `06_bimanual_whole_body_ik.py` | Bimanual whole-body teleop, defaulting to AI Worker and optionally supporting RB-Y1, with CoM and collision handling. |
@@ -112,71 +122,61 @@ pixi run -e mjviser spot-locomanip-mjviser --policy locomanip
 pixi run -e mjviser-teleop spot-locomanip-mjviser --enable-teleop --policy locomanip
 ```
 
-Use a single Pixi environment per run: `mjviser` for browser GUI control and
-`mjviser-teleop` for browser GUI plus Seer controller input. Do not add
-`mjviser` after `python`; it is a Pixi environment name, not a Python module
-argument. Passing `--enable-teleop` connects the optional controller; the in-app
-**Enable teleop** box starts enabled when the controller connects. The
-locomanipulation app also has solver preference sliders. **Base assist**
-controls how much the solver uses x/y/yaw locomotion while tracking the gripper
-target: lower values keep more motion in the arm, and higher values let the
-base help earlier. **Arm recovery bias** increases the arm posture return while
-condition-number protection is active, which helps avoid fully stretched arm
-configurations during loco-manipulation teleop. The default values are tuned for
-teleop: the base helps on reachable x/y/yaw nudges, and arm recovery stays
-active without making the high-condition-number solve overly stiff.
-The mjviser loop rate-limits ONNX policy inference and background IK requests
-to 50 Hz by default while MuJoCo simulation and rendering continue stepping at
-the model/viewer rate. The IK worker keeps only the newest pending request so
-collision-constrained solves cannot build a backlog and starve the sim thread.
-When collision avoidance is enabled, the default checks the 3 closest active
-collision pairs with balanced speed/accuracy tuning.
-Clone-based Spot IK changes can be headlessly checked with:
-
-```bash
-pixi run -e mjviser-teleop python scripts/spot_locomanip_ik_hardening.py
-```
+See the [Spot locomanipulation guide](https://robodreamer.github.io/embodik/examples/spot_locomanip_mjviser/)
+for mjviser, Seer teleop, solver tuning, and headless validation details.
 
 Most examples default to the Panda preset. Use `--robot <key>` when a script supports alternate robot presets. See the [Examples Guide](https://robodreamer.github.io/embodik/examples/) for the full catalog, helper conventions, and clone-only development examples.
 
-## Preview
+## 🎬 Preview
 
 **Franka Panda collision-free IK**
 
-[![Franka Panda collision-free IK preview](docs/assets/media/franka_panda_collision_free_ik_preview.gif)](https://robodreamer.github.io/embodik/)
+<a href="https://robodreamer.github.io/embodik/">
+  <img src="docs/assets/media/franka_panda_collision_free_ik_preview.gif?raw=true" alt="Franka Panda collision-free IK preview" width="640">
+</a>
 
 **ROBOTIS AI Worker constraint teleop**
 
-[![Bimanual whole-body IK preview](docs/assets/media/robotis_ai_worker_collision_free_ik_preview.gif)](https://robodreamer.github.io/embodik/examples/bimanual_whole_body_ik/)
+<a href="https://robodreamer.github.io/embodik/examples/bimanual_whole_body_ik/">
+  <img src="docs/assets/media/robotis_ai_worker_collision_free_ik_preview.gif?raw=true" alt="ROBOTIS AI Worker constraint teleop preview" width="640">
+</a>
 
 **RB-Y1 bimanual whole-body IK**
 
-[![RB-Y1 bimanual whole-body IK preview](docs/assets/media/rby1_collision_free_ik_preview.gif)](https://robodreamer.github.io/embodik/examples/bimanual_whole_body_ik/)
+<a href="https://robodreamer.github.io/embodik/examples/bimanual_whole_body_ik/">
+  <img src="docs/assets/media/rby1_collision_free_ik_preview.gif?raw=true" alt="RB-Y1 bimanual whole-body IK preview" width="640">
+</a>
 
 **Unitree G1 retargeting IK**
 
-[![Unitree G1 retargeting IK preview](docs/assets/media/unitree_g1_retargeting_ik_preview.gif)](https://robodreamer.github.io/embodik/examples/unitree_g1_retargeting_ik/)
+<a href="https://robodreamer.github.io/embodik/examples/unitree_g1_retargeting_ik/">
+  <img src="docs/assets/media/unitree_g1_retargeting_ik_preview.gif?raw=true" alt="Unitree G1 retargeting IK preview" width="640">
+</a>
 
 **Spot full-body IK**
 
-[![Spot full-body IK preview](docs/assets/media/spot_fullbody_interactive_ik_preview.gif)](https://robodreamer.github.io/embodik/examples/spot_full_body_ik/)
+<a href="https://robodreamer.github.io/embodik/examples/spot_full_body_ik/">
+  <img src="docs/assets/media/spot_fullbody_interactive_ik_preview.gif?raw=true" alt="Spot full-body IK preview" width="640">
+</a>
 
 **Spot locomanipulation mjviser**
 
-[![Spot locomanipulation mjviser preview](docs/assets/media/spot_locomanip_interactive_ik_mjviser_preview.gif)](https://robodreamer.github.io/embodik/examples/spot_locomanip_mjviser/)
+<a href="https://robodreamer.github.io/embodik/examples/spot_locomanip_mjviser/">
+  <img src="docs/assets/media/spot_locomanip_interactive_ik_mjviser_preview.gif?raw=true" alt="Spot locomanipulation mjviser preview" width="640">
+</a>
 
-## Core Capabilities
+## 🧰 Core Capabilities
 
-- C++ IK core with Nanobind Python bindings.
-- Hierarchical velocity IK tasks for frames, posture, CoM, and dual-arm coordination.
-- Joint-limit, self-collision, and CoM support-polygon constraints.
-- Solver diagnostics for timing, task scaling, and Jacobian condition-number logging.
-- Lie-group-aware configuration operations for floating-base, quaternion, and continuous joints.
-- Native Pinocchio-backed robot model utilities exposed through EmbodiK bindings.
-- Optional Viser visualization for interactive IK demos.
-- Experimental GPU batch IK and collision tooling for high-throughput research workflows.
+- ⚙️ C++ IK core with Nanobind Python bindings.
+- 🎯 Hierarchical velocity IK tasks for frames, posture, CoM, and dual-arm coordination.
+- 🛡️ Joint-limit, self-collision, and CoM support-polygon constraints.
+- 📈 Solver diagnostics for timing, task scaling, and Jacobian condition-number logging.
+- 🧭 Lie-group-aware configuration operations for floating-base, quaternion, and continuous joints.
+- 🤖 Native Pinocchio-backed robot model utilities exposed through EmbodiK bindings.
+- 👁️ Optional Viser visualization for interactive IK demos.
+- ⚡ Experimental GPU batch IK and collision tooling for high-throughput research workflows.
 
-## Documentation
+## 📚 Documentation
 
 - [Installation](https://robodreamer.github.io/embodik/installation/) - platform setup, source builds, and troubleshooting.
 - [Quickstart](https://robodreamer.github.io/embodik/quickstart/) - first IK calls and solver concepts.
@@ -186,7 +186,7 @@ Most examples default to the Panda preset. Use `--robot <key>` when a script sup
 - [GPU Solvers](https://robodreamer.github.io/embodik/gpu_solvers/) - FI-PeSNS and PPH-SNS batch solver notes.
 - [Development](https://robodreamer.github.io/embodik/development/) - local build, tests, and contributor workflow.
 
-## Development
+## 🛠️ Development
 
 Use Pixi from a repository clone:
 
@@ -206,7 +206,7 @@ pixi run python examples/03_teleop_ik.py
 
 Clone-only advanced surfaces live under `examples/` and are not copied by `embodik-examples --copy`.
 
-## Repository Layout
+## 🗂️ Repository Layout
 
 ```text
 embodik/
@@ -224,11 +224,11 @@ embodik/
 `-- test/
 ```
 
-## Star History
+## ⭐ Star History
 
 [![Star History Chart](https://api.star-history.com/svg?repos=robodreamer/embodik&type=Date)](https://www.star-history.com/#robodreamer/embodik&Date)
 
-## License
+## 📄 License
 
 EmbodiK is released under the Apache License 2.0. See [LICENSE](LICENSE) for details.
 Binary wheels may bundle permissively licensed native dependencies; see

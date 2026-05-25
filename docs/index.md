@@ -1,51 +1,64 @@
-# EmbodiK
+<h1 class="embodik-doc-heading">
+  <span class="embodik-sr-only">EmbodiK</span>
+  <img class="embodik-doc-wordmark embodik-doc-wordmark--light" src="assets/brand/embodik-wordmark-light.svg" alt="">
+  <img class="embodik-doc-wordmark embodik-doc-wordmark--dark" src="assets/brand/embodik-wordmark-dark.svg" alt="">
+</h1>
 
-**High-performance inverse kinematics solver optimized for cross-embodiment VLA/AI applications**
+**High-performance prioritized numerical inverse kinematics for cross-embodiment robotics and VLA/AI applications**
 
-EmbodiK is a modern C++ library with Python bindings designed for robust, high-performance IK behaviors in cross-embodiment scenarios. The name reflects its focus on **embodied** dynamics and constraint handling, making it ideal for humanoid robots and AI/VLA integrations. Built on top of [Pinocchio](https://github.com/stack-of-tasks/pinocchio) and using [Nanobind](https://github.com/wjakob/nanobind) for seamless Python integration.
+EmbodiK is a modern C++ prioritized numerical IK library with Python bindings
+for robot bring-up, teleoperation, retargeting, and whole-body IK examples. It
+is built on [Pinocchio](https://github.com/stack-of-tasks/pinocchio), exposed to
+Python through [Nanobind](https://github.com/wjakob/nanobind), and keeps
+task hierarchy, constraints, and recovery policy in the solver so examples can
+stay focused on targets and visualization.
 
-## Features
+## ✨ Features
 
-- 🚀 **High Performance**: C++ core with optimized Eigen linear algebra
-- 🐍 **Python Integration**: Seamless numpy array support via Nanobind
-- 🎯 **Multiple Solvers**: Single-step and full multi-task velocity IK
-- 🛡️ **Singularity Robust**: Advanced inverse methods for stable solutions
-- 🔒 **Constraint Support**: Joint limits and operational space constraints
-- 📈 **Solver Diagnostics**: Timing, task scaling, and Jacobian condition-number reporting
-- 📊 **Visualization**: Optional Viser-based interactive visualization
+- **⚙️ Fast C++ core**: Eigen-based IK routines with Python bindings and numpy support.
+- **🎯 Prioritized task hierarchy**: Register frame, posture, relative-pose, and CoM objectives with explicit priorities.
+- **🛡️ Solver-owned robustness**: Constraint handling and recovery policy live in the C++ solver, not in example-side guard code.
+- **🔒 Hard-constraint handling**: Joint limits, collision constraints, CoM support polygons, contact, and relative-pose checks stay in C++.
+- **📈 Diagnostics**: Timing, condition numbers, recovery stage, task scaling, and solver status reporting.
+- **🎮 Examples and visualization**: Viser and mjviser demos for Panda, AI Worker, RB-Y1, Unitree G1, and Spot workflows.
 
-## Quick Start
+## 🚀 Quick Start
 
 Install EmbodiK, run a maintained example, then adapt the registered-task API
 pattern from that script:
 
 ```bash
-pip install embodik
+python -m pip install --only-binary=:all: "embodik[examples]"
 python -c "import embodik; print(embodik.__version__)"
+embodik-examples --copy
+cd embodik_examples
+python 01_basic_ik_simple.py
 ```
 
 See the [Quickstart](quickstart.md) and [Examples](examples/index.md) pages for
 the current `KinematicsSolver`, `add_frame_task()`, and `solve_position_step()`
 workflow.
 
-## Installation
+## 📦 Installation
 
-See the [Installation Guide](installation.md) for detailed instructions.
+See the [Installation Guide](installation.md) for wheel, source-build, and
+troubleshooting instructions.
 
 ```bash
-pip install embodik
+python -m pip install --only-binary=:all: embodik
 ```
 
-## Documentation
+## 📚 Documentation
 
-- [Installation Guide](installation.md) — How to install EmbodiK
-- [Quickstart](quickstart.md) — Get started in 5 minutes
-- [GPU Solvers](gpu_solvers.md) — FI-PeSNS and PPH-SNS GPU-accelerated solvers
-- [API Reference](api/index.md) — Complete API documentation
-- [Examples](examples/index.md) — Example code and tutorials
-- [Development Guide](development.md) — Contributing and development
+- [Installation Guide](installation.md) - Install wheels, source builds, and optional example extras.
+- [Quickstart](quickstart.md) - Build a small prioritized IK example with registered tasks.
+- [Examples](examples/index.md) - Run maintained public examples and clone-only development demos.
+- [KinematicsSolver API](api/kinematics_solver.md) - Configure tasks, constraints, runtime policy, and diagnostics.
+- [RobotModel API](api/robot_model.md) - Load models, compute FK/Jacobians, and query collisions or CoM.
+- [GPU Solvers](gpu_solvers.md) - FI-PeSNS and PPH-SNS batch solver notes.
+- [Development Guide](development.md) - Local builds, tests, and release workflow.
 
-## Preview
+## 🎬 Preview
 
 **Franka Panda collision-free IK**
 
@@ -71,7 +84,7 @@ pip install embodik
 
 <video autoplay muted loop playsinline controls width="100%" src="assets/media/spot_locomanip_interactive_ik_mjviser.mp4"></video>
 
-## License
+## 📄 License
 
 Apache License 2.0 - see the [LICENSE](https://github.com/robodreamer/embodik/blob/main/LICENSE) file for details. Source: [robodreamer/embodik](https://github.com/robodreamer/embodik)
 

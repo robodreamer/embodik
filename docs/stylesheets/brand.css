@@ -1,0 +1,41 @@
+.embodik-doc-heading {
+  margin: 0 0 0.85rem;
+  line-height: 0;
+}
+
+.embodik-doc-wordmark {
+  display: block;
+  width: min(260px, 72vw);
+  height: auto;
+  margin: 0;
+}
+
+.embodik-doc-wordmark--dark {
+  display: none;
+}
+
+[data-md-color-scheme="slate"] .embodik-doc-wordmark--light {
+  display: none;
+}
+
+[data-md-color-scheme="slate"] .embodik-doc-wordmark--dark {
+  display: block;
+}
+
+@media screen and (max-width: 48rem) {
+  .embodik-doc-wordmark {
+    width: min(230px, 76vw);
+  }
+}
+
+.embodik-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}

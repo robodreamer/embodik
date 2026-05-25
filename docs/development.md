@@ -124,6 +124,18 @@ pixi run docs-build
 4. Push tag: `git push origin v0.1.0`
 5. GitHub Actions will build and publish to PyPI
 
+The PyPI trusted publisher for `embodik` must match the tag workflow exactly:
+
+- Owner: `robodreamer`
+- Repository: `embodik`
+- Workflow: `wheels.yml`
+- Environment: `pypi`
+
+The `Publish to PyPI` job declares `environment: pypi` so PyPI receives a
+stable environment claim in GitHub's OIDC token. If PyPI reports
+`invalid-publisher` with `environment: MISSING`, the workflow environment and
+the PyPI trusted publisher configuration are out of sync.
+
 ## Debugging
 
 ### C++ Extension Issues

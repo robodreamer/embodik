@@ -48,7 +48,7 @@ while True:
         q_command = result.joints
 ```
 
-The backend uses the same stepping IK pattern as the other examples:
+The backend uses the same registered-task IK path as the other examples:
 `solve_position_step()` with a frame task, posture bias, adaptive dt, and optional
 self-collision constraints.
 

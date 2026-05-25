@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Refreshed the docs landing page and README positioning around solver-owned
+  robustness behavior, and added theme-aware EmbodiK logo assets.
+
+### Fixed
+
+- Added the `pypi` GitHub Actions environment to the wheel publish job so PyPI
+  trusted publishing receives the expected OIDC environment claim.
+
 ## [0.20.11] - 2026-05-23
 
 ### Added

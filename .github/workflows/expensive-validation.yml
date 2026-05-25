@@ -1,0 +1,91 @@
+name: Expensive Validation
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_linux_source:
+        description: "Run Linux pip source install smoke test"
+        required: true
+        default: true
+        type: boolean
+      linux_python_version:
+        description: "Python version for Linux source install"
+        required: true
+        default: "3.12"
+        type: choice
+        options:
+          - "3.12"
+          - "3.11"
+      run_macos:
+        description: "Run optional macOS arm64 full test"
+        required: true
+        default: false
+        type: boolean
+      macos_python_version:
+        description: "Python version for optional macOS test"
+        required: true
+        default: "3.12"
+        type: choice
+        options:
+          - "3.12"
+          - "3.11"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux-pip-source:
+    name: Linux pip source install (Python ${{ inputs.linux_python_version }})
+    if: ${{ inputs.run_linux_source }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.linux_python_version }}
+
+      - name: Build and smoke test source install
+        run: |
+          bash scripts/install_embodik_linux.sh \
+            --venv .venv \
+            --python python \
+            --editable "$PWD" \
+            --clean-env
+
+  macos-arm64:
+    name: macOS arm64 full tests (Python ${{ inputs.macos_python_version }})
+    if: ${{ inputs.run_macos }}
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.macos_python_version }}
+
+      - name: Build and install package (venv + pip)
+        run: |
+          bash scripts/install_embodik_macos.sh \
+            --venv .venv \
+            --python python \
+            --editable "$PWD" \
+            --clean-env
+          source .venv/bin/activate
+          python -m pip install pytest pytest-benchmark robot_descriptions casadi trimesh pycollada
+
+      - name: Run tests
+        run: |
+          source .venv/bin/activate
+          pytest test/
