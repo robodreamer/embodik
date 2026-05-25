@@ -1,7 +1,7 @@
 <h1 class="embodik-doc-heading">
   <span class="embodik-sr-only">EmbodiK</span>
-  <img class="embodik-doc-wordmark embodik-doc-wordmark--light" src="assets/brand/embodik-wordmark-light.svg" alt="">
-  <img class="embodik-doc-wordmark embodik-doc-wordmark--dark" src="assets/brand/embodik-wordmark-dark.svg" alt="">
+  <img class="embodik-doc-wordmark embodik-doc-wordmark--light" src="assets/brand/embodik-wordmark-light.png" alt="">
+  <img class="embodik-doc-wordmark embodik-doc-wordmark--dark" src="assets/brand/embodik-wordmark-dark.png" alt="">
 </h1>
 
 **High-performance prioritized numerical inverse kinematics for cross-embodiment robotics and VLA/AI applications**
@@ -12,6 +12,27 @@ is built on [Pinocchio](https://github.com/stack-of-tasks/pinocchio), exposed to
 Python through [Nanobind](https://github.com/wjakob/nanobind), and keeps
 task hierarchy, constraints, and recovery policy in the solver so examples can
 stay focused on targets and visualization.
+
+## Design Principles
+
+<div class="embodik-principles" markdown>
+<div class="embodik-principle">
+  <img src="assets/brand/principles/brand-cross-embodiment.png" alt="">
+  <div><strong>Cross-Embodiment</strong><span>Apply one IK policy across arms, humanoids, quadrupeds, and mobile bases.</span></div>
+</div>
+<div class="embodik-principle">
+  <img src="assets/brand/principles/brand-solver-intelligence.png" alt="">
+  <div><strong>Solver Intelligence</strong><span>Keep priority, recovery, diagnostics, and constraint policy in the solver.</span></div>
+</div>
+<div class="embodik-principle">
+  <img src="assets/brand/principles/brand-reliable-safe.png" alt="">
+  <div><strong>Reliable &amp; Safe</strong><span>Respect limits, collision constraints, CoM support, and contact feasibility.</span></div>
+</div>
+<div class="embodik-principle">
+  <img src="assets/brand/principles/brand-scalable.png" alt="">
+  <div><strong>Scalable</strong><span>Use the same solver surface for demos, stress tests, and policy rollout.</span></div>
+</div>
+</div>
 
 ## ✨ Features
 

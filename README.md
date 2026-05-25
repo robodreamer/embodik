@@ -1,6 +1,6 @@
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/brand/embodik-wordmark-dark.svg">
-  <img align="right" src="docs/assets/brand/embodik-wordmark-light.svg" alt="EmbodiK logo" width="220">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/brand/embodik-wordmark-dark.png">
+  <img align="right" src="docs/assets/brand/embodik-wordmark-light.png" alt="EmbodiK logo" width="245">
 </picture>
 
 # EmbodiK
