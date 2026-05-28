@@ -83,8 +83,8 @@ demo-parallel-tracking = "python examples/parallel_trajectory_tracking.py --n-ro
 demo-parallel-tracking-benchmark = "python examples/parallel_trajectory_tracking.py --n-robots 1000 --benchmark"
 # Export CasADi function for GPU solver
 export-casadi = "python -m embodik.gpu.export_casadi_velocity_solve --robot panda --out build/casadi/fn_velocity_solve.casadi"
-lint = "black --check python/ test/ && isort --check python/ test/"
-format = "black python/ test/ && isort python/ test/"
+lint = "black --check --extend-exclude '\\.pyi$' python/ test/ && isort --check --skip-glob '*.pyi' python/ test/"
+format = "black --extend-exclude '\\.pyi$' python/ test/ && isort --skip-glob '*.pyi' python/ test/"
 docs-build = { cmd = "python -W ignore::DeprecationWarning:hppfcl -m mkdocs build", depends-on = ["install"] }
 docs-serve = "mkdocs serve"
 # Build distributions
