@@ -24,6 +24,13 @@ def _make_se3(rotation: np.ndarray, translation: np.ndarray) -> np.ndarray:
     return transform
 
 
+def _se3_from_matrix(transform: np.ndarray) -> embodik.SE3:
+    return embodik.SE3(
+        rotation=np.asarray(transform[:3, :3], dtype=float),
+        translation=np.asarray(transform[:3, 3], dtype=float),
+    )
+
+
 def _inverse_se3(transform: np.ndarray) -> np.ndarray:
     rotation = transform[:3, :3]
     translation = transform[:3, 3]
@@ -108,6 +115,113 @@ def test_consistent_arm_targets_recover_object_target(dual_arm_solver):
     assert diag.angular_rad == pytest.approx(0.0, abs=1e-10)
     error = np.asarray(task.get_error(), dtype=float)
     np.testing.assert_allclose(error[:3], object_target[:3, 3] - object_calib[:3, 3], atol=1e-10)
+
+
+def test_task_target_pair_records_secondary_pose():
+    primary = _make_se3(_rot_z(0.1), np.array([0.1, 0.2, 0.3]))
+    secondary = _make_se3(_rot_z(-0.2), np.array([-0.1, 0.4, 0.2]))
+
+    target = embodik.TaskTarget.from_se3_pair(
+        "abs",
+        _se3_from_matrix(primary),
+        _se3_from_matrix(secondary),
+        2.0,
+        3.0,
+    )
+
+    assert target.task_name == "abs"
+    assert target.has_secondary_target_pose is True
+    assert target.position_gain == pytest.approx(2.0)
+    assert target.orientation_gain == pytest.approx(3.0)
+    np.testing.assert_allclose(target.target_pose, primary)
+    np.testing.assert_allclose(target.secondary_target_pose, secondary)
+
+
+def test_position_step_absolute_task_uses_paired_arm_targets(dual_arm_solver):
+    solver, robot = dual_arm_solver
+    task, object_calib, left_fk, right_fk = _calibrated_task(solver, robot)
+
+    left_in_object = _inverse_se3(object_calib) @ left_fk
+    right_in_object = _inverse_se3(object_calib) @ right_fk
+    object_target = _make_se3(_rot_z(0.15), object_calib[:3, 3] + [0.02, -0.01, 0.03])
+    left_target = object_target @ left_in_object
+    right_target = object_target @ right_in_object
+
+    opts = embodik.PositionStepOptions()
+    opts.max_steps = 1
+    q = np.asarray(robot.get_current_configuration(), dtype=float)
+    solver.solve_position_step(
+        q,
+        [
+            embodik.TaskTarget.from_se3_pair(
+                "abs",
+                _se3_from_matrix(left_target),
+                _se3_from_matrix(right_target),
+                0.0,
+                0.0,
+            )
+        ],
+        opts,
+    )
+    task.update(robot)
+
+    diag = task.get_grasp_divergence()
+    assert diag.linear_m == pytest.approx(0.0, abs=1e-10)
+    assert diag.angular_rad == pytest.approx(0.0, abs=1e-8)
+    error = np.asarray(task.get_error(), dtype=float)
+    np.testing.assert_allclose(error[:3], object_target[:3, 3] - object_calib[:3, 3], atol=1e-10)
+
+
+def test_position_step_ects_error_measurement_is_small_for_working_dual_arm_case(dual_arm_solver):
+    solver, robot = dual_arm_solver
+    abs_task, object_calib, left_fk, right_fk = _calibrated_task(solver, robot)
+    rel_task = solver.add_relative_frame_task("rel", "left_ee", "right_ee")
+    rel_task.update(robot)
+
+    left_in_object = _inverse_se3(object_calib) @ left_fk
+    right_in_object = _inverse_se3(object_calib) @ right_fk
+    object_target = _make_se3(
+        object_calib[:3, :3] @ _rot_z(0.005),
+        object_calib[:3, 3] + [0.005, -0.002, 0.003],
+    )
+    left_target = object_target @ left_in_object
+    right_target = object_target @ right_in_object
+    relative_target = embodik.compute_relative_frame(
+        _se3_from_matrix(left_target),
+        _se3_from_matrix(right_target),
+    )
+
+    opts = embodik.PositionStepOptions()
+    opts.max_steps = 2
+    opts.dt = 0.01
+    q = np.asarray(robot.get_current_configuration(), dtype=float)
+    for _ in range(200):
+        result = solver.solve_position_step(
+            q,
+            [
+                embodik.TaskTarget.from_se3_pair(
+                    "abs",
+                    _se3_from_matrix(left_target),
+                    _se3_from_matrix(right_target),
+                    5.0,
+                    5.0,
+                ),
+                embodik.TaskTarget.from_se3("rel", relative_target, 5.0, 5.0),
+            ],
+            opts,
+        )
+        q = np.asarray(result.q_solution, dtype=float)
+        robot.update_configuration(q)
+
+    abs_task.update(robot)
+    rel_task.update(robot)
+    abs_error = np.asarray(abs_task.get_error(), dtype=float)
+    rel_error = np.asarray(rel_task.get_error(), dtype=float)
+
+    assert np.linalg.norm(abs_error[:3]) < 0.01
+    assert np.degrees(np.linalg.norm(abs_error[3:])) < 0.1
+    assert np.linalg.norm(rel_error[:3]) < 0.002
+    assert np.degrees(np.linalg.norm(rel_error[3:])) < 0.1
 
 
 def test_divergent_arm_targets_use_midpoint_and_report_diagnostic(dual_arm_solver):

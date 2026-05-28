@@ -56,6 +56,34 @@ def _create_two_joint_urdf(*, velocity_limit: float = 100.0) -> str:
     return path
 
 
+def _create_lower_limited_two_joint_urdf(*, velocity_limit: float = 100.0) -> str:
+    urdf_content = f"""<?xml version="1.0"?>
+<robot name="test_robot_lower_limited">
+  <link name="base_link"/>
+  <joint name="joint1" type="revolute">
+    <parent link="base_link"/>
+    <child link="link1"/>
+    <origin xyz="0 0 0.1"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="0.0" upper="3.14" effort="100" velocity="{velocity_limit}"/>
+  </joint>
+  <link name="link1"/>
+  <joint name="joint2" type="revolute">
+    <parent link="link1"/>
+    <child link="ee"/>
+    <origin xyz="0.2 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-3.14" upper="3.14" effort="100" velocity="{velocity_limit}"/>
+  </joint>
+  <link name="ee"/>
+</robot>
+"""
+    fd, path = tempfile.mkstemp(suffix=".urdf")
+    with os.fdopen(fd, "w") as f:
+        f.write(urdf_content)
+    return path
+
+
 def _make_solver_with_posture():
     urdf_path = _create_two_joint_urdf()
     robot = eik.RobotModel(urdf_path, floating_base=False)
@@ -248,6 +276,44 @@ def test_adaptive_dt_respects_position_limits_during_multi_target_integration():
 
         assert res.status == eik.SolverStatus.SUCCESS
         assert np.asarray(res.q_solution, dtype=float)[0] <= 3.14
+    finally:
+        os.unlink(urdf_path)
+
+
+def test_elastic_position_step_returns_true_joint_limits_after_integration():
+    """Elastic-band internal limit expansion must not leak into q_solution."""
+    urdf_path = _create_lower_limited_two_joint_urdf()
+    try:
+        robot = eik.RobotModel(urdf_path, floating_base=False)
+        solver = eik.KinematicsSolver(robot)
+        solver.enable_position_limits(True)
+        solver.dt = 0.01
+        task = solver.add_frame_task("ee_task", "ee")
+        task.priority = 0
+        task.weight = 1.0
+
+        q = np.array([0.0, 0.0], dtype=float)
+        robot.update_configuration(q)
+        pose = robot.get_frame_pose("ee")
+        target = np.eye(4, dtype=float)
+        target[:3, :3] = np.asarray(pose.rotation, dtype=float)
+        target[:3, 3] = np.asarray(pose.translation, dtype=float)
+        target[1, 3] -= 0.1
+
+        opts = eik.PositionStepOptions()
+        opts.dt = 0.01
+        opts.max_steps = 1
+        opts.position_gain = 100.0
+        opts.orientation_gain = 0.0
+        opts.elastic_band = True
+
+        res = solver.solve_position_step(q, target, "ee_task", opts)
+        q_lower, q_upper = robot.get_joint_limits()
+        q_solution = np.asarray(res.q_solution, dtype=float)
+
+        assert res.status in (eik.SolverStatus.SUCCESS, eik.SolverStatus.INFEASIBLE)
+        assert q_solution[0] >= q_lower[0] - 1e-12
+        assert q_solution[0] <= q_upper[0] + 1e-12
     finally:
         os.unlink(urdf_path)
 

@@ -745,6 +745,30 @@ static void expand_scalar_joint_limits_for_velocity_delta(
   }
 }
 
+static void project_scalar_configuration_to_true_joint_limits(
+    Eigen::VectorXd &q, const Eigen::VectorXd &q_min,
+    const Eigen::VectorXd &q_max,
+    const std::vector<int> &velocity_to_config_index, int nv) {
+  if (q.size() == 0 || q_min.size() == 0 || q_max.size() == 0) {
+    return;
+  }
+
+  for (int vi = 0; vi < nv; ++vi) {
+    if (vi >= static_cast<int>(velocity_to_config_index.size())) {
+      continue;
+    }
+    const int qi = velocity_to_config_index[vi];
+    if (qi < 0 || qi >= q.size() || qi >= q_min.size() || qi >= q_max.size()) {
+      continue;
+    }
+    if (!std::isfinite(q[qi]) || !std::isfinite(q_min[qi]) ||
+        !std::isfinite(q_max[qi])) {
+      continue;
+    }
+    q[qi] = std::clamp(q[qi], q_min[qi], q_max[qi]);
+  }
+}
+
 static ClassifiedOutcome classify_position_outcome(
     SolverStatus current_status, const std::string &current_status_message,
     bool converged_or_within_tolerance, bool stagnation_abort,
@@ -6232,6 +6256,12 @@ PositionIKResult KinematicsSolver::solve_position(
     Eigen::VectorXd q_pre_step = q_current;
     q_current =
         pinocchio::integrate(robot_->model(), q_current, options.dt * dq);
+    if (use_position_limits_) {
+      auto [q_min_true, q_max_true] = robot_->get_joint_limits();
+      project_scalar_configuration_to_true_joint_limits(
+          q_current, q_min_true, q_max_true, velocity_to_config_index,
+          robot_->nv());
+    }
     robot_->update_configuration(q_current);
 
     // Skip expensive post-step checks when integration produced no motion.
@@ -6658,6 +6688,11 @@ PositionIKResult KinematicsSolver::solve_position_step(
     }
     q = pinocchio::integrate(robot_->model(), q,
                              step_dt_eff * last_vel_result.joint_velocities);
+    if (use_position_limits_) {
+      auto [q_min_true, q_max_true] = robot_->get_joint_limits();
+      project_scalar_configuration_to_true_joint_limits(
+          q, q_min_true, q_max_true, velocity_to_config_index, robot_->nv());
+    }
     robot_->update_configuration(q);
 
     // Skip expensive post-step checks when integration produced no motion.
@@ -7450,9 +7485,15 @@ PositionIKResult KinematicsSolver::solve_position_step(
                             target.target_pose.block<3, 3>(0, 0));
         break;
       case PoseTaskKind::kAbsolute:
-        static_cast<AbsoluteFrameTask *>(rt.task.get())
-            ->setTargetPose(target.target_pose.block<3, 1>(0, 3),
-                            target.target_pose.block<3, 3>(0, 0));
+        if (target.has_secondary_target_pose) {
+          static_cast<AbsoluteFrameTask *>(rt.task.get())
+              ->set_target_from_arm_targets(target.target_pose,
+                                            target.secondary_target_pose);
+        } else {
+          static_cast<AbsoluteFrameTask *>(rt.task.get())
+              ->setTargetPose(target.target_pose.block<3, 1>(0, 3),
+                              target.target_pose.block<3, 3>(0, 0));
+        }
         break;
       case PoseTaskKind::kRelative:
         static_cast<RelativeFrameTask *>(rt.task.get())
@@ -7624,6 +7665,11 @@ PositionIKResult KinematicsSolver::solve_position_step(
     }
     q = pinocchio::integrate(robot_->model(), q,
                              step_dt_eff * last_vel_result.joint_velocities);
+    if (use_position_limits_) {
+      auto [q_min_true, q_max_true] = robot_->get_joint_limits();
+      project_scalar_configuration_to_true_joint_limits(
+          q, q_min_true, q_max_true, velocity_to_config_index, robot_->nv());
+    }
     robot_->update_configuration(q);
 
     // Skip expensive post-step checks when integration produced no motion.

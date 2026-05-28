@@ -354,6 +354,8 @@ struct TaskTarget {
   Eigen::Matrix4d target_pose = Eigen::Matrix4d::Identity();
   double position_gain = 1.0;
   double orientation_gain = 1.0;
+  Eigen::Matrix4d secondary_target_pose = Eigen::Matrix4d::Identity();
+  bool has_secondary_target_pose = false;
 };
 
 // Position IK result
