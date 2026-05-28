@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.12] - 2026-05-28
+
+### Added
+
+- Added paired-SE3 `TaskTarget.from_se3_pair(...)` bindings so
+  multi-target `solve_position_step()` can drive an `AbsoluteFrameTask` from
+  the two commanded arm targets while preserving calibrated grasp offsets.
+
 ### Changed
 
 - Refreshed the docs landing page and README positioning around solver-owned
@@ -16,6 +24,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Added the `pypi` GitHub Actions environment to the wheel publish job so PyPI
   trusted publishing receives the expected OIDC environment claim.
+- Kept elastic-band joint-limit expansion internal by projecting returned
+  position-step configurations back to the robot's true scalar joint limits
+  after integration.
+- Made multi-target position stepping apply paired arm targets to
+  `AbsoluteFrameTask` instead of treating the absolute task as a single-frame
+  pose target.
 
 ## [0.20.11] - 2026-05-23
 
