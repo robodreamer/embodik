@@ -475,10 +475,33 @@ NB_MODULE(_embodik_impl, m) {
           },
           nb::arg("task_name"), nb::arg("target_pose"),
           nb::arg("position_gain") = 1.0, nb::arg("orientation_gain") = 1.0)
+      .def_static(
+          "from_se3_pair",
+          [](const std::string &task_name,
+             const pinocchio::SE3 &target_pose,
+             const pinocchio::SE3 &secondary_target_pose,
+             double position_gain, double orientation_gain) {
+            eik::TaskTarget t;
+            t.task_name = task_name;
+            t.target_pose = target_pose.toHomogeneousMatrix();
+            t.secondary_target_pose =
+                secondary_target_pose.toHomogeneousMatrix();
+            t.position_gain = position_gain;
+            t.orientation_gain = orientation_gain;
+            t.has_secondary_target_pose = true;
+            return t;
+          },
+          nb::arg("task_name"), nb::arg("target_pose"),
+          nb::arg("secondary_target_pose"),
+          nb::arg("position_gain") = 1.0, nb::arg("orientation_gain") = 1.0)
       .def_rw("task_name", &eik::TaskTarget::task_name)
       .def_rw("target_pose", &eik::TaskTarget::target_pose)
+      .def_rw("secondary_target_pose",
+              &eik::TaskTarget::secondary_target_pose)
       .def_rw("position_gain", &eik::TaskTarget::position_gain)
-      .def_rw("orientation_gain", &eik::TaskTarget::orientation_gain);
+      .def_rw("orientation_gain", &eik::TaskTarget::orientation_gain)
+      .def_rw("has_secondary_target_pose",
+              &eik::TaskTarget::has_secondary_target_pose);
 
   nb::class_<eik::SolveDiagnostics>(
       m, "SolveDiagnostics",

@@ -471,24 +471,34 @@ def test_unlocked_lift_can_participate_in_single_arm_solve() -> None:
         if joint_name.startswith("lift_"):
             lift_vel.extend(expanded)
 
-    q_unlocked = _solve_single_step(
+    q_up = _solve_single_step(
         robot,
         frames,
         right_target_offset=np.array([0.0, 0.0, 0.08], dtype=float),
         exclude_right=left_arm_vel,
         exclude_left=[],
     )
+    q_unlocked = _solve_single_step(
+        robot,
+        frames,
+        right_target_offset=np.array([0.0, 0.0, -0.08], dtype=float),
+        exclude_right=left_arm_vel,
+        exclude_left=[],
+    )
     q_locked = _solve_single_step(
         robot,
         frames,
-        right_target_offset=np.array([0.0, 0.0, 0.08], dtype=float),
+        right_target_offset=np.array([0.0, 0.0, -0.08], dtype=float),
         exclude_right=left_arm_vel + lift_vel,
         exclude_left=lift_vel,
     )
 
     lift_idx = int(robot.get_joint_config_index("lift_joint"))
+    q_lo, q_hi = robot.get_joint_limits()
+    lift_up = float(q_up[lift_idx])
     lift_unlocked = float(q_unlocked[lift_idx])
     lift_locked = float(q_locked[lift_idx])
+    assert q_lo[lift_idx] <= lift_up <= q_hi[lift_idx]
     assert abs(lift_unlocked) > 1e-5
     assert abs(lift_locked) <= 1e-9
 
