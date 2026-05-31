@@ -15,6 +15,7 @@ from example_helpers.adaptive_gain_tuning import (
     AdaptiveGainTuningState,
     compute_effective_gains,
 )
+from example_helpers.ik_common import configure_solver_runtime_policy
 
 try:
     from robot_descriptions.panda_description import URDF_PATH as PANDA_URDF_PATH
@@ -82,6 +83,7 @@ def make_panda_solver(*, with_collision: bool = False) -> tuple[embodik.RobotMod
     _setup_ros_package_path(PANDA_URDF_PATH)
     robot = embodik.RobotModel(PANDA_URDF_PATH)
     solver = embodik.KinematicsSolver(robot)
+    configure_solver_runtime_policy(solver)
     solver.dt = 1.0 / CONTROL_HZ
     solver.set_damping(0.01)
     ee_task = solver.add_frame_task("ee_task", "panda_hand")

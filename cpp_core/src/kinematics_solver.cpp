@@ -4144,8 +4144,13 @@ void KinematicsSolver::apply_position_step_primary_task_options(
   if (task == nullptr) {
     return;
   }
-  task->setSolveMode(options.primary_solve_mode);
-  task->setAllowMinErrorFallback(options.primary_allow_min_error_fallback);
+  if (options.primary_solve_mode != TaskSolveMode::kScale &&
+      task->getSolveMode() != TaskSolveMode::kMinError) {
+    task->setSolveMode(options.primary_solve_mode);
+  }
+  if (options.primary_allow_min_error_fallback) {
+    task->setAllowMinErrorFallback(true);
+  }
 }
 
 std::optional<PositionIKResult>

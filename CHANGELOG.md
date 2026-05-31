@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.20.14] - 2026-05-31
+
+### Fixed
+
+- Preserve registered `solve_position_step()` task solve modes and min-error
+  fallback settings unless the caller supplies an explicit non-default step
+  override.
+- Apply the shared solver runtime policy in the adaptive gain harness.
+
 ## [0.20.13] - 2026-05-31
 
 ### Added
