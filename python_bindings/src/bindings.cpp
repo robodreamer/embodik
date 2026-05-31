@@ -714,7 +714,7 @@ NB_MODULE(_embodik_impl, m) {
           )pbdoc");
 
   // Module metadata
-  m.attr("__version__") = "0.20.13";
+  m.attr("__version__") = "0.20.14";
   m.attr("DEFAULT_REGULARIZATION") = eik::BasicSolverConfig{}.regularization;
 
   // Bind robot model with Pinocchio integration
