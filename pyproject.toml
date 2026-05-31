@@ -15,7 +15,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "embodik"
-version = "0.20.12"
+version = "0.20.13"
 description = "High-performance inverse kinematics solver optimized for cross-embodiment VLA/AI applications"
 authors = [{ name = "Andy Park", email = "andypark.purdue@gmail.com" }]
 readme = "README.md"
@@ -112,6 +112,8 @@ build-dir = "build/{state}-{cache_tag}"
 exclude = [
     ".github/**",
     "examples/**",
+    "examples/assets/optional_wheelbase/**",
+    "examples/example_helpers/optional_wheelbase_model_utils.py",
     "examples/harnesses/**",
     "docs/**",
     "notes/**",

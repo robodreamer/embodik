@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(embodik VERSION 0.20.7)
+project(embodik VERSION 0.20.13)
 
 # Python is used to auto-discover Pinocchio (PyPI `pin`) CMake config during sdist builds.
 find_package(Python REQUIRED COMPONENTS Interpreter)
@@ -179,6 +179,8 @@ install(DIRECTORY examples/
     DESTINATION share/embodik/examples
     FILES_MATCHING
         PATTERN "harnesses" EXCLUDE
+        PATTERN "assets/optional_wheelbase" EXCLUDE
+        PATTERN "optional_wheelbase_model_utils.py" EXCLUDE
         PATTERN "*.py"
         PATTERN "*.yaml"
         PATTERN "*.md"

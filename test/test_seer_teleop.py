@@ -30,8 +30,38 @@ def test_seer_controller_does_not_import_xvisio_without_explicit_port(monkeypatc
 
     controller = seer_teleop.SeerController(None)
 
-    assert controller.connect() is False
+    assert controller.connect(auto_detect_port=False) is False
     assert calls == []
+
+
+def test_connect_without_port_can_auto_detect_serial_devices(monkeypatch) -> None:
+    monkeypatch.setattr(seer_teleop, "_available_serial_ports", lambda: ["/dev/ttyUSB1"])
+    monkeypatch.setattr(seer_teleop, "_port_accessible", lambda port: (True, "OK"))
+
+    class FakeDevice:
+        def reset_controller_reference(self):
+            pass
+
+        def close(self):
+            pass
+
+    fake_xvisio = SimpleNamespace(
+        discover_controllers=lambda: ["seer"],
+        open_controller=lambda port: FakeDevice(),
+    )
+    monkeypatch.setattr(seer_teleop.importlib, "import_module", lambda name: fake_xvisio)
+
+    controller = seer_teleop.SeerController(None)
+    assert controller.connect() is True
+    assert controller.port == "/dev/ttyUSB1"
+
+
+def test_candidate_controller_ports_prefers_requested_port() -> None:
+    ports = seer_teleop._candidate_controller_ports(
+        "/dev/ttyUSB0",
+        auto_detect_port=True,
+    )
+    assert ports == ["/dev/ttyUSB0"]
 
 
 def test_seer_controller_imports_xvisio_only_when_port_is_provided(monkeypatch) -> None:
@@ -58,6 +88,7 @@ def test_seer_controller_imports_xvisio_only_when_port_is_provided(monkeypatch) 
         assert name == "xvisio"
         return fake_xvisio
 
+    monkeypatch.setattr(seer_teleop, "_port_accessible", lambda port: (True, "OK"))
     monkeypatch.setattr(seer_teleop.importlib, "import_module", fake_import_module)
 
     controller = seer_teleop.SeerController("/dev/ttyUSB0")
@@ -68,6 +99,55 @@ def test_seer_controller_imports_xvisio_only_when_port_is_provided(monkeypatch) 
     assert fake_device.reset_count == 1
     controller.disconnect()
     assert fake_device.closed
+
+
+def test_connect_is_idempotent_when_already_connected(monkeypatch) -> None:
+    open_count = 0
+
+    class FakeDevice:
+        def reset_controller_reference(self):
+            pass
+
+        def close(self):
+            pass
+
+    def open_controller(port):
+        nonlocal open_count
+        open_count += 1
+        return FakeDevice()
+
+    fake_xvisio = SimpleNamespace(
+        discover_controllers=lambda: ["seer"],
+        open_controller=open_controller,
+    )
+    monkeypatch.setattr(seer_teleop, "_port_accessible", lambda port: (True, "OK"))
+    monkeypatch.setattr(seer_teleop.importlib, "import_module", lambda name: fake_xvisio)
+
+    controller = seer_teleop.SeerController("/dev/ttyUSB0")
+    assert controller.connect() is True
+    assert controller.connect() is True
+    assert open_count == 1
+
+
+def test_connect_rejects_while_connection_in_progress(monkeypatch) -> None:
+    class FakeDevice:
+        def reset_controller_reference(self):
+            pass
+
+        def close(self):
+            pass
+
+    fake_xvisio = SimpleNamespace(
+        discover_controllers=lambda: ["seer"],
+        open_controller=lambda port: FakeDevice(),
+    )
+    monkeypatch.setattr(seer_teleop, "_port_accessible", lambda port: (True, "OK"))
+    monkeypatch.setattr(seer_teleop.importlib, "import_module", lambda name: fake_xvisio)
+
+    controller = seer_teleop.SeerController("/dev/ttyUSB0")
+    controller._connecting = True
+    assert controller.connect() is False
+    assert controller.last_connect_error == "Connection already in progress"
 
 
 def test_seer_controller_handles_xvisio_native_load_failure(monkeypatch) -> None:

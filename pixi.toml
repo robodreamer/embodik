@@ -112,7 +112,9 @@ demo-advanced-ik = "python examples/advanced_interactive_ik.py basic"
 xvisio = ">=0.3.1"
 
 [feature.teleop.tasks]
-demo-teleop = "python examples/03_teleop_ik.py --robot panda"
+demo-teleop = "python examples/03_teleop_ik.py --robot panda --enable-teleop"
+demo-bimanual-teleop = "python examples/06_bimanual_whole_body_ik.py --robot rby1"
+demo-alpha-teleop = "python examples/optional_wheelbase_bimanual_ik.py"
 
 # Optional mjviser/MuJoCo stack for Spot locomanipulation.
 [feature.mjviser.pypi-dependencies]

@@ -43,6 +43,45 @@ Important options:
 Example 02 supports auto-generated exclusion lists from robot presets so public
 robot demos do not require hand-writing every adjacent pair.
 
+### Non-worsening recovery floor
+
+Some robots have links that rest closer than the configured `min_distance` (for
+example, an upper arm near the torso). Without special handling, the collision
+recovery logic can try to push those pairs out to the global clearance and freeze
+the solve.
+
+When enabled, the **non-worsening floor** keeps each pair at its achievable
+distance instead of forcing recovery to `min_distance`:
+
+```python
+solver.set_non_worsening_collision_floor_enabled(True)
+```
+
+This is **off by default** on a new `KinematicsSolver`. The bimanual teleop
+example opts in because whole-body models commonly include structurally-close
+pairs.
+
+`set_collision_structural_floor(metres)` sets the minimum clearance maintained for
+those pairs when the floor is active (default `0.005` m). Use it when tuning how
+aggressively the solver prevents penetration on resting contacts.
+
+### Collision tuning mode
+
+New solvers default to `CollisionTuningMode.BALANCED`, which enables sphere
+broadphase and a conservative pair cache suitable for interactive teleop. Use
+`set_collision_tuning_mode()` or the shared helper
+`apply_collision_tuning_mode(solver, "balanced")` to switch between `speed`,
+`balanced`, and `precise`.
+
+### Position-step MIN_ERROR fallback
+
+For teleop loops using `solve_position_step()`, set
+`PositionStepOptions.primary_allow_min_error_fallback = True` when the primary
+EE tasks use `SCALE` or `SCALE_ELASTIC`. If a collision row collapses the primary
+task scale, the solver retries once with a MIN_ERROR primary solve while keeping
+hard constraints active. This unfreezes motion near the body without permanently
+changing registered task modes.
+
 ## Collision Debugging
 
 The interactive UI can show:

@@ -43,12 +43,14 @@ try:
     import example_helpers.common_bimanual_teleop_app as common_app
     from example_helpers.ik_common import DEFAULT_VISER_PORT
     from example_helpers.public_ai_worker_paths import resolve_public_ai_worker_urdf_paths
+    from example_helpers.seer_teleop import DEFAULT_SEER_CONTROLLER_PORT
 except ModuleNotFoundError as exc:
     if exc.name != "example_helpers" and not str(exc.name).startswith("example_helpers."):
         raise
     import examples.example_helpers.common_bimanual_teleop_app as common_app
     from examples.example_helpers.ik_common import DEFAULT_VISER_PORT
     from examples.example_helpers.public_ai_worker_paths import resolve_public_ai_worker_urdf_paths
+    from examples.example_helpers.seer_teleop import DEFAULT_SEER_CONTROLLER_PORT
 
 
 def parse_args() -> argparse.Namespace:
@@ -83,6 +85,12 @@ def parse_args() -> argparse.Namespace:
         "--print-resolved-paths",
         action="store_true",
         help="Print resolved URDF inputs before launching the app.",
+    )
+    parser.add_argument(
+        "--controller-port",
+        type=str,
+        default=DEFAULT_SEER_CONTROLLER_PORT,
+        help="Seer/xvisio serial port (default: /dev/ttyUSB0, same as examples/03_teleop_ik.py).",
     )
     return parser.parse_args()
 
@@ -333,6 +341,8 @@ def main() -> None:
     common_app.resolve_ffw_urdf_path = lambda _variant: urdf_path
     common_app.resolve_generated_ffw_collision_urdf_path = lambda _variant: collision_urdf_path
     common_app.parse_args = lambda: argparse.Namespace(variant=variant_for_app, port=args.port)
+    common_app.COMMON_BIMANUAL_ENABLE_SEER_TELEOP = True
+    common_app.COMMON_BIMANUAL_SEER_CONTROLLER_PORT = args.controller_port
     common_app.main()
 
 

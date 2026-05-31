@@ -322,7 +322,12 @@ def examples_cmd(argv: Optional[List[str]] = None) -> int:
         shutil.copytree(
             src_str,
             dst_str,
-            ignore=shutil.ignore_patterns("_scratch*", "harnesses"),
+            ignore=shutil.ignore_patterns(
+                "_scratch*",
+                "harnesses",
+                "optional_wheelbase",
+                "optional_wheelbase_model_utils.py",
+            ),
         )
         print(f"✓ Copied examples to {dest}")
         print(f"\nTo run an example:")

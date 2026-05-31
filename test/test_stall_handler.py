@@ -373,6 +373,12 @@ class TestStallHandlerAPI:
         opts.stall_recovery = True
         assert opts.stall_recovery is True
 
+    def test_position_step_primary_options_match_position_ik_defaults(self):
+        step = eik.PositionStepOptions()
+        ik = eik.PositionIKOptions()
+        assert step.primary_solve_mode == ik.primary_solve_mode
+        assert step.primary_allow_min_error_fallback == ik.primary_allow_min_error_fallback
+
     def test_position_ik_options_stall_recovery_default_false(self):
         opts = eik.PositionIKOptions()
         assert opts.stall_recovery is False

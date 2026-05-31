@@ -31,6 +31,19 @@ try:
     )
     from example_helpers.ik_common import DEFAULT_VISER_PORT, configure_solver_runtime_policy
     from example_helpers.visualization_helpers import make_visual_config_mapper
+    from example_helpers.bimanual_seer_teleop import BimanualSeerTeleop
+    from example_helpers.seer_teleop import (
+        DEFAULT_TELEOP_SCALE_FACTOR,
+        DEFAULT_SEER_CONTROLLER_PORT,
+        pose_from_transform_control,
+        set_transform_control_pose,
+    )
+    from example_helpers.adaptive_gain_tuning import (
+        AdaptiveGainTuningConfig,
+        AdaptiveGainTuningState,
+        compute_effective_gains,
+        reset_adaptive_gain_state,
+    )
 except ModuleNotFoundError as exc:
     if exc.name != "example_helpers" and not str(exc.name).startswith("example_helpers."):
         raise
@@ -43,6 +56,19 @@ except ModuleNotFoundError as exc:
         configure_solver_runtime_policy,
     )
     from examples.example_helpers.visualization_helpers import make_visual_config_mapper
+    from examples.example_helpers.bimanual_seer_teleop import BimanualSeerTeleop
+    from examples.example_helpers.seer_teleop import (
+        DEFAULT_TELEOP_SCALE_FACTOR,
+        DEFAULT_SEER_CONTROLLER_PORT,
+        pose_from_transform_control,
+        set_transform_control_pose,
+    )
+    from examples.example_helpers.adaptive_gain_tuning import (
+        AdaptiveGainTuningConfig,
+        AdaptiveGainTuningState,
+        compute_effective_gains,
+        reset_adaptive_gain_state,
+    )
 
 DEFAULT_SOLVER_DT = 0.01
 DEFAULT_POS_GAIN = 10.0
@@ -55,8 +81,52 @@ POSTURE_SLIDER_DEADBAND = 1e-3
 EE_POSITION_DEADBAND = 1e-4
 EE_ROTATION_DEADBAND = 1e-3
 LIFT_LIMIT_MARGIN = 1e-3
+_ADAPTIVE_GAIN_CONFIG = AdaptiveGainTuningConfig()
+
+
+def _require_position_step_primary_opts(opts: object) -> None:
+    """C++ step-level MIN_ERROR fallback requires rebuilt PositionStepOptions bindings."""
+    missing = [
+        name
+        for name in ("primary_solve_mode", "primary_allow_min_error_fallback")
+        if not hasattr(opts, name)
+    ]
+    if missing:
+        raise RuntimeError(
+            "Installed embodik is missing PositionStepOptions fields "
+            f"{missing}. Rebuild this worktree with: pixi run install"
+        )
 DEFAULT_MAX_COLLISION_CONSTRAINTS = 3
 DEFAULT_JOINT_ACCEL_LIMIT = 15.0
+# Optional override of the curated collision link-pair whitelist. When set by a
+# model-specific entrypoint to a set of sorted (link_a, link_b) tuples, it
+# replaces the built-in curated list. Default None keeps 06 unchanged.
+COMMON_BIMANUAL_COLLISION_LINK_PAIRS: set[tuple[str, str]] | None = None
+# Optional override of the initial "Robot Geometry" view. When set to a value in
+# GEOMETRY_VIEW_OPTIONS it overrides the auto Visual/Collision choice. Default None
+# keeps the existing auto behaviour for 06.
+COMMON_BIMANUAL_DEFAULT_GEOMETRY_VIEW: str | None = None
+# Joints controlled by the "lock" checkbox during IK. Default None falls back to
+# the FFW lift axis (joints starting with "lift_"); model-specific entrypoints
+# can override this with torso-chain joints. COMMON_BIMANUAL_LOCK_LABEL sets the
+# checkbox text (default "Lock Lift Joint During IK").
+COMMON_BIMANUAL_LOCK_JOINT_NAMES: list[str] | None = None
+COMMON_BIMANUAL_LOCK_LABEL: str | None = None
+# Opt-in dual-controller Seer teleop (set True by entrypoints that share the
+# panel, including public example 06). When False (default for
+# any other consumer) no teleop panel/controllers are built. Ports are forwarded
+# by the entrypoint; None = discover/fallback.
+COMMON_BIMANUAL_ENABLE_SEER_TELEOP: bool = False
+COMMON_BIMANUAL_SEER_CONTROLLER_PORT: str | None = DEFAULT_SEER_CONTROLLER_PORT
+# Opt-in internal segment replay panel; public example 06 does not enable it.
+COMMON_BIMANUAL_ENABLE_SEGMENT_REPLAY: bool = False
+# Optional model-specific integrated-WBC parity defaults. None keeps legacy auto
+# behaviour for public example 06; model-specific entrypoints set these explicitly.
+COMMON_BIMANUAL_DEFAULT_ENABLE_COM: bool | None = None
+COMMON_BIMANUAL_DEFAULT_POSTURE_WEIGHT: float | None = None
+COMMON_BIMANUAL_DEFAULT_ARM_NULLSPACE: bool | None = None
+COMMON_BIMANUAL_DEFAULT_LOCK_TORSO: bool | None = None
+COMMON_BIMANUAL_POSTURE_JOINT_NAMES: list[str] | None = None
 _SolverStep = collections.namedtuple("_SolverStep", ("q_next", "solver_result", "elapsed_ms"))
 COMMON_BIMANUAL_SUPPORT_CONTACT_FRAMES = (
     "left_wheel_drive_link",
@@ -111,6 +181,12 @@ DEFAULT_RBY1_SEED = {
     "right_arm_5": 0.7854,
     "right_arm_6": 0.0,
 }
+DEFAULT_SIDE_PREFIXED_TORSO_SEED = {
+    "left_shoulder_roll_joint": 0.25,
+    "left_elbow_pitch_joint": -0.6,
+    "right_shoulder_roll_joint": -0.25,
+    "right_elbow_pitch_joint": -0.6,
+}
 POSTURE_JOINT_CANDIDATES = (
     "lift_joint",
     "torso_0",
@@ -119,6 +195,11 @@ POSTURE_JOINT_CANDIDATES = (
     "torso_3",
     "torso_4",
     "torso_5",
+    "base_yaw_joint",
+    "base_pitch_joint",
+    "knee_pitch_joint",
+    "hip_pitch_joint",
+    "torso_yaw_joint",
 )
 
 
@@ -139,20 +220,48 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+# Arm-segment tokens used to recognise side-prefixed arm joints, e.g.
+# ``left_shoulder_pitch_joint`` / ``right_elbow_yaw_joint``.
+_ARM_SEGMENT_TOKENS = ("shoulder", "elbow", "wrist")
+
+
 def _is_left_arm_joint(joint_name: str) -> bool:
-    return joint_name.startswith(("arm_l_", "gripper_l_", "left_arm_", "gripper_finger_l"))
+    if joint_name.startswith(("arm_l_", "gripper_l_", "left_arm_", "gripper_finger_l")):
+        return True
+    return joint_name.startswith("left_") and any(
+        token in joint_name for token in _ARM_SEGMENT_TOKENS
+    )
 
 
 def _is_right_arm_joint(joint_name: str) -> bool:
-    return joint_name.startswith(("arm_r_", "gripper_r_", "right_arm_", "gripper_finger_r"))
+    if joint_name.startswith(("arm_r_", "gripper_r_", "right_arm_", "gripper_finger_r")):
+        return True
+    return joint_name.startswith("right_") and any(
+        token in joint_name for token in _ARM_SEGMENT_TOKENS
+    )
 
 
 def _is_arm_joint(joint_name: str) -> bool:
     return _is_left_arm_joint(joint_name) or _is_right_arm_joint(joint_name)
 
 
+def _resolve_lock_joint_names(
+    joint_names: list[str], joint_name_to_cfg: dict[str, int]
+) -> list[str]:
+    """Joints controlled by the GUI "lock" checkbox, restricted to present joints.
+
+    Uses COMMON_BIMANUAL_LOCK_JOINT_NAMES when configured by a model-specific
+    entrypoint; otherwise falls back to the FFW lift axis (``lift_`` prefix).
+    """
+    if COMMON_BIMANUAL_LOCK_JOINT_NAMES is not None:
+        return [name for name in COMMON_BIMANUAL_LOCK_JOINT_NAMES if name in joint_name_to_cfg]
+    return [name for name in joint_names if name.startswith("lift_") and name in joint_name_to_cfg]
+
+
 def _posture_control_joint_names(joint_names: list[str]) -> list[str]:
     available = set(joint_names)
+    if COMMON_BIMANUAL_POSTURE_JOINT_NAMES is not None:
+        return [name for name in COMMON_BIMANUAL_POSTURE_JOINT_NAMES if name in available]
     return [name for name in POSTURE_JOINT_CANDIDATES if name in available]
 
 
@@ -168,7 +277,33 @@ def _default_seed_for_joint_names(joint_names: list[str]) -> dict[str, float]:
     names = set(joint_names)
     if {"torso_0", "left_arm_0", "right_arm_0"}.issubset(names):
         return DEFAULT_RBY1_SEED
+    if "base_yaw_joint" in names and "left_shoulder_pitch_joint" in names:
+        return DEFAULT_SIDE_PREFIXED_TORSO_SEED
     return DEFAULT_COMMON_BIMANUAL_SEED
+
+
+def _default_posture_weight() -> float:
+    if COMMON_BIMANUAL_DEFAULT_POSTURE_WEIGHT is not None:
+        return float(COMMON_BIMANUAL_DEFAULT_POSTURE_WEIGHT)
+    return DEFAULT_POSTURE_WEIGHT
+
+
+def _initial_enable_com(*, solver_has_com: bool, com_inside_support: bool) -> bool:
+    if COMMON_BIMANUAL_DEFAULT_ENABLE_COM is not None:
+        return bool(COMMON_BIMANUAL_DEFAULT_ENABLE_COM) and solver_has_com
+    return solver_has_com and com_inside_support
+
+
+def _initial_arm_nullspace_enabled() -> bool:
+    if COMMON_BIMANUAL_DEFAULT_ARM_NULLSPACE is not None:
+        return bool(COMMON_BIMANUAL_DEFAULT_ARM_NULLSPACE)
+    return True
+
+
+def _initial_lock_torso(*, has_lock_joints: bool) -> bool:
+    if COMMON_BIMANUAL_DEFAULT_LOCK_TORSO is not None:
+        return bool(COMMON_BIMANUAL_DEFAULT_LOCK_TORSO) and has_lock_joints
+    return False
 
 
 def _default_collision_min_distance_mm(variant: str) -> float:
@@ -203,6 +338,13 @@ def _ctrl_from_pose(ctrl, pose) -> None:
     q_xyzw = r2q(pose[:3, :3], order="xyzs")
     ctrl.position = tuple(np.asarray(pose[:3, 3], dtype=float))
     ctrl.wxyz = (float(q_xyzw[3]), float(q_xyzw[0]), float(q_xyzw[1]), float(q_xyzw[2]))
+
+
+def _matrix_from_rt(pose: embodik.Rt) -> np.ndarray:
+    matrix = np.eye(4, dtype=float)
+    matrix[:3, :3] = np.asarray(pose.rotation, dtype=float)
+    matrix[:3, 3] = np.asarray(pose.translation, dtype=float)
+    return matrix
 
 
 def _rotation_error_rad(R_target: np.ndarray, R_current: np.ndarray) -> float:
@@ -477,6 +619,25 @@ def _urdf_has_collision_geometry(urdf_path: Path) -> bool:
     return root.find(".//collision/geometry") is not None
 
 
+def _resolve_default_geometry_view(
+    *,
+    override: str | None,
+    urdf_path: Path,
+    collision_urdf_path: Path,
+    has_collision_geometry: bool,
+) -> str:
+    """Pick the initial Robot Geometry view.
+
+    An explicit, valid ``override`` always wins. Otherwise fall back to the auto
+    rule: show collision meshes only when the visual and collision URDFs are the
+    same file and that file actually carries collision geometry.
+    """
+    if override in GEOMETRY_VIEW_OPTIONS:
+        return override
+    same_urdf = Path(urdf_path).resolve() == Path(collision_urdf_path).resolve()
+    return "Collision" if same_urdf and has_collision_geometry else "Visual"
+
+
 def _build_link_adjacency_graph(urdf_path: Path) -> dict[str, set[str]]:
     tree = ET.parse(urdf_path)
     root = tree.getroot()
@@ -736,7 +897,10 @@ def _generate_common_bimanual_collision_include_pairs(
     exclude_set = {tuple(p) for p in exclude_pairs}
     link_graph = _build_link_adjacency_graph(urdf_path)
     link_names = set(link_graph.keys())
-    curated_link_pairs = set(_common_bimanual_manual_curated_link_pairs())
+    if COMMON_BIMANUAL_COLLISION_LINK_PAIRS is not None:
+        curated_link_pairs = set(COMMON_BIMANUAL_COLLISION_LINK_PAIRS)
+    else:
+        curated_link_pairs = set(_common_bimanual_manual_curated_link_pairs())
     include_pairs: list[tuple[str, str]] = []
     for a, b in pair_names:
         pair = (str(a), str(b))
@@ -953,11 +1117,11 @@ def main() -> None:
     initial_com_inside_support = _contains_point_in_polygon(
         support_polygon, np.asarray(robot.get_com_position(), dtype=float)[:2]
     )
-    default_geometry_view = (
-        "Collision"
-        if urdf_path.resolve() == collision_urdf_path.resolve()
-        and _urdf_has_collision_geometry(collision_viewer_urdf_path)
-        else "Visual"
+    default_geometry_view = _resolve_default_geometry_view(
+        override=COMMON_BIMANUAL_DEFAULT_GEOMETRY_VIEW,
+        urdf_path=urdf_path,
+        collision_urdf_path=collision_urdf_path,
+        has_collision_geometry=_urdf_has_collision_geometry(collision_viewer_urdf_path),
     )
     _set_geometry_view(default_geometry_view)
     _update_robot_visuals(q)
@@ -971,6 +1135,14 @@ def main() -> None:
         configure_solver_runtime_policy(solver_local)
         solver_local.enable_position_limits(True)
         solver_local.enable_velocity_limits(True)
+        # These whole-body bimanual robots have links that rest closer than the
+        # collision clearance (arm near torso, chassis near leg linkage). The
+        # non-worsening floor keeps those structural pairs from triggering an
+        # infeasible recovery that would over-constrain / freeze the solve. Opt-in,
+        # so it stays local to the bimanual app rather than the shared policy helper
+        # (which collision-recovery tests/examples rely on with default semantics).
+        if hasattr(solver_local, "set_non_worsening_collision_floor_enabled"):
+            solver_local.set_non_worsening_collision_floor_enabled(True)
 
         right_task_local = solver_local.add_frame_task(
             "right_tool_pose", frame_map["right_tool"], embodik.TaskType.FRAME_POSE
@@ -983,14 +1155,18 @@ def main() -> None:
         right_task_local.weight = 1.0
         left_task_local.weight = 1.0
 
+        # Posture/nullspace sit below the EE band. The EE tasks use priority 0,
+        # or 0/1 when held-arm protection demotes the actively-dragged arm to keep
+        # the held arm planted (see the solve loop); keep regularizers at 2 so
+        # they always fill the remaining nullspace under both layouts.
         posture_local = solver_local.add_posture_task("bimanual_posture")
-        posture_local.priority = 1
-        posture_local.weight = DEFAULT_POSTURE_WEIGHT
+        posture_local.priority = 2
+        posture_local.weight = _default_posture_weight()
         posture_local.set_target_configuration(np.asarray(q_posture_seed, dtype=float).copy())
         if hasattr(posture_local, "set_controlled_joint_indices"):
             posture_local.set_controlled_joint_indices(list(posture_controlled_indices))
         arm_nullspace_local = solver_local.add_posture_task("arm_nullspace")
-        arm_nullspace_local.priority = 1
+        arm_nullspace_local.priority = 2
         arm_nullspace_local.weight = 0.0
         arm_nullspace_local.set_target_configuration(
             np.asarray(nullspace_bias_q, dtype=float).copy()
@@ -1000,6 +1176,7 @@ def main() -> None:
     solver, right_task, left_task, posture, arm_nullspace = _build_solver(q)
 
     allowed_joint_names = set(ik_joint_names)
+    lock_joint_name_set = set(_resolve_lock_joint_names(joint_names, joint_name_to_cfg))
     locked_velocity_indices: list[int] = []
     left_arm_velocity_indices: list[int] = []
     right_arm_velocity_indices: list[int] = []
@@ -1018,7 +1195,7 @@ def main() -> None:
             target_index_list = left_arm_velocity_indices
         elif _is_right_arm_joint(joint_name):
             target_index_list = right_arm_velocity_indices
-        elif joint_name.startswith("lift_"):
+        elif joint_name in lock_joint_name_set:
             target_index_list = lift_velocity_indices
         for offset in range(max(nv_joint, 1)):
             expanded_idx = idx_v + offset
@@ -1059,17 +1236,6 @@ def main() -> None:
         T[:3, :3] = np.asarray(pose.rotation, dtype=float)
         T[:3, 3] = np.asarray(pose.translation, dtype=float)
         return T
-
-    def _current_task_errors() -> tuple[float, float, float, float]:
-        right_pose_now = frame_pose(frame_map["right_tool"])
-        left_pose_now = frame_pose(frame_map["left_tool"])
-        right_target_pose = _pose_from_ctrl(right_ctrl)
-        left_target_pose = _pose_from_ctrl(left_ctrl)
-        right_pos_err = float(np.linalg.norm(right_target_pose[:3, 3] - right_pose_now[:3, 3]))
-        left_pos_err = float(np.linalg.norm(left_target_pose[:3, 3] - left_pose_now[:3, 3]))
-        right_rot_err = _rotation_error_rad(right_target_pose[:3, :3], right_pose_now[:3, :3])
-        left_rot_err = _rotation_error_rad(left_target_pose[:3, :3], left_pose_now[:3, :3])
-        return right_pos_err, left_pos_err, right_rot_err, left_rot_err
 
     right_pose0 = frame_pose(frame_map["right_tool"])
     left_pose0 = frame_pose(frame_map["left_tool"])
@@ -1122,7 +1288,8 @@ def main() -> None:
         ori_gain = server.gui.add_slider(
             "Orientation Gain", min=0.1, max=200.0, initial_value=DEFAULT_ROT_GAIN, step=0.1
         )
-        ik_steps = server.gui.add_slider("IK Iterations", min=1, max=20, initial_value=1, step=1)
+        auto_tune_gains = server.gui.add_checkbox("Auto-tune gains", initial_value=False)
+        ik_steps = server.gui.add_slider("IK Iterations", min=1, max=20, initial_value=2, step=1)
         adaptive_dt = server.gui.add_checkbox("Adaptive dt", initial_value=True)
         adaptive_dt_max_scale = server.gui.add_slider(
             "Adaptive dt Max Scale", min=1.0, max=10.0, step=0.5, initial_value=10.0
@@ -1130,14 +1297,216 @@ def main() -> None:
         adaptive_dt_ref_dist = server.gui.add_slider(
             "Adaptive dt Ref Dist (m)", min=0.01, max=0.20, step=0.01, initial_value=0.02
         )
+        # SCALE_ELASTIC default: the elastic band lets a saturated joint push past
+        # its limit and relax back cleanly (much better limit-saturation recovery
+        # than plain SCALE/MIN_ERROR). Trade-off: its limit relaxation is global,
+        # so when one arm's motion shifts the torso/CoM the *held* arm's EEF can
+        # drift (cross-coupling). SCALE keeps the held arm planted but loses the
+        # recovery robustness; MIN_ERROR avoids stalls but also drifts on return.
         solve_mode = server.gui.add_dropdown(
             "EE Solve Mode",
             options=("SCALE", "SCALE_ELASTIC", "MIN_ERROR"),
             initial_value="SCALE_ELASTIC",
         )
+        # Default on: when a prioritized SCALE/SCALE_ELASTIC solve collapses the
+        # primary task scale to zero under active constraints (reach limit,
+        # self-collision, or CoM balance opposing the commanded EE motion), fall
+        # back to MIN_ERROR for that step so the arm tracks as close as the
+        # constraints allow instead of freezing. It only engages on collapse, so
+        # feasible solves are unchanged; uncheck to see strict infeasibility.
         allow_fallback = server.gui.add_checkbox(
-            "Allow SCALE fallback to MIN_ERROR", initial_value=False
+            "Allow SCALE fallback to MIN_ERROR", initial_value=True
         )
+        # When you drag one gizmo, the held arm should stay on its target even as
+        # the torso/CoM shift to serve the moving arm. Demoting the actively
+        # dragged arm to a lower priority plants the held arm (the moving arm then
+        # works in its nullspace). Default on; disable for symmetric bimanual moves.
+        hold_inactive_arm = server.gui.add_checkbox(
+            "Hold the non-dragged arm", initial_value=True
+        )
+        seer_teleop = None
+        seer_gui = {}
+        if COMMON_BIMANUAL_ENABLE_SEER_TELEOP:
+            seer_teleop = BimanualSeerTeleop(
+                scale=DEFAULT_TELEOP_SCALE_FACTOR,
+                port=COMMON_BIMANUAL_SEER_CONTROLLER_PORT,
+            )
+            with server.gui.add_folder("Teleop Control", expand_by_default=False):
+                seer_gui["enabled"] = server.gui.add_checkbox("Enable Teleop Mode", initial_value=False)
+                seer_gui["status"] = server.gui.add_text("Controller", initial_value="Not connected")
+                seer_gui["connect"] = server.gui.add_button("Connect Controller")
+                seer_gui["disconnect"] = server.gui.add_button("Disconnect Controller")
+                seer_gui["disconnect"].disabled = True
+                seer_gui["left_enable"] = server.gui.add_checkbox("Enable left arm", initial_value=True)
+                seer_gui["right_enable"] = server.gui.add_checkbox("Enable right arm", initial_value=True)
+                seer_gui["streaming"] = server.gui.add_text("Streaming", initial_value="L=OFF R=OFF")
+                seer_gui["gripper"] = server.gui.add_text("Gripper", initial_value="L=OPEN R=OPEN")
+                seer_gui["reset"] = server.gui.add_button("Reset Controller Reference")
+                seer_gui["reset"].disabled = True
+                seer_gui["reset_robot"] = server.gui.add_button("Reset Robot + Targets")
+                seer_gui["scale"] = server.gui.add_slider(
+                    "Position Scale",
+                    min=0.1,
+                    max=5.0,
+                    step=0.1,
+                    initial_value=DEFAULT_TELEOP_SCALE_FACTOR,
+                )
+                with server.gui.add_folder("Controller Info", expand_by_default=False):
+                    seer_gui["pos"] = server.gui.add_text(
+                        "Position", initial_value="L=n/a | R=n/a"
+                    )
+                    seer_gui["buttons"] = server.gui.add_text(
+                        "Buttons", initial_value="L n/a | R n/a"
+                    )
+                    seer_gui["solver_status"] = server.gui.add_text("Solver", initial_value="Ready")
+
+            def _reset_seer_status_display() -> None:
+                seer_gui["streaming"].value = "L=OFF R=OFF"
+                seer_gui["gripper"].value = "L=OPEN R=OPEN"
+                seer_gui["pos"].value = "L=n/a | R=n/a"
+                seer_gui["buttons"].value = "L n/a | R n/a"
+
+            @seer_gui["reset"].on_click
+            def _on_seer_reset(_event) -> None:
+                seer_teleop.reset_references()
+
+            def _sync_seer_connection_gui(*, connected: bool) -> None:
+                seer_gui["connect"].disabled = connected
+                seer_gui["disconnect"].disabled = not connected
+                seer_gui["reset"].disabled = not connected
+
+            @seer_gui["connect"].on_click
+            def _on_seer_connect(_event) -> None:
+                if seer_teleop.connected or seer_gui["connect"].disabled:
+                    return
+                seer_gui["connect"].disabled = True
+                seer_gui["disconnect"].disabled = True
+                seer_gui["status"].value = "Connecting..."
+                ok = seer_teleop.connect()
+                if ok:
+                    seer_gui["status"].value = f"Connected ({seer_teleop.controller.port})"
+                else:
+                    err = seer_teleop.controller.last_connect_error or "Connection failed"
+                    seer_gui["status"].value = err
+                _sync_seer_connection_gui(connected=ok)
+                if not ok:
+                    _reset_seer_status_display()
+
+            @seer_gui["disconnect"].on_click
+            def _on_seer_disconnect(_event) -> None:
+                if not seer_teleop.connected:
+                    _sync_seer_connection_gui(connected=False)
+                    return
+                seer_gui["disconnect"].disabled = True
+                seer_teleop.disconnect()
+                seer_gui["status"].value = "Not connected"
+                _sync_seer_connection_gui(connected=False)
+                _reset_seer_status_display()
+                if bool(seer_gui["enabled"].value):
+                    seer_gui["enabled"].value = False
+
+        # ------------------------------------------------------------------ #
+        # Internal segment replay panel — gated behind COMMON_BIMANUAL_ENABLE_SEGMENT_REPLAY
+        # Mirror of the Seer panel: built only when opted in, otherwise nothing
+        # is constructed and the flag-off path is byte-equivalent for example 06.
+        # ------------------------------------------------------------------ #
+        _seg_player = None
+        _seg_gui: dict = {}
+        _seg_initial_left = None
+        _seg_initial_right = None
+        if COMMON_BIMANUAL_ENABLE_SEGMENT_REPLAY:
+            with server.gui.add_folder("Segment Replay", expand_by_default=False):
+                try:
+                    from examples.wbc_helpers.wbc_segment_replay import (
+                        SegmentPlayer,
+                        load_motion19_segments,
+                    )
+
+                    _seg_segments = load_motion19_segments()
+                    _seg_player = SegmentPlayer(_seg_segments, dt=DEFAULT_SOLVER_DT)
+                    _seg_initial_left = pose_from_transform_control(left_ctrl)
+                    _seg_initial_right = pose_from_transform_control(right_ctrl)
+
+                    _seg_gui["caveat"] = server.gui.add_markdown(
+                        "**Note:** segment replay uses the integrated WBC harness "
+                        "(CoM + posture + SCALE_ELASTIC); full integration behavior "
+                        "can still differ."
+                    )
+                    _seg_gui["reset_to_initial"] = server.gui.add_checkbox(
+                        "Reset to initial config", initial_value=True
+                    )
+                    _seg_gui["speed"] = server.gui.add_slider(
+                        "Replay Speed (x)", min=0.1, max=3.0, step=0.1, initial_value=1.0
+                    )
+                    # One button per segment (indices 0-3 are arm segments; index 4 is torso).
+                    for _si, _ss in enumerate(_seg_segments):
+                        _is_arm = bool(set(_ss.target_keys) & {"left_arm", "right_arm"}) and not (
+                            set(_ss.target_keys) - {"left_arm", "right_arm"}
+                        )
+                        _btn_label = f"[{_si + 1}] {_ss.name}"
+                        if _is_arm:
+                            _btn = server.gui.add_button(_btn_label)
+                        else:
+                            _btn = server.gui.add_button(
+                                f"{_btn_label} (torso — no EE gizmo)", disabled=True
+                            )
+
+                        def _make_seg_click(seg_idx: int):
+                            def _on_seg_click(_event) -> None:
+                                if _seg_player is None:
+                                    return
+                                cur_left = pose_from_transform_control(left_ctrl)
+                                cur_right = pose_from_transform_control(right_ctrl)
+                                reset_flag = bool(_seg_gui["reset_to_initial"].value)
+                                init_l = _seg_initial_left if reset_flag else None
+                                init_r = _seg_initial_right if reset_flag else None
+                                ok = _seg_player.start(
+                                    seg_idx,
+                                    left_ref=cur_left,
+                                    right_ref=cur_right,
+                                    initial_left=init_l,
+                                    initial_right=init_r,
+                                )
+                                if ok:
+                                    if not bool(lock_lift_joint.value) and bool(lift_velocity_indices):
+                                        lock_lift_joint.value = True
+                                    _seg_gui["status"].value = (
+                                        f"Seg {seg_idx + 1}: {_seg_segments[seg_idx].name} — starting"
+                                    )
+                                else:
+                                    _seg_gui["status"].value = (
+                                        f"Seg {seg_idx + 1}: rejected (not an arm segment)"
+                                    )
+
+                            return _on_seg_click
+
+                        _btn.on_click(_make_seg_click(_si))
+
+                    _seg_gui["stop"] = server.gui.add_button("Stop Replay")
+                    _seg_gui["status"] = server.gui.add_text(
+                        "Replay Status", initial_value="Idle"
+                    )
+
+                    @_seg_gui["stop"].on_click
+                    def _on_seg_stop(_event) -> None:
+                        if _seg_player is not None:
+                            _seg_player.stop()
+                        _seg_gui["status"].value = "Idle (stopped)"
+
+                except Exception as _seg_load_exc:
+                    _seg_player = None
+                    _seg_gui["status"] = server.gui.add_text(
+                        "Replay Status",
+                        initial_value=f"Unavailable: {_seg_load_exc}",
+                    )
+                    server.gui.add_button("Load segments (failed)", disabled=True)
+                    server.gui.add_button("Stop Replay", disabled=True)
+                    import logging
+
+                    logging.getLogger(__name__).warning(
+                        "WBC segment replay panel disabled: %s", _seg_load_exc
+                    )
+
         enable_accel_limits = server.gui.add_checkbox(
             "Enable Joint Accel Constraint",
             initial_value=False,
@@ -1153,22 +1522,27 @@ def main() -> None:
         )
         lock_passive = server.gui.add_checkbox("Lock passive joints", initial_value=True)
         arm_nullspace_enable = server.gui.add_checkbox(
-            "Enable Arm Nullspace Bias", initial_value=True
+            "Enable Arm Nullspace Bias",
+            initial_value=_initial_arm_nullspace_enabled(),
         )
         arm_nullspace_weight = server.gui.add_slider(
             "Arm Nullspace Gain",
             min=0.0,
             max=2.0,
-            initial_value=DEFAULT_ARM_NULLSPACE_WEIGHT,
             step=0.01,
+            initial_value=DEFAULT_ARM_NULLSPACE_WEIGHT,
         )
         posture_weight = server.gui.add_slider(
-            "Posture Bias Weight", min=0.0, max=2.0, initial_value=DEFAULT_POSTURE_WEIGHT, step=0.01
+            "Posture Bias Weight",
+            min=0.0,
+            max=2.0,
+            initial_value=_default_posture_weight(),
+            step=0.01,
         )
         lock_lift_joint = server.gui.add_checkbox(
-            "Lock Lift Joint During IK",
-            initial_value=False,
-            disabled="lift_joint" not in joint_name_to_cfg,
+            COMMON_BIMANUAL_LOCK_LABEL or "Lock Lift Joint During IK",
+            initial_value=_initial_lock_torso(has_lock_joints=bool(lift_velocity_indices)),
+            disabled=not lift_velocity_indices,
         )
         manual_control = server.gui.add_checkbox("Manual Joint Control", initial_value=False)
 
@@ -1221,8 +1595,10 @@ def main() -> None:
     with server.gui.add_folder("CoM Constraint"):
         enable_com_constraint = server.gui.add_checkbox(
             "Enable CoM Constraint",
-            initial_value=hasattr(solver, "configure_com_constraint")
-            and initial_com_inside_support,
+            initial_value=_initial_enable_com(
+                solver_has_com=hasattr(solver, "configure_com_constraint"),
+                com_inside_support=initial_com_inside_support,
+            ),
             disabled=not hasattr(solver, "configure_com_constraint"),
         )
         com_margin_pct = server.gui.add_slider(
@@ -1599,10 +1975,12 @@ def main() -> None:
         )
 
     def _sync_targets_from_robot() -> None:
+        nonlocal seer_target_poses
         right_pose = frame_pose(frame_map["right_tool"])
         left_pose = frame_pose(frame_map["left_tool"])
         _ctrl_from_pose(right_ctrl, right_pose)
         _ctrl_from_pose(left_ctrl, left_pose)
+        seer_target_poses = {"left": None, "right": None}
         for task, pose in ((right_task, right_pose), (left_task, left_pose)):
             try:
                 task.set_target_pose(pose[:3, 3], pose[:3, :3])
@@ -1636,19 +2014,31 @@ def main() -> None:
         )
         return _SolverStep(q_next=q_next, solver_result=result, elapsed_ms=elapsed_ms)
 
+    def _target_pose_moved(
+        cur_pose: np.ndarray, prev_pose: np.ndarray | None, *, pos_eps: float, rot_eps: float
+    ) -> bool:
+        if prev_pose is None:
+            return False
+        pos_delta = float(np.linalg.norm(cur_pose[:3, 3] - prev_pose[:3, 3]))
+        rot_delta = _rotation_error_rad(cur_pose[:3, :3], prev_pose[:3, :3])
+        return pos_delta > pos_eps or rot_delta > rot_eps
+
     @snap_targets.on_click
     def _(_evt) -> None:
         _sync_targets_from_robot()
         status.value = "Status: Targets snapped to current EE poses"
 
-    @reset_pose.on_click
-    def _(_evt) -> None:
-        nonlocal q, posture_target
+    def _reset_robot_and_targets(*, status_message: str = "Status: Robot and targets reset") -> None:
+        nonlocal q, posture_target, nullspace_bias_q, prev_right_target_pose, prev_left_target_pose
+        reset_adaptive_gain_state(_adaptive_gain_state)
         q = robot.neutral_configuration()
         q = _apply_named_joint_seed(q, joint_name_to_cfg, q_lo, q_hi, default_joint_seed)
         q = np.clip(q, np.asarray(q_lo, dtype=float), np.asarray(q_hi, dtype=float))
         q = _apply_soft_lift_margin(q, joint_name_to_cfg=joint_name_to_cfg, q_lo=q_lo, q_hi=q_hi)
-        posture_target = q.copy()
+        posture_target = np.asarray(q, dtype=float).copy()
+        # Posture + arm-nullspace tasks read this every IK tick; keep it aligned with q
+        # or reset will drift back toward the pre-reset configuration.
+        nullspace_bias_q = np.asarray(q, dtype=float).copy()
         robot.update_configuration(q)
         _update_robot_visuals(q)
         _reset_solver_state("manual reset")
@@ -1658,15 +2048,107 @@ def main() -> None:
         _update_com_visualization()
         timing_handle.value = 0.0
         solve_ms.value = "--"
-        status.value = "Status: Robot and targets reset"
+        status.value = status_message
+        prev_right_target_pose = None
+        prev_left_target_pose = None
+        if _seg_player is not None:
+            _seg_player.stop()
+            if _seg_gui.get("status") is not None:
+                _seg_gui["status"].value = "Idle (stopped by reset)"
+        if seer_teleop is not None:
+            for side in ("left", "right"):
+                seer_teleop.arms[side].streaming = False
+                seer_teleop.arms[side].base_pose = None
+            if seer_teleop.connected:
+                seer_teleop.reset_references()
+            if seer_gui:
+                seer_gui["streaming"].value = "L=OFF R=OFF"
+
+    @reset_pose.on_click
+    def _(_evt) -> None:
+        _reset_robot_and_targets()
+
+    if seer_teleop is not None:
+
+        @seer_gui["reset_robot"].on_click
+        def _on_seer_reset_robot(_event) -> None:
+            _reset_robot_and_targets()
+
+        seer_teleop.on_reset_robot = _reset_robot_and_targets
 
     opts = embodik.PositionStepOptions()
+    _require_position_step_primary_opts(opts)
+    _adaptive_gain_state = AdaptiveGainTuningState()
     _configure_acceleration_limits_if_needed(force=True)
     _configure_com_constraint_if_needed(force=True)
     _sync_joint_sliders_from_q(q)
     _sync_posture_sliders_from_q(q)
     _sync_targets_from_robot()
     prev_manual_state = False
+    # Held-arm protection state: remember last frame's EE target poses so the
+    # solve loop can tell which gizmo the user is actively dragging.
+    prev_right_target_pose: np.ndarray | None = None
+    prev_left_target_pose: np.ndarray | None = None
+    seer_target_poses: dict[str, embodik.Rt | None] = {"left": None, "right": None}
+
+    def _seer_side_active(side: str) -> bool:
+        if seer_teleop is None:
+            return False
+        return (
+            bool(seer_gui["enabled"].value)
+            and seer_teleop.connected
+            and bool(seer_gui[f"{side}_enable"].value)
+        )
+
+    def _target_pose_matrix(side: str) -> np.ndarray:
+        if _seer_side_active(side):
+            owned = seer_target_poses.get(side)
+            if owned is not None:
+                return _matrix_from_rt(owned)
+        ctrl = right_ctrl if side == "right" else left_ctrl
+        return _pose_from_ctrl(ctrl)
+
+    def _current_task_errors() -> tuple[float, float, float, float]:
+        right_pose_now = frame_pose(frame_map["right_tool"])
+        left_pose_now = frame_pose(frame_map["left_tool"])
+        right_target_pose = _target_pose_matrix("right")
+        left_target_pose = _target_pose_matrix("left")
+        right_pos_err = float(np.linalg.norm(right_target_pose[:3, 3] - right_pose_now[:3, 3]))
+        left_pos_err = float(np.linalg.norm(left_target_pose[:3, 3] - left_pose_now[:3, 3]))
+        right_rot_err = _rotation_error_rad(right_target_pose[:3, :3], right_pose_now[:3, :3])
+        left_rot_err = _rotation_error_rad(left_target_pose[:3, :3], left_pose_now[:3, :3])
+        return right_pos_err, left_pos_err, right_rot_err, left_rot_err
+
+    def _format_seer_pos(side: str, ctrl) -> str:
+        if _seer_side_active(side) and seer_target_poses.get(side) is not None:
+            pos = np.asarray(seer_target_poses[side].translation, dtype=float)
+        else:
+            pos = np.asarray(ctrl.position, dtype=float)
+        return f"({pos[0]:+.3f}, {pos[1]:+.3f}, {pos[2]:+.3f})"
+
+    def _update_seer_gui_from_states(states) -> None:
+        if seer_teleop is None or not states:
+            return
+        left_st = states["left"]
+        right_st = states["right"]
+        seer_gui["streaming"].value = (
+            f"L={'ON' if left_st.streaming else 'OFF'} "
+            f"R={'ON' if right_st.streaming else 'OFF'}"
+        )
+        seer_gui["gripper"].value = (
+            f"L={'CLOSED' if left_st.gripper_closed else 'OPEN'} "
+            f"R={'CLOSED' if right_st.gripper_closed else 'OPEN'}"
+        )
+        left_pos = _format_seer_pos("left", left_ctrl)
+        right_pos = _format_seer_pos("right", right_ctrl)
+        seer_gui["pos"].value = f"L={left_pos} | R={right_pos}"
+        lb = left_st.buttons
+        rb = right_st.buttons
+        seer_gui["buttons"].value = (
+            f"L trig={lb[0]:>3} side={lb[1]:>3} key={lb[2]:>3} | "
+            f"R trig={rb[0]:>3} side={rb[1]:>3} key={rb[2]:>3}"
+        )
+
     while True:
         q_prev = np.asarray(q, dtype=float).copy()
         _configure_acceleration_limits_if_needed()
@@ -1755,9 +2237,19 @@ def main() -> None:
         else:
             right_ctrl.visible = True
             left_ctrl.visible = True
+        # When the locked-joint chain is frozen during IK,
+        # the reduced-DOF arm can hit SNS task-scale collapse against an active
+        # collision row: the SCALE solve drives the primary scale toward zero and
+        # the step goes INFEASIBLE (the arm freezes). MIN_ERROR instead yields
+        # graceful, collision-safe partial motion (move as close as the locked
+        # DOF allow). Apply it only while the chain is locked; the user's chosen
+        # mode governs when nothing is locked.
+        torso_chain_locked = bool(lock_lift_joint.value) and bool(lift_velocity_indices)
+        effective_solve_mode = (
+            embodik.TaskSolveMode.MIN_ERROR if torso_chain_locked else active_mode
+        )
         for task in (right_task, left_task):
-            task.solve_mode = active_mode
-            task.allow_min_error_fallback = bool(allow_fallback.value)
+            task.solve_mode = effective_solve_mode
 
         posture.weight = float(posture_weight.value)
         for joint_name in posture_control_joint_names:
@@ -1780,6 +2272,40 @@ def main() -> None:
             if hasattr(arm_nullspace, "set_controlled_joint_indices"):
                 arm_nullspace.set_controlled_joint_indices([])
 
+        right_active = bool(enable_right_ee.value)
+        left_active = bool(enable_left_ee.value)
+
+        right_task.weight = 1.0 if right_active else 0.0
+        left_task.weight = 1.0 if left_active else 0.0
+
+        _seer_states = None
+        if seer_teleop is not None and bool(seer_gui["enabled"].value):
+            seer_teleop.scale = float(seer_gui["scale"].value)
+            seer_teleop.set_arm_enabled("right", bool(seer_gui["right_enable"].value))
+            seer_teleop.set_arm_enabled("left", bool(seer_gui["left_enable"].value))
+            for _side, _ctrl in (("right", right_ctrl), ("left", left_ctrl)):
+                if _seer_side_active(_side):
+                    if seer_target_poses[_side] is None:
+                        seer_target_poses[_side] = pose_from_transform_control(_ctrl)
+                else:
+                    seer_target_poses[_side] = None
+            _seer_states = seer_teleop.step(
+                left_target=seer_target_poses["left"] or pose_from_transform_control(left_ctrl),
+                right_target=seer_target_poses["right"] or pose_from_transform_control(right_ctrl),
+                now=time.time(),
+            )
+            for _side, _ctrl in (("right", right_ctrl), ("left", left_ctrl)):
+                _st = _seer_states[_side]
+                if _seer_side_active(_side):
+                    if _st.new_pose is not None:
+                        seer_target_poses[_side] = _st.new_pose
+                    if seer_target_poses[_side] is not None:
+                        set_transform_control_pose(_ctrl, seer_target_poses[_side])
+            _update_seer_gui_from_states(_seer_states)
+        else:
+            seer_target_poses["left"] = None
+            seer_target_poses["right"] = None
+
         right_pos_err, left_pos_err, right_rot_err, left_rot_err = _current_task_errors()
         if posture_controlled_indices:
             posture_err = float(
@@ -1790,11 +2316,104 @@ def main() -> None:
             )
         else:
             posture_err = 0.0
-        right_active = bool(enable_right_ee.value)
-        left_active = bool(enable_left_ee.value)
 
-        right_task.weight = 1.0 if right_active else 0.0
-        left_task.weight = 1.0 if left_active else 0.0
+        # Held-arm protection: detect which target is actively moving (gizmo drag
+        # or teleop stream), then demote that arm to priority 1 so the held arm
+        # stays planted while the torso/CoM shift to serve the moving arm.
+        cur_right_target_pose = _target_pose_matrix("right")
+        cur_left_target_pose = _target_pose_matrix("left")
+        if _seer_side_active("right") and _seer_states is not None:
+            right_target_moved = bool(_seer_states["right"].streaming) or _target_pose_moved(
+                cur_right_target_pose,
+                prev_right_target_pose,
+                pos_eps=1e-4,
+                rot_eps=1e-3,
+            )
+        else:
+            right_target_moved = _target_pose_moved(
+                cur_right_target_pose,
+                prev_right_target_pose,
+                pos_eps=1e-4,
+                rot_eps=1e-3,
+            )
+        if _seer_side_active("left") and _seer_states is not None:
+            left_target_moved = bool(_seer_states["left"].streaming) or _target_pose_moved(
+                cur_left_target_pose,
+                prev_left_target_pose,
+                pos_eps=1e-4,
+                rot_eps=1e-3,
+            )
+        else:
+            left_target_moved = _target_pose_moved(
+                cur_left_target_pose,
+                prev_left_target_pose,
+                pos_eps=1e-4,
+                rot_eps=1e-3,
+            )
+        prev_right_target_pose = cur_right_target_pose
+        prev_left_target_pose = cur_left_target_pose
+        right_task.priority = 0
+        left_task.priority = 0
+        if bool(hold_inactive_arm.value) and right_active and left_active:
+            if left_target_moved and not right_target_moved:
+                left_task.priority = 1
+            elif right_target_moved and not left_target_moved:
+                right_task.priority = 1
+
+        # Segment replay block — gated so flag-off is byte-equivalent (no-op).
+        if _seg_player is not None and _seg_player.state != "idle":
+            _seg_player.speed = float(_seg_gui["speed"].value)
+            _left_now_rt = pose_from_transform_control(left_ctrl)
+            _right_now_rt = pose_from_transform_control(right_ctrl)
+            _seg_tick = _seg_player.tick(left_now=_left_now_rt, right_now=_right_now_rt)
+            if _seg_tick["left_target"] is not None:
+                set_transform_control_pose(left_ctrl, _seg_tick["left_target"])
+            if _seg_tick["right_target"] is not None:
+                set_transform_control_pose(right_ctrl, _seg_tick["right_target"])
+            if _seg_gui:
+                _seg_state = _seg_tick["state"]
+                _seg_elapsed = _seg_tick["elapsed"]
+                _seg_dur = _seg_tick["duration"]
+                _seg_name = (
+                    _seg_player._spec.name if _seg_player._spec is not None else "?"
+                )
+                _seg_mean_err = 0.0
+                _seg_lt = _seg_tick.get("left_target")
+                _seg_rt = _seg_tick.get("right_target")
+                if _seg_lt is not None:
+                    _lt_now = np.asarray(
+                        robot.get_frame_pose(frame_map["left_tool"]).translation, dtype=float
+                    )
+                    _lt_tgt = np.asarray(_seg_lt.translation, dtype=float)
+                    _seg_mean_err = float(np.linalg.norm(_lt_now - _lt_tgt))
+                if _seg_rt is not None:
+                    _rt_now = np.asarray(
+                        robot.get_frame_pose(frame_map["right_tool"]).translation, dtype=float
+                    )
+                    _rt_tgt = np.asarray(_seg_rt.translation, dtype=float)
+                    _seg_mean_err = max(
+                        _seg_mean_err, float(np.linalg.norm(_rt_now - _rt_tgt))
+                    )
+                _seg_idx = int(_seg_tick.get("index", -1))
+                _seg_n = len(getattr(_seg_player, "_segments", ()))
+                _sample_i = int(_seg_tick.get("sample_index", 0))
+                _done_label = " DONE" if _seg_tick["done"] else ""
+                _seg_gui["status"].value = (
+                    f"seg {_seg_idx + 1}/{_seg_n} | sample {_sample_i} | "
+                    f"{_seg_name} | {_seg_state} | "
+                    f"{_seg_elapsed:.1f}/{_seg_dur:.1f}s | "
+                    f"err={_seg_mean_err * 1000:.1f}mm{_done_label}"
+                )
+                if _seg_tick.get("done") and _seg_state == "hold":
+                    _seg_player.stop()
+                    if _seg_gui.get("status") is not None:
+                        _seg_gui["status"].value = "Idle (segment finished — ready for teleop)"
+                    set_transform_control_pose(
+                        left_ctrl, robot.get_frame_pose(frame_map["left_tool"])
+                    )
+                    set_transform_control_pose(
+                        right_ctrl, robot.get_frame_pose(frame_map["right_tool"])
+                    )
 
         right_settled = (not right_active) or (
             right_pos_err <= EE_POSITION_DEADBAND and right_rot_err <= EE_ROTATION_DEADBAND
@@ -1803,7 +2422,14 @@ def main() -> None:
             left_pos_err <= EE_POSITION_DEADBAND and left_rot_err <= EE_ROTATION_DEADBAND
         )
         settled = right_settled and left_settled and posture_err < POSTURE_SLIDER_DEADBAND
-        if settled:
+        streaming_active = _seer_states is not None and (
+            bool(_seer_states["left"].streaming) or bool(_seer_states["right"].streaming)
+        )
+        # Segment replay is treated as streaming so the settled early-exit doesn't
+        # swallow its gizmo updates.
+        if _seg_player is not None and _seg_player.state not in ("idle", "hold"):
+            streaming_active = True
+        if settled and not streaming_active and not (left_target_moved or right_target_moved):
             robot.update_configuration(q)
             _update_robot_visuals(q)
             _sync_joint_sliders_from_q(q)
@@ -1836,29 +2462,46 @@ def main() -> None:
             continue
 
         collision_min_distance_m = float(collision_min_dist_mm.value) * 1e-3
+        tune_pos_err = 0.0
+        tune_rot_err = 0.0
+        if right_active:
+            tune_pos_err = max(tune_pos_err, float(right_pos_err))
+            tune_rot_err = max(tune_rot_err, float(right_rot_err))
+        if left_active:
+            tune_pos_err = max(tune_pos_err, float(left_pos_err))
+            tune_rot_err = max(tune_rot_err, float(left_rot_err))
+        eff_pos_gain, eff_rot_gain, _, _ = compute_effective_gains(
+            base_position_gain=float(pos_gain.value),
+            base_orientation_gain=float(ori_gain.value),
+            position_error_m=tune_pos_err,
+            orientation_error_rad=tune_rot_err,
+            config=_ADAPTIVE_GAIN_CONFIG,
+            state=_adaptive_gain_state,
+            enabled=bool(auto_tune_gains.value),
+        )
         targets = []
         if right_active:
             targets.append(
                 embodik.TaskTarget(
                     "right_tool_pose",
-                    _pose_from_ctrl(right_ctrl),
-                    float(pos_gain.value),
-                    float(ori_gain.value),
+                    _target_pose_matrix("right"),
+                    float(eff_pos_gain),
+                    float(eff_rot_gain),
                 )
             )
         if left_active:
             targets.append(
                 embodik.TaskTarget(
                     "left_tool_pose",
-                    _pose_from_ctrl(left_ctrl),
-                    float(pos_gain.value),
-                    float(ori_gain.value),
+                    _target_pose_matrix("left"),
+                    float(eff_pos_gain),
+                    float(eff_rot_gain),
                 )
             )
         opts.max_steps = int(ik_steps.value)
-        opts.position_gain = float(pos_gain.value)
-        opts.orientation_gain = float(ori_gain.value)
-        opts.adaptive_dt = bool(adaptive_dt.value)
+        opts.position_gain = float(eff_pos_gain)
+        opts.orientation_gain = float(eff_rot_gain)
+        opts.adaptive_dt = bool(adaptive_dt.value) and not bool(auto_tune_gains.value)
         opts.adaptive_dt_max_scale = float(adaptive_dt_max_scale.value)
         opts.adaptive_dt_reference_distance = float(adaptive_dt_ref_dist.value)
         if hasattr(opts, "stall_recovery"):
@@ -1869,10 +2512,19 @@ def main() -> None:
             opts.no_progress_error_tolerance = 1e-5
         if hasattr(opts, "no_progress_dq_norm_tolerance"):
             opts.no_progress_dq_norm_tolerance = 1e-6
-        if hasattr(opts, "primary_solve_mode"):
-            opts.primary_solve_mode = active_mode
-        if hasattr(opts, "primary_allow_min_error_fallback"):
-            opts.primary_allow_min_error_fallback = bool(allow_fallback.value)
+        constrained_teleop = bool(
+            (seer_teleop is not None and bool(seer_gui.get("enabled", {}).value))
+            or max(right_pos_err, left_pos_err) > EE_POSITION_DEADBAND
+        )
+        primary_allow_fallback = bool(
+            allow_fallback.value
+            and effective_solve_mode != embodik.TaskSolveMode.MIN_ERROR
+            and constrained_teleop
+        )
+        opts.primary_solve_mode = effective_solve_mode
+        opts.primary_allow_min_error_fallback = primary_allow_fallback
+        for task in (right_task, left_task):
+            task.allow_min_error_fallback = primary_allow_fallback
         dynamic_freeze_indices = []
         right_task_excluded = list(left_arm_velocity_indices)
         left_task_excluded = list(right_arm_velocity_indices)
@@ -1926,8 +2578,8 @@ def main() -> None:
             robot.get_frame_pose(frame_map["right_tool"]).translation, dtype=float
         )
         left_now = np.asarray(robot.get_frame_pose(frame_map["left_tool"]).translation, dtype=float)
-        right_tgt = np.asarray(right_ctrl.position, dtype=float)
-        left_tgt = np.asarray(left_ctrl.position, dtype=float)
+        right_tgt = _target_pose_matrix("right")[:3, 3]
+        left_tgt = _target_pose_matrix("left")[:3, 3]
         right_err.value = f"{np.linalg.norm(right_tgt - right_now):.4f} m"
         left_err.value = f"{np.linalg.norm(left_tgt - left_now):.4f} m"
         if (

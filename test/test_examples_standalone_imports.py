@@ -151,12 +151,18 @@ def test_examples_copy_hides_internal_harnesses(monkeypatch, tmp_path) -> None:
     assert cli.examples_cmd(["--copy", str(dest)]) == 0
     assert (dest / "01_basic_ik_simple.py").is_file()
     assert not (dest / "harnesses").exists()
+    assert not (dest / "assets" / "optional_wheelbase").exists()
+    assert not (dest / "example_helpers" / "optional_wheelbase_model_utils.py").exists()
 
 
-def test_package_configs_hide_internal_harnesses_from_public_examples() -> None:
+def test_package_configs_hide_internal_sources_from_public_examples() -> None:
     root = Path(__file__).resolve().parents[1]
     cmake = (root / "CMakeLists.txt").read_text(encoding="utf-8")
     pyproject = (root / "pyproject.toml").read_text(encoding="utf-8")
 
     assert 'PATTERN "harnesses" EXCLUDE' in cmake
+    assert 'PATTERN "assets/optional_wheelbase" EXCLUDE' in cmake
+    assert 'PATTERN "optional_wheelbase_model_utils.py" EXCLUDE' in cmake
     assert '"examples/harnesses/**"' in pyproject
+    assert '"examples/assets/optional_wheelbase/**"' in pyproject
+    assert '"examples/example_helpers/optional_wheelbase_model_utils.py"' in pyproject
