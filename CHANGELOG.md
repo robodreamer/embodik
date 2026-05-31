@@ -5,7 +5,42 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.20.13] - 2026-05-31
+
+### Added
+
+- Added an opt-in per-pair **non-worsening collision recovery floor**
+  (`set_non_worsening_collision_floor_enabled`, `set_collision_structural_floor`;
+  off by default). When enabled, link pairs first seen closer than `min_distance`
+  by construction (e.g. an upper arm near the torso) are maintained at a small
+  penetration-prevention clearance instead of triggering an infeasible recovery to
+  the full `min_distance` — which otherwise over-constrains the QP (arm coupling,
+  jamming, or a frozen solve). Off by default because it changes recovery semantics
+  for pairs that start in violation; the shared bimanual whole-body teleop app
+  enables it.
+- Added shared bimanual Seer/xvisio teleop support for
+  `examples/06_bimanual_whole_body_ik.py`. The browser transform controls remain
+  available when no controller is connected.
+- Added adaptive position/orientation gain tuning controls and headless
+  regression coverage for the shared bimanual teleop app.
+- Added `PositionStepOptions.primary_solve_mode` and
+  `primary_allow_min_error_fallback` so `solve_position_step()` callers can keep
+  their primary task mode explicit and opt into one constrained MIN_ERROR retry
+  when a SCALE/SCALE_ELASTIC step stalls under active constraints.
+
+### Changed
+
+- A freshly constructed `KinematicsSolver` now defaults to the BALANCED collision
+  tuning preset (proximity-gated activation with a 5x band, sphere broadphase, and
+  the balanced pair-cache cadence) instead of an unconfigured speed-labelled state.
+  Collision checking still only runs once `configure_collision_constraint()` is
+  called, so solvers without a collision constraint are unaffected. Callers that
+  want a different preset can still call `set_collision_tuning_mode(...)`.
+
+### Fixed
+
+- Kept source-only robot fixtures and validation helpers out of installed/copied
+  public examples while preserving them in the repository for validation.
 
 ## [0.20.12] - 2026-05-28
 

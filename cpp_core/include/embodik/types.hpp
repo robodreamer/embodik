@@ -346,6 +346,16 @@ struct PositionStepOptions {
   bool adaptive_dt = false;
   double adaptive_dt_max_scale = 5.0;            // Max multiplier on base dt
   double adaptive_dt_reference_distance = 0.05;  // Distance (m) where scale = 1.0
+  /// Primary pose-task solve behavior for targets in this step (mirrors
+  /// PositionIKOptions::primary_solve_mode). Applied to each active step target
+  /// task at entry; does not mutate unrelated registered tasks.
+  TaskSolveMode primary_solve_mode = TaskSolveMode::kScale;
+  /// When true, multi-target solve_position_step re-runs once from the entry
+  /// configuration with priority-0 SCALE/SCALE_ELASTIC pose tasks temporarily
+  /// switched to MIN_ERROR if the primary attempt stalls with primary task
+  /// scale collapse or NUMERICAL_ERROR under active collision/CoM constraints.
+  /// Mirrors PositionIKOptions::primary_allow_min_error_fallback semantics.
+  bool primary_allow_min_error_fallback = false;
 };
 
 // Per-task target for multi-task solve_position_step().

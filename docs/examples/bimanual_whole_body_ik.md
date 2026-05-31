@@ -15,6 +15,8 @@ reduced collision assets for AI Worker collision-aware IK, and
 - Model-aware posture bias controls layered underneath the IK tasks
 - Passive-joint locking so wheel/drive joints stay quiet during arm teleoperation
 - Support for AI Worker `sg2` / `bg2` and RB-Y1 via `--robot rby1`
+- Optional Seer/xvisio controller input through the same IK target path
+- Collision debug controls, CoM support visualization, and adaptive gain tuning
 
 ## Run It
 
@@ -47,6 +49,42 @@ copied examples:
 python 06_bimanual_whole_body_ik.py --variant bg2
 python 06_bimanual_whole_body_ik.py --robot rby1
 ```
+
+The app opens at `http://localhost:8080` by default. Use `--port` when running
+multiple viewers:
+
+```bash
+python 06_bimanual_whole_body_ik.py --port 8090
+```
+
+## Teleop Controls
+
+The browser transform controls are always available. When the teleop optional
+dependencies are installed and a Seer/xvisio controller is connected, the same
+left/right target poses can be driven from the controller panel:
+
+```bash
+python -m pip install "embodik[examples,teleop]"
+python 06_bimanual_whole_body_ik.py --controller-port /dev/ttyUSB0
+```
+
+If no controller is present, the app falls back to browser dragging without
+changing the IK setup.
+
+## Solver Controls
+
+The example exposes the solver knobs that matter most for whole-body teleop:
+
+- self-collision constraint enable, minimum distance, active-row cap, and tuning
+  mode (`speed`, `balanced`, `precise`)
+- non-worsening collision recovery floor for structurally close link pairs
+- CoM support-polygon constraint and visualization
+- adaptive dt for large target jumps
+- optional adaptive position/orientation gain tuning
+
+New `KinematicsSolver` instances default to the balanced collision preset. The
+example still keeps the collision controls visible so you can reproduce precise
+or speed-oriented behavior when comparing robot models.
 
 ## Asset Resolution
 

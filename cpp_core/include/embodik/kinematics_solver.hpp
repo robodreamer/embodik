@@ -12,6 +12,7 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <functional>
 #include <embodik/dual_arm_ects.hpp>
 #include <embodik/pose_task_group.hpp>
 #include <embodik/robot_model.hpp>
@@ -609,6 +610,23 @@ public:
   void   set_collision_recovery_scale(double scale) { collision_recovery_scale_ = std::clamp(scale, 0.01, 2.0); }
   double get_collision_recovery_scale() const       { return collision_recovery_scale_; }
 
+  /** Non-worsening recovery floor. Default OFF (opt-in).
+   *  When enabled, a pair first seen closer than min_distance is treated as
+   *  structurally close and pinned to a small penetration-prevention floor rather
+   *  than recovered to the full clearance -- so links that rest closer than
+   *  min_distance by construction do not trigger an infeasible recovery (which
+   *  would over-constrain the QP and freeze the solve). Off by default because it
+   *  changes recovery semantics for pairs that start in violation; enable it for
+   *  robots whose links rest closer than the clearance (e.g. an arm near a torso). */
+  void   set_non_worsening_collision_floor_enabled(bool enable) { non_worsening_collision_floor_enabled_ = enable; }
+  bool   get_non_worsening_collision_floor_enabled() const      { return non_worsening_collision_floor_enabled_; }
+
+  /** Penetration-prevention clearance (metres) used for structurally-close pairs
+   *  (those resting closer than min_distance). Default 5 mm. Must be below the
+   *  tightest structural resting distance to avoid an infeasible recovery. */
+  void   set_collision_structural_floor(double metres) { collision_structural_floor_ = std::max(0.0, metres); }
+  double get_collision_structural_floor() const        { return collision_structural_floor_; }
+
   /** Maximum separation speed (m/s) for non-penetrating recovery.
    *  Default 0.15 m/s. */
   void   set_collision_max_separation_speed_nonpenetrating(double mps) { collision_max_sep_speed_nonpen_ = std::max(0.0, mps); }
@@ -1148,6 +1166,18 @@ private:
   /// Set by solve_position_step before each inner solve_velocity(); cleared at
   /// end of solve_velocity(). Enforces v_i = 0 in the QP for listed nv-indices.
   std::vector<int> pending_velocity_lock_indices_;
+  /// Step-scoped frozen (locked/excluded) nv-indices, set for the whole duration
+  /// of solve_position_step (not just the inner solve_velocity()). Lets the
+  /// post-solve collision computations (stall escape, post-step validation) see
+  /// the same frozen set the velocity solve used, so the collision debug list
+  /// and the QP constraint slots agree on which pairs are controllable.
+  std::vector<int> position_step_locked_indices_;
+  /// Frozen nv-index set the collision code should honor: the inner velocity
+  /// solve's pending set when active, otherwise the step-scoped set.
+  const std::vector<int> &active_collision_lock_indices() const {
+    return pending_velocity_lock_indices_.empty() ? position_step_locked_indices_
+                                                   : pending_velocity_lock_indices_;
+  }
   /// Optional torso constraint rows injected by solve_position_step into the
   /// next solve_velocity() call; cleared at end of solve_velocity().
   std::optional<TorsoPoseConstraintOptions> pending_step_torso_constraint_;
@@ -1157,6 +1187,8 @@ private:
   /// One-shot integration dt used by solve_position_step so solve_velocity()
   /// can validate fallback candidates against the actual accepted step length.
   std::optional<double> pending_step_validation_dt_;
+  /// Guards against recursive MIN_ERROR step retry in solve_position_step.
+  bool suppress_min_error_step_retry_ = false;
   std::optional<Eigen::MatrixXd> warm_start_selector_cache_;
   int warm_start_constraint_rows_ = -1;
 
@@ -1176,6 +1208,18 @@ private:
   const RobotModel *velocity_to_config_cache_robot_ = nullptr;
   int velocity_to_config_cache_nv_ = -1;
 
+  void apply_position_step_primary_task_options(const PositionStepOptions &options,
+                                                Task *task);
+
+  std::optional<PositionIKResult> attempt_min_error_position_step_retry(
+      const Eigen::VectorXd &entry_q, const PositionStepOptions &options,
+      double step_dt, bool have_vel_result,
+      const VelocitySolverResult &last_vel_result,
+      const Eigen::VectorXd &q_after_primary,
+      const std::function<bool(std::vector<std::pair<Task *, TaskSolveMode>> *)>
+          &flip_primary_tasks,
+      const std::function<PositionIKResult()> &rerun_step);
+
   // Sort tasks by priority
   void sort_tasks_by_priority();
 
@@ -1192,14 +1236,18 @@ private:
     double min_distance = 0.05;
     double upper_distance = 10.0;
     double tolerance = 1e-4;
-    bool constraint_activation_enabled = false;
+    // Defaults mirror the BALANCED tuning preset (see set_collision_tuning_mode):
+    // proximity-gated activation on with a conservative 5x activation band. This
+    // only takes effect once configure_collision_constraint() enables a
+    // constraint; an unconfigured solver still performs no collision checks.
+    bool constraint_activation_enabled = true;
     // Optional proximity gate for emitting collision QP rows.
     // <= 0 disables gating and preserves legacy behavior.
     double constraint_activation_margin = 0.0;
     // Auto-tuning factor applied to min_distance:
     //   margin = multiplier * min_distance
     // <= 0 keeps gating disabled.
-    double constraint_activation_multiplier = 0.0;
+    double constraint_activation_multiplier = 5.0;
     bool nearest_points_all_pairs = true;
     std::unordered_set<std::string> include_pairs;
     std::unordered_set<std::string> exclude_pairs;
@@ -1387,6 +1435,15 @@ private:
   // Pending (deferred) overrides: promoted to active the first time the pair
   // achieves the desired clearance (latch-on). Set via activate_when_clear=true.
   std::unordered_map<std::string, double> per_pair_deferred_overrides_;
+  // Non-worsening recovery floor: per-pair ratcheting clearance (keyed by
+  // canonical pair key) and its enable flag. Cleared on (re)configure / clear.
+  bool non_worsening_collision_floor_enabled_ = false;  // opt-in (changes recovery semantics)
+  double collision_structural_floor_ = 0.005;  // 5 mm penetration-prevention floor
+  std::unordered_map<std::string, double> collision_pair_distance_floor_;
+  // Frozen (locked/excluded) velocity DOFs used when the lazy-reuse cache was
+  // built; lazy reuse is invalidated when the current frozen set differs, since
+  // it changes which collision pairs are controllable / selectable.
+  std::vector<int> collision_cache_frozen_indices_;
   std::optional<CollisionDebugInfo> last_collision_debug_;
   // All active constraint pairs (up to max_constraints), populated after each solve.
   std::vector<CollisionDebugInfo> last_collision_debug_list_;
@@ -1401,11 +1458,13 @@ private:
   std::vector<double> collision_pair_last_signed_distance_;
   std::vector<double> collision_pair_last_rel_translation_norm_;
   std::vector<std::array<double, 9>> collision_pair_last_rel_rotation_;
+  // Collision-tuning member defaults mirror the BALANCED preset
+  // (see set_collision_tuning_mode); keep them in sync if BALANCED changes.
   bool collision_pair_cache_enabled_ = true;
-  int collision_pair_cache_refresh_interval_ = 100;
-  double collision_pair_cache_distance_margin_ = 0.03;
-  int collision_pair_cache_max_candidates_ = 128;
-  int collision_refinement_time_budget_us_ = 300;
+  int collision_pair_cache_refresh_interval_ = 5;
+  double collision_pair_cache_distance_margin_ = 0.05;
+  int collision_pair_cache_max_candidates_ = 256;
+  int collision_refinement_time_budget_us_ = 0;
   bool collision_pair_cache_has_full_scan_ = false;
   int collision_pair_cache_steps_since_refresh_ = 0;
   // Instrumentation from the latest compute_collision_constraint() call.
@@ -1420,9 +1479,9 @@ private:
   // Cached constraint result for lazy reuse when configuration change is small.
   std::optional<CollisionConstraintResult> last_collision_constraint_result_;
   Eigen::VectorXd last_collision_constraint_q_;
-  CollisionTuningMode collision_tuning_mode_ = CollisionTuningMode::kSpeed;
+  CollisionTuningMode collision_tuning_mode_ = CollisionTuningMode::kBalanced;
   SphereBroadphase sphere_broadphase_;
-  bool sphere_broadphase_enabled_ = false;
+  bool sphere_broadphase_enabled_ = true;
   std::uint64_t last_collision_sphere_culled_pairs_ = 0;
   // Track solver stagnation near collision boundary for stronger recovery (per-pair).
   double last_solution_dq_norm_ = 0.0;

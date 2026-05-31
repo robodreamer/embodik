@@ -144,18 +144,14 @@ def main() -> None:
     solver.dt = 0.01
     configure_solver_runtime_policy(solver)
 
-    # Configure collision constraint
+    # Configure collision constraint. The solver already defaults to the BALANCED
+    # tuning preset (proximity-gated activation + sphere broadphase), so no
+    # explicit set_collision_tuning_mode / enable_sphere_broadphase is needed.
     solver.configure_collision_constraint(
         min_distance=DEFAULT_MIN_DIST,
         include_pairs=[],
         exclude_pairs=list(exclusions),
     )
-    if hasattr(embodik, "CollisionTuningMode") and hasattr(solver, "set_collision_tuning_mode"):
-        solver.set_collision_tuning_mode(embodik.CollisionTuningMode.BALANCED)
-
-    if hasattr(solver, "enable_sphere_broadphase"):
-        solver.enable_sphere_broadphase(True)
-        print("[demo] Sphere broadphase enabled")
 
     # Add EE frame task
     frame_task = solver.add_frame_task("ee_task", TARGET_LINK)

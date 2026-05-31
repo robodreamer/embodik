@@ -429,6 +429,21 @@ void bind_kinematics_solver(nb::module_ &m) {
            "Fraction of desired recovery velocity applied inside min_distance.  Default 0.2.")
       .def("get_collision_recovery_scale",
            &KinematicsSolver::get_collision_recovery_scale)
+      .def("set_non_worsening_collision_floor_enabled",
+           &KinematicsSolver::set_non_worsening_collision_floor_enabled, nb::arg("enable"),
+           "Enable the per-pair non-worsening (ratcheting) collision recovery floor.  "
+           "When enabled, links that rest closer than min_distance are maintained "
+           "at their achievable distance instead of triggering an infeasible recovery.  "
+           "Off by default on a new solver; the bimanual teleop app opts in.")
+      .def("get_non_worsening_collision_floor_enabled",
+           &KinematicsSolver::get_non_worsening_collision_floor_enabled)
+      .def("set_collision_structural_floor",
+           &KinematicsSolver::set_collision_structural_floor, nb::arg("metres"),
+           "Minimum clearance (m) maintained for structurally-close pairs when the "
+           "non-worsening floor is enabled. Default 0.005 m.")
+      .def("get_collision_structural_floor",
+           &KinematicsSolver::get_collision_structural_floor,
+           "Return the structural collision recovery floor distance (m).")
       .def("set_collision_max_separation_speed_nonpenetrating",
            &KinematicsSolver::set_collision_max_separation_speed_nonpenetrating, nb::arg("mps"),
            "Max separation speed (m/s) for non-penetrating recovery.  Default 0.15 m/s.")

@@ -453,7 +453,13 @@ NB_MODULE(_embodik_impl, m) {
               "Maximum dt multiplier when adaptive_dt=True (default 5.0)")
       .def_rw("adaptive_dt_reference_distance",
               &eik::PositionStepOptions::adaptive_dt_reference_distance,
-              "Position error (m) at which dt scale = 1.0 (default 0.05)");
+              "Position error (m) at which dt scale = 1.0 (default 0.05)")
+      .def_rw("primary_solve_mode", &eik::PositionStepOptions::primary_solve_mode,
+              "Primary pose-task solve mode for active step targets")
+      .def_rw("primary_allow_min_error_fallback",
+              &eik::PositionStepOptions::primary_allow_min_error_fallback,
+              "Re-run solve_position_step once in MIN_ERROR when SCALE collapses "
+              "under active constraints");
 
   nb::class_<eik::TaskTarget>(
       m, "TaskTarget",
@@ -708,7 +714,7 @@ NB_MODULE(_embodik_impl, m) {
           )pbdoc");
 
   // Module metadata
-  m.attr("__version__") = "0.20.7";
+  m.attr("__version__") = "0.20.13";
   m.attr("DEFAULT_REGULARIZATION") = eik::BasicSolverConfig{}.regularization;
 
   // Bind robot model with Pinocchio integration

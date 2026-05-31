@@ -22,12 +22,17 @@ from examples.example_helpers.common_bimanual_model_utils import (  # noqa: E402
     resolve_common_bimanual_frames,
 )
 from examples.example_helpers.common_bimanual_teleop_app import (  # noqa: E402
+    COMMON_BIMANUAL_SUPPORT_CONTACT_FRAMES,
     DEFAULT_COMMON_BIMANUAL_SEED,
     _apply_named_joint_seed,
     _apply_soft_lift_margin,
+    _compute_support_polygon_from_contacts,
     _configure_collision_constraint,
     _generate_common_bimanual_collision_include_pairs,
     _generate_consecutive_collision_exclusions,
+)
+from examples.example_helpers.ik_common import (  # noqa: E402
+    configure_solver_runtime_policy,
 )
 from examples.example_helpers.public_ai_worker_paths import (  # noqa: E402
     resolve_public_ai_worker_urdf_paths,
@@ -619,6 +624,269 @@ def test_worker_one_arm_collision_push_remains_productive_without_boundary_stall
     assert statuses
     assert statuses[-1] == "SUCCESS"
     assert np.all(np.isfinite(q))
+
+
+def _drive_unreachable_left_reach(*, allow_fallback: bool) -> tuple[float, int, str]:
+    """Drive the left tool toward a far, unreachable target with both arm pose
+    tasks at priority 0 (mirrors the bimanual teleop app). Returns
+    (extension_m, terminal_zero_motion_steps, final_status)."""
+    robot, frames, collision_urdf = _load_worker_collision_robot()
+    q = robot.neutral_configuration()
+    robot.update_configuration(q)
+
+    solver = embodik.KinematicsSolver(robot)
+    solver.dt = 0.01
+    configure_solver_runtime_policy(solver)
+    solver.enable_position_limits(True)
+    solver.enable_velocity_limits(True)
+    if hasattr(solver, "set_non_worsening_collision_floor_enabled"):
+        solver.set_non_worsening_collision_floor_enabled(True)
+    right_task = solver.add_frame_task(
+        "right_tool_pose", frames["right_tool"], embodik.TaskType.FRAME_POSE
+    )
+    left_task = solver.add_frame_task(
+        "left_tool_pose", frames["left_tool"], embodik.TaskType.FRAME_POSE
+    )
+    for task in (right_task, left_task):
+        task.priority = 0
+        task.weight = 1.0
+        task.solve_mode = embodik.TaskSolveMode.SCALE
+        task.allow_min_error_fallback = bool(allow_fallback)
+    posture = solver.add_posture_task("bimanual_posture")
+    posture.priority = 1
+    posture.weight = 1e-2
+    posture.set_target_configuration(q.copy())
+
+    exclusions = _generate_consecutive_collision_exclusions(robot, collision_urdf)
+    include_pairs = _generate_common_bimanual_collision_include_pairs(
+        robot, collision_urdf, exclusions
+    )
+    _configure_collision_constraint(
+        solver,
+        enabled=True,
+        min_distance_m=0.035,
+        max_constraints=3,
+        tuning_mode="balanced",
+        include_pairs=include_pairs,
+        exclude_pairs=exclusions,
+    )
+    # The CoM balance constraint is the trigger: as the arm reaches far out, the
+    # support-polygon constraint opposes the reach and the prioritized SCALE solve
+    # collapses the task scale (freeze) unless the min-error fallback engages.
+    if hasattr(solver, "configure_com_constraint") and "base" in frames:
+        polygon = _compute_support_polygon_from_contacts(
+            robot, COMMON_BIMANUAL_SUPPORT_CONTACT_FRAMES
+        )
+        solver.configure_com_constraint(
+            support_polygon=polygon,
+            margin=0.10,
+            frame_name=frames["base"],
+            com_vel_max=1.0,
+            com_acc_max=10.0,
+            use_acceleration_limits=False,
+            proximity_fraction=0.05,
+        )
+
+    left0 = _frame_pose_matrix(robot, frames["left_tool"])
+    right0 = _frame_pose_matrix(robot, frames["right_tool"])
+    left_start = left0[:3, 3].copy()
+    # A far, kinematically unreachable target: SCALE collapses the primary task
+    # scale to zero here (frozen) unless the min-error fallback engages.
+    target = left_start + np.array([1.2, 0.0, 0.8], dtype=float)
+
+    opts = embodik.PositionStepOptions()
+    opts.max_steps = 4
+    opts.adaptive_dt = True
+    opts.adaptive_dt_max_scale = 10.0
+    opts.adaptive_dt_reference_distance = 0.05
+
+    ramp, hold = 25, 15
+    terminal_zero_motion = 0
+    status = "UNKNOWN"
+    for k in range(ramp + hold):
+        frac = (k + 1) / ramp if k < ramp else 1.0
+        tgt = left_start + (target - left_start) * min(frac, 1.0)
+        left_pose = left0.copy()
+        left_pose[:3, 3] = tgt
+        targets = [
+            embodik.TaskTarget("right_tool_pose", right0, 12.0, 12.0),
+            embodik.TaskTarget("left_tool_pose", left_pose, 12.0, 12.0),
+        ]
+        result = solver.solve_position_step(q, targets, opts)
+        q_next = np.asarray(getattr(result, "q_solution", q), dtype=float)
+        dq = float(np.linalg.norm(q_next - q)) if q_next.shape == q.shape else -1.0
+        status = result.status.name
+        if k >= ramp:
+            if dq < 1e-5:
+                terminal_zero_motion += 1
+        if q_next.shape == q.shape and np.all(np.isfinite(q_next)):
+            q = q_next
+        robot.update_configuration(q)
+
+    extension = float(np.linalg.norm(_frame_pose_matrix(robot, frames["left_tool"])[:3, 3] - left_start))
+    return extension, terminal_zero_motion, status
+
+
+def test_worker_unreachable_reach_does_not_freeze_with_min_error_fallback() -> None:
+    # Dragging a gizmo to a far, unreachable pose drives the prioritized SCALE
+    # solve to a zero task scale (the arm freezes mid-extension). With the
+    # min-error fallback enabled (the bimanual teleop app's default), the step
+    # degrades to MIN_ERROR and the arm keeps extending toward the target instead
+    # of freezing. Guards against regressing that hardening.
+    ext_off, stalls_off, _ = _drive_unreachable_left_reach(allow_fallback=False)
+    ext_on, stalls_on, status_on = _drive_unreachable_left_reach(allow_fallback=True)
+
+    assert ext_on > ext_off + 0.03, (
+        f"min-error fallback should reach further toward an unreachable target "
+        f"(on={ext_on*1000:.0f} mm vs off={ext_off*1000:.0f} mm)"
+    )
+    assert stalls_on < stalls_off, (
+        f"min-error fallback should reduce zero-motion freezing "
+        f"(on={stalls_on} vs off={stalls_off} terminal stalled steps)"
+    )
+    assert status_on == "SUCCESS"
+
+
+def _held_arm_drift_when_dragging_other(*, solve_mode, protect_held: bool = False) -> float:
+    """Hold the right tool target fixed while ramping the left tool through a
+    CoM-shifting reach; return the max drift (m) of the held right EEF.
+
+    When ``protect_held`` is set, the held (right) arm is given priority over the
+    moving (left) arm, mirroring the app's held-arm protection."""
+    robot, frames, collision_urdf = _load_worker_collision_robot()
+    q = robot.neutral_configuration()
+    robot.update_configuration(q)
+
+    solver = embodik.KinematicsSolver(robot)
+    solver.dt = 0.01
+    configure_solver_runtime_policy(solver)
+    solver.enable_position_limits(True)
+    solver.enable_velocity_limits(True)
+    if hasattr(solver, "set_non_worsening_collision_floor_enabled"):
+        solver.set_non_worsening_collision_floor_enabled(True)
+    right_task = solver.add_frame_task(
+        "right_tool_pose", frames["right_tool"], embodik.TaskType.FRAME_POSE
+    )
+    left_task = solver.add_frame_task(
+        "left_tool_pose", frames["left_tool"], embodik.TaskType.FRAME_POSE
+    )
+    for task in (right_task, left_task):
+        task.priority = 0
+        task.weight = 1.0
+        task.solve_mode = solve_mode
+        task.allow_min_error_fallback = True
+    if protect_held:
+        # We drag the left arm below, so the right arm is the held one: give it the
+        # higher priority (0) and demote the moving left arm (1) -- the app's
+        # held-arm protection.
+        right_task.priority = 0
+        left_task.priority = 1
+    posture = solver.add_posture_task("bimanual_posture")
+    posture.priority = 2
+    posture.weight = 1e-2
+    posture.set_target_configuration(q.copy())
+
+    # Mutual arm exclusion (as the app does): each arm task ignores the other
+    # arm's joints but shares the torso/base chain -- the coupling path.
+    left_arm_v = sorted(
+        int(robot.get_joint_velocity_index(n))
+        for n in robot.get_joint_names()
+        if n.startswith(("arm_l_", "gripper_l_"))
+    )
+    right_arm_v = sorted(
+        int(robot.get_joint_velocity_index(n))
+        for n in robot.get_joint_names()
+        if n.startswith(("arm_r_", "gripper_r_"))
+    )
+    right_task.set_excluded_joint_indices(left_arm_v)
+    left_task.set_excluded_joint_indices(right_arm_v)
+
+    exclusions = _generate_consecutive_collision_exclusions(robot, collision_urdf)
+    include_pairs = _generate_common_bimanual_collision_include_pairs(
+        robot, collision_urdf, exclusions
+    )
+    _configure_collision_constraint(
+        solver, enabled=True, min_distance_m=0.035, max_constraints=3,
+        tuning_mode="balanced", include_pairs=include_pairs, exclude_pairs=exclusions,
+    )
+    if hasattr(solver, "configure_com_constraint") and "base" in frames:
+        polygon = _compute_support_polygon_from_contacts(
+            robot, COMMON_BIMANUAL_SUPPORT_CONTACT_FRAMES
+        )
+        solver.configure_com_constraint(
+            support_polygon=polygon, margin=0.10, frame_name=frames["base"],
+            com_vel_max=1.0, com_acc_max=10.0, use_acceleration_limits=False,
+            proximity_fraction=0.05,
+        )
+
+    left0 = _frame_pose_matrix(robot, frames["left_tool"])
+    right0 = _frame_pose_matrix(robot, frames["right_tool"])
+    left_start = left0[:3, 3].copy()
+    right_held = right0[:3, 3].copy()
+    delta = np.array([0.30, 0.0, -0.25], dtype=float)  # CoM-shifting reach
+
+    opts = embodik.PositionStepOptions()
+    opts.max_steps = 4
+    opts.adaptive_dt = True
+    opts.adaptive_dt_max_scale = 10.0
+    opts.adaptive_dt_reference_distance = 0.05
+
+    max_drift = 0.0
+    for k in range(40):
+        tgt = left_start + delta * min((k + 1) / 30.0, 1.0)
+        left_pose = left0.copy()
+        left_pose[:3, 3] = tgt
+        targets = [
+            embodik.TaskTarget("right_tool_pose", right0, 12.0, 12.0),  # held fixed
+            embodik.TaskTarget("left_tool_pose", left_pose, 12.0, 12.0),
+        ]
+        result = solver.solve_position_step(q, targets, opts)
+        q_next = np.asarray(getattr(result, "q_solution", q), dtype=float)
+        if q_next.shape == q.shape and np.all(np.isfinite(q_next)):
+            q = q_next
+        robot.update_configuration(q)
+        drift = float(
+            np.linalg.norm(_frame_pose_matrix(robot, frames["right_tool"])[:3, 3] - right_held)
+        )
+        max_drift = max(max_drift, drift)
+    return max_drift
+
+
+def test_worker_held_arm_stays_put_in_scale_mode() -> None:
+    # Cross-coupling: dragging one arm through a CoM-shifting reach must not pull
+    # the held arm's EEF off its fixed target. SCALE keeps the held arm planted;
+    # SCALE_ELASTIC lets it drift (the elastic relaxation trades off the held
+    # task), which is why the app defaults to SCALE.
+    scale_drift = _held_arm_drift_when_dragging_other(solve_mode=embodik.TaskSolveMode.SCALE)
+    elastic_drift = _held_arm_drift_when_dragging_other(
+        solve_mode=embodik.TaskSolveMode.SCALE_ELASTIC
+    )
+    assert scale_drift < 5e-3, f"held arm should stay put in SCALE, drifted {scale_drift*1000:.1f} mm"
+    assert elastic_drift > scale_drift, (
+        "SCALE should couple less than SCALE_ELASTIC "
+        f"(scale {scale_drift*1000:.1f} mm vs elastic {elastic_drift*1000:.1f} mm)"
+    )
+
+
+def test_worker_held_arm_protection_plants_held_arm_under_scale_elastic() -> None:
+    # Cross-coupling fix: SCALE_ELASTIC keeps its limit-saturation robustness but
+    # couples the held arm (it drifts when the other arm moves). Giving the held
+    # arm priority over the actively-dragged arm plants it -- the app's held-arm
+    # protection -- without leaving SCALE_ELASTIC.
+    coupled = _held_arm_drift_when_dragging_other(
+        solve_mode=embodik.TaskSolveMode.SCALE_ELASTIC, protect_held=False
+    )
+    protected = _held_arm_drift_when_dragging_other(
+        solve_mode=embodik.TaskSolveMode.SCALE_ELASTIC, protect_held=True
+    )
+    assert protected < 5e-3, (
+        f"held-arm protection should plant the held EEF under SCALE_ELASTIC, "
+        f"drifted {protected*1000:.1f} mm"
+    )
+    assert protected < coupled, (
+        f"protection should cut coupling (protected {protected*1000:.1f} mm vs "
+        f"coupled {coupled*1000:.1f} mm)"
+    )
 
 
 class _DummyStatus:

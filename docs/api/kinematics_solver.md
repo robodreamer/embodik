@@ -50,6 +50,39 @@ Disable `weighted_fallback_enabled` only when you are running an A/B benchmark
 or need to reproduce historical strict-priority behavior. Disable
 `enable_auto_task_layout` when you need a fixed merged or split pose-task layout.
 
+## Collision recovery floor
+
+Whole-body robots often include link pairs that rest closer than the configured
+collision clearance. Enable the non-worsening floor when those structural pairs
+should not trigger an infeasible push to the global `min_distance`:
+
+```python
+solver.set_non_worsening_collision_floor_enabled(True)
+solver.set_collision_structural_floor(0.005)  # metres; default 5 mm
+```
+
+The floor is **off by default**. Getter/setter pairs:
+`get_non_worsening_collision_floor_enabled()` and
+`get_collision_structural_floor()`.
+
+## Collision tuning default
+
+Fresh `KinematicsSolver` instances default to `CollisionTuningMode.BALANCED`
+(sphere broadphase + conservative pair cache). Override with
+`set_collision_tuning_mode()` when benchmarking or reproducing older behavior.
+
+## Position-step options (teleop)
+
+`PositionStepOptions` fields used by marker/teleop loops:
+
+- `max_steps` — inner IK iterations per control tick (bimanual teleop default: `2`)
+- `primary_solve_mode` — mirrors registered EE task solve mode for the primary band
+- `primary_allow_min_error_fallback` — when `True`, retry a stalled SCALE/SCALE_ELASTIC
+  primary solve once with MIN_ERROR before accepting freeze
+
+See `docs/examples/collision_aware_ik.md` for the collision-floor and fallback
+interaction with `configure_collision_constraint()`.
+
 ## Position IK Objective Order
 
 `solve_position()` now supports a three-level stack:

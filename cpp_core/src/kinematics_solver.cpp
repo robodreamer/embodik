@@ -518,6 +518,63 @@ static ClassifiedOutcome classify_velocity_outcome(
   return {SolverStatus::kSuccess, backend_status_message};
 }
 
+static bool is_primary_scale_collapsed_message(const std::string &message) {
+  return message.find("primary task scale collapsed") != std::string::npos;
+}
+
+template <typename ResolvedTaskRange>
+static bool flip_primary_scale_tasks_to_min_error(
+    const ResolvedTaskRange &resolved,
+    std::vector<std::pair<Task *, TaskSolveMode>> *saved_modes) {
+  saved_modes->clear();
+  int min_priority = std::numeric_limits<int>::max();
+  for (const auto &rt : resolved) {
+    if (rt.task && rt.task->isActive()) {
+      min_priority = std::min(min_priority, rt.task->getPriority());
+    }
+  }
+  if (min_priority == std::numeric_limits<int>::max()) {
+    return false;
+  }
+  for (const auto &rt : resolved) {
+    Task *task = rt.task.get();
+    if (task == nullptr || !task->isActive() ||
+        task->getPriority() != min_priority) {
+      continue;
+    }
+    const TaskSolveMode mode = task->getSolveMode();
+    if (mode != TaskSolveMode::kScale && mode != TaskSolveMode::kScaleElastic) {
+      continue;
+    }
+    saved_modes->emplace_back(task, mode);
+    task->setSolveMode(TaskSolveMode::kMinError);
+  }
+  return !saved_modes->empty();
+}
+
+static void restore_task_solve_modes(
+    const std::vector<std::pair<Task *, TaskSolveMode>> &saved_modes) {
+  for (const auto &[task, mode] : saved_modes) {
+    if (task != nullptr) {
+      task->setSolveMode(mode);
+    }
+  }
+}
+
+static bool flip_scale_family_task(
+    Task *task, std::vector<std::pair<Task *, TaskSolveMode>> *saved_modes) {
+  if (task == nullptr || !task->isActive()) {
+    return false;
+  }
+  const TaskSolveMode mode = task->getSolveMode();
+  if (mode != TaskSolveMode::kScale && mode != TaskSolveMode::kScaleElastic) {
+    return false;
+  }
+  saved_modes->emplace_back(task, mode);
+  task->setSolveMode(TaskSolveMode::kMinError);
+  return true;
+}
+
 template <typename Derived>
 static void clamp_spatial_velocity_components(Eigen::MatrixBase<Derived> &vel,
                                               double max_linear_speed,
@@ -1739,6 +1796,8 @@ void KinematicsSolver::configure_collision_constraint(
     last_collision_constraint_q_ = Eigen::VectorXd();
     collision_stuck_counters_.clear();
     collision_stuck_last_distances_.clear();
+    collision_pair_distance_floor_.clear();
+    collision_cache_frozen_indices_.clear();
   }
   if (sphere_broadphase_enabled_ && !sphere_broadphase_.is_built()) {
     sphere_broadphase_.build(*collision_model_ptr);
@@ -2226,6 +2285,8 @@ void KinematicsSolver::clear_collision_constraint() {
   collision_pair_last_signed_distance_.clear();
   collision_pair_last_rel_translation_norm_.clear();
   collision_pair_last_rel_rotation_.clear();
+  collision_pair_distance_floor_.clear();
+  collision_cache_frozen_indices_.clear();
   collision_pair_cache_has_full_scan_ = false;
   collision_pair_cache_steps_since_refresh_ = 0;
   last_collision_pairs_considered_ = 0;
@@ -3081,6 +3142,9 @@ KinematicsSolver::compute_collision_constraint() {
         last_collision_constraint_q_.size() == robot_->nq() &&
         std::isfinite(last_constraint_min_distance_) &&
         !last_collision_budget_exhausted_ &&
+        // Invalidate when the frozen (locked/excluded) DOF set changed: it alters
+        // which pairs are controllable / selected, so the cached result is stale.
+        collision_cache_frozen_indices_ == active_collision_lock_indices() &&
         // Respect the cache refresh interval: periodic full recomputation
         // prevents the cached result from going permanently stale.
         collision_pair_cache_steps_since_refresh_ <
@@ -3442,9 +3506,55 @@ KinematicsSolver::compute_collision_constraint() {
   last_constraint_min_distance_ = best_distance_debug;
   last_constraint_was_full_scan_ = !use_cached_candidate_subset;
 
+  // Skip collision pairs that no free DOF can move: both links are governed only
+  // by locked/excluded joints (zero relative Jacobian). Constraining such a pair
+  // is meaningless, can be infeasible if it is penetrating, and otherwise wastes
+  // the limited constraint slots that should go to controllable pairs.
+  const std::vector<int> &active_locks = active_collision_lock_indices();
+  const std::unordered_set<int> frozen_vdofs(active_locks.begin(),
+                                             active_locks.end());
+  const pinocchio::Model &pin_model = robot_->model();
+  auto link_has_free_dof = [&](std::size_t gidx) -> bool {
+    const auto parent_joint = collision_model->geometryObjects[gidx].parentJoint;
+    for (const auto jid : pin_model.supports[parent_joint]) {
+      if (jid == 0) {  // universe / fixed base contributes no DOF
+        continue;
+      }
+      const int vi = pin_model.idx_vs[jid];
+      for (int k = 0; k < pin_model.nvs[jid]; ++k) {
+        if (frozen_vdofs.find(vi + k) == frozen_vdofs.end()) {
+          return true;
+        }
+      }
+    }
+    return false;
+  };
+  auto pair_uncontrollable = [&](std::size_t pidx) -> bool {
+    if (frozen_vdofs.empty()) {
+      return false;
+    }
+    return !link_has_free_dof(pairs[pidx].first) && !link_has_free_dof(pairs[pidx].second);
+  };
+
   // ---- Pair selection: top-K with hysteresis ----
   // Sort all allowed candidates by distance (ascending).
   std::sort(allowed_candidates.begin(), allowed_candidates.end());
+
+  // Uncontrollable pairs (both links governed only by frozen DOFs) keep their
+  // place in allowed_candidates so they still contribute to the global minimum
+  // distance signal (last_constraint_min_distance_, computed above) and to the
+  // next-step candidate cache (built below) -- those drive collision caution
+  // (adaptive step size, post-step rejection) and must reflect the true
+  // geometry. They are excluded only from the constraint *slots* (a meaningless
+  // zero-Jacobian row that would starve controllable pairs), via this
+  // selectable view.
+  std::vector<std::pair<double, std::size_t>> selectable_candidates;
+  selectable_candidates.reserve(allowed_candidates.size());
+  for (const auto &entry : allowed_candidates) {
+    if (!pair_uncontrollable(entry.second)) {
+      selectable_candidates.push_back(entry);
+    }
+  }
 
   const int max_k = collision_constraint_.has_value()
                         ? collision_constraint_->max_constraints
@@ -3454,10 +3564,10 @@ KinematicsSolver::compute_collision_constraint() {
   // A previous pair is kept if its distance is within hysteresis of the
   // current K-th best candidate.
   double hysteresis_cutoff = std::numeric_limits<double>::infinity();
-  if (!allowed_candidates.empty()) {
+  if (!selectable_candidates.empty()) {
     const std::size_t kth = static_cast<std::size_t>(
-        std::min(max_k, static_cast<int>(allowed_candidates.size())) - 1);
-    hysteresis_cutoff = allowed_candidates[kth].first +
+        std::min(max_k, static_cast<int>(selectable_candidates.size())) - 1);
+    hysteresis_cutoff = selectable_candidates[kth].first +
                         kCollisionPairSwitchHysteresis;
   }
 
@@ -3465,14 +3575,17 @@ KinematicsSolver::compute_collision_constraint() {
   // previous pairs that fall within hysteresis_cutoff.
   std::unordered_set<std::size_t> selected_set;
   for (int i = 0;
-       i < max_k && i < static_cast<int>(allowed_candidates.size()); ++i) {
-    selected_set.insert(allowed_candidates[i].second);
+       i < max_k && i < static_cast<int>(selectable_candidates.size()); ++i) {
+    selected_set.insert(selectable_candidates[i].second);
   }
   for (std::size_t prev_idx : last_collision_constraint_pair_indices_) {
     if (static_cast<int>(selected_set.size()) >= max_k) {
       break;
     }
     if (prev_idx >= pairs.size()) {
+      continue;
+    }
+    if (pair_uncontrollable(prev_idx)) {
       continue;
     }
     if (!collision_data->activeCollisionPairs.empty() &&
@@ -3504,7 +3617,8 @@ KinematicsSolver::compute_collision_constraint() {
   // Safety: any penetrating pair (distance < 0) MUST be in the active set,
   // even if max_constraints would normally exclude it.  Without this, the
   // QP may miss a pair that transitions from out-of-cache to penetrating.
-  if (best_index_debug.has_value() && best_distance_debug < 0.0) {
+  if (best_index_debug.has_value() && best_distance_debug < 0.0 &&
+      !pair_uncontrollable(*best_index_debug)) {
     bool found = false;
     for (const auto &entry : selected_sorted) {
       if (entry.second == *best_index_debug) { found = true; break; }
@@ -3630,11 +3744,12 @@ KinematicsSolver::compute_collision_constraint() {
     const double target_min_distance = config.min_distance;
     // Apply per-pair override (active or newly promoted from deferred).
     double effective_min_distance = target_min_distance;
+    std::string pair_key;
     {
       const auto &pa = pairs[pair_idx];
       const auto &name_a = collision_model->geometryObjects[pa.first].name;
       const auto &name_b = collision_model->geometryObjects[pa.second].name;
-      const std::string pair_key = canonical_pair_key(name_a, name_b);
+      pair_key = canonical_pair_key(name_a, name_b);
       // Check deferred (pending) overrides first: promote when pair achieves
       // the desired clearance for the first time (latch-on semantics).
       if (!per_pair_deferred_overrides_.empty()) {
@@ -3657,12 +3772,32 @@ KinematicsSolver::compute_collision_constraint() {
       }
     }
 
+    // Non-worsening recovery target. Classify each pair the first time it is seen:
+    // a pair already resting closer than effective_min_distance is structurally
+    // close (links that cannot reach the full clearance by construction), so its
+    // recovery target is pinned to a small penetration-prevention floor -- it may
+    // range freely above that floor and is never asked to recover to an infeasible
+    // clearance (which would scale the task to zero / freeze the solve). A pair
+    // resting at or beyond the clearance keeps the full effective_min_distance.
+    double recovery_target = effective_min_distance;
+    if (non_worsening_collision_floor_enabled_ && !pair_key.empty()) {
+      auto it = collision_pair_distance_floor_.find(pair_key);
+      if (it == collision_pair_distance_floor_.end()) {
+        const double seeded =
+            (signed_distance < effective_min_distance)
+                ? std::min(collision_structural_floor_, std::max(0.0, signed_distance))
+                : effective_min_distance;
+        it = collision_pair_distance_floor_.emplace(pair_key, seeded).first;
+      }
+      recovery_target = std::min(it->second, effective_min_distance);
+    }
+
     // Detect stuck: non-penetrating but significantly inside min_distance for
     // multiple consecutive cycles AND the previous dq was near-zero.
     bool stuck_active = false;
     const bool deep_non_penetration =
         (signed_distance >= 0.0) &&
-        (signed_distance < (effective_min_distance - kCollisionStuckBand));
+        (signed_distance < (recovery_target - kCollisionStuckBand));
     const bool dq_small = (last_solution_dq_norm_ < kCollisionStuckDqNormEps);
     if (deep_non_penetration && dq_small) {
       int &counter = collision_stuck_counters_[pair_idx];
@@ -3691,17 +3826,17 @@ KinematicsSolver::compute_collision_constraint() {
     const double recovery_scale      = collision_recovery_scale_;
     const double max_sep_speed_nonpen = collision_max_sep_speed_nonpen_;
     double lower_bound = 0.0;
-    if (signed_distance >= (effective_min_distance + repulsion_deadband)) {
+    if (signed_distance >= (recovery_target + repulsion_deadband)) {
       lower_bound =
-          (effective_min_distance + config.tolerance - signed_distance) / dt;
-    } else if (signed_distance >= effective_min_distance) {
+          (recovery_target + config.tolerance - signed_distance) / dt;
+    } else if (signed_distance >= recovery_target) {
       lower_bound = 0.0;
     } else {
       // Violated region: uniform continuous recovery ramp from the moment
-      // signed_distance drops below min_distance. No dead-zone — recovery
-      // force is active at all violation depths.
+      // signed_distance drops below the (non-worsening) recovery target. No
+      // dead-zone — recovery force is active at all violation depths.
       const double desired =
-          (effective_min_distance + config.tolerance - signed_distance) / dt;
+          (recovery_target + config.tolerance - signed_distance) / dt;
       if (signed_distance >= 0.0) {
         // Non-penetrating: proportional recovery, capped.
         lower_bound = std::min(max_sep_speed_nonpen,
@@ -3814,6 +3949,7 @@ KinematicsSolver::compute_collision_constraint() {
   // Cache the result and configuration for lazy reuse.
   last_collision_constraint_result_ = result;
   last_collision_constraint_q_ = robot_->get_current_configuration();
+  collision_cache_frozen_indices_ = active_collision_lock_indices();
 
   return result;
 #else
@@ -4001,6 +4137,100 @@ void KinematicsSolver::clamp_jacobians_near_joint_limits(
       }
     }
   }
+}
+
+void KinematicsSolver::apply_position_step_primary_task_options(
+    const PositionStepOptions &options, Task *task) {
+  if (task == nullptr) {
+    return;
+  }
+  task->setSolveMode(options.primary_solve_mode);
+  task->setAllowMinErrorFallback(options.primary_allow_min_error_fallback);
+}
+
+std::optional<PositionIKResult>
+KinematicsSolver::attempt_min_error_position_step_retry(
+    const Eigen::VectorXd &entry_q, const PositionStepOptions &options,
+    double step_dt, bool have_vel_result,
+    const VelocitySolverResult &last_vel_result,
+    const Eigen::VectorXd &q_after_primary,
+    const std::function<bool(std::vector<std::pair<Task *, TaskSolveMode>> *)>
+        &flip_primary_tasks,
+    const std::function<PositionIKResult()> &rerun_step) {
+  if (!options.primary_allow_min_error_fallback || suppress_min_error_step_retry_ ||
+      !have_vel_result) {
+    return std::nullopt;
+  }
+
+  const double applied_step_eps =
+      stall_config_.dq_stall_eps * std::max(step_dt, 1e-9);
+  const double applied_step_norm = (q_after_primary - entry_q).norm();
+  const bool constraints_active =
+      (collision_constraint_.has_value() && collision_constraint_->enabled) ||
+      (com_constraint_.has_value() && com_constraint_->enabled);
+  const bool scale_collapsed =
+      last_vel_result.status == SolverStatus::kInfeasible &&
+      is_primary_scale_collapsed_message(last_vel_result.status_message);
+  const bool numerical_stall =
+      last_vel_result.status == SolverStatus::kNumericalError && constraints_active;
+  constexpr double kPrimaryScaleEps = 1e-4;
+  bool primary_scale_saturated = false;
+  if (constraints_active && !last_vel_result.task_scales.empty()) {
+    for (double scale : last_vel_result.task_scales) {
+      if (std::abs(scale) <= kPrimaryScaleEps) {
+        primary_scale_saturated = true;
+        break;
+      }
+    }
+  }
+  const bool soft_saturated =
+      primary_scale_saturated &&
+      (last_vel_result.status == SolverStatus::kSuccess ||
+       last_vel_result.status == SolverStatus::kNoProgress ||
+       last_vel_result.status == SolverStatus::kInfeasible);
+  if (applied_step_norm > applied_step_eps ||
+      (!scale_collapsed && !numerical_stall && !soft_saturated)) {
+    return std::nullopt;
+  }
+
+  std::vector<std::pair<Task *, TaskSolveMode>> saved_modes;
+  if (!flip_primary_tasks(&saved_modes)) {
+    return std::nullopt;
+  }
+
+  const TaskLayout saved_layout = current_auto_task_layout_;
+  if (runtime_config_.enable_auto_task_layout) {
+    current_auto_task_layout_ = TaskLayout::kSplit;
+    auto_layout_below_low_count_ = 0;
+    for (auto &kv : pose_task_groups_) {
+      if (kv.second && kv.second->auto_switch()) {
+        kv.second->set_layout(TaskLayout::kSplit);
+      }
+    }
+  }
+
+  suppress_min_error_step_retry_ = true;
+  PositionIKResult retry_result = rerun_step();
+  suppress_min_error_step_retry_ = false;
+
+  restore_task_solve_modes(saved_modes);
+  if (runtime_config_.enable_auto_task_layout) {
+    current_auto_task_layout_ = saved_layout;
+    for (auto &kv : pose_task_groups_) {
+      if (kv.second && kv.second->auto_switch()) {
+        kv.second->set_layout(saved_layout);
+      }
+    }
+  }
+
+  const double retry_norm = (retry_result.q_solution - entry_q).norm();
+  const bool accept_retry =
+      retry_norm > applied_step_eps ||
+      retry_result.status == SolverStatus::kSuccess;
+  if (!accept_retry) {
+    return std::nullopt;
+  }
+  return retry_result;
 }
 
 void KinematicsSolver::sort_tasks_by_priority() {
@@ -6524,6 +6754,9 @@ PositionIKResult KinematicsSolver::solve_position_step(
 
   frame_task->setTargetPose(target_pose.block<3, 1>(0, 3),
                             target_pose.block<3, 3>(0, 0));
+  if (!suppress_min_error_step_retry_) {
+    apply_position_step_primary_task_options(options, frame_task.get());
+  }
 
   // Enable stall handler if requested. enable_stall_handler is idempotent:
   // repeated calls preserve accumulated stall counters so detection works
@@ -6550,6 +6783,20 @@ PositionIKResult KinematicsSolver::solve_position_step(
 
   const std::vector<int> step_locked_indices =
       build_step_locked_indices(options);
+  // Keep the frozen set visible to collision computations that run after the
+  // inner solve_velocity() clears pending_velocity_lock_indices_ (stall escape,
+  // post-step validation), so the collision debug list and QP slots agree on
+  // which pairs are controllable. Cleared on every exit path.
+  position_step_locked_indices_ = step_locked_indices;
+  struct ClearPositionStepLocks {
+    KinematicsSolver *solver;
+    ~ClearPositionStepLocks() {
+      if (solver != nullptr) {
+        solver->position_step_locked_indices_.clear();
+      }
+    }
+  } clear_position_step_locks{this};
+  (void)clear_position_step_locks;
 
   VelocitySolverResult last_vel_result;
   bool have_vel_result = false;
@@ -7167,6 +7414,19 @@ PositionIKResult KinematicsSolver::solve_position_step(
     }
   }
 
+  if (auto retry_result = attempt_min_error_position_step_retry(
+          current_q, options, step_dt, have_vel_result, last_vel_result, q,
+          [&](std::vector<std::pair<Task *, TaskSolveMode>> *saved_modes) {
+            return flip_scale_family_task(frame_task.get(), saved_modes);
+          },
+          [&]() {
+            return solve_position_step(current_q, target_pose, frame_task_name,
+                                       options);
+          });
+      retry_result.has_value()) {
+    return retry_result.value();
+  }
+
   clear_all_target_velocities();
 
   result.q_solution = q;
@@ -7427,6 +7687,12 @@ PositionIKResult KinematicsSolver::solve_position_step(
     }
   }
 
+  for (const auto &rt : resolved) {
+    if (!suppress_min_error_step_retry_) {
+      apply_position_step_primary_task_options(options, rt.task.get());
+    }
+  }
+
   // Enable stall handler if requested. enable_stall_handler is idempotent:
   // repeated calls preserve accumulated stall counters so detection works
   // across successive single-step solve_position_step calls.
@@ -7456,6 +7722,20 @@ PositionIKResult KinematicsSolver::solve_position_step(
   }
   const std::vector<int> step_locked_indices =
       build_step_locked_indices(options);
+  // Keep the frozen set visible to collision computations that run after the
+  // inner solve_velocity() clears pending_velocity_lock_indices_ (stall escape,
+  // post-step validation), so the collision debug list and QP slots agree on
+  // which pairs are controllable. Cleared on every exit path.
+  position_step_locked_indices_ = step_locked_indices;
+  struct ClearPositionStepLocks {
+    KinematicsSolver *solver;
+    ~ClearPositionStepLocks() {
+      if (solver != nullptr) {
+        solver->position_step_locked_indices_.clear();
+      }
+    }
+  } clear_position_step_locks{this};
+  (void)clear_position_step_locks;
 
   VelocitySolverResult last_vel_result;
   bool have_vel_result = false;
@@ -8130,6 +8410,16 @@ PositionIKResult KinematicsSolver::solve_position_step(
         }
       }
     }
+  }
+
+  if (auto retry_result = attempt_min_error_position_step_retry(
+          current_q, options, step_dt, have_vel_result, last_vel_result, q,
+          [&resolved](std::vector<std::pair<Task *, TaskSolveMode>> *saved_modes) {
+            return flip_primary_scale_tasks_to_min_error(resolved, saved_modes);
+          },
+          [&]() { return solve_position_step(current_q, targets, options); });
+      retry_result.has_value()) {
+    return retry_result.value();
   }
 
   std::unordered_set<Task *> resolved_tasks;

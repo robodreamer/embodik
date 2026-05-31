@@ -20,7 +20,7 @@ the best starting points for users.
 - [`03_teleop_ik.py`](teleop_ik.md) — Minimal teleop input adapter into EmbodiK IK
 - [`04_com_constraint_example.py`](com_constraint_ik.md) — CoM support-polygon constraint demo in Viser
 - [`05_dual_arm_ects.py`](dual_arm_ects.md) — Dual-arm ECTS/Orthogonal coordination with collision handling
-- [`06_bimanual_whole_body_ik.py`](bimanual_whole_body_ik.md) — Bimanual whole-body teleop for AI Worker and RB-Y1 with CoM and collision handling
+- [`06_bimanual_whole_body_ik.py`](bimanual_whole_body_ik.md) — Bimanual whole-body teleop for AI Worker and RB-Y1 with CoM, collision handling, adaptive tuning, and optional Seer input
 - [`07_unitree_g1_retargeting_ik.py`](unitree_g1_retargeting_ik.md) — Unitree G1 retargeting IK with palm/foot/pelvis targets, CoM visualization, and optional self-collision constraints
 - [`08_spot_full_body_ik_viser.py`](spot_full_body_ik.md) — Spot full-body IK in regular Viser with arm+torso, torso-only, full-body, and two-stage modes
 - [`09_spot_locomanip_mjviser.py`](spot_locomanip_mjviser.md) — Spot locomanipulation ONNX policy rollout in MuJoCo through mjviser
@@ -80,7 +80,7 @@ The `examples/example_helpers/` directory contains reusable utilities:
 
 - `ik_common.py` — Shared defaults and small IK/collision helper functions
 - `teleop_ik_backend.py` — Reusable registered-task IK backend for the teleop example
-- `common_bimanual_model_utils.py` / `common_bimanual_teleop_app.py` — Shared AI Worker/RB-Y1 bimanual whole-body IK helpers
+- `common_bimanual_model_utils.py` / `common_bimanual_teleop_app.py` — Shared bimanual whole-body IK helpers for public robot examples
 - `dual_arm_ik_helper.py` — Dual-arm IK utilities
 - `g1_model_utils.py` / `g1_ik_runtime.py` — Unitree G1 model, retargeting, and IK runtime helpers
 - `limit_profiles/` — Joint limit profile configurations
