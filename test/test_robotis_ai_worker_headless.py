@@ -723,7 +723,9 @@ def _drive_unreachable_left_reach(*, allow_fallback: bool) -> tuple[float, int, 
             q = q_next
         robot.update_configuration(q)
 
-    extension = float(np.linalg.norm(_frame_pose_matrix(robot, frames["left_tool"])[:3, 3] - left_start))
+    extension = float(
+        np.linalg.norm(_frame_pose_matrix(robot, frames["left_tool"])[:3, 3] - left_start)
+    )
     return extension, terminal_zero_motion, status
 
 
@@ -806,16 +808,25 @@ def _held_arm_drift_when_dragging_other(*, solve_mode, protect_held: bool = Fals
         robot, collision_urdf, exclusions
     )
     _configure_collision_constraint(
-        solver, enabled=True, min_distance_m=0.035, max_constraints=3,
-        tuning_mode="balanced", include_pairs=include_pairs, exclude_pairs=exclusions,
+        solver,
+        enabled=True,
+        min_distance_m=0.035,
+        max_constraints=3,
+        tuning_mode="balanced",
+        include_pairs=include_pairs,
+        exclude_pairs=exclusions,
     )
     if hasattr(solver, "configure_com_constraint") and "base" in frames:
         polygon = _compute_support_polygon_from_contacts(
             robot, COMMON_BIMANUAL_SUPPORT_CONTACT_FRAMES
         )
         solver.configure_com_constraint(
-            support_polygon=polygon, margin=0.10, frame_name=frames["base"],
-            com_vel_max=1.0, com_acc_max=10.0, use_acceleration_limits=False,
+            support_polygon=polygon,
+            margin=0.10,
+            frame_name=frames["base"],
+            com_vel_max=1.0,
+            com_acc_max=10.0,
+            use_acceleration_limits=False,
             proximity_fraction=0.05,
         )
 
@@ -861,7 +872,9 @@ def test_worker_held_arm_stays_put_in_scale_mode() -> None:
     elastic_drift = _held_arm_drift_when_dragging_other(
         solve_mode=embodik.TaskSolveMode.SCALE_ELASTIC
     )
-    assert scale_drift < 5e-3, f"held arm should stay put in SCALE, drifted {scale_drift*1000:.1f} mm"
+    assert (
+        scale_drift < 5e-3
+    ), f"held arm should stay put in SCALE, drifted {scale_drift*1000:.1f} mm"
     assert elastic_drift > scale_drift, (
         "SCALE should couple less than SCALE_ELASTIC "
         f"(scale {scale_drift*1000:.1f} mm vs elastic {elastic_drift*1000:.1f} mm)"

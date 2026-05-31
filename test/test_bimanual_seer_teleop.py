@@ -60,11 +60,11 @@ def test_raw_buttons_side_selects_requested_controller():
     assert ctrl.raw_buttons_side("right") == (40, 0, 32)
 
 
+from embodik import Rt  # noqa: E402
 from examples.example_helpers.bimanual_seer_teleop import (  # noqa: E402
     ArmTeleopState,
     BimanualSeerTeleop,
 )
-from embodik import Rt  # noqa: E402
 
 
 def _identity_target():
