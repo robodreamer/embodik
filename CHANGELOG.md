@@ -11,11 +11,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Public docs — collision and robustness guides**: [`docs/collision_constraints.md`](docs/collision_constraints.md)
+- **Public docs — collision and robustness guides**: `docs/collision_constraints.md`
   (Speed / Balanced / Precise tuning, pairwise bounds, post-step guards, batch IK notes) and
-  [`docs/solver_robustness.md`](docs/solver_robustness.md) (adaptive dt, elastic band, auto task
-  layout, weighted fallback, stall handler, diagnostics), plus a
-  [`docs/guides/index.md`](docs/guides/index.md) reading-path hub and tuning-mode demo video.
+  `docs/solver_robustness.md` (adaptive dt, elastic band, auto task layout, weighted fallback,
+  stall handler, diagnostics), plus a `docs/guides/index.md` reading-path hub and tuning-mode demo
+  video.
 - **Non-worsening floor regression coverage**: expanded `test/test_collision_non_worsening_floor.py`
   for margin-floor recovery and initially penetrating pairs.
 

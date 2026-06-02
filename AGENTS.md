@@ -8,16 +8,22 @@ Context for AI agents and contributors to pick up work efficiently. See `README.
 - **Core layout:** C++ in `cpp_core/`, Python bindings in `python_bindings/`, examples in `examples/`
 - **CoM constraints:** `configure_com_constraint()` with polygon vertices; margin uses `char_size` (mean centroid→vertex distance)
 - **ECTS dual-arm:** `add_absolute_frame_task()`, `add_relative_frame_task()`, `add_frame_task()`; `map_ects_mode()` / `map_ects_mode_blended()`; reference: H. A. Park, IROS 2016 (doi:10.1109/IROS.2016.7759161)
+- **Worktree notes:** curate onto `main`, archive stale WIP — `private maintainer notes/INDEX.md`, `worktree_internal_notes_policy.md`
 
 ---
 
 ## Agent Workflow (Recommended)
 
 1. **Scope first**: confirm task target (`bug`, `feature`, `docs`, `release`) and touched paths.
-2. **Load context**: check `AGENTS.md`, then `private maintainer notes/` for prior iteration context, then public docs in `docs/`.
+2. **Load context**: check `AGENTS.md`, then `private maintainer notes/INDEX.md` (active notes only), then
+   `private maintainer notes/` or `archive/` only when you need historical context, then public docs in `docs/`.
 3. **Implement minimally**: prefer localized diffs over broad rewrites; preserve existing APIs unless requested.
 4. **Validate**: run the smallest relevant checks first, then broader checks.
 5. **Document**: update public docs for user-facing behavior; keep ad-hoc reasoning in `private maintainer notes/`.
+6. **Land maintainer context on `main`**: before removing a worktree, **curate** — active notes at repo root
+   per `private maintainer notes/INDEX.md`; archive or omit rejected trials. Run
+   `pixi run python scripts/check_maintainer_context_on_main.py --include-uncommitted` from the primary
+   `main` checkout. See `private maintainer notes/worktree_internal_notes_policy.md`.
 
 Definition of done (default):
 
@@ -25,6 +31,7 @@ Definition of done (default):
 - Build passes (`pixi run build`) for C++/bindings changes
 - Docs build passes (`pixi run docs-build`) if docs changed
 - Any new behavior is reflected in `docs/` and/or examples
+- Investigation notes for the iteration are on **`main`**, not only on a feature branch/worktree
 
 ---
 
@@ -70,22 +77,49 @@ Testing expectations:
 | `examples/` | Standalone example scripts, including basic IK, collision-aware IK, CoM, dual-arm ECTS, whole-body bimanual, and G1 retargeting demos |
 | `examples/utils/` | dual_iiwa_urdf.py, dual_panda_urdf.py, robot_models.py |
 | `test/` | Pytest suite |
-| `scripts/` | Build helpers (version.py, patch_qhull_cmake.py, upload_pypi.sh) |
+| `scripts/` | Build helpers (version.py, patch_qhull_cmake.py, upload_pypi.sh, `check_maintainer_context_on_main.py`) |
 | `docs/` | MkDocs documentation |
-| `private maintainer notes/` | Internal iteration notes/runbooks (not published in MkDocs) |
+| `private maintainer notes/` | Active maintainer context + [`INDEX.md`](private maintainer notes/INDEX.md); archive under `private maintainer notes/archive/` |
 
 ---
 
 ## Internal Iteration Notes
 
 When a task references prior experiments, regressions, or release-era debugging context,
-check `private maintainer notes/` first before re-investigating from scratch. These files are
-maintainer-facing context (not public docs) and should be used to inform follow-up work.
+check [`private maintainer notes/INDEX.md`](private maintainer notes/INDEX.md) first (active notes only). Use
+`private maintainer notes/archive/` only for historical context — not as current behavior.
 
 Guideline: search `private maintainer notes/` only when the task references prior
 experiments, regressions, release debugging, or private context. Keep
 user-facing guidance in `docs/`; keep ad-hoc/internal investigation artifacts in
 `private maintainer notes/`.
+
+### Canonical copy on `main`
+
+Maintainer context are versioned in git but **not** in MkDocs or the public changelog.
+The **canonical active set** is listed in [`private maintainer notes/INDEX.md`](private maintainer notes/INDEX.md)
+at the repo root of `private maintainer notes/`. Superseded material lives under
+[`private maintainer notes/archive/`](private maintainer notes/archive/README.md) — agents must not treat archived
+files as current behavior.
+
+**Do not hoard trials on `main`:** when closing an investigation, keep one **active** note per
+topic. Rejected approaches → “Changes Tried” table, **archive** if history helps, **delete** if
+not. Never bulk-import branch dumps; never put internal-only tooling in public `CHANGELOG`.
+
+**Before `git worktree remove` or deleting a branch:**
+
+1. Commit or stash any `private maintainer notes/` edits in that worktree.
+2. From the primary checkout on `main`:
+   ```bash
+   pixi run python scripts/check_maintainer_context_on_main.py --include-uncommitted
+   ```
+3. If paths are missing on `main`, `git checkout <branch> -- private maintainer notes/<file>` (or
+   merge/cherry-pick), commit, re-run until `OK`.
+4. Then remove the worktree / delete the branch.
+
+Full runbook: [`private maintainer notes/worktree_internal_notes_policy.md`](private maintainer notes/worktree_internal_notes_policy.md).
+Active index: [`private maintainer notes/INDEX.md`](private maintainer notes/INDEX.md).
+Branch-specific merge-prep context belongs in `private maintainer notes/`, not root guidance.
 
 ---
 
