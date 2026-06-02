@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Made production `pixi run upload-pypi` refuse sdist-only uploads unless an
+  explicit recovery override is set, so releases do not reach PyPI without the
+  repaired wheel artifacts.
+
 ## [0.20.15] - 2026-06-02
 
 ### Added

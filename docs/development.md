@@ -133,8 +133,10 @@ The PyPI trusted publisher for `embodik` must match the tag workflow exactly:
 
 The `Publish to PyPI` job declares `environment: pypi` so PyPI receives a
 stable environment claim in GitHub's OIDC token. If PyPI reports
-`invalid-publisher` with `environment: MISSING`, the workflow environment and
-the PyPI trusted publisher configuration are out of sync.
+`invalid-publisher`, compare the rendered claims from the Actions log against
+the PyPI trusted publisher configuration. A valid token with
+`environment: pypi` can still fail when the PyPI project has no matching
+publisher for the owner, repository, workflow filename, and environment.
 
 ## Debugging
 

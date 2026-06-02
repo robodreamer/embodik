@@ -10,6 +10,22 @@ set -e
 REPO="${1:-pypi}"
 DIST_DIR="dist"
 
+if [ "$REPO" != "testpypi" ] && [ "${EMBODIK_ALLOW_SDIST_ONLY_PYPI_UPLOAD:-0}" != "1" ]; then
+    cat >&2 <<'EOF'
+Refusing production PyPI upload from scripts/upload_pypi.sh.
+
+This script uploads only the source distribution. Production EmbodiK releases
+must publish repaired wheels and the sdist together through the tag-gated
+GitHub Actions Wheels workflow.
+
+If this is a deliberate recovery action after wheel artifacts have already been
+uploaded or are being uploaded separately, rerun with:
+
+  EMBODIK_ALLOW_SDIST_ONLY_PYPI_UPLOAD=1 pixi run upload-pypi
+EOF
+    exit 1
+fi
+
 VERSION="$(python - <<'PY'
 import pathlib, tomllib
 pyproject = pathlib.Path("pyproject.toml")

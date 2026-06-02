@@ -93,7 +93,7 @@ build-sdist = { cmd = "python -m build --sdist", depends-on = ["clean-dist", "pa
 build-dist = { cmd = "python -m build", depends-on = ["clean-dist", "patch-qhull"] }
 # Setup PyPI credentials (run once to create ~/.pypirc)
 setup-pypirc = "bash scripts/setup_pypirc.sh"
-# Upload to PyPI (requires credentials configured in ~/.pypirc)
+# Upload helpers. Production PyPI sdist-only upload is recovery-gated in the script.
 upload-testpypi = "bash scripts/upload_testpypi.sh"
 upload-pypi = "bash scripts/upload_pypi.sh"
 # Version management
