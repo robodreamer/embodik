@@ -25,28 +25,35 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 try:
-    from example_helpers.common_bimanual_model_utils import (
-        default_common_bimanual_ik_joint_names,
-        resolve_common_bimanual_frames,
-    )
-    from example_helpers.ik_common import DEFAULT_VISER_PORT, configure_solver_runtime_policy
-    from example_helpers.visualization_helpers import make_visual_config_mapper
-    from example_helpers.bimanual_seer_teleop import BimanualSeerTeleop
-    from example_helpers.seer_teleop import (
-        DEFAULT_TELEOP_SCALE_FACTOR,
-        DEFAULT_SEER_CONTROLLER_PORT,
-        pose_from_transform_control,
-        set_transform_control_pose,
-    )
     from example_helpers.adaptive_gain_tuning import (
         AdaptiveGainTuningConfig,
         AdaptiveGainTuningState,
         compute_effective_gains,
         reset_adaptive_gain_state,
     )
+    from example_helpers.bimanual_seer_teleop import BimanualSeerTeleop
+    from example_helpers.common_bimanual_model_utils import (
+        default_common_bimanual_ik_joint_names,
+        resolve_common_bimanual_frames,
+    )
+    from example_helpers.ik_common import DEFAULT_VISER_PORT, configure_solver_runtime_policy
+    from example_helpers.seer_teleop import (
+        DEFAULT_SEER_CONTROLLER_PORT,
+        DEFAULT_TELEOP_SCALE_FACTOR,
+        pose_from_transform_control,
+        set_transform_control_pose,
+    )
+    from example_helpers.visualization_helpers import make_visual_config_mapper
 except ModuleNotFoundError as exc:
     if exc.name != "example_helpers" and not str(exc.name).startswith("example_helpers."):
         raise
+    from examples.example_helpers.adaptive_gain_tuning import (
+        AdaptiveGainTuningConfig,
+        AdaptiveGainTuningState,
+        compute_effective_gains,
+        reset_adaptive_gain_state,
+    )
+    from examples.example_helpers.bimanual_seer_teleop import BimanualSeerTeleop
     from examples.example_helpers.common_bimanual_model_utils import (
         default_common_bimanual_ik_joint_names,
         resolve_common_bimanual_frames,
@@ -55,20 +62,13 @@ except ModuleNotFoundError as exc:
         DEFAULT_VISER_PORT,
         configure_solver_runtime_policy,
     )
-    from examples.example_helpers.visualization_helpers import make_visual_config_mapper
-    from examples.example_helpers.bimanual_seer_teleop import BimanualSeerTeleop
     from examples.example_helpers.seer_teleop import (
-        DEFAULT_TELEOP_SCALE_FACTOR,
         DEFAULT_SEER_CONTROLLER_PORT,
+        DEFAULT_TELEOP_SCALE_FACTOR,
         pose_from_transform_control,
         set_transform_control_pose,
     )
-    from examples.example_helpers.adaptive_gain_tuning import (
-        AdaptiveGainTuningConfig,
-        AdaptiveGainTuningState,
-        compute_effective_gains,
-        reset_adaptive_gain_state,
-    )
+    from examples.example_helpers.visualization_helpers import make_visual_config_mapper
 
 DEFAULT_SOLVER_DT = 0.01
 DEFAULT_POS_GAIN = 10.0
@@ -96,6 +96,8 @@ def _require_position_step_primary_opts(opts: object) -> None:
             "Installed embodik is missing PositionStepOptions fields "
             f"{missing}. Rebuild this worktree with: pixi run install"
         )
+
+
 DEFAULT_MAX_COLLISION_CONSTRAINTS = 3
 DEFAULT_JOINT_ACCEL_LIMIT = 15.0
 # Optional override of the curated collision link-pair whitelist. When set by a
@@ -126,7 +128,9 @@ COMMON_BIMANUAL_DEFAULT_ENABLE_COM: bool | None = None
 COMMON_BIMANUAL_DEFAULT_POSTURE_WEIGHT: float | None = None
 COMMON_BIMANUAL_DEFAULT_ARM_NULLSPACE: bool | None = None
 COMMON_BIMANUAL_DEFAULT_LOCK_TORSO: bool | None = None
+COMMON_BIMANUAL_DEFAULT_COLLISION_MAX_CONSTRAINTS: int | None = None
 COMMON_BIMANUAL_POSTURE_JOINT_NAMES: list[str] | None = None
+COMMON_BIMANUAL_INITIAL_TARGET_WXYZ: tuple[float, float, float, float] | None = None
 _SolverStep = collections.namedtuple("_SolverStep", ("q_next", "solver_result", "elapsed_ms"))
 COMMON_BIMANUAL_SUPPORT_CONTACT_FRAMES = (
     "left_wheel_drive_link",
@@ -315,6 +319,8 @@ def _default_collision_min_distance_mm(variant: str) -> float:
 
 def _default_collision_max_constraints(variant: str) -> int:
     """Return a bounded active-row count for the active robot collision geometry."""
+    if COMMON_BIMANUAL_DEFAULT_COLLISION_MAX_CONSTRAINTS is not None:
+        return int(COMMON_BIMANUAL_DEFAULT_COLLISION_MAX_CONSTRAINTS)
     if str(variant).lower() == "rby1":
         return 8
     return DEFAULT_MAX_COLLISION_CONSTRAINTS
@@ -338,6 +344,48 @@ def _ctrl_from_pose(ctrl, pose) -> None:
     q_xyzw = r2q(pose[:3, :3], order="xyzs")
     ctrl.position = tuple(np.asarray(pose[:3, 3], dtype=float))
     ctrl.wxyz = (float(q_xyzw[3]), float(q_xyzw[0]), float(q_xyzw[1]), float(q_xyzw[2]))
+
+
+def _normalized_wxyz(
+    wxyz: tuple[float, float, float, float] | np.ndarray,
+) -> tuple[float, float, float, float]:
+    quat = np.asarray(wxyz, dtype=float).reshape(4)
+    norm = float(np.linalg.norm(quat))
+    if not np.isfinite(norm) or norm < 1e-12:
+        raise ValueError(f"invalid target quaternion: {wxyz}")
+    quat = quat / norm
+    return tuple(float(v) for v in quat)
+
+
+def _rotation_from_wxyz(wxyz: tuple[float, float, float, float] | np.ndarray) -> np.ndarray:
+    quat_wxyz = _normalized_wxyz(wxyz)
+    quat_xyzw = np.array([quat_wxyz[1], quat_wxyz[2], quat_wxyz[3], quat_wxyz[0]], dtype=float)
+    return q2r(quat_xyzw, order="xyzs")
+
+
+def _target_display_offset_for_initial_pose(
+    solver_pose: np.ndarray,
+    display_wxyz: tuple[float, float, float, float] | np.ndarray | None,
+) -> np.ndarray:
+    if display_wxyz is None:
+        return np.eye(3, dtype=float)
+    return np.asarray(solver_pose[:3, :3], dtype=float).T @ _rotation_from_wxyz(display_wxyz)
+
+
+def _display_pose_from_solver_pose_with_offset(
+    solver_pose: np.ndarray, display_offset: np.ndarray
+) -> np.ndarray:
+    pose = np.asarray(solver_pose, dtype=float).copy()
+    pose[:3, :3] = pose[:3, :3] @ np.asarray(display_offset, dtype=float)
+    return pose
+
+
+def _solver_pose_from_display_pose_with_offset(
+    display_pose: np.ndarray, display_offset: np.ndarray
+) -> np.ndarray:
+    pose = np.asarray(display_pose, dtype=float).copy()
+    pose[:3, :3] = pose[:3, :3] @ np.asarray(display_offset, dtype=float).T
+    return pose
 
 
 def _matrix_from_rt(pose: embodik.Rt) -> np.ndarray:
@@ -1237,14 +1285,52 @@ def main() -> None:
         T[:3, 3] = np.asarray(pose.translation, dtype=float)
         return T
 
+    robot.update_configuration(robot.neutral_configuration())
+    right_zero_pose = frame_pose(frame_map["right_tool"])
+    left_zero_pose = frame_pose(frame_map["left_tool"])
+    robot.update_configuration(q)
+
     right_pose0 = frame_pose(frame_map["right_tool"])
     left_pose0 = frame_pose(frame_map["left_tool"])
-    right_wxyz0_xyzw = r2q(right_pose0[:3, :3], order="xyzs")
-    left_wxyz0_xyzw = r2q(left_pose0[:3, :3], order="xyzs")
+    target_display_offsets = {
+        "right": _target_display_offset_for_initial_pose(
+            right_zero_pose, COMMON_BIMANUAL_INITIAL_TARGET_WXYZ
+        ),
+        "left": _target_display_offset_for_initial_pose(
+            left_zero_pose, COMMON_BIMANUAL_INITIAL_TARGET_WXYZ
+        ),
+    }
+
+    def _display_pose_from_solver_pose(side: str, solver_pose: np.ndarray) -> np.ndarray:
+        return _display_pose_from_solver_pose_with_offset(solver_pose, target_display_offsets[side])
+
+    def _solver_pose_from_display_pose(side: str, display_pose: np.ndarray) -> np.ndarray:
+        return _solver_pose_from_display_pose_with_offset(
+            display_pose, target_display_offsets[side]
+        )
+
+    def _ctrl_from_solver_pose(side: str, ctrl, solver_pose) -> None:
+        _ctrl_from_pose(ctrl, _display_pose_from_solver_pose(side, solver_pose))
+
+    def _solver_pose_from_ctrl(side: str, ctrl) -> np.ndarray:
+        return _solver_pose_from_display_pose(side, _pose_from_ctrl(ctrl))
+
+    def _solver_rt_from_ctrl(side: str, ctrl) -> embodik.Rt:
+        pose = _solver_pose_from_ctrl(side, ctrl)
+        return embodik.Rt(R=pose[:3, :3], t=pose[:3, 3])
+
+    def _set_ctrl_from_solver_rt(side: str, ctrl, pose) -> None:
+        solver_pose = _matrix_from_rt(pose)
+        _ctrl_from_pose(ctrl, _display_pose_from_solver_pose(side, solver_pose))
+
+    right_target0 = _display_pose_from_solver_pose("right", right_pose0)
+    left_target0 = _display_pose_from_solver_pose("left", left_pose0)
+    right_wxyz0_xyzw = r2q(right_target0[:3, :3], order="xyzs")
+    left_wxyz0_xyzw = r2q(left_target0[:3, :3], order="xyzs")
     right_ctrl = server.scene.add_transform_controls(
         "/target/right_tool",
         scale=0.2,
-        position=tuple(np.asarray(right_pose0[:3, 3], dtype=float)),
+        position=tuple(np.asarray(right_target0[:3, 3], dtype=float)),
         wxyz=(
             float(right_wxyz0_xyzw[3]),
             float(right_wxyz0_xyzw[0]),
@@ -1255,7 +1341,7 @@ def main() -> None:
     left_ctrl = server.scene.add_transform_controls(
         "/target/left_tool",
         scale=0.2,
-        position=tuple(np.asarray(left_pose0[:3, 3], dtype=float)),
+        position=tuple(np.asarray(left_target0[:3, 3], dtype=float)),
         wxyz=(
             float(left_wxyz0_xyzw[3]),
             float(left_wxyz0_xyzw[0]),
@@ -1321,9 +1407,7 @@ def main() -> None:
         # the torso/CoM shift to serve the moving arm. Demoting the actively
         # dragged arm to a lower priority plants the held arm (the moving arm then
         # works in its nullspace). Default on; disable for symmetric bimanual moves.
-        hold_inactive_arm = server.gui.add_checkbox(
-            "Hold the non-dragged arm", initial_value=True
-        )
+        hold_inactive_arm = server.gui.add_checkbox("Hold the non-dragged arm", initial_value=True)
         seer_teleop = None
         seer_gui = {}
         if COMMON_BIMANUAL_ENABLE_SEER_TELEOP:
@@ -1332,14 +1416,24 @@ def main() -> None:
                 port=COMMON_BIMANUAL_SEER_CONTROLLER_PORT,
             )
             with server.gui.add_folder("Teleop Control", expand_by_default=False):
-                seer_gui["enabled"] = server.gui.add_checkbox("Enable Teleop Mode", initial_value=False)
-                seer_gui["status"] = server.gui.add_text("Controller", initial_value="Not connected")
+                seer_gui["enabled"] = server.gui.add_checkbox(
+                    "Enable Teleop Mode", initial_value=False
+                )
+                seer_gui["status"] = server.gui.add_text(
+                    "Controller", initial_value="Not connected"
+                )
                 seer_gui["connect"] = server.gui.add_button("Connect Controller")
                 seer_gui["disconnect"] = server.gui.add_button("Disconnect Controller")
                 seer_gui["disconnect"].disabled = True
-                seer_gui["left_enable"] = server.gui.add_checkbox("Enable left arm", initial_value=True)
-                seer_gui["right_enable"] = server.gui.add_checkbox("Enable right arm", initial_value=True)
-                seer_gui["streaming"] = server.gui.add_text("Streaming", initial_value="L=OFF R=OFF")
+                seer_gui["left_enable"] = server.gui.add_checkbox(
+                    "Enable left arm", initial_value=True
+                )
+                seer_gui["right_enable"] = server.gui.add_checkbox(
+                    "Enable right arm", initial_value=True
+                )
+                seer_gui["streaming"] = server.gui.add_text(
+                    "Streaming", initial_value="L=OFF R=OFF"
+                )
                 seer_gui["gripper"] = server.gui.add_text("Gripper", initial_value="L=OPEN R=OPEN")
                 seer_gui["reset"] = server.gui.add_button("Reset Controller Reference")
                 seer_gui["reset"].disabled = True
@@ -1352,9 +1446,7 @@ def main() -> None:
                     initial_value=DEFAULT_TELEOP_SCALE_FACTOR,
                 )
                 with server.gui.add_folder("Controller Info", expand_by_default=False):
-                    seer_gui["pos"] = server.gui.add_text(
-                        "Position", initial_value="L=n/a | R=n/a"
-                    )
+                    seer_gui["pos"] = server.gui.add_text("Position", initial_value="L=n/a | R=n/a")
                     seer_gui["buttons"] = server.gui.add_text(
                         "Buttons", initial_value="L n/a | R n/a"
                     )
@@ -1424,8 +1516,8 @@ def main() -> None:
 
                     _seg_segments = load_motion19_segments()
                     _seg_player = SegmentPlayer(_seg_segments, dt=DEFAULT_SOLVER_DT)
-                    _seg_initial_left = pose_from_transform_control(left_ctrl)
-                    _seg_initial_right = pose_from_transform_control(right_ctrl)
+                    _seg_initial_left = _solver_rt_from_ctrl("left", left_ctrl)
+                    _seg_initial_right = _solver_rt_from_ctrl("right", right_ctrl)
 
                     _seg_gui["caveat"] = server.gui.add_markdown(
                         "**Note:** segment replay uses the integrated WBC harness "
@@ -1455,8 +1547,8 @@ def main() -> None:
                             def _on_seg_click(_event) -> None:
                                 if _seg_player is None:
                                     return
-                                cur_left = pose_from_transform_control(left_ctrl)
-                                cur_right = pose_from_transform_control(right_ctrl)
+                                cur_left = _solver_rt_from_ctrl("left", left_ctrl)
+                                cur_right = _solver_rt_from_ctrl("right", right_ctrl)
                                 reset_flag = bool(_seg_gui["reset_to_initial"].value)
                                 init_l = _seg_initial_left if reset_flag else None
                                 init_r = _seg_initial_right if reset_flag else None
@@ -1468,7 +1560,9 @@ def main() -> None:
                                     initial_right=init_r,
                                 )
                                 if ok:
-                                    if not bool(lock_lift_joint.value) and bool(lift_velocity_indices):
+                                    if not bool(lock_lift_joint.value) and bool(
+                                        lift_velocity_indices
+                                    ):
                                         lock_lift_joint.value = True
                                     _seg_gui["status"].value = (
                                         f"Seg {seg_idx + 1}: {_seg_segments[seg_idx].name} — starting"
@@ -1483,9 +1577,7 @@ def main() -> None:
                         _btn.on_click(_make_seg_click(_si))
 
                     _seg_gui["stop"] = server.gui.add_button("Stop Replay")
-                    _seg_gui["status"] = server.gui.add_text(
-                        "Replay Status", initial_value="Idle"
-                    )
+                    _seg_gui["status"] = server.gui.add_text("Replay Status", initial_value="Idle")
 
                     @_seg_gui["stop"].on_click
                     def _on_seg_stop(_event) -> None:
@@ -1978,8 +2070,8 @@ def main() -> None:
         nonlocal seer_target_poses
         right_pose = frame_pose(frame_map["right_tool"])
         left_pose = frame_pose(frame_map["left_tool"])
-        _ctrl_from_pose(right_ctrl, right_pose)
-        _ctrl_from_pose(left_ctrl, left_pose)
+        _ctrl_from_solver_pose("right", right_ctrl, right_pose)
+        _ctrl_from_solver_pose("left", left_ctrl, left_pose)
         seer_target_poses = {"left": None, "right": None}
         for task, pose in ((right_task, right_pose), (left_task, left_pose)):
             try:
@@ -2028,7 +2120,9 @@ def main() -> None:
         _sync_targets_from_robot()
         status.value = "Status: Targets snapped to current EE poses"
 
-    def _reset_robot_and_targets(*, status_message: str = "Status: Robot and targets reset") -> None:
+    def _reset_robot_and_targets(
+        *, status_message: str = "Status: Robot and targets reset"
+    ) -> None:
         nonlocal q, posture_target, nullspace_bias_q, prev_right_target_pose, prev_left_target_pose
         reset_adaptive_gain_state(_adaptive_gain_state)
         q = robot.neutral_configuration()
@@ -2104,9 +2198,9 @@ def main() -> None:
         if _seer_side_active(side):
             owned = seer_target_poses.get(side)
             if owned is not None:
-                return _matrix_from_rt(owned)
+                return _solver_pose_from_display_pose(side, _matrix_from_rt(owned))
         ctrl = right_ctrl if side == "right" else left_ctrl
-        return _pose_from_ctrl(ctrl)
+        return _solver_pose_from_ctrl(side, ctrl)
 
     def _current_task_errors() -> tuple[float, float, float, float]:
         right_pose_now = frame_pose(frame_map["right_tool"])
@@ -2363,20 +2457,18 @@ def main() -> None:
         # Segment replay block — gated so flag-off is byte-equivalent (no-op).
         if _seg_player is not None and _seg_player.state != "idle":
             _seg_player.speed = float(_seg_gui["speed"].value)
-            _left_now_rt = pose_from_transform_control(left_ctrl)
-            _right_now_rt = pose_from_transform_control(right_ctrl)
+            _left_now_rt = _solver_rt_from_ctrl("left", left_ctrl)
+            _right_now_rt = _solver_rt_from_ctrl("right", right_ctrl)
             _seg_tick = _seg_player.tick(left_now=_left_now_rt, right_now=_right_now_rt)
             if _seg_tick["left_target"] is not None:
-                set_transform_control_pose(left_ctrl, _seg_tick["left_target"])
+                _set_ctrl_from_solver_rt("left", left_ctrl, _seg_tick["left_target"])
             if _seg_tick["right_target"] is not None:
-                set_transform_control_pose(right_ctrl, _seg_tick["right_target"])
+                _set_ctrl_from_solver_rt("right", right_ctrl, _seg_tick["right_target"])
             if _seg_gui:
                 _seg_state = _seg_tick["state"]
                 _seg_elapsed = _seg_tick["elapsed"]
                 _seg_dur = _seg_tick["duration"]
-                _seg_name = (
-                    _seg_player._spec.name if _seg_player._spec is not None else "?"
-                )
+                _seg_name = _seg_player._spec.name if _seg_player._spec is not None else "?"
                 _seg_mean_err = 0.0
                 _seg_lt = _seg_tick.get("left_target")
                 _seg_rt = _seg_tick.get("right_target")
@@ -2391,9 +2483,7 @@ def main() -> None:
                         robot.get_frame_pose(frame_map["right_tool"]).translation, dtype=float
                     )
                     _rt_tgt = np.asarray(_seg_rt.translation, dtype=float)
-                    _seg_mean_err = max(
-                        _seg_mean_err, float(np.linalg.norm(_rt_now - _rt_tgt))
-                    )
+                    _seg_mean_err = max(_seg_mean_err, float(np.linalg.norm(_rt_now - _rt_tgt)))
                 _seg_idx = int(_seg_tick.get("index", -1))
                 _seg_n = len(getattr(_seg_player, "_segments", ()))
                 _sample_i = int(_seg_tick.get("sample_index", 0))
@@ -2408,11 +2498,11 @@ def main() -> None:
                     _seg_player.stop()
                     if _seg_gui.get("status") is not None:
                         _seg_gui["status"].value = "Idle (segment finished — ready for teleop)"
-                    set_transform_control_pose(
-                        left_ctrl, robot.get_frame_pose(frame_map["left_tool"])
+                    _set_ctrl_from_solver_rt(
+                        "left", left_ctrl, robot.get_frame_pose(frame_map["left_tool"])
                     )
-                    set_transform_control_pose(
-                        right_ctrl, robot.get_frame_pose(frame_map["right_tool"])
+                    _set_ctrl_from_solver_rt(
+                        "right", right_ctrl, robot.get_frame_pose(frame_map["right_tool"])
                     )
 
         right_settled = (not right_active) or (

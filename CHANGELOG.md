@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [0.20.15] - 2026-06-02
+
+### Added
+
+- **Public docs — collision and robustness guides**: [`docs/collision_constraints.md`](docs/collision_constraints.md)
+  (Speed / Balanced / Precise tuning, pairwise bounds, post-step guards, batch IK notes) and
+  [`docs/solver_robustness.md`](docs/solver_robustness.md) (adaptive dt, elastic band, auto task
+  layout, weighted fallback, stall handler, diagnostics), plus a
+  [`docs/guides/index.md`](docs/guides/index.md) reading-path hub and tuning-mode demo video.
+- **Non-worsening floor regression coverage**: expanded `test/test_collision_non_worsening_floor.py`
+  for margin-floor recovery and initially penetrating pairs.
+
+### Changed
+
+- **C++ position-step penetration guard**: tightened post-step rejection when a pair is already
+  materially penetrating so accepted steps cannot keep drifting deeper; added margin-floor-aware
+  worsen tolerances and recovery seeding for pairs first seen in penetration toward the configured
+  structural floor (capped by the active collision margin).
+- **MkDocs layout**: reordered Guides and Examples navigation, grouped the home-page doc index by
+  intent (Learn / Configure / Reference), and expanded cross-links from API and example pages.
+
+### Fixed
+
+- **Incremental penetration on `SUCCESS`**: C++ position-step integration no longer accepts small
+  deepenings when an actionable pair is already inside the material penetration band.
+
 ## [0.20.14] - 2026-05-31
 
 ### Fixed
@@ -433,7 +461,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.15.6] - 2026-03-21
 
 ### Added
-- **Panda joint-limit regression tests**: `test_panda_position_limit_seed.py` (at-limit seed vs validation-style nudge under `solve_position_step`) and `test_panda_joint_limit_barrier_position_step.py` (barrier overhead / incremental teleop-like stepping).
+- **Panda joint-limit regression tests**: `test_panda_position_limit_seed.py` (at-limit seed vs incremental teleop-style nudge under `solve_position_step`) and `test_panda_joint_limit_barrier_position_step.py` (barrier overhead / incremental teleop-like stepping).
 - **`scripts/benchmark_joint_limit_barrier_overhead.py`**: optional local timing comparison for barrier ON vs OFF under repeated `solve_position_step` calls.
 
 ### Changed
@@ -485,7 +513,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Healthy-step gating**: fallback deactivation requires sustained *meaningful* motion (above 10× the effective stall threshold), not just any non-zero `dq`.
 
 ### Added
-- **`TestDualEEBodyStall` test class**: 5 new tests covering progressive margin relaxation, repeated threshold hits, computation time budget, no-penetration-jump on task disable, and velocity-loop stall reduction — all using the multi-target `solve_position_step` pattern matching `validation_robot` teleop usage.
+- **`TestDualEEBodyStall` test class**: 5 new tests covering progressive margin relaxation, repeated threshold hits, computation time budget, no-penetration-jump on task disable, and velocity-loop stall reduction — all using the multi-target `solve_position_step` pattern typical of dual-arm teleop loops.
 
 ## [0.15.1] - 2026-03-20
 
@@ -709,7 +737,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.11.0] - 2026-03-04
 
 ### Added
-- **RobotModel constructor with actuated joint names**: `RobotModel(urdf_path, actuated_joint_names=[...], floating_base=False)` builds a reduced model by locking all joints not in the list at their neutral configuration. The resulting model's `nq`/`nv` match the actuated joint count, eliminating index mapping when integrating with external systems (e.g. validationlib) that use reduced configurations. Visual and collision geometry are reduced in sync with the model.
+- **RobotModel constructor with actuated joint names**: `RobotModel(urdf_path, actuated_joint_names=[...], floating_base=False)` builds a reduced model by locking all joints not in the list at their neutral configuration. The resulting model's `nq`/`nv` match the actuated joint count, eliminating index mapping when integrating with external systems that use reduced configurations. Visual and collision geometry are reduced in sync with the model.
 
 ### Changed
 - For floating-base robots, the root freeflyer joint is never locked when using the actuated_joint_names constructor.

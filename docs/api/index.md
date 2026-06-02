@@ -1,6 +1,7 @@
 # API Reference
 
-Complete API documentation for EmbodiK.
+Complete API documentation for EmbodiK. For conceptual guides (robustness, collision, GPU),
+start with the [Guides overview](../guides/index.md).
 
 ## Core Classes
 

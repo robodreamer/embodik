@@ -7037,7 +7037,29 @@ PositionIKResult KinematicsSolver::solve_position_step(
             std::isfinite(pre_dist) &&
             *post_dist_debug < kCollisionHardPenetrationRejectDistance &&
             *post_dist_debug < pre_dist - kCollisionHardWorsenTolerance;
-        if (seed_was_safe || deepened || hard_jump) {
+        const bool pure_primary_min_error =
+            !last_vel_result.task_modes_effective.empty() &&
+            last_vel_result.task_modes_effective[0] == TaskSolveMode::kMinError &&
+            (last_vel_result.task_used_fallback.empty() ||
+             !last_vel_result.task_used_fallback[0]);
+        const bool step_has_velocity_locks =
+            !options.excluded_joint_indices.empty() ||
+            !options.integration_zero_velocity_indices.empty();
+        const bool enforce_material_penetration_guard =
+            !pure_primary_min_error || step_has_velocity_locks;
+        const bool post_penetrating =
+            *post_dist_debug < kCollisionPenetrationDistanceThreshold;
+        const bool crossed_into_penetration =
+            enforce_material_penetration_guard && post_penetrating &&
+            (!std::isfinite(pre_dist) ||
+             pre_dist >= kCollisionPenetrationDistanceThreshold);
+        const bool material_penetration_worsened =
+            enforce_material_penetration_guard &&
+            post_penetrating && std::isfinite(pre_dist) &&
+            pre_dist < kCollisionPenetrationDistanceThreshold &&
+            *post_dist_debug < pre_dist - kCollisionTolerance;
+        if (seed_was_safe || deepened || hard_jump ||
+            crossed_into_penetration || material_penetration_worsened) {
           // Backoff threshold depends on seed state:
           //   safe seed   → must restore full safety (>= min_distance)
           //   violated seed + hard geometry jump → stop geometry penetration
@@ -7045,6 +7067,10 @@ PositionIKResult KinematicsSolver::solve_position_step(
           double backoff_threshold;
           if (seed_was_safe) {
             backoff_threshold = violation_threshold;
+          } else if (crossed_into_penetration) {
+            backoff_threshold = kCollisionPenetrationDistanceThreshold;
+          } else if (material_penetration_worsened) {
+            backoff_threshold = pre_dist - kCollisionTolerance;
           } else if (hard_jump) {
             backoff_threshold = kCollisionPenetrationDistanceThreshold;
           } else {
@@ -8037,10 +8063,36 @@ PositionIKResult KinematicsSolver::solve_position_step(
             std::isfinite(pre_dist) &&
             *post_dist_debug < kCollisionHardPenetrationRejectDistance &&
             *post_dist_debug < pre_dist - kCollisionHardWorsenTolerance;
-        if (seed_was_safe || deepened || hard_jump) {
+        const bool pure_primary_min_error =
+            !last_vel_result.task_modes_effective.empty() &&
+            last_vel_result.task_modes_effective[0] == TaskSolveMode::kMinError &&
+            (last_vel_result.task_used_fallback.empty() ||
+             !last_vel_result.task_used_fallback[0]);
+        const bool step_has_velocity_locks =
+            !options.excluded_joint_indices.empty() ||
+            !options.integration_zero_velocity_indices.empty();
+        const bool enforce_material_penetration_guard =
+            !pure_primary_min_error || step_has_velocity_locks;
+        const bool post_penetrating =
+            *post_dist_debug < kCollisionPenetrationDistanceThreshold;
+        const bool crossed_into_penetration =
+            enforce_material_penetration_guard && post_penetrating &&
+            (!std::isfinite(pre_dist) ||
+             pre_dist >= kCollisionPenetrationDistanceThreshold);
+        const bool material_penetration_worsened =
+            enforce_material_penetration_guard &&
+            post_penetrating && std::isfinite(pre_dist) &&
+            pre_dist < kCollisionPenetrationDistanceThreshold &&
+            *post_dist_debug < pre_dist - kCollisionTolerance;
+        if (seed_was_safe || deepened || hard_jump ||
+            crossed_into_penetration || material_penetration_worsened) {
           double backoff_threshold;
           if (seed_was_safe) {
             backoff_threshold = violation_threshold;
+          } else if (crossed_into_penetration) {
+            backoff_threshold = kCollisionPenetrationDistanceThreshold;
+          } else if (material_penetration_worsened) {
+            backoff_threshold = pre_dist - kCollisionTolerance;
           } else if (hard_jump) {
             backoff_threshold = kCollisionPenetrationDistanceThreshold;
           } else {

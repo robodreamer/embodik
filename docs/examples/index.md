@@ -2,6 +2,12 @@
 
 Example code and tutorials for EmbodiK.
 
+!!! tip "Not sure where to start?"
+    New to the API → [Quickstart](../quickstart.md) and [Basic IK](basic_ik.md).
+    Teleop stalls or weak tracking → [Solver Robustness & Recovery](../solver_robustness.md).
+    Collision latency or safety → [Collision Constraints & Tuning](../collision_constraints.md).
+    Full guide map → [Guides overview](../guides/index.md).
+
 ## 🧭 Core Guides
 
 - [Basic IK Example](basic_ik.md) — Minimal `solve_position_step()` IK bring-up

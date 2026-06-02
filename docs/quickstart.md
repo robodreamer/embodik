@@ -127,7 +127,9 @@ robots it preserves quaternion and SE(3) validity.
 
 ## Next Steps
 
+- [Guides overview](guides/index.md) — Reading paths for robustness, collision, GPU, and transforms.
 - [Examples](examples/index.md) — Maintained runnable scripts.
+- [Solver Robustness & Recovery](solver_robustness.md) — Runtime policy when teleop stalls near limits or margins.
 - [KinematicsSolver API](api/kinematics_solver.md) — Solver options and result diagnostics.
 - [Tasks API](api/tasks.md) — Registered task types, priorities, and solve modes.
 - [RobotModel API](api/robot_model.md) — Model loading, FK/Jacobians/CoM, collisions, and configuration-space operations.

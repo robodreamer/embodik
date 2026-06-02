@@ -21,12 +21,9 @@ returns `SUCCESS`.
 
 ## Runtime Policy
 
-`SolverRuntimeConfig` stores runtime defaults that are useful for interactive
-loops. Weighted fallback is enabled by default in the solver runtime config, so
-non-success prioritized solves may use the constrained weighted candidate when
-that candidate satisfies the same hard constraints. Maintained examples also
-call the shared helper `configure_solver_runtime_policy(solver)` to make that
-policy explicit and to enable pose-task auto layout:
+`SolverRuntimeConfig` stores runtime defaults for interactive loops. See
+[Solver Robustness](../solver_robustness.md) for the full picture (adaptive dt, elastic band,
+stall handler, auto layout, weighted fallback). Summary:
 
 ```python
 cfg = solver.runtime_config()
@@ -50,6 +47,17 @@ Disable `weighted_fallback_enabled` only when you are running an A/B benchmark
 or need to reproduce historical strict-priority behavior. Disable
 `enable_auto_task_layout` when you need a fixed merged or split pose-task layout.
 
+## Adaptive dt, elastic band, stall handler
+
+- **Adaptive dt** — `PositionStepOptions.adaptive_dt` scales integration step with position error;
+  capped when collision clearance is tight. Configure defaults via `SolverRuntimeConfig`.
+- **Elastic band** — `enable_elastic_band()` or `TaskSolveMode.SCALE_ELASTIC` temporarily widens
+  joint limit margins when limit-dominated stalls collapse task scale.
+- **Stall handler** — `enable_stall_handler(nominal_min_distance)` + `stall_recovery=True` relaxes
+  collision margin only when collision rows bind (not on joint-limit stalls).
+
+See [Solver Robustness](../solver_robustness.md).
+
 ## Collision recovery floor
 
 Whole-body robots often include link pairs that rest closer than the configured
@@ -61,6 +69,13 @@ solver.set_non_worsening_collision_floor_enabled(True)
 solver.set_collision_structural_floor(0.005)  # metres; default 5 mm
 ```
 
+The default 5 mm floor preserves the historical non-worsening behavior for
+positive structural clearances: pairs that already rest above the floor keep
+their observed clearance rather than being pushed to the global collision
+margin. When an app deliberately raises the floor, first-seen positive pairs
+below that raised floor recover toward the floor; first-seen penetrating pairs
+also recover toward the floor, capped by the active collision margin.
+
 The floor is **off by default**. Getter/setter pairs:
 `get_non_worsening_collision_floor_enabled()` and
 `get_collision_structural_floor()`.
@@ -71,6 +86,19 @@ Fresh `KinematicsSolver` instances default to `CollisionTuningMode.BALANCED`
 (sphere broadphase + conservative pair cache). Override with
 `set_collision_tuning_mode()` when benchmarking or reproducing older behavior.
 
+Three presets trade **latency vs distance fidelity**:
+
+| Mode | Typical use | Character |
+| --- | --- | --- |
+| `SPEED` | High-rate teleop | Aggressive cache + bounded exact-refinement budget (~300 µs) |
+| `BALANCED` | Default interactive IK | Conservative cache, no refinement early-stop |
+| `PRECISE` | Debug / regression | Cache off; full exact checks every step |
+
+EmbodiK combines these tuned hot paths with **post-step penetration guards** and optional
+**non-worsening floors** so fast modes do not silently accept deepening penetration.
+See the [Collision Constraints](../collision_constraints.md) guide for tuning walkthroughs,
+batch parallelization notes, and measured Speed vs Precise timings.
+
 ## Position-step options (teleop)
 
 `PositionStepOptions` fields used by marker/teleop loops:
@@ -80,8 +108,8 @@ Fresh `KinematicsSolver` instances default to `CollisionTuningMode.BALANCED`
 - `primary_allow_min_error_fallback` — when `True`, retry a stalled SCALE/SCALE_ELASTIC
   primary solve once with MIN_ERROR before accepting freeze
 
-See `docs/examples/collision_aware_ik.md` for the collision-floor and fallback
-interaction with `configure_collision_constraint()`.
+See `docs/examples/collision_aware_ik.md` for collision-floor, adaptive dt, elastic band, and
+fallback interaction with `configure_collision_constraint()`.
 
 ## Position IK Objective Order
 

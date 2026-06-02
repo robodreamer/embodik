@@ -33,6 +33,9 @@ and option wiring.
 computes active close pairs and adds velocity-damper inequality constraints to
 keep them above `min_distance`.
 
+For the **why** behind fast WBC collision (bounds, pairwise coherence, Speed vs Precise timing),
+see [Collision Constraints](../collision_constraints.md#the-wbc-collision-bottleneck).
+
 Important options:
 
 - `min_distance`: safety margin in metres
@@ -72,6 +75,20 @@ broadphase and a conservative pair cache suitable for interactive teleop. Use
 `set_collision_tuning_mode()` or the shared helper
 `apply_collision_tuning_mode(solver, "balanced")` to switch between `speed`,
 `balanced`, and `precise`.
+
+| Mode | When to use | Performance (Panda CI medians) |
+| --- | --- | --- |
+| `speed` | Viser teleop, tight control loops | `< 3 ms` per `solve_position_step` |
+| `balanced` | Default for examples and replay harness | `< 4 ms` |
+| `precise` | Distance fidelity checks, regression debug | Slowest; full exact pair checks |
+
+All three modes share the same **post-step penetration guard** — Speed is faster because
+pair cache, broadphase, and refinement budgeting skip work in clear space, not because
+safety checks are removed.
+
+See [Collision Constraints & Tuning](../collision_constraints.md) for measured timings, batch
+parallelization, and collision tuning. See [Solver Robustness & Recovery](../solver_robustness.md) for
+adaptive dt, elastic band, and runtime policy.
 
 ### Position-step MIN_ERROR fallback
 

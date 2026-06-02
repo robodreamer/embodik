@@ -38,7 +38,8 @@ stay focused on targets and visualization.
 
 - **⚙️ Fast C++ core**: Eigen-based IK routines with Python bindings and numpy support.
 - **🎯 Prioritized task hierarchy**: Register frame, posture, relative-pose, and CoM objectives with explicit priorities.
-- **🛡️ Solver-owned robustness**: Constraint handling and recovery policy live in the C++ solver, not in example-side guard code.
+- **🛡️ Solver-owned robustness**: Elastic limits, adaptive dt, auto task layout, weighted fallback, stall recovery, and collision guards — in C++.
+- **⚡ Tunable collision stack**: Speed / Balanced / Precise presets, conservative bounds, and post-step guards — often ~10–50× faster collision steps vs naive full scans.
 - **🔒 Hard-constraint handling**: Joint limits, collision constraints, CoM support polygons, contact, and relative-pose checks stay in C++.
 - **📈 Diagnostics**: Timing, condition numbers, recovery stage, task scaling, and solver status reporting.
 - **🎮 Examples and visualization**: Viser and mjviser demos for Panda, AI Worker, RB-Y1, Unitree G1, and Spot workflows.
@@ -71,13 +72,24 @@ python -m pip install --only-binary=:all: embodik
 
 ## 📚 Documentation
 
-- [Installation Guide](installation.md) - Install wheels, source builds, and optional example extras.
-- [Quickstart](quickstart.md) - Build a small prioritized IK example with registered tasks.
-- [Examples](examples/index.md) - Run maintained public examples and clone-only development demos.
-- [KinematicsSolver API](api/kinematics_solver.md) - Configure tasks, constraints, runtime policy, and diagnostics.
-- [RobotModel API](api/robot_model.md) - Load models, compute FK/Jacobians, and query collisions or CoM.
-- [GPU Solvers](gpu_solvers.md) - FI-PeSNS and PPH-SNS batch solver notes.
-- [Development Guide](development.md) - Local builds, tests, and release workflow.
+### Learn
+
+- [Quickstart](quickstart.md) — Build a small prioritized IK example with registered tasks.
+- [Examples](examples/index.md) — Run maintained public examples and clone-only development demos.
+- [Guides overview](guides/index.md) — Pick a reading path (robustness, collision, GPU, transforms).
+
+### Configure the solver
+
+- [Solver Robustness & Recovery](solver_robustness.md) — Adaptive dt, elastic limits, auto layout, weighted fallback, stall recovery.
+- [Collision Constraints & Tuning](collision_constraints.md) — Tuning presets, safety layers, and performance vs naive full-scan checks.
+- [GPU Batch Solvers](gpu_solvers.md) — FI-PeSNS and PPH-SNS batch solver notes.
+
+### Reference
+
+- [KinematicsSolver API](api/kinematics_solver.md) — Tasks, constraints, runtime policy, and diagnostics.
+- [RobotModel API](api/robot_model.md) — Load models, compute FK/Jacobians, and query collisions or CoM.
+- [Installation Guide](installation.md) — Install wheels, source builds, and optional example extras.
+- [Development Guide](development.md) — Local builds, tests, and release workflow.
 
 ## 🎬 Preview
 

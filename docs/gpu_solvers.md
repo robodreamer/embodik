@@ -1,6 +1,12 @@
-# GPU Solvers
+# GPU Batch Solvers
 
 > **Experimental:** GPU solvers are under active development and need more validation. Use with caution in production systems.
+
+!!! tip "When to read this guide"
+    Use GPU solvers for **offline batch throughput** (thousands of independent velocity IK solves).
+    Real-time teleop and WBC use the CPU [KinematicsSolver](api/kinematics_solver.md) with
+    [Solver Robustness](solver_robustness.md) and [Collision Constraints](collision_constraints.md).
+    See the [Guides overview](guides/index.md) for how batch and interactive paths differ.
 
 EmbodiK provides two GPU-optimized velocity IK solvers for massive parallelism via CusADi:
 

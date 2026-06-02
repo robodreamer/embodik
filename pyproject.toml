@@ -15,7 +15,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "embodik"
-version = "0.20.14"
+version = "0.20.15"
 description = "High-performance inverse kinematics solver optimized for cross-embodiment VLA/AI applications"
 authors = [{ name = "Andy Park", email = "andypark.purdue@gmail.com" }]
 readme = "README.md"
@@ -152,6 +152,7 @@ target-version = ['py310']
 [tool.isort]
 profile = "black"
 line_length = 100
+known_first_party = ["embodik", "examples"]
 
 [tool.pytest.ini_options]
 testpaths = ["test"]
