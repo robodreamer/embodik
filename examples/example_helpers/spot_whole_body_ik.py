@@ -64,10 +64,6 @@ _LOCAL_SPOT_URDF_FALLBACKS: tuple[Path, ...] = (
     / "spot_description"
     / "urdf"
     / "spot_with_arm.urdf",
-    Path(
-        "/path/to/local/backup/backup-x13/Projects/other-bdai-repos/"
-        "bdai-data-lfs/bdai/spot_isaac_sim_assets/urdf/spot_whole_body.urdf"
-    ),
 )
 _SPOT_URDF_NAME_PREFERENCE: tuple[str, ...] = (
     "spot_whole_body.urdf",

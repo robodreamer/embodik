@@ -72,13 +72,9 @@ For repository development, use Pixi:
 ```bash
 pixi run python examples/01_basic_ik_simple.py
 pixi run python examples/03_teleop_ik.py
-pixi run demo-advanced-ik  # clone-only advanced/dev IK surface
 ```
 
 Pass `--robot <key>` when you want a non-default robot preset.
-
-Clone-only advanced surfaces live in `examples/` and are intentionally not
-part of the pip-facing `embodik-examples --copy` workflow.
 
 ## 🧰 Example Helpers
 

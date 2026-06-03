@@ -80,7 +80,7 @@ def resolve_g1_urdf_path() -> Path:
 
     Priority:
     1) EMBODIK_G1_URDF env var
-    2) known local checkout paths used by this workspace
+    2) bundled generated G1 collision URDF
     """
     env_path = os.environ.get("EMBODIK_G1_URDF", "").strip()
     if env_path:
@@ -92,15 +92,6 @@ def resolve_g1_urdf_path() -> Path:
     candidates = [
         Path(__file__).resolve().parents[1]
         / "assets/g1/generated/g1_29dof_rev_1_0_with_inspire_hand_FTP_box_collision.urdf",
-        Path(
-            "/path/to/local/Projects/repos/robot-model-repos/unitree_ros/robots/g1_description/g1_29dof_rev_1_0_with_inspire_hand_FTP.urdf"
-        ),
-        Path(
-            "/path/to/local/Projects/repos/robot-model-repos/unitree_ros/robots/g1_description/g1_29dof_rev_1_0.urdf"
-        ),
-        Path(
-            "/path/to/local/Projects/repos/robot-model-repos/unitree_ros/robots/g1_description/g1_29dof.urdf"
-        ),
     ]
     found = _first_existing(candidates)
     if found is not None:
@@ -452,12 +443,12 @@ def build_embodik_6d_target_pose(p_target: np.ndarray, R_target: np.ndarray) -> 
     return pose
 
 
-def build_g1_three_point_targets(
+def build_three_point_orientation_targets(
     p_target: np.ndarray,
     R_target: np.ndarray,
     local_offsets: list[np.ndarray],
 ) -> list[np.ndarray]:
-    """Build 4 target poses from G1-style 3-point orientation surrogate."""
+    """Build 4 target poses from a 3-point orientation surrogate."""
     if len(local_offsets) != 4:
         raise ValueError("local_offsets must contain exactly 4 vectors")
     p_target = np.asarray(p_target, dtype=float)
@@ -948,7 +939,7 @@ def build_site_mode_target_payloads(
 ) -> list[dict]:
     """Build deterministic target payloads for site-IK modes."""
     if mode == "G1 3-point":
-        point_poses = build_g1_three_point_targets(p_target, R_target, local_offsets)
+        point_poses = build_three_point_orientation_targets(p_target, R_target, local_offsets)
         return [
             {
                 "task_name": f"g1_site_{i}",

@@ -14,12 +14,8 @@ path for trying EmbodiK on a robot model:
 - call `solve_position_step()` and visualize the returned configuration
 
 Detailed tuning panels, joint sliders, diagnostics, and limit-scaling controls
-are kept out of this public example. From a git clone, use the clone-only dev
-surface instead:
-
-```bash
-pixi run demo-advanced-ik
-```
+are kept out of this minimal example. Use the other public examples for richer
+interactive workflows.
 
 ## API Walkthrough
 

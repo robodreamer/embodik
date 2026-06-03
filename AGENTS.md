@@ -4,34 +4,29 @@ Context for AI agents and contributors to pick up work efficiently. See `README.
 
 ## TL;DR
 
-- **Build/test/release/gotchas:** See `agent guidance` for commands, architecture, and common gotchas
+- **Build/test/release/gotchas:** See Quick Commands and Common Gotchas below.
 - **Core layout:** C++ in `cpp_core/`, Python bindings in `python_bindings/`, examples in `examples/`
 - **CoM constraints:** `configure_com_constraint()` with polygon vertices; margin uses `char_size` (mean centroid→vertex distance)
 - **ECTS dual-arm:** `add_absolute_frame_task()`, `add_relative_frame_task()`, `add_frame_task()`; `map_ects_mode()` / `map_ects_mode_blended()`; reference: H. A. Park, IROS 2016 (doi:10.1109/IROS.2016.7759161)
-- **Worktree notes:** curate onto `main`, archive stale WIP — `private maintainer notes/INDEX.md`, `worktree_internal_notes_policy.md`
+- **Private context:** maintainer-only notes, local paths, and private integration details live outside this public repository.
 
 ---
 
 ## Agent Workflow (Recommended)
 
 1. **Scope first**: confirm task target (`bug`, `feature`, `docs`, `release`) and touched paths.
-2. **Load context**: check `AGENTS.md`, then `private maintainer notes/INDEX.md` (active notes only), then
-   `private maintainer notes/` or `archive/` only when you need historical context, then public docs in `docs/`.
+2. **Load context**: check `AGENTS.md`, public docs in `docs/`, and the relevant source/tests.
 3. **Implement minimally**: prefer localized diffs over broad rewrites; preserve existing APIs unless requested.
 4. **Validate**: run the smallest relevant checks first, then broader checks.
-5. **Document**: update public docs for user-facing behavior; keep ad-hoc reasoning in `private maintainer notes/`.
-6. **Land maintainer context on `main`**: before removing a worktree, **curate** — active notes at repo root
-   per `private maintainer notes/INDEX.md`; archive or omit rejected trials. Run
-   `pixi run python scripts/check_maintainer_context_on_main.py --include-uncommitted` from the primary
-   `main` checkout. See `private maintainer notes/worktree_internal_notes_policy.md`.
+5. **Document**: update public docs for user-facing behavior; keep maintainer-only reasoning outside this repository.
+6. **Keep private context private**: do not commit local paths, private integration details, branch-cleanup logs, or customer/company-specific investigation notes.
 
 Definition of done (default):
 
 - Relevant tests pass (`pixi run test` or targeted subset)
 - Build passes (`pixi run build`) for C++/bindings changes
 - Docs build passes (`pixi run docs-build`) if docs changed
-- Any new behavior is reflected in `docs/` and/or examples
-- Investigation notes for the iteration are on **`main`**, not only on a feature branch/worktree
+- Any new behavior is reflected in `docs/` and/or examples when user-facing
 
 ---
 
@@ -77,49 +72,20 @@ Testing expectations:
 | `examples/` | Standalone example scripts, including basic IK, collision-aware IK, CoM, dual-arm ECTS, whole-body bimanual, and G1 retargeting demos |
 | `examples/utils/` | dual_iiwa_urdf.py, dual_panda_urdf.py, robot_models.py |
 | `test/` | Pytest suite |
-| `scripts/` | Build helpers (version.py, patch_qhull_cmake.py, upload_pypi.sh, `check_maintainer_context_on_main.py`) |
+| `scripts/` | Build helpers (version.py, patch_qhull_cmake.py, upload_pypi.sh) |
 | `docs/` | MkDocs documentation |
-| `private maintainer notes/` | Active maintainer context + [`INDEX.md`](private maintainer notes/INDEX.md); archive under `private maintainer notes/archive/` |
 
 ---
 
-## Internal Iteration Notes
+## Private Maintainer Notes
 
-When a task references prior experiments, regressions, or release-era debugging context,
-check [`private maintainer notes/INDEX.md`](private maintainer notes/INDEX.md) first (active notes only). Use
-`private maintainer notes/archive/` only for historical context — not as current behavior.
+Maintainer-only notes are intentionally kept outside this public repository.
+Do not add private investigation logs, local workspace paths, company/customer integration details,
+branch-cleanup maps, or private benchmark artifacts to this repo.
 
-Guideline: search `private maintainer notes/` only when the task references prior
-experiments, regressions, release debugging, or private context. Keep
-user-facing guidance in `docs/`; keep ad-hoc/internal investigation artifacts in
-`private maintainer notes/`.
-
-### Canonical copy on `main`
-
-Maintainer context are versioned in git but **not** in MkDocs or the public changelog.
-The **canonical active set** is listed in [`private maintainer notes/INDEX.md`](private maintainer notes/INDEX.md)
-at the repo root of `private maintainer notes/`. Superseded material lives under
-[`private maintainer notes/archive/`](private maintainer notes/archive/README.md) — agents must not treat archived
-files as current behavior.
-
-**Do not hoard trials on `main`:** when closing an investigation, keep one **active** note per
-topic. Rejected approaches → “Changes Tried” table, **archive** if history helps, **delete** if
-not. Never bulk-import branch dumps; never put internal-only tooling in public `CHANGELOG`.
-
-**Before `git worktree remove` or deleting a branch:**
-
-1. Commit or stash any `private maintainer notes/` edits in that worktree.
-2. From the primary checkout on `main`:
-   ```bash
-   pixi run python scripts/check_maintainer_context_on_main.py --include-uncommitted
-   ```
-3. If paths are missing on `main`, `git checkout <branch> -- private maintainer notes/<file>` (or
-   merge/cherry-pick), commit, re-run until `OK`.
-4. Then remove the worktree / delete the branch.
-
-Full runbook: [`private maintainer notes/worktree_internal_notes_policy.md`](private maintainer notes/worktree_internal_notes_policy.md).
-Active index: [`private maintainer notes/INDEX.md`](private maintainer notes/INDEX.md).
-Branch-specific merge-prep context belongs in `private maintainer notes/`, not root guidance.
+If private context is needed to answer a public issue or implement a public change, ask the maintainer
+for the minimal public-safe excerpt and document only the reusable behavior in `docs/`, examples, or
+tests.
 
 ---
 
@@ -130,14 +96,26 @@ PDFs, private repos, or non-indexed docs). In those cases:
 
 - Do not assume access to non-public repositories.
 - Ask for concrete excerpts when precision matters (API signatures, constraints, workflows).
-- Record distilled takeaways in `private maintainer notes/` so future iterations keep the context.
+- Ask the maintainer for public-safe excerpts; do not copy private/internal material into this repository.
 - Avoid copying private/internal language into public docs unless explicitly intended.
 
 ---
 
 ## Quick Commands & Release Workflow
 
-See `agent guidance` for build/test commands and release steps. Always run via `pixi run <task>` so the hermetic environment is used.
+Always run project commands through Pixi:
+
+```bash
+pixi run install
+pixi run build
+pixi run test
+pixi run lint
+pixi run format
+pixi run docs-build
+```
+
+For releases: run tests and build first, bump with `pixi run version --bump <patch|minor|major>`,
+sync `pixi.toml` with `pyproject.toml` if needed, update `CHANGELOG.md`, then tag and publish.
 
 ## GitHub Actions Cost Policy
 
@@ -149,7 +127,7 @@ Default automation is intentionally targeted to reduce maintainer spend:
 - Do not re-enable full wheel builds or macOS full tests on every PR/push unless the user explicitly requests that policy change.
 - Use `workflow_dispatch` for release-candidate validation and platform-sensitive changes.
 - Keep `v*` tag release workflows unfiltered and protected.
-- See `private maintainer notes/github_actions_cost_policy_2026-05-25.md` before editing `.github/workflows/`.
+- Keep release/tag workflows protected; avoid adding expensive automatic CI without maintainer approval.
 
 ---
 
@@ -195,7 +173,11 @@ Default automation is intentionally targeted to reduce maintainer spend:
 
 ## Common Gotchas
 
-See `agent guidance` for the full gotchas list.
+- `pixi.toml` version can get out of sync with `pyproject.toml` — check both after version bump.
+- Qhull build errors: `patch-qhull` task runs before build; ensure it succeeds.
+- Drake iiwa mesh collision is much slower than sphere primitives — use `examples/utils/dual_iiwa_urdf.py`.
+- Floating-base vs fixed-base mismatch: `viz.display(q)` expects `nq` to match the visualizer model.
+- `pin` / `LD_LIBRARY_PATH` conflicts: use `embodik-sanitize-env` or unset `LD_LIBRARY_PATH`.
 
 ---
 
@@ -208,4 +190,5 @@ See `agent guidance` for the full gotchas list.
 
 ## File Change Checklist
 
-See `agent guidance` for the full-stack change checklist.
+- C++ changes in `cpp_core/` -> bindings in `python_bindings/src/` if API changes -> tests in `test/` -> examples/docs if user-facing.
+- Keep private investigation context outside this public repository.

@@ -179,8 +179,6 @@ install(DIRECTORY examples/
     DESTINATION share/embodik/examples
     FILES_MATCHING
         PATTERN "harnesses" EXCLUDE
-        PATTERN "assets/optional_wheelbase" EXCLUDE
-        PATTERN "optional_wheelbase_model_utils.py" EXCLUDE
         PATTERN "*.py"
         PATTERN "*.yaml"
         PATTERN "*.md"

@@ -71,7 +71,7 @@ def test_build_three_point_mode_targets_rotate_local_offsets() -> None:
         np.array([0.0, 0.1, 0.0], dtype=float),
         np.array([0.0, 0.0, 0.1], dtype=float),
     ]
-    poses = g1_utils.build_g1_three_point_targets(p_target, R_target, local_offsets)
+    poses = g1_utils.build_three_point_orientation_targets(p_target, R_target, local_offsets)
     assert len(poses) == 4
     np.testing.assert_allclose(poses[0][:3, 3], np.array([1.0, 2.0, 3.0]), atol=1e-9)
     np.testing.assert_allclose(poses[1][:3, 3], np.array([1.0, 2.1, 3.0]), atol=1e-9)

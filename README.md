@@ -212,8 +212,6 @@ pixi run python examples/02_collision_aware_IK.py
 pixi run python examples/03_teleop_ik.py
 ```
 
-Clone-only advanced surfaces live under `examples/` and are not copied by `embodik-examples --copy`.
-
 ## 🗂️ Repository Layout
 
 ```text
@@ -225,7 +223,6 @@ embodik/
 |-- python_bindings/
 |   `-- src/
 |-- python/embodik/
-|-- examples/
 |-- examples/
 |-- docs/
 |-- scripts/

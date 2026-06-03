@@ -1,11 +1,8 @@
-"""Panda: one position IK step from a seed on a joint upper limit vs. validation-style nudge.
+"""Panda: one position IK step from a seed on a joint upper limit vs. limit nudge.
 
-Mirrors the validation_robot regression ``embodik_position_limit_seed_test`` (pendulum URDF)
-using the Franka Panda from ``robot_descriptions``. Checks that pre-nudging the seed
-inward is optional: at-limit and nudged seeds should both succeed and yield nearly
-the same ``q_solution``.
-
-See also: ``validation_robot/.../tests/embodik_position_limit_seed_test.py``.
+Uses the Franka Panda from ``robot_descriptions``. Checks that pre-nudging the
+seed inward is optional: at-limit and nudged seeds should both succeed and yield
+nearly the same ``q_solution``.
 """
 
 from __future__ import annotations
@@ -43,7 +40,7 @@ def _nudge_joint_positions_inside_limits(
     q_up: Any,
     eps: float = _NUDGE_EPS,
 ) -> tuple[np.ndarray, int]:
-    """Same semantics as validation_robots.embodik_helpers.limits.nudge_joint_positions_inside_limits."""
+    """Move finite-limit joints just inside their position bounds."""
     q_out = np.asarray(q, dtype=float).copy()
     lo = np.asarray(q_lo, dtype=float)
     hi = np.asarray(q_up, dtype=float)

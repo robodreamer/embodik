@@ -67,7 +67,7 @@ public:
    * Loads the full URDF, then builds a reduced model by locking all joints
    * not in actuated_joint_names at their neutral configuration. The resulting
    * model's nq/nv match the actuated joint count, eliminating index mapping
-   * when integrating with external systems (e.g. validationlib) that use reduced
+   * when integrating with external systems that use reduced
    * configurations.
    *
    * @param urdf_path Path to URDF file

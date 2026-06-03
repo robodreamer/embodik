@@ -69,7 +69,6 @@ test-verbose = "python -m pytest test/ -v"
 test-spot-ik = "python -m pytest test/test_spot_whole_body_ik_headless.py -v"
 verify-agent = "python scripts/verify_changed.py --run"
 verify-ai-worker = "python scripts/verify_ai_worker_robustness.py --scenario all --output-json /tmp/ai_worker_metrics.json"
-verify-alpha-wheelbase = "python scripts/verify_optional_wheelbase_robustness.py --matrix --output-json /tmp/optional_wheelbase_metrics.json"
 # GPU solver tests (requires CUDA)
 test-gpu = "EMBODIK_GPU_TESTS=1 pytest test/test_gpu_solver.py test/test_gpu_collision.py -v"
 # GPU benchmarks
@@ -105,7 +104,6 @@ pytest-cov = ">=2.0"
 
 [feature.dev.tasks]
 test-cov = "pytest test/ --cov=embodik --cov-report=term-missing"
-demo-advanced-ik = "python examples/advanced_interactive_ik.py basic"
 
 # Teleop feature: Xvisio SDK for Seer controller (requires libxvsdk.so on host)
 [feature.teleop.pypi-dependencies]
@@ -114,7 +112,6 @@ xvisio = ">=0.3.1"
 [feature.teleop.tasks]
 demo-teleop = "python examples/03_teleop_ik.py --robot panda --enable-teleop"
 demo-bimanual-teleop = "python examples/06_bimanual_whole_body_ik.py --robot rby1"
-demo-alpha-teleop = "python examples/optional_wheelbase_bimanual_ik.py"
 
 # Optional mjviser/MuJoCo stack for Spot locomanipulation.
 [feature.mjviser.pypi-dependencies]

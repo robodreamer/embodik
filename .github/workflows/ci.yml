@@ -6,14 +6,12 @@ on:
     paths-ignore:
       - "README.md"
       - "docs/**"
-      - "private maintainer notes/**"
       - "*.md"
   pull_request:
     branches: [ main, packaging-and-docs ]
     paths-ignore:
       - "README.md"
       - "docs/**"
-      - "private maintainer notes/**"
       - "*.md"
   workflow_dispatch:
 

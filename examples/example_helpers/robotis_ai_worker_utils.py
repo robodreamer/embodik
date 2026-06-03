@@ -31,12 +31,8 @@ def resolve_ffw_urdf_path(variant: str) -> Path:
             raise FileNotFoundError(f"{env_key} does not exist: {path}")
 
     candidates = {
-        "sg2": [
-            Path("/path/to/local/Projects/robot_models_urdf/ffw_sg2_mobile_robot/ffw_sg2_mobile_robot.urdf"),
-        ],
-        "bg2": [
-            Path("/path/to/local/Projects/robot_models_urdf/ffw_bg2_mobile_robot/ffw_bg2_mobile_robot.urdf"),
-        ],
+        "sg2": [],
+        "bg2": [],
     }
     found = _first_existing(candidates[variant])
     if found is not None:

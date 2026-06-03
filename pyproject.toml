@@ -107,16 +107,12 @@ build-dir = "build/{state}-{cache_tag}"
 
 [tool.scikit-build.sdist]
 # Keep source distributions focused on build/runtime inputs. Documentation,
-# preview media, tests, and maintainer context are published from the repository/docs
-# site instead of being bundled into every PyPI source upload.
+# preview media, and tests are published from the repository/docs site instead
+# of being bundled into every PyPI source upload.
 exclude = [
     ".github/**",
-    "examples/**",
-    "examples/assets/optional_wheelbase/**",
-    "examples/example_helpers/optional_wheelbase_model_utils.py",
     "examples/harnesses/**",
     "docs/**",
-    "notes/**",
     "site/**",
     "test/**",
     "pixi.lock",

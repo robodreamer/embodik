@@ -897,7 +897,7 @@ class TestDualEEBodyStall:
     """Dual-EE body collision stall: detection, margin relaxation, recovery.
 
     All tests use solve_position_step with the multi-target TaskTarget overload
-    to match the validation_robot teleop pattern.
+    to match the dual-EE teleop pattern.
     """
 
     def test_stall_recovery_does_not_relax_margin_without_stall(self):

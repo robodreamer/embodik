@@ -261,7 +261,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - Hardened collision and CoM boundary handling around constrained teleop stalls, including target resync and safe-pose restoration.
 - Preserved AI Worker visual meshes while using generated reduced collision geometry for IK collision checks.
-- Cleaned up stale/order-dependent regression tests and documented removed expectations in maintainer context.
+- Cleaned up stale/order-dependent regression tests and documented the removed expectations in public test history.
 
 ## [0.20.0] - 2026-04-19
 
@@ -299,7 +299,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Post-step collision rejection**: targeted safety check after integration prevents penetration without full-scan overhead.
 - **Elastic band joint limit expansion**: temporary joint limit widening for overconstrained solver stalls. New `SCALE_ELASTIC` task solve mode auto-enables elastic band.
 - **`evaluate_min_collision_distance()` Python binding**: public API for querying collision distance at arbitrary configurations.
-- **`/release` slash command**: release workflow slash command for version bump, changelog, and PyPI publish workflow.
+- **Release workflow command**: helper workflow for version bump, changelog, and PyPI publishing.
 
 ### Changed
 - **Default solve mode**: examples 01-09 now default to `SCALE_ELASTIC` instead of `SCALE`.

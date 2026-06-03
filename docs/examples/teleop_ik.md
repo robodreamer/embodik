@@ -84,18 +84,6 @@ pixi run -e teleop python examples/03_teleop_ik.py --enable-teleop --controller-
 pixi run -e teleop python examples/03_teleop_ik.py --no-collision
 ```
 
-## Advanced Teleop Surface
-
-The public teleop example avoids detailed IK controls. From a git clone, use the
-clone-only advanced launcher when you need solver tuning/debug panels:
-
-```bash
-pixi run python examples/advanced_interactive_ik.py teleop
-```
-
-The advanced launcher is not part of the pip-facing `embodik-examples --copy`
-workflow.
-
 ## Notes
 
 - Seer controller mode requires `xvisio`, host runtime support, and an explicit
