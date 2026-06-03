@@ -41,6 +41,7 @@ from example_helpers.spot_whole_body_ik import (  # noqa: E402
     spot_collision_pairs_from_references,
 )
 
+
 def _resolve_spot_ik_urdf() -> Path:
     if path := resolve_spot_ik_urdf():
         return path
