@@ -1917,7 +1917,11 @@ def run_headless(args: argparse.Namespace) -> None:
     try:
         import mujoco
     except ImportError as exc:
-        raise RuntimeError("mujoco is required for --headless") from exc
+        raise RuntimeError(
+            "mujoco is required for --headless. From a Pixi checkout, run this "
+            "through the mjviser environment, for example "
+            "`pixi run -e mjviser spot-locomanip-mjviser --headless`."
+        ) from exc
 
     model = load_spot_mujoco_model(
         Path(args.scene) if args.scene else None,
@@ -1967,7 +1971,12 @@ def run_viewer(args: argparse.Namespace) -> None:
         import viser
         from mjviser import Viewer
     except ImportError as exc:
-        raise RuntimeError("mujoco, viser, and mjviser are required for interactive mode") from exc
+        raise RuntimeError(
+            "mujoco, viser, and mjviser are required for interactive mode. "
+            "From a Pixi checkout, run "
+            "`pixi run -e mjviser spot-locomanip-mjviser` or, for Seer teleop, "
+            "`pixi run -e mjviser-teleop spot-locomanip-mjviser --enable-teleop`."
+        ) from exc
 
     model = load_spot_mujoco_model(
         Path(args.scene) if args.scene else None,

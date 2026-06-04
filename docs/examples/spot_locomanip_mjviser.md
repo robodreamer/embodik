@@ -64,6 +64,11 @@ pixi run -e mjviser spot-locomanip-mjviser --policy locomanip
 pixi run -e mjviser-teleop spot-locomanip-mjviser --enable-teleop --policy locomanip
 ```
 
+Use the Pixi task form from a checkout. Running raw
+`pixi run -e mjviser-teleop python examples/09_spot_locomanip_mjviser.py` can
+fail in a fresh optional environment because it bypasses the task's `install`
+dependency, which builds/installs EmbodiK's native extension before launch.
+
 `mjviser` is the MuJoCo-backed web viewer environment for browser GUI policy
 rollout and interactive simulation. `mjviser-teleop` includes that same viewer
 stack plus the optional Seer/xvisio controller dependencies. Use `mjviser` for

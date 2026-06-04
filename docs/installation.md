@@ -267,6 +267,11 @@ pixi run -e mjviser-teleop spot-locomanip-mjviser --enable-teleop
 Use a single Pixi environment per run. `mjviser` and `mjviser-teleop` are
 optional environment names, not Python module arguments.
 
+From a repository checkout, prefer the `spot-locomanip-mjviser` Pixi task over
+raw `python examples/09_spot_locomanip_mjviser.py` in these optional
+environments. The task depends on `install`, so it builds/installs EmbodiK's
+native extension before importing the example.
+
 ## Troubleshooting Native Builds
 
 ### Local Pinocchio, Boost, or ROS paths override the build

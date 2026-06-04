@@ -123,12 +123,17 @@ python 09_spot_locomanip_mjviser.py --enable-teleop --policy locomanip
 ```
 
 From a repository checkout, run the same example from the repository root with
-the matching Pixi environment:
+the matching Pixi environment and task:
 
 ```bash
 pixi run -e mjviser spot-locomanip-mjviser --policy locomanip
 pixi run -e mjviser-teleop spot-locomanip-mjviser --enable-teleop --policy locomanip
 ```
+
+Use the `spot-locomanip-mjviser` Pixi task from a checkout, not raw
+`pixi run -e mjviser-teleop python examples/09_spot_locomanip_mjviser.py`, on
+a fresh environment. The task depends on `install`, so it builds/installs the
+native EmbodiK extension before launching the example.
 
 See the [Spot locomanipulation guide](https://robodreamer.github.io/embodik/examples/spot_locomanip_mjviser/)
 for mjviser, Seer teleop, solver tuning, and headless validation details.
