@@ -37,14 +37,15 @@ pixi run python examples/07_unitree_g1_retargeting_ik.py
 
 ## Assets
 
-The example resolves the visual G1 URDF from one of these locations:
-
-- `EMBODIK_G1_URDF`
-- known local Unitree ROS checkout paths
+The example ships a minimal Unitree G1 visual asset subset under
+`examples/assets/g1/visual/`. It contains the BSD-3-Clause upstream license,
+the visual URDF, and only the mesh files directly referenced by that URDF, so
+running the example does not need to download the full Unitree ROS repository.
 
 The reduced box-collision URDF used for collision-aware IK is bundled under
-`examples/assets/g1/generated/` and is used by default. Override it with
-`EMBODIK_G1_COLLISION_URDF` when testing a different collision model.
+`examples/assets/g1/generated/` and is used by default. Override the visual
+model with `EMBODIK_G1_URDF`, or override the collision model with
+`EMBODIK_G1_COLLISION_URDF`, when testing custom models.
 
 ## Headless Checks
 

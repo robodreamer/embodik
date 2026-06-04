@@ -15,6 +15,14 @@ from typing import Iterable
 
 import numpy as np
 
+_ASSETS_G1_ROOT = Path(__file__).resolve().parents[1] / "assets/g1"
+_BUNDLED_G1_VISUAL_URDF = (
+    _ASSETS_G1_ROOT / "visual/g1_29dof_rev_1_0_with_inspire_hand_FTP.urdf"
+)
+_BUNDLED_G1_COLLISION_URDF = (
+    _ASSETS_G1_ROOT / "generated/g1_29dof_rev_1_0_with_inspire_hand_FTP_box_collision.urdf"
+)
+
 _RETARGET_PRESETS = {
     "neutral": {
         "right_palm": np.array([0.35, -0.22, 0.05], dtype=float),
@@ -80,7 +88,8 @@ def resolve_g1_urdf_path() -> Path:
 
     Priority:
     1) EMBODIK_G1_URDF env var
-    2) bundled generated G1 collision URDF
+    2) bundled minimal visual G1 assets
+    3) bundled generated G1 collision URDF
     """
     env_path = os.environ.get("EMBODIK_G1_URDF", "").strip()
     if env_path:
@@ -90,8 +99,8 @@ def resolve_g1_urdf_path() -> Path:
         raise FileNotFoundError(f"EMBODIK_G1_URDF does not exist: {p}")
 
     candidates = [
-        Path(__file__).resolve().parents[1]
-        / "assets/g1/generated/g1_29dof_rev_1_0_with_inspire_hand_FTP_box_collision.urdf",
+        _BUNDLED_G1_VISUAL_URDF,
+        _BUNDLED_G1_COLLISION_URDF,
     ]
     found = _first_existing(candidates)
     if found is not None:
@@ -116,12 +125,8 @@ def resolve_g1_collision_urdf_path() -> Path:
             return p
         raise FileNotFoundError(f"EMBODIK_G1_COLLISION_URDF does not exist: {p}")
 
-    generated = (
-        Path(__file__).resolve().parents[1]
-        / "assets/g1/generated/g1_29dof_rev_1_0_with_inspire_hand_FTP_box_collision.urdf"
-    )
-    if generated.is_file():
-        return generated
+    if _BUNDLED_G1_COLLISION_URDF.is_file():
+        return _BUNDLED_G1_COLLISION_URDF
     return resolve_g1_urdf_path()
 
 
@@ -207,7 +212,6 @@ def create_g1_robot_and_visual(
 ):
     """Create RobotModel + Viser server + ViserUrdf visualizer for G1."""
     import viser
-    from robot_descriptions.loaders.yourdfpy import load_robot_description
     from viser.extras import ViserUrdf
 
     urdf_path = resolve_g1_urdf_path()
@@ -227,15 +231,7 @@ def create_g1_robot_and_visual(
     server = viser.ViserServer(port=port)
     server.scene.add_grid("/ground", width=4, height=4)
 
-    # If robot_descriptions has g1_description installed, prefer it for visuals.
-    description_name = "g1_description"
-    try:
-        urdf_description = load_robot_description(description_name)
-    except Exception:
-        urdf_description = load_robot_description(str(urdf_path))
-
-    viewer_source_path = Path(getattr(urdf_description, "path", urdf_path))
-    viewer_urdf_path = prepare_g1_viewer_urdf_path(viewer_source_path)
+    viewer_urdf_path = prepare_g1_viewer_urdf_path(urdf_path)
     import yourdfpy
 
     urdf_vis = ViserUrdf(

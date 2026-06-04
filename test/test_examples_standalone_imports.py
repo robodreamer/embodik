@@ -93,6 +93,15 @@ def test_unitree_g1_example_imports_from_copied_examples_layout(monkeypatch, tmp
         module_globals["resolve_g1_collision_urdf_path"].__code__.co_filename
     ).is_relative_to(copied_examples_dir / "example_helpers")
 
+    g1_model_utils = importlib.import_module("example_helpers.g1_model_utils")
+    visual_urdf_path = g1_model_utils.resolve_g1_urdf_path()
+    collision_urdf_path = g1_model_utils.resolve_g1_collision_urdf_path()
+
+    assert visual_urdf_path.is_file()
+    assert visual_urdf_path.is_relative_to(copied_examples_dir / "assets" / "g1" / "visual")
+    assert collision_urdf_path.is_file()
+    assert collision_urdf_path.is_relative_to(copied_examples_dir / "assets" / "g1" / "generated")
+
 
 def test_ai_worker_sg2_resolves_bundled_urdf_before_network(monkeypatch, tmp_path) -> None:
     copied_examples_dir = _copy_examples_dir(tmp_path)

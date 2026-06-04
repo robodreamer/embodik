@@ -63,3 +63,14 @@ The upstream license text is included at
 
 The upstream license text is included at
 `examples/assets/spot_description/LICENSE`.
+
+## Example Unitree G1 Model
+
+- Project: Unitree G1 description from `unitreerobotics/unitree_ros`
+- Upstream: https://github.com/unitreerobotics/unitree_ros/tree/master/robots/g1_description
+- License: BSD-3-Clause
+- Role in EmbodiK: bundled minimal visual URDF and directly referenced meshes
+  for the Unitree G1 retargeting IK example.
+
+The upstream license text is included at
+`examples/assets/g1/visual/LICENSE`.

@@ -39,3 +39,5 @@ examples/assets/spot_policies/*.onnx filter=lfs diff=lfs merge=lfs -text
 examples/assets/spot_mjcf/assets/*.obj filter=lfs diff=lfs merge=lfs -text
 examples/assets/spot_description/meshes/**/*.obj filter=lfs diff=lfs merge=lfs -text
 examples/assets/spot_description/meshes/**/*.stl filter=lfs diff=lfs merge=lfs -text
+examples/assets/g1/visual/meshes/*.STL filter=lfs diff=lfs merge=lfs -text
+examples/assets/g1/visual/meshes/*.stl filter=lfs diff=lfs merge=lfs -text
