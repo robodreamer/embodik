@@ -12,6 +12,7 @@ import json
 import math
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -27,6 +28,7 @@ if str(_REPO_ROOT) not in sys.path:
 from examples.harnesses.kinematic_health_metrics import (  # noqa: E402
     collision_distance_stats_dict,
     kinematic_health_sample,
+    summarize_continuity_series,
     summarize_health_series,
 )
 from examples.utils.robot_models import ensure_ros_package_path  # noqa: E402
@@ -36,6 +38,53 @@ from examples.utils.robot_models import ensure_ros_package_path  # noqa: E402
 class Scenario:
     name: str
     builder: Callable[[], tuple[eik.RobotModel, eik.KinematicsSolver, np.ndarray, np.ndarray, str]]
+
+
+_HEALTH_SAMPLING_MODES = {
+    "health_sampling",
+    "health_sampling_collision",
+    "health_sampling_parallel_seed",
+}
+_PARALLEL_SEED_MODES = {
+    "parallel_seed_recovery",
+    "health_sampling_parallel_seed",
+}
+
+
+@dataclass(frozen=True)
+class ParallelSeedExperimentConfig:
+    sample_radius: float = 0.035
+    blend: float = 0.2
+    min_score_improvement: float = 1e-4
+    singularity_normalization_scale: float = 1e-6
+    joint_limit_weight: float = 1.0
+    singularity_weight: float = 0.25
+    collision_weight: float = 0.5
+    max_step_norm: float = 0.08
+    max_step_component: float = 0.06
+    max_primary_deviation_norm: float = 0.008
+    max_primary_deviation_component: float = 0.004
+    max_step_delta_norm: float = 0.08
+    max_step_jerk_norm: float = 0.16
+    task_error_abs_tolerance: float = 1e-4
+    task_error_rel_tolerance: float = 0.05
+    collision_worsen_tolerance: float = 1e-4
+    activation_joint_limit_cost: float = 50.0
+    zero_motion_step_norm: float = 1e-8
+
+
+@dataclass
+class ParallelSeedExperimentStats:
+    attempted_steps: int = 0
+    candidate_solves: int = 0
+    accepted_steps: int = 0
+    rejected_limit: int = 0
+    rejected_collision: int = 0
+    rejected_tracking: int = 0
+    rejected_continuity: int = 0
+    rejected_health: int = 0
+    best_score_delta: float = float("-inf")
+    time_ms_total: float = 0.0
 
 
 def _stats(values: list[float]) -> dict[str, float]:
@@ -59,9 +108,11 @@ def _make_runtime(
         "weighted_fallback",
         "health_sampling",
         "health_sampling_collision",
+        "parallel_seed_recovery",
+        "health_sampling_parallel_seed",
     }
     cfg.weighted_advisor_enabled = mode == "weighted_fallback"
-    if mode in {"health_sampling", "health_sampling_collision"}:
+    if mode in _HEALTH_SAMPLING_MODES:
         cfg.health_sampling.enabled = True
         cfg.health_sampling.seed = 20260606
         cfg.health_sampling.sample_count = int(sample_budget)
@@ -156,6 +207,387 @@ def _dual_iiwa_scenario() -> (
     return robot, solver, q, target, "left_ee"
 
 
+def _health_score(
+    sample,
+    cfg: ParallelSeedExperimentConfig,
+    collision_distance: float | None = None,
+) -> float:
+    singularity = 0.0
+    if (
+        math.isfinite(float(sample.limit_weighted_dexterity))
+        and sample.limit_weighted_dexterity > 0.0
+    ):
+        scale = max(float(cfg.singularity_normalization_scale), 1e-12)
+        singularity = float(sample.limit_weighted_dexterity) / (
+            float(sample.limit_weighted_dexterity) + scale
+        )
+    score = (
+        cfg.joint_limit_weight * float(sample.joint_limit_health)
+        + cfg.singularity_weight * singularity
+    )
+    if collision_distance is not None and math.isfinite(float(collision_distance)):
+        score += cfg.collision_weight * float(collision_distance)
+    return float(score)
+
+
+def _task_error_at(robot: eik.RobotModel, task: eik.Task, q: np.ndarray) -> float:
+    robot.update_configuration(np.asarray(q, dtype=float))
+    task.update(robot)
+    err = np.asarray(task.get_error(), dtype=float)
+    if err.size >= 6:
+        return float(np.linalg.norm(err[:3]) + np.linalg.norm(err[3:]))
+    return float(np.linalg.norm(err))
+
+
+def _collision_distance_at(
+    solver: eik.KinematicsSolver,
+    robot: eik.RobotModel,
+    q: np.ndarray,
+    q_restore: np.ndarray,
+) -> float:
+    try:
+        d = solver.evaluate_min_collision_distance(np.asarray(q, dtype=float))
+        return float(d) if math.isfinite(float(d)) else float("inf")
+    finally:
+        robot.update_configuration(np.asarray(q_restore, dtype=float))
+
+
+def _finite_limited_indices(q_lower: np.ndarray, q_upper: np.ndarray, q_size: int) -> list[int]:
+    indices: list[int] = []
+    n = min(int(q_size), q_lower.size, q_upper.size)
+    for i in range(n):
+        if (
+            math.isfinite(float(q_lower[i]))
+            and math.isfinite(float(q_upper[i]))
+            and float(q_upper[i] - q_lower[i]) > 1e-9
+        ):
+            indices.append(i)
+    return indices
+
+
+def _project_onto_task_nullspace(delta: np.ndarray, jacobian: np.ndarray) -> np.ndarray:
+    if jacobian.size == 0 or jacobian.shape[1] != delta.size:
+        return delta
+    try:
+        projector = np.eye(delta.size) - np.linalg.pinv(jacobian, rcond=1e-8) @ jacobian
+    except np.linalg.LinAlgError:
+        return delta
+    return np.asarray(projector @ delta, dtype=float)
+
+
+def _limit_projected_seed(
+    q: np.ndarray,
+    delta: np.ndarray,
+    q_lower: np.ndarray,
+    q_upper: np.ndarray,
+) -> np.ndarray:
+    q_seed = np.asarray(q, dtype=float) + np.asarray(delta, dtype=float)
+    n = min(q_seed.size, q_lower.size, q_upper.size)
+    if n > 0:
+        q_seed[:n] = np.clip(q_seed[:n], q_lower[:n], q_upper[:n])
+    return q_seed
+
+
+def _generate_parallel_seed_candidates(
+    *,
+    robot: eik.RobotModel,
+    task: eik.Task,
+    q: np.ndarray,
+    jacobian: np.ndarray,
+    sample_budget: int,
+    step_index: int,
+    cfg: ParallelSeedExperimentConfig,
+) -> list[np.ndarray]:
+    q_arr = np.asarray(q, dtype=float)
+    q_lower, q_upper = robot.get_joint_limits()
+    lower = np.asarray(q_lower, dtype=float)
+    upper = np.asarray(q_upper, dtype=float)
+    active = _finite_limited_indices(lower, upper, q_arr.size)
+    if not active or sample_budget <= 0:
+        return []
+
+    base_sample = kinematic_health_sample(robot, q_arr, jacobian)
+    base_score = _health_score(base_sample, cfg)
+    rng = np.random.default_rng(20260606 + 7919 * int(step_index) + 104729 * q_arr.size)
+    candidates: list[tuple[float, np.ndarray]] = []
+
+    def add_delta(delta: np.ndarray) -> None:
+        delta = np.asarray(delta, dtype=float)
+        if delta.size != q_arr.size or not np.all(np.isfinite(delta)):
+            return
+        delta = _project_onto_task_nullspace(delta, jacobian)
+        norm = float(np.linalg.norm(delta))
+        if norm <= 1e-12:
+            return
+        delta = (cfg.sample_radius / norm) * delta
+        q_seed = _limit_projected_seed(q_arr, delta, lower, upper)
+        if np.linalg.norm(q_seed - q_arr) <= 1e-12:
+            return
+        robot.update_configuration(q_seed)
+        task.update(robot)
+        seed_jac = np.asarray(task.get_jacobian(), dtype=float)
+        seed_sample = kinematic_health_sample(robot, q_seed, seed_jac)
+        seed_score = _health_score(seed_sample, cfg)
+        robot.update_configuration(q_arr)
+        task.update(robot)
+        if seed_score > base_score + cfg.min_score_improvement:
+            candidates.append((seed_score - base_score, q_seed))
+
+    try:
+        gradient = np.asarray(
+            eik.joint_limit_distance_gradient(q_arr, lower, upper, 1e-6),
+            dtype=float,
+        )
+        grad_delta = np.zeros_like(q_arr)
+        for idx in active:
+            grad_delta[idx] = gradient[idx]
+        add_delta(grad_delta)
+    except Exception:
+        pass
+
+    for _ in range(max(0, int(sample_budget) * 2)):
+        delta = np.zeros_like(q_arr)
+        values = rng.uniform(-1.0, 1.0, size=len(active))
+        for idx, value in zip(active, values, strict=False):
+            delta[idx] = value
+        add_delta(delta)
+        if len(candidates) >= int(sample_budget):
+            break
+
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    return [q_seed for _score, q_seed in candidates[: int(sample_budget)]]
+
+
+def _build_parallel_seed_workers(
+    scenario: Scenario,
+    mode: str,
+    *,
+    sample_budget: int,
+    collision_scoring: bool,
+) -> list[tuple[eik.RobotModel, eik.KinematicsSolver, eik.Task]]:
+    workers = []
+    for _ in range(max(0, int(sample_budget))):
+        robot, solver, _q, _target, task_name = scenario.builder()
+        task = solver.get_task(task_name)
+        if task is None:
+            raise RuntimeError(f"task {task_name!r} was not created")
+        _apply_mode(solver, task, mode, sample_budget, collision_scoring)
+        workers.append((robot, solver, task))
+    return workers
+
+
+def _parallel_seed_recovery_step(
+    *,
+    scenario: Scenario,
+    mode: str,
+    workers: list[tuple[eik.RobotModel, eik.KinematicsSolver, eik.Task]],
+    main_solver: eik.KinematicsSolver,
+    main_robot: eik.RobotModel,
+    main_task: eik.Task,
+    q_current: np.ndarray,
+    q_primary: np.ndarray,
+    target: np.ndarray,
+    opts: eik.PositionStepOptions,
+    primary_error: float,
+    base_health,
+    base_jacobian: np.ndarray,
+    sample_budget: int,
+    step_index: int,
+    prev_step: np.ndarray,
+    prev_step_delta: np.ndarray,
+    collision_scoring: bool,
+    seed_worker_mode: str,
+    executor: ThreadPoolExecutor | None,
+    stats: ParallelSeedExperimentStats,
+    cfg: ParallelSeedExperimentConfig,
+) -> tuple[np.ndarray, bool]:
+    del scenario
+    q_current = np.asarray(q_current, dtype=float)
+    q_primary = np.asarray(q_primary, dtype=float)
+    primary_step = q_primary - q_current
+    primary_step_norm = float(np.linalg.norm(primary_step))
+    status_trigger = primary_step_norm <= cfg.zero_motion_step_norm and primary_error > 1e-4
+    health_trigger = float(base_health.joint_limit_cost) >= cfg.activation_joint_limit_cost
+    if not (status_trigger or health_trigger):
+        return q_primary, False
+
+    t0 = time.perf_counter()
+    stats.attempted_steps += 1
+    seeds = _generate_parallel_seed_candidates(
+        robot=main_robot,
+        task=main_task,
+        q=q_current,
+        jacobian=base_jacobian,
+        sample_budget=sample_budget,
+        step_index=step_index,
+        cfg=cfg,
+    )
+    if not seeds:
+        stats.time_ms_total += (time.perf_counter() - t0) * 1000.0
+        return q_primary, False
+
+    q_lower, q_upper = main_robot.get_joint_limits()
+    lower = np.asarray(q_lower, dtype=float)
+    upper = np.asarray(q_upper, dtype=float)
+    vel_limits = np.asarray(main_robot.get_velocity_limits(), dtype=float)
+    dt_safe = max(float(opts.dt if opts.dt > 0.0 else main_solver.dt), 1e-12)
+    current_collision = (
+        _collision_distance_at(main_solver, main_robot, q_current, q_current)
+        if collision_scoring
+        else float("inf")
+    )
+    best_q: np.ndarray | None = None
+    best_objective = -float("inf")
+
+    task_name = str(main_task.name)
+
+    def solve_candidate(seed_index: int, q_seed: np.ndarray) -> tuple[int, np.ndarray | None]:
+        if seed_index >= len(workers):
+            return seed_index, None
+        worker_robot, worker_solver, _worker_task = workers[seed_index]
+        worker_robot.update_configuration(q_seed)
+        try:
+            result = worker_solver.solve_position_step(q_seed, target, task_name, opts)
+            return seed_index, np.asarray(result.q_solution, dtype=float)
+        except Exception:
+            return seed_index, None
+
+    indexed_seeds = list(enumerate(seeds[: len(workers)]))
+    stats.candidate_solves += len(indexed_seeds)
+    if seed_worker_mode == "thread" and executor is not None and len(indexed_seeds) > 1:
+        futures = [
+            executor.submit(solve_candidate, i, q_seed.copy()) for i, q_seed in indexed_seeds
+        ]
+        candidate_outputs = [future.result() for future in futures]
+    else:
+        candidate_outputs = [solve_candidate(i, q_seed) for i, q_seed in indexed_seeds]
+
+    for _seed_index, q_candidate in candidate_outputs:
+        if q_candidate is None:
+            stats.rejected_limit += 1
+            continue
+        if q_candidate.size != q_current.size or not np.all(np.isfinite(q_candidate)):
+            stats.rejected_limit += 1
+            continue
+
+        step = q_candidate - q_current
+        m = min(step.size, vel_limits.size)
+        if m > 0:
+            step_limit = np.maximum(0.0, vel_limits[:m]) * dt_safe
+            finite_limits = np.isfinite(step_limit)
+            limited_step = step[:m].copy()
+            limited_step[finite_limits] = np.clip(
+                limited_step[finite_limits],
+                -step_limit[finite_limits],
+                step_limit[finite_limits],
+            )
+            step[:m] = limited_step
+        max_component = float(np.max(np.abs(step))) if step.size else 0.0
+        if max_component > cfg.max_step_component:
+            step *= cfg.max_step_component / max_component
+        step_norm = float(np.linalg.norm(step))
+        if step_norm > cfg.max_step_norm:
+            step *= cfg.max_step_norm / step_norm
+        blend = min(1.0, max(0.0, float(cfg.blend)))
+        step = primary_step + blend * (step - primary_step)
+        q_candidate = q_current + step
+
+        n = min(q_candidate.size, lower.size, upper.size)
+        if n > 0:
+            q_candidate[:n] = np.clip(q_candidate[:n], lower[:n], upper[:n])
+            step = q_candidate - q_current
+        if n > 0 and (
+            np.any(q_candidate[:n] < lower[:n] - 1e-9) or np.any(q_candidate[:n] > upper[:n] + 1e-9)
+        ):
+            stats.rejected_limit += 1
+            continue
+
+        step_norm = float(np.linalg.norm(step))
+        primary_deviation = step - primary_step
+        primary_delta_norm = float(np.linalg.norm(primary_step - prev_step))
+        primary_jerk_norm = float(np.linalg.norm((primary_step - prev_step) - prev_step_delta))
+        if (
+            step_norm > cfg.max_step_norm
+            or float(np.max(np.abs(step))) > cfg.max_step_component
+            or float(np.linalg.norm(primary_deviation)) > cfg.max_primary_deviation_norm
+            or float(np.max(np.abs(primary_deviation))) > cfg.max_primary_deviation_component
+            or float(np.linalg.norm(step - prev_step))
+            > max(cfg.max_step_delta_norm, primary_delta_norm + cfg.max_primary_deviation_norm)
+            or float(np.linalg.norm((step - prev_step) - prev_step_delta))
+            > max(cfg.max_step_jerk_norm, primary_jerk_norm + cfg.max_primary_deviation_norm)
+        ):
+            stats.rejected_continuity += 1
+            continue
+
+        m = min(step.size, vel_limits.size)
+        if m > 0 and np.any(np.abs(step[:m] / dt_safe) > vel_limits[:m] + 1e-9):
+            stats.rejected_continuity += 1
+            continue
+
+        candidate_error = _task_error_at(main_robot, main_task, q_candidate)
+        main_robot.update_configuration(q_current)
+        main_task.update(main_robot)
+        allowed_error = primary_error + max(
+            cfg.task_error_abs_tolerance,
+            cfg.task_error_rel_tolerance * max(primary_error, 1e-12),
+        )
+        if candidate_error > allowed_error:
+            stats.rejected_tracking += 1
+            continue
+
+        candidate_collision = float("inf")
+        collision_delta = 0.0
+        if collision_scoring:
+            candidate_collision = _collision_distance_at(
+                main_solver,
+                main_robot,
+                q_candidate,
+                q_current,
+            )
+            collision_delta = candidate_collision - current_collision
+            if collision_delta < -cfg.collision_worsen_tolerance:
+                stats.rejected_collision += 1
+                continue
+
+        main_robot.update_configuration(q_candidate)
+        main_task.update(main_robot)
+        candidate_jac = np.asarray(main_task.get_jacobian(), dtype=float)
+        candidate_health = kinematic_health_sample(main_robot, q_candidate, candidate_jac)
+        candidate_score = _health_score(
+            candidate_health,
+            cfg,
+            candidate_collision if collision_scoring else None,
+        )
+        base_score_with_collision = _health_score(
+            base_health,
+            cfg,
+            current_collision if collision_scoring else None,
+        )
+        score_delta = candidate_score - base_score_with_collision
+        main_robot.update_configuration(q_current)
+        main_task.update(main_robot)
+        if score_delta <= cfg.min_score_improvement:
+            stats.rejected_health += 1
+            continue
+
+        objective = (
+            score_delta
+            + 0.25 * max(0.0, primary_error - candidate_error)
+            + 0.1 * collision_delta
+            - 0.01 * step_norm
+        )
+        if objective > best_objective:
+            best_objective = objective
+            best_q = q_candidate
+            stats.best_score_delta = max(stats.best_score_delta, score_delta)
+
+    stats.time_ms_total += (time.perf_counter() - t0) * 1000.0
+    if best_q is None:
+        return q_primary, False
+    stats.accepted_steps += 1
+    return best_q, True
+
+
 def _run_case(
     scenario: Scenario,
     mode: str,
@@ -163,6 +595,7 @@ def _run_case(
     steps: int,
     sample_budget: int,
     collision_scoring: bool,
+    seed_worker_mode: str,
 ) -> dict[str, object]:
     robot, solver, q, target, task_name = scenario.builder()
     task = solver.get_task(task_name)
@@ -174,6 +607,7 @@ def _run_case(
     collision_distances: list[float] = []
     timings: list[float] = []
     statuses: dict[str, int] = {}
+    q_history: list[np.ndarray] = [np.asarray(q, dtype=float).copy()]
     health_applied = 0
     health_cache_available = 0
     health_cache_used = 0
@@ -189,35 +623,98 @@ def _run_case(
     opts.position_gain = 10.0
     opts.orientation_gain = 10.0
 
-    prev_q = np.asarray(q, dtype=float)
-    for _ in range(steps):
-        robot.update_configuration(q)
-        task.update(robot)
-        jac = np.asarray(task.get_jacobian(), dtype=float)
-        health_samples.append(kinematic_health_sample(robot, q, jac))
-        d = solver.evaluate_min_collision_distance(q)
-        if math.isfinite(float(d)):
-            collision_distances.append(float(d))
-
-        t0 = time.perf_counter()
-        result = solver.solve_position_step(q, target, task_name, opts)
-        timings.append((time.perf_counter() - t0) * 1000.0)
-        statuses[result.status.name] = statuses.get(result.status.name, 0) + 1
-        diag = result.diagnostics
-        health_applied += int(bool(diag.health_sampling_applied))
-        health_cache_available += int(
-            bool(getattr(diag, "health_sampling_cache_available", False))
+    parallel_cfg = ParallelSeedExperimentConfig()
+    parallel_stats = ParallelSeedExperimentStats()
+    parallel_workers = (
+        _build_parallel_seed_workers(
+            scenario,
+            mode,
+            sample_budget=sample_budget,
+            collision_scoring=collision_scoring,
         )
-        health_cache_used += int(bool(getattr(diag, "health_sampling_cache_used", False)))
-        accepted_samples += int(diag.health_sampling_accepted)
-        exact_collision_queries += int(getattr(result, "collision_exact_distance_queries", 0))
-        final_error = float(result.position_error + result.orientation_error)
-        if start_error is None:
-            start_error = final_error
-        q = np.asarray(result.q_solution, dtype=float)
-        if float(np.linalg.norm(q - prev_q)) < 1e-8:
-            zero_progress += 1
-        prev_q = q.copy()
+        if mode in _PARALLEL_SEED_MODES and sample_budget > 0
+        else []
+    )
+    prev_q = np.asarray(q, dtype=float)
+    prev_step = np.zeros_like(prev_q)
+    prev_step_delta = np.zeros_like(prev_q)
+    executor = (
+        ThreadPoolExecutor(max_workers=max(1, len(parallel_workers)))
+        if mode in _PARALLEL_SEED_MODES
+        and seed_worker_mode == "thread"
+        and len(parallel_workers) > 1
+        else None
+    )
+    try:
+        for step_index in range(steps):
+            robot.update_configuration(q)
+            task.update(robot)
+            jac = np.asarray(task.get_jacobian(), dtype=float)
+            base_health = kinematic_health_sample(robot, q, jac)
+            health_samples.append(base_health)
+            d = solver.evaluate_min_collision_distance(q)
+            if math.isfinite(float(d)):
+                collision_distances.append(float(d))
+
+            q_before_step = np.asarray(q, dtype=float).copy()
+            t0 = time.perf_counter()
+            result = solver.solve_position_step(q, target, task_name, opts)
+            timings.append((time.perf_counter() - t0) * 1000.0)
+            statuses[result.status.name] = statuses.get(result.status.name, 0) + 1
+            diag = result.diagnostics
+            health_applied += int(bool(diag.health_sampling_applied))
+            health_cache_available += int(
+                bool(getattr(diag, "health_sampling_cache_available", False))
+            )
+            health_cache_used += int(bool(getattr(diag, "health_sampling_cache_used", False)))
+            accepted_samples += int(diag.health_sampling_accepted)
+            exact_collision_queries += int(getattr(result, "collision_exact_distance_queries", 0))
+            final_error = float(result.position_error + result.orientation_error)
+            if start_error is None:
+                start_error = final_error
+            q_primary = np.asarray(result.q_solution, dtype=float)
+            if mode in _PARALLEL_SEED_MODES and parallel_workers:
+                q_recovered, recovered = _parallel_seed_recovery_step(
+                    scenario=scenario,
+                    mode=mode,
+                    workers=parallel_workers,
+                    main_solver=solver,
+                    main_robot=robot,
+                    main_task=task,
+                    q_current=q_before_step,
+                    q_primary=q_primary,
+                    target=target,
+                    opts=opts,
+                    primary_error=final_error,
+                    base_health=base_health,
+                    base_jacobian=jac,
+                    sample_budget=sample_budget,
+                    step_index=step_index,
+                    prev_step=prev_step,
+                    prev_step_delta=prev_step_delta,
+                    collision_scoring=solver.get_collision_min_distance() > 0.0,
+                    seed_worker_mode=seed_worker_mode,
+                    executor=executor,
+                    stats=parallel_stats,
+                    cfg=parallel_cfg,
+                )
+                if recovered:
+                    q_primary = q_recovered
+                    final_error = _task_error_at(robot, task, q_primary)
+                    robot.update_configuration(q_before_step)
+                    task.update(robot)
+            q = q_primary
+            if float(np.linalg.norm(q - prev_q)) < 1e-8:
+                zero_progress += 1
+            current_step = q - q_before_step
+            current_step_delta = current_step - prev_step
+            prev_step = current_step
+            prev_step_delta = current_step_delta
+            prev_q = q.copy()
+            q_history.append(prev_q.copy())
+    finally:
+        if executor is not None:
+            executor.shutdown(wait=True, cancel_futures=True)
 
     summary = {
         "scenario": scenario.name,
@@ -233,10 +730,45 @@ def _run_case(
         "health_sampling_cache_used_steps": int(health_cache_used),
         "health_sampling_accepted_samples": int(accepted_samples),
         "collision_exact_distance_queries": int(exact_collision_queries),
+        "parallel_seed_worker_mode": (
+            seed_worker_mode if mode in _PARALLEL_SEED_MODES else "disabled"
+        ),
+        "parallel_seed_worker_count": int(len(parallel_workers)),
+        "parallel_seed_collision_gate_enabled": bool(
+            mode in _PARALLEL_SEED_MODES and solver.get_collision_min_distance() > 0.0
+        ),
+        "parallel_seed_attempted_steps": int(parallel_stats.attempted_steps),
+        "parallel_seed_candidate_solves": int(parallel_stats.candidate_solves),
+        "parallel_seed_accepted_steps": int(parallel_stats.accepted_steps),
+        "parallel_seed_rejected_limit": int(parallel_stats.rejected_limit),
+        "parallel_seed_rejected_collision": int(parallel_stats.rejected_collision),
+        "parallel_seed_rejected_tracking": int(parallel_stats.rejected_tracking),
+        "parallel_seed_rejected_continuity": int(parallel_stats.rejected_continuity),
+        "parallel_seed_rejected_health": int(parallel_stats.rejected_health),
+        "parallel_seed_best_score_delta": (
+            float(parallel_stats.best_score_delta)
+            if math.isfinite(parallel_stats.best_score_delta)
+            else float("nan")
+        ),
+        "parallel_seed_avg_time_ms": (
+            float(parallel_stats.time_ms_total / parallel_stats.attempted_steps)
+            if parallel_stats.attempted_steps
+            else 0.0
+        ),
         "wall_time_ms": _stats(timings),
     }
     summary.update(summarize_health_series(health_samples))
     summary.update(collision_distance_stats_dict(collision_distances, threshold=0.0))
+    q_lower, q_upper = robot.get_joint_limits()
+    summary.update(
+        summarize_continuity_series(
+            q_history,
+            dt=float(opts.dt),
+            velocity_limits=np.asarray(robot.get_velocity_limits(), dtype=float),
+            q_lower=np.asarray(q_lower, dtype=float),
+            q_upper=np.asarray(q_upper, dtype=float),
+        )
+    )
     return summary
 
 
@@ -244,6 +776,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--steps", type=int, default=50)
     parser.add_argument("--sample-budget", type=int, default=8)
+    parser.add_argument(
+        "--seed-worker-mode",
+        choices=("sequential", "thread"),
+        default="sequential",
+        help="Execution mode for Python-side multi-seed recovery workers.",
+    )
     parser.add_argument(
         "--modes",
         nargs="+",
@@ -254,6 +792,8 @@ def main() -> None:
             "elastic_scale",
             "health_sampling",
             "health_sampling_collision",
+            "parallel_seed_recovery",
+            "health_sampling_parallel_seed",
         ],
     )
     parser.add_argument(
@@ -280,6 +820,7 @@ def main() -> None:
                         steps=args.steps,
                         sample_budget=args.sample_budget,
                         collision_scoring=mode == "health_sampling_collision",
+                        seed_worker_mode=args.seed_worker_mode,
                     )
                 )
             except Exception as exc:

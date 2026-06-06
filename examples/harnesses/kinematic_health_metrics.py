@@ -31,6 +31,21 @@ class CollisionDistanceStats:
     worst_penetration: float
 
 
+@dataclass(frozen=True)
+class ContinuityStats:
+    sample_count: int
+    q_step_norm_mean: float
+    q_step_norm_p95: float
+    q_step_norm_max: float
+    q_step_component_max: float
+    q_accel_norm_p95: float
+    q_accel_norm_max: float
+    q_jerk_norm_p95: float
+    q_jerk_norm_max: float
+    velocity_limit_violation_count: int
+    joint_limit_violation_count: int
+
+
 def _finite_array(values: Iterable[float]) -> np.ndarray:
     arr = np.asarray(list(values), dtype=float)
     return arr[np.isfinite(arr)]
@@ -147,3 +162,82 @@ def collision_distance_stats_dict(
         "collision_count": stats.count_below_threshold,
         "worst_penetration": stats.worst_penetration,
     }
+
+
+def summarize_continuity_series(
+    q_series: Iterable[np.ndarray],
+    *,
+    dt: float,
+    velocity_limits: np.ndarray | None = None,
+    q_lower: np.ndarray | None = None,
+    q_upper: np.ndarray | None = None,
+    tolerance: float = 1e-9,
+) -> dict[str, float | int]:
+    """Summarize step, acceleration, and jerk proxies for fixed-size q traces."""
+    qs = [np.asarray(q, dtype=float).copy() for q in q_series]
+    if len(qs) < 2:
+        return ContinuityStats(
+            sample_count=0,
+            q_step_norm_mean=0.0,
+            q_step_norm_p95=0.0,
+            q_step_norm_max=0.0,
+            q_step_component_max=0.0,
+            q_accel_norm_p95=0.0,
+            q_accel_norm_max=0.0,
+            q_jerk_norm_p95=0.0,
+            q_jerk_norm_max=0.0,
+            velocity_limit_violation_count=0,
+            joint_limit_violation_count=0,
+        ).__dict__.copy()
+
+    q_mat = np.vstack(qs)
+    steps = np.diff(q_mat, axis=0)
+    step_norms = np.linalg.norm(steps, axis=1)
+    step_components = np.max(np.abs(steps), axis=1)
+    safe_dt = max(float(dt), 1e-12)
+    velocities = steps / safe_dt
+    accel = (
+        np.diff(velocities, axis=0) / safe_dt
+        if len(velocities) >= 2
+        else np.empty((0, q_mat.shape[1]))
+    )
+    jerk = np.diff(accel, axis=0) / safe_dt if len(accel) >= 2 else np.empty((0, q_mat.shape[1]))
+    accel_norms = np.linalg.norm(accel, axis=1) if len(accel) else np.asarray([], dtype=float)
+    jerk_norms = np.linalg.norm(jerk, axis=1) if len(jerk) else np.asarray([], dtype=float)
+
+    velocity_limit_violation_count = 0
+    if velocity_limits is not None:
+        vlim = np.asarray(velocity_limits, dtype=float)
+        n = min(vlim.size, velocities.shape[1])
+        if n > 0:
+            finite = np.isfinite(vlim[:n]) & (vlim[:n] >= 0.0)
+            if np.any(finite):
+                over = np.abs(velocities[:, :n]) > (vlim[:n] + tolerance)
+                velocity_limit_violation_count = int(np.sum(over[:, finite]))
+
+    joint_limit_violation_count = 0
+    if q_lower is not None and q_upper is not None:
+        lower = np.asarray(q_lower, dtype=float)
+        upper = np.asarray(q_upper, dtype=float)
+        n = min(lower.size, upper.size, q_mat.shape[1])
+        if n > 0:
+            below = q_mat[:, :n] < (lower[:n] - tolerance)
+            above = q_mat[:, :n] > (upper[:n] + tolerance)
+            joint_limit_violation_count = int(np.sum(below | above))
+
+    def _percentile_or_zero(values: np.ndarray, pct: float) -> float:
+        return float(np.percentile(values, pct)) if values.size else 0.0
+
+    return ContinuityStats(
+        sample_count=int(len(step_norms)),
+        q_step_norm_mean=float(np.mean(step_norms)) if step_norms.size else 0.0,
+        q_step_norm_p95=_percentile_or_zero(step_norms, 95.0),
+        q_step_norm_max=float(np.max(step_norms)) if step_norms.size else 0.0,
+        q_step_component_max=float(np.max(step_components)) if step_components.size else 0.0,
+        q_accel_norm_p95=_percentile_or_zero(accel_norms, 95.0),
+        q_accel_norm_max=float(np.max(accel_norms)) if accel_norms.size else 0.0,
+        q_jerk_norm_p95=_percentile_or_zero(jerk_norms, 95.0),
+        q_jerk_norm_max=float(np.max(jerk_norms)) if jerk_norms.size else 0.0,
+        velocity_limit_violation_count=velocity_limit_violation_count,
+        joint_limit_violation_count=joint_limit_violation_count,
+    ).__dict__.copy()
