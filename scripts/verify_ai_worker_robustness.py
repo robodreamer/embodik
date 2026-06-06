@@ -71,6 +71,12 @@ class StepRecord:
     com_slack_inner: float
     relaxed_margin: float
     elapsed_ms: float
+    health_sampling_applied: bool = False
+    health_sampling_cache_used: bool = False
+    health_sampling_sampled: int = 0
+    health_sampling_accepted: int = 0
+    health_sampling_score_delta: float = float("nan")
+    health_sampling_time_ms: float = 0.0
 
 
 @dataclass
@@ -96,6 +102,14 @@ class ScenarioMetrics:
     late_stall_count: int = 0  # stalls during the second half of the scenario (recovery phase)
     min_collision_distance_m: float = float("inf")
     min_com_inner_slack_m: float = float("inf")
+    health_sampling_available_count: int = 0
+    health_sampling_applied_count: int = 0
+    health_sampling_cache_available_count: int = 0
+    health_sampling_cache_used_count: int = 0
+    health_sampling_sampled_count: int = 0
+    health_sampling_accepted_count: int = 0
+    health_sampling_time_ms_total: float = 0.0
+    health_sampling_best_score_delta: float = float("-inf")
     step_records: list[StepRecord] = field(default_factory=list)
 
     def as_dict(self) -> dict:
@@ -127,6 +141,23 @@ class ScenarioMetrics:
             "min_com_inner_slack_m": (
                 round(self.min_com_inner_slack_m, 6)
                 if np.isfinite(self.min_com_inner_slack_m)
+                else None
+            ),
+            "health_sampling_available_count": self.health_sampling_available_count,
+            "health_sampling_applied_count": self.health_sampling_applied_count,
+            "health_sampling_cache_available_count": self.health_sampling_cache_available_count,
+            "health_sampling_cache_used_count": self.health_sampling_cache_used_count,
+            "health_sampling_sampled_count": self.health_sampling_sampled_count,
+            "health_sampling_accepted_count": self.health_sampling_accepted_count,
+            "health_sampling_avg_time_ms": round(
+                self.health_sampling_time_ms_total / self.total_steps
+                if self.total_steps
+                else 0.0,
+                4,
+            ),
+            "health_sampling_best_score_delta": (
+                round(self.health_sampling_best_score_delta, 9)
+                if np.isfinite(self.health_sampling_best_score_delta)
                 else None
             ),
         }
@@ -429,11 +460,24 @@ def run_scenario(
         cumulative_solve_ms += elapsed_ms
 
         result = step.solver_result
+        diag = getattr(result, "diagnostics", result)
         q_prev = np.asarray(q, dtype=float).copy()
         q = np.asarray(step.q_next, dtype=float)
         if not np.all(np.isfinite(q)):
             q = q_prev
         status_name = _status_name(result)
+        health_available = bool(getattr(diag, "health_sampling_available", False))
+        health_applied = bool(getattr(diag, "health_sampling_applied", False))
+        health_cache_available = bool(
+            getattr(diag, "health_sampling_cache_available", False)
+        )
+        health_cache_used = bool(getattr(diag, "health_sampling_cache_used", False))
+        health_sampled = int(getattr(diag, "health_sampling_sampled", 0) or 0)
+        health_accepted = int(getattr(diag, "health_sampling_accepted", 0) or 0)
+        health_score_delta = float(
+            getattr(diag, "health_sampling_score_delta", float("nan"))
+        )
+        health_time_ms = float(getattr(diag, "health_sampling_time_ms", 0.0) or 0.0)
         # Mirror the app: hold last-known-good q on unresolvable statuses.
         if status_name in {"INFEASIBLE", "NO_PROGRESS"}:
             q = q_prev
@@ -462,6 +506,18 @@ def run_scenario(
             relaxed_mm_count += 1
 
         metrics.total_steps += 1
+        metrics.health_sampling_available_count += int(health_available)
+        metrics.health_sampling_applied_count += int(health_applied)
+        metrics.health_sampling_cache_available_count += int(health_cache_available)
+        metrics.health_sampling_cache_used_count += int(health_cache_used)
+        metrics.health_sampling_sampled_count += int(health_sampled)
+        metrics.health_sampling_accepted_count += int(health_accepted)
+        if np.isfinite(health_time_ms):
+            metrics.health_sampling_time_ms_total += health_time_ms
+        if np.isfinite(health_score_delta):
+            metrics.health_sampling_best_score_delta = max(
+                metrics.health_sampling_best_score_delta, health_score_delta
+            )
         if status_name == "SUCCESS":
             metrics.success_count += 1
         elif status_name == "INFEASIBLE":
@@ -523,6 +579,12 @@ def run_scenario(
                 com_slack_inner=com_inner if np.isfinite(com_inner) else -1.0,
                 relaxed_margin=relaxed_mm if np.isfinite(relaxed_mm) else -1.0,
                 elapsed_ms=elapsed_ms,
+                health_sampling_applied=health_applied,
+                health_sampling_cache_used=health_cache_used,
+                health_sampling_sampled=health_sampled,
+                health_sampling_accepted=health_accepted,
+                health_sampling_score_delta=health_score_delta,
+                health_sampling_time_ms=health_time_ms,
             )
         )
 
@@ -537,7 +599,9 @@ def run_scenario(
                 f"right_err={right_err:.4f} left_err={left_err:.4f} "
                 f"collision_min={collision_min if np.isfinite(collision_min) else 'inf'} "
                 f"com_inner={com_inner if np.isfinite(com_inner) else 'inf'} "
-                f"relaxed_mm={relaxed_mm}"
+                f"relaxed_mm={relaxed_mm} "
+                f"health_applied={int(health_applied)} "
+                f"health_cache={int(health_cache_used)}"
             )
 
     if metrics.total_steps:
@@ -617,7 +681,10 @@ def main() -> int:
             f"late_stall={record['late_stall_count']} "
             f"hard={record['hard_failures']} "
             f"escape_events={record['escape_events']} "
+            f"health_applied={record['health_sampling_applied_count']} "
+            f"health_cache={record['health_sampling_cache_used_count']} "
             f"avg_solve_ms={record['avg_solve_ms']} "
+            f"health_ms={record['health_sampling_avg_time_ms']} "
             f"final_right={record['final_right_position_error_m']} "
             f"final_left={record['final_left_position_error_m']} "
             f"min_col={record['min_collision_distance_m']} "

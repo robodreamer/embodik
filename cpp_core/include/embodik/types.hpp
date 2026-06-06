@@ -93,6 +93,47 @@ struct SolverResult {
   double condition_number = 1.0;   // Worst-case Jacobian condition number
 };
 
+struct NullspaceHealthSamplingConfig {
+  /// Enable solver-owned low-priority health biasing. When disabled, the
+  /// solver path is unchanged.
+  bool enabled = false;
+  /// Number of candidate joint-space perturbations to score per velocity solve.
+  int sample_count = 8;
+  /// Also score a bounded step toward the healthiest observed configuration
+  /// seen by this solver. This is an extra deterministic candidate and does
+  /// not replace random samples.
+  bool best_config_cache_enabled = true;
+  /// Deterministic base seed. The solver mixes this with an internal tick.
+  std::uint64_t seed = 0x6a09e667f3bcc909ULL;
+  /// Maximum sampled configuration displacement in joint coordinates.
+  double sample_radius = 0.02;
+  /// Scale applied to the selected displacement before converting it to a
+  /// low-priority velocity target.
+  double gain = 0.2;
+  /// Minimum normalized weighted score improvement required before injecting a
+  /// bias.
+  double min_score_improvement = 1e-4;
+  /// Inject the health objective only when the current joint-limit cost is at
+  /// or above this threshold. Set negative to disable this activation gate.
+  double activation_joint_limit_cost = 50.0;
+  /// Inject the health objective when limit-weighted dexterity is at or below
+  /// this threshold. Set negative to disable this activation gate.
+  double activation_singularity_threshold = -1.0;
+  /// Scale for bounding the existing limit-weighted dexterity metric into
+  /// metric / (metric + scale) before scoring candidates.
+  double singularity_normalization_scale = 1e-6;
+  double joint_limit_weight = 1.0;
+  double singularity_weight = 0.25;
+  double collision_weight = 0.5;
+  /// Include collision-distance delta in scoring when a collision constraint is
+  /// configured. Runtime scoring uses the solver's existing cached/targeted
+  /// distance path rather than scanning all pairs for every sample.
+  bool collision_scoring = false;
+  /// Reject candidates whose collision distance worsens by more than this
+  /// tolerance when collision scoring is enabled.
+  double collision_worsen_tolerance = 1e-4;
+};
+
 // Extended result for velocity-level solving
 struct VelocitySolverResult : public SolverResult {
   std::vector<int> saturated_joints; // Indices of joints at velocity limits
@@ -145,6 +186,25 @@ struct VelocitySolverResult : public SolverResult {
   /// the optional stateful layout switcher. Zero when the switcher is disabled
   /// or has not yet seen a prior solve.
   double binding_score = 0.0;
+
+  // Nullspace health sampling diagnostics.
+  bool health_sampling_available = false;
+  bool health_sampling_applied = false;
+  bool health_sampling_cache_available = false;
+  bool health_sampling_cache_used = false;
+  std::uint32_t health_sampling_sampled = 0;
+  std::uint32_t health_sampling_accepted = 0;
+  double health_sampling_score_delta =
+      std::numeric_limits<double>::quiet_NaN();
+  double health_sampling_joint_limit_delta =
+      std::numeric_limits<double>::quiet_NaN();
+  double health_sampling_singularity_delta =
+      std::numeric_limits<double>::quiet_NaN();
+  double health_sampling_collision_distance_delta =
+      std::numeric_limits<double>::quiet_NaN();
+  double health_sampling_bias_norm =
+      std::numeric_limits<double>::quiet_NaN();
+  double health_sampling_time_ms = 0.0;
 };
 
 // Configuration for regularized matrix inversion
@@ -432,6 +492,24 @@ struct SolveDiagnostics {
   SolverRecoveryStage recovery_stage = SolverRecoveryStage::kPrioritized;
   /// Mirrors VelocitySolverResult::binding_score.
   double binding_score = 0.0;
+  /// Mirrors VelocitySolverResult nullspace health sampling diagnostics.
+  bool health_sampling_available = false;
+  bool health_sampling_applied = false;
+  bool health_sampling_cache_available = false;
+  bool health_sampling_cache_used = false;
+  std::uint32_t health_sampling_sampled = 0;
+  std::uint32_t health_sampling_accepted = 0;
+  double health_sampling_score_delta =
+      std::numeric_limits<double>::quiet_NaN();
+  double health_sampling_joint_limit_delta =
+      std::numeric_limits<double>::quiet_NaN();
+  double health_sampling_singularity_delta =
+      std::numeric_limits<double>::quiet_NaN();
+  double health_sampling_collision_distance_delta =
+      std::numeric_limits<double>::quiet_NaN();
+  double health_sampling_bias_norm =
+      std::numeric_limits<double>::quiet_NaN();
+  double health_sampling_time_ms = 0.0;
 };
 
 /// Bundled runtime defaults for interactive solve loops.
@@ -495,6 +573,9 @@ struct SolverRuntimeConfig {
   double auto_layout_binding_threshold_low = 0.15;
   /// Hysteresis count for returning from split to merged.
   int auto_layout_cooldown_ticks = 20;
+  /// Solver-owned nullspace health sampler. Kept disabled in the raw solver
+  /// default; shared runtime policy can opt into it after validation.
+  NullspaceHealthSamplingConfig health_sampling;
 };
 
 } // namespace embodik

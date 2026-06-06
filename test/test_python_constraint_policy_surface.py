@@ -106,6 +106,13 @@ def test_example_runtime_policy_enables_auto_switch_and_weighted_fallback() -> N
     assert solver.applied is solver.config
     assert solver.config.enable_auto_task_layout is True
     assert solver.config.weighted_fallback_enabled is True
+    assert solver.config.health_sampling.enabled is True
+    assert solver.config.health_sampling.sample_count == 8
+    assert solver.config.health_sampling.best_config_cache_enabled is True
+    assert solver.config.health_sampling.min_score_improvement == 1e-4
+    assert solver.config.health_sampling.activation_joint_limit_cost == 50.0
+    assert solver.config.health_sampling.activation_singularity_threshold == -1.0
+    assert solver.config.health_sampling.singularity_normalization_scale == 1e-6
 
 
 def test_examples_that_construct_solvers_apply_runtime_policy() -> None:

@@ -4,6 +4,7 @@
  */
 
 #include <Eigen/Geometry>
+#include <Eigen/QR>
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -12,6 +13,7 @@
 #include <sstream>
 #include <string>
 #include <pinocchio/algorithm/geometry.hpp>
+#include <random>
 #include <stdexcept>
 #include <unordered_set>
 #include <utility>
@@ -23,6 +25,7 @@
 
 #include <embodik/ik_baseline.hpp>
 #include <embodik/kinematics_solver.hpp>
+#include <embodik/pose_metrics.hpp>
 #include <embodik/tasks.hpp>
 #include <embodik/weighted_advisor.hpp>
 
@@ -5154,6 +5157,398 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
       c_lower[i] = std::max(c_lower[i], a_lb);
       c_upper[i] = std::min(c_upper[i], a_ub);
     }
+  }
+
+  const auto &health_cfg = runtime_config_.health_sampling;
+  if (health_cfg.enabled &&
+      (health_cfg.sample_count > 0 || health_cfg.best_config_cache_enabled) &&
+      health_cfg.sample_radius > 0.0 && std::isfinite(health_cfg.sample_radius) &&
+      health_cfg.gain > 0.0 && std::isfinite(health_cfg.gain)) {
+    const auto t_health_start = std::chrono::high_resolution_clock::now();
+    auto finish_health_timing = [&]() {
+      result.health_sampling_time_ms = get_elapsed_ms(t_health_start);
+    };
+    result.health_sampling_available = true;
+
+    const auto [q_lower, q_upper] = robot_->get_joint_limits();
+    const int nv = robot_->nv();
+    const int nq = robot_->nq();
+    std::vector<int> active_velocity_indices;
+    active_velocity_indices.reserve(static_cast<size_t>(nv));
+    for (int i = 0; i < nv; ++i) {
+      if (excluded_union.find(i) != excluded_union.end()) {
+        continue;
+      }
+      const int qi = (i < static_cast<int>(velocity_to_config_index.size()))
+                         ? velocity_to_config_index[i]
+                         : kVelocityToConfigUnmapped;
+      if (qi == kVelocityToConfigUnmapped || qi < 0 || qi >= nq ||
+          qi >= q_lower.size() || qi >= q_upper.size()) {
+        continue;
+      }
+      const double range = q_upper(qi) - q_lower(qi);
+      if (!std::isfinite(q_lower(qi)) || !std::isfinite(q_upper(qi)) ||
+          range <= 1e-9) {
+        continue;
+      }
+      active_velocity_indices.push_back(i);
+    }
+
+    if (!active_velocity_indices.empty() && q_eval.size() == nq) {
+      Eigen::MatrixXd primary_nullspace_projector =
+          Eigen::MatrixXd::Identity(nv, nv);
+      if (!jacobians.empty() && jacobians.front().rows() > 0 &&
+          jacobians.front().cols() == nv) {
+        Eigen::CompleteOrthogonalDecomposition<Eigen::MatrixXd> cod(
+            jacobians.front());
+        cod.setThreshold(std::max(1e-8, constraint_tolerance_));
+        const Eigen::MatrixXd primary_pinv = cod.pseudoInverse();
+        primary_nullspace_projector.noalias() -= primary_pinv * jacobians.front();
+      }
+      auto project_primary_nullspace = [&](const Eigen::VectorXd &delta) {
+        Eigen::VectorXd projected = primary_nullspace_projector * delta;
+        for (int idx : excluded_union) {
+          if (idx >= 0 && idx < projected.size()) {
+            projected(idx) = 0.0;
+          }
+        }
+        return projected;
+      };
+
+      auto primary_jacobian = [&]() {
+        int primary_priority = std::numeric_limits<int>::max();
+        for (const auto &task : tasks_) {
+          if (task && task->isActive()) {
+            primary_priority = std::min(primary_priority, task->getPriority());
+          }
+        }
+        int rows = 0;
+        for (const auto &task : tasks_) {
+          if (task && task->isActive() &&
+              task->getPriority() == primary_priority) {
+            rows += task->getDimension();
+          }
+        }
+        Eigen::MatrixXd J(rows, nv);
+        J.setZero();
+        int offset = 0;
+        for (const auto &task : tasks_) {
+          if (!task || !task->isActive() ||
+              task->getPriority() != primary_priority) {
+            continue;
+          }
+          const Eigen::MatrixXd task_jac = task->getJacobian();
+          if (task_jac.rows() > 0 && task_jac.cols() == nv) {
+            J.block(offset, 0, task_jac.rows(), nv) = task_jac;
+            offset += static_cast<int>(task_jac.rows());
+          }
+        }
+        if (offset < rows) {
+          J.conservativeResize(offset, nv);
+        }
+        return J;
+      };
+
+      auto update_active_tasks = [&]() {
+        for (auto &task : tasks_) {
+          if (task && task->isActive()) {
+            task->update(*robot_);
+          }
+        }
+      };
+
+      struct HealthScore {
+        double joint_limit = 0.0;
+        double joint_limit_cost = 0.0;
+        double singularity = 0.0;
+        double singularity_raw = 0.0;
+        std::optional<double> collision_distance;
+      };
+
+      auto normalize_positive_metric = [](double value, double scale) {
+        if (!std::isfinite(value) || value <= 0.0) {
+          return 0.0;
+        }
+        const double safe_scale =
+            (std::isfinite(scale) && scale > 0.0) ? scale : 1e-6;
+        return value / (value + safe_scale);
+      };
+
+      auto compute_health_score = [&]() -> HealthScore {
+        const Eigen::VectorXd q_here = robot_->get_current_configuration();
+        const auto [unused_per_joint, limit_cost] =
+            joint_limit_distance(q_here, q_lower, q_upper, 1e-6);
+        (void)unused_per_joint;
+        const Eigen::MatrixXd J_primary = primary_jacobian();
+        const double singularity =
+            (J_primary.rows() > 0 && J_primary.cols() == nv)
+                ? singularity_joint_limit_metric(q_here, J_primary, q_lower,
+                                                q_upper, 1e-6)
+                : 0.0;
+        HealthScore score;
+        score.joint_limit_cost =
+            (std::isfinite(limit_cost) && limit_cost > 0.0) ? limit_cost : 0.0;
+        score.joint_limit = 1.0 / (1.0 + score.joint_limit_cost);
+        score.singularity_raw = singularity;
+        score.singularity = normalize_positive_metric(
+            singularity, health_cfg.singularity_normalization_scale);
+        if (health_cfg.collision_scoring && collision_constraint_.has_value() &&
+            collision_constraint_->enabled) {
+          score.collision_distance =
+              evaluate_post_step_collision_distance(q_here);
+        }
+        return score;
+      };
+
+      auto combined_health_score = [&](const HealthScore &score) {
+        double combined = health_cfg.joint_limit_weight * score.joint_limit +
+                          health_cfg.singularity_weight * score.singularity;
+        if (health_cfg.collision_scoring && score.collision_distance) {
+          combined +=
+              health_cfg.collision_weight * (*score.collision_distance);
+        }
+        return combined;
+      };
+
+      const HealthScore base_score = compute_health_score();
+      const double base_combined_score = combined_health_score(base_score);
+      const bool joint_activation_gate_enabled =
+          std::isfinite(health_cfg.activation_joint_limit_cost) &&
+          health_cfg.activation_joint_limit_cost >= 0.0;
+      const bool singularity_activation_gate_enabled =
+          std::isfinite(health_cfg.activation_singularity_threshold) &&
+          health_cfg.activation_singularity_threshold >= 0.0;
+      const bool activation_gate_enabled =
+          joint_activation_gate_enabled || singularity_activation_gate_enabled;
+      const bool health_activation_allowed =
+          !activation_gate_enabled ||
+          (joint_activation_gate_enabled &&
+           base_score.joint_limit_cost >=
+               health_cfg.activation_joint_limit_cost) ||
+          (singularity_activation_gate_enabled &&
+           base_score.singularity_raw <=
+               health_cfg.activation_singularity_threshold);
+      if (health_activation_allowed) {
+      const bool cache_can_be_used =
+          health_cfg.best_config_cache_enabled && health_sampling_cache_valid_ &&
+          health_sampling_cache_q_.size() == nq &&
+          health_sampling_cache_q_.allFinite();
+      result.health_sampling_cache_available = cache_can_be_used;
+      Eigen::VectorXd best_delta_v = Eigen::VectorXd::Zero(nv);
+      double best_score_delta = -std::numeric_limits<double>::infinity();
+      double best_joint_delta = std::numeric_limits<double>::quiet_NaN();
+      double best_singularity_delta = std::numeric_limits<double>::quiet_NaN();
+      double best_collision_delta = std::numeric_limits<double>::quiet_NaN();
+      bool best_from_cache = false;
+
+      auto evaluate_delta = [&](const Eigen::VectorXd &delta_v,
+                                bool from_cache) {
+        if (delta_v.size() != nv || !delta_v.allFinite() ||
+            delta_v.norm() <= 1e-12) {
+          return;
+        }
+        ++result.health_sampling_sampled;
+        const Eigen::VectorXd q_candidate =
+            pinocchio::integrate(robot_->model(), q_eval, delta_v);
+        if (q_candidate.size() != nq || !q_candidate.allFinite()) {
+          return;
+        }
+        for (int idx : active_velocity_indices) {
+          const int qi = velocity_to_config_index[idx];
+          if (qi < 0 || qi >= q_candidate.size() ||
+              qi >= q_lower.size() || qi >= q_upper.size()) {
+            return;
+          }
+          if (std::isfinite(q_lower(qi)) &&
+              q_candidate(qi) < q_lower(qi) - 1e-9) {
+            return;
+          }
+          if (std::isfinite(q_upper(qi)) &&
+              q_candidate(qi) > q_upper(qi) + 1e-9) {
+            return;
+          }
+        }
+        robot_->update_kinematics(q_candidate);
+        update_active_tasks();
+        const HealthScore cand_score = compute_health_score();
+
+        const double joint_delta =
+            cand_score.joint_limit - base_score.joint_limit;
+        const double singularity_delta =
+            cand_score.singularity - base_score.singularity;
+        double collision_delta = 0.0;
+        if (health_cfg.collision_scoring && base_score.collision_distance &&
+            cand_score.collision_distance) {
+          collision_delta =
+              *cand_score.collision_distance - *base_score.collision_distance;
+          if (collision_delta < -std::max(0.0, health_cfg.collision_worsen_tolerance)) {
+            return;
+          }
+        }
+
+        const double score_delta =
+            health_cfg.joint_limit_weight * joint_delta +
+            health_cfg.singularity_weight * singularity_delta +
+            health_cfg.collision_weight * collision_delta;
+        if (score_delta <= health_cfg.min_score_improvement) {
+          return;
+        }
+
+        ++result.health_sampling_accepted;
+        if (score_delta > best_score_delta) {
+          best_score_delta = score_delta;
+          best_delta_v = delta_v;
+          best_joint_delta = joint_delta;
+          best_singularity_delta = singularity_delta;
+          best_collision_delta =
+              (health_cfg.collision_scoring && base_score.collision_distance &&
+               cand_score.collision_distance)
+                  ? collision_delta
+                  : std::numeric_limits<double>::quiet_NaN();
+          best_from_cache = from_cache;
+        }
+      };
+
+      const double radius = std::max(0.0, health_cfg.sample_radius);
+      if (health_cfg.sample_count > 0) {
+        Eigen::VectorXd gradient_delta = Eigen::VectorXd::Zero(nv);
+        const Eigen::VectorXd q_grad =
+            joint_limit_distance_gradient(q_eval, q_lower, q_upper, 1e-6);
+        for (int idx : active_velocity_indices) {
+          const int qi = velocity_to_config_index[idx];
+          if (qi >= 0 && qi < q_grad.size()) {
+            gradient_delta(idx) = q_grad(qi);
+          }
+        }
+        const double grad_norm = gradient_delta.norm();
+        if (grad_norm > 1e-12) {
+          Eigen::VectorXd projected_gradient =
+              project_primary_nullspace((radius / grad_norm) * gradient_delta);
+          const double projected_norm = projected_gradient.norm();
+          if (projected_norm > 1e-12) {
+            evaluate_delta((radius / projected_norm) * projected_gradient,
+                           false);
+          }
+        }
+      }
+      const std::uint32_t generated_samples_before_cache =
+          result.health_sampling_sampled;
+
+      if (cache_can_be_used) {
+        Eigen::VectorXd cache_delta =
+            pinocchio::difference(robot_->model(), q_eval,
+                                  health_sampling_cache_q_);
+        if (cache_delta.size() == nv && cache_delta.allFinite()) {
+          for (int i = 0; i < nv; ++i) {
+            const bool is_active =
+                std::find(active_velocity_indices.begin(),
+                          active_velocity_indices.end(), i) !=
+                active_velocity_indices.end();
+            if (!is_active || excluded_union.find(i) != excluded_union.end()) {
+              cache_delta(i) = 0.0;
+            }
+          }
+          const double cache_norm = cache_delta.norm();
+          if (cache_norm > 1e-12) {
+            const double scale = std::min(1.0, radius / cache_norm);
+            Eigen::VectorXd projected_cache_delta =
+                project_primary_nullspace(scale * cache_delta);
+            const double projected_norm = projected_cache_delta.norm();
+            if (projected_norm > 1e-12) {
+              evaluate_delta(projected_cache_delta, true);
+            }
+          }
+        }
+      }
+
+      const std::uint64_t tick = health_sampling_tick_++;
+      std::mt19937_64 rng(
+          health_cfg.seed ^
+          (0x9e3779b97f4a7c15ULL + tick + (tick << 6U) + (tick >> 2U)));
+      std::uniform_real_distribution<double> unit(-1.0, 1.0);
+      const int random_samples =
+          std::max(0, health_cfg.sample_count -
+                          static_cast<int>(generated_samples_before_cache));
+      for (int s = 0; s < random_samples; ++s) {
+        Eigen::VectorXd delta = Eigen::VectorXd::Zero(nv);
+        for (int idx : active_velocity_indices) {
+          delta(idx) = unit(rng);
+        }
+        const double norm = delta.norm();
+        if (norm <= 1e-12) {
+          continue;
+        }
+        Eigen::VectorXd projected_delta =
+            project_primary_nullspace((radius / norm) * delta);
+        const double projected_norm = projected_delta.norm();
+        if (projected_norm > 1e-12) {
+          evaluate_delta((radius / projected_norm) * projected_delta, false);
+        }
+      }
+
+      robot_->update_kinematics(q_eval);
+      update_active_tasks();
+      if (health_cfg.collision_scoring && collision_constraint_.has_value() &&
+          collision_constraint_->enabled) {
+        (void)compute_collision_constraint();
+      }
+
+      if (best_score_delta > health_cfg.min_score_improvement &&
+          best_delta_v.norm() > 1e-12) {
+        std::vector<int> objective_indices;
+        objective_indices.reserve(active_velocity_indices.size());
+        for (int idx : active_velocity_indices) {
+          if (std::abs(best_delta_v(idx)) > 0.0) {
+            objective_indices.push_back(idx);
+          }
+        }
+        if (!objective_indices.empty()) {
+          const int rows = static_cast<int>(objective_indices.size());
+          Eigen::VectorXd health_goal(rows);
+          Eigen::MatrixXd health_jac = Eigen::MatrixXd::Zero(rows, nv);
+          const double dt_safe = std::max(dt_, 1e-9);
+          for (int r = 0; r < rows; ++r) {
+            const int idx = objective_indices[static_cast<size_t>(r)];
+            health_jac(r, idx) = 1.0;
+            health_goal(r) = health_cfg.gain * best_delta_v(idx) / dt_safe;
+          }
+          if (use_contact_projection) {
+            health_jac = health_jac * contact_P_c;
+          }
+          goals.push_back(std::move(health_goal));
+          jacobians.push_back(std::move(health_jac));
+          const int last_priority =
+              objective_configs.empty()
+                  ? 1
+                  : objective_configs.back().priority + 1;
+          objective_configs.push_back(ObjectiveSolveConfig{
+              last_priority, TaskSolveMode::kMinError, false});
+          objective_tasks.push_back(nullptr);
+          result.health_sampling_applied = true;
+          result.health_sampling_score_delta = best_score_delta;
+          result.health_sampling_joint_limit_delta = best_joint_delta;
+          result.health_sampling_singularity_delta = best_singularity_delta;
+          result.health_sampling_collision_distance_delta =
+              best_collision_delta;
+          result.health_sampling_bias_norm =
+              (health_cfg.gain * best_delta_v / std::max(dt_, 1e-9)).norm();
+          result.health_sampling_cache_used = best_from_cache;
+        }
+      }
+      }
+
+      if (health_cfg.best_config_cache_enabled &&
+          (!health_sampling_cache_valid_ ||
+           health_sampling_cache_q_.size() != nq ||
+           base_combined_score >
+               health_sampling_cache_score_ +
+                   std::max(0.0, health_cfg.min_score_improvement))) {
+        health_sampling_cache_q_ = q_eval;
+        health_sampling_cache_score_ = base_combined_score;
+        health_sampling_cache_valid_ = true;
+      }
+    }
+    finish_health_timing();
   }
 
   sanitize_solver_inputs(goals, jacobians, C, c_lower, c_upper);

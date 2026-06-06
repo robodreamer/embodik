@@ -371,6 +371,7 @@ public:
     damping_ = cfg.damping;
     reset_adaptive_state();
     reset_auto_task_layout_state();
+    reset_health_sampling_state();
   }
 
   /**
@@ -1123,6 +1124,12 @@ private:
       const std::optional<TorsoPoseConstraintOptions> &torso_constraint,
       const std::optional<double> &step_validation_dt);
   void update_auto_task_layout_feedback(const VelocitySolverResult &result);
+  void reset_health_sampling_state() {
+    health_sampling_tick_ = 0;
+    health_sampling_cache_valid_ = false;
+    health_sampling_cache_q_.resize(0);
+    health_sampling_cache_score_ = -std::numeric_limits<double>::infinity();
+  }
   TaskLayout current_auto_task_layout_ = TaskLayout::kMerged;
   int auto_layout_below_low_count_ = 0;
   bool auto_layout_has_feedback_ = false;
@@ -1131,6 +1138,11 @@ private:
   double advisor_scale_ratio_sum_ = 0.0;
   double advisor_scale_epoch_time_s_ = 0.0;
   int advisor_scale_sample_count_ = 0;
+  std::uint64_t health_sampling_tick_ = 0;
+  bool health_sampling_cache_valid_ = false;
+  Eigen::VectorXd health_sampling_cache_q_;
+  double health_sampling_cache_score_ =
+      -std::numeric_limits<double>::infinity();
   double norm_threshold_ = 1e10;
   int max_zero_scale_iterations_ = 2;
   bool position_ik_debug_ = false;

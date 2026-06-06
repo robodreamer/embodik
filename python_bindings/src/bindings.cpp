@@ -167,7 +167,65 @@ NB_MODULE(_embodik_impl, m) {
       .def_ro("recovery_stage", &eik::VelocitySolverResult::recovery_stage,
               "Recovery stage that supplied the accepted velocity")
       .def_ro("binding_score", &eik::VelocitySolverResult::binding_score,
-              "Binding score used by the optional auto-switcher");
+              "Binding score used by the optional auto-switcher")
+      .def_ro("health_sampling_available",
+              &eik::VelocitySolverResult::health_sampling_available)
+      .def_ro("health_sampling_applied",
+              &eik::VelocitySolverResult::health_sampling_applied)
+      .def_ro("health_sampling_cache_available",
+              &eik::VelocitySolverResult::health_sampling_cache_available)
+      .def_ro("health_sampling_cache_used",
+              &eik::VelocitySolverResult::health_sampling_cache_used)
+      .def_ro("health_sampling_sampled",
+              &eik::VelocitySolverResult::health_sampling_sampled)
+      .def_ro("health_sampling_accepted",
+              &eik::VelocitySolverResult::health_sampling_accepted)
+      .def_ro("health_sampling_score_delta",
+              &eik::VelocitySolverResult::health_sampling_score_delta)
+      .def_ro("health_sampling_joint_limit_delta",
+              &eik::VelocitySolverResult::health_sampling_joint_limit_delta)
+      .def_ro("health_sampling_singularity_delta",
+              &eik::VelocitySolverResult::health_sampling_singularity_delta)
+      .def_ro("health_sampling_collision_distance_delta",
+              &eik::VelocitySolverResult::
+                  health_sampling_collision_distance_delta)
+      .def_ro("health_sampling_bias_norm",
+              &eik::VelocitySolverResult::health_sampling_bias_norm)
+      .def_ro("health_sampling_time_ms",
+              &eik::VelocitySolverResult::health_sampling_time_ms);
+
+  nb::class_<eik::NullspaceHealthSamplingConfig>(
+      m, "NullspaceHealthSamplingConfig",
+      "Runtime options for solver-owned nullspace health sampling.")
+      .def(nb::init<>())
+      .def_rw("enabled", &eik::NullspaceHealthSamplingConfig::enabled)
+      .def_rw("sample_count", &eik::NullspaceHealthSamplingConfig::sample_count)
+      .def_rw("best_config_cache_enabled",
+              &eik::NullspaceHealthSamplingConfig::best_config_cache_enabled)
+      .def_rw("seed", &eik::NullspaceHealthSamplingConfig::seed)
+      .def_rw("sample_radius",
+              &eik::NullspaceHealthSamplingConfig::sample_radius)
+      .def_rw("gain", &eik::NullspaceHealthSamplingConfig::gain)
+      .def_rw("min_score_improvement",
+              &eik::NullspaceHealthSamplingConfig::min_score_improvement)
+      .def_rw("activation_joint_limit_cost",
+              &eik::NullspaceHealthSamplingConfig::activation_joint_limit_cost)
+      .def_rw("activation_singularity_threshold",
+              &eik::NullspaceHealthSamplingConfig::
+                  activation_singularity_threshold)
+      .def_rw("singularity_normalization_scale",
+              &eik::NullspaceHealthSamplingConfig::
+                  singularity_normalization_scale)
+      .def_rw("joint_limit_weight",
+              &eik::NullspaceHealthSamplingConfig::joint_limit_weight)
+      .def_rw("singularity_weight",
+              &eik::NullspaceHealthSamplingConfig::singularity_weight)
+      .def_rw("collision_weight",
+              &eik::NullspaceHealthSamplingConfig::collision_weight)
+      .def_rw("collision_scoring",
+              &eik::NullspaceHealthSamplingConfig::collision_scoring)
+      .def_rw("collision_worsen_tolerance",
+              &eik::NullspaceHealthSamplingConfig::collision_worsen_tolerance);
 
   nb::class_<eik::VelocityBoxHeadroomPolicy>(
       m, "VelocityBoxHeadroomPolicy",
@@ -540,7 +598,32 @@ NB_MODULE(_embodik_impl, m) {
               &eik::SolveDiagnostics::advisor_scale_adapt_active)
       .def_ro("active_task_layout", &eik::SolveDiagnostics::active_task_layout)
       .def_ro("recovery_stage", &eik::SolveDiagnostics::recovery_stage)
-      .def_ro("binding_score", &eik::SolveDiagnostics::binding_score);
+      .def_ro("binding_score", &eik::SolveDiagnostics::binding_score)
+      .def_ro("health_sampling_available",
+              &eik::SolveDiagnostics::health_sampling_available)
+      .def_ro("health_sampling_applied",
+              &eik::SolveDiagnostics::health_sampling_applied)
+      .def_ro("health_sampling_cache_available",
+              &eik::SolveDiagnostics::health_sampling_cache_available)
+      .def_ro("health_sampling_cache_used",
+              &eik::SolveDiagnostics::health_sampling_cache_used)
+      .def_ro("health_sampling_sampled",
+              &eik::SolveDiagnostics::health_sampling_sampled)
+      .def_ro("health_sampling_accepted",
+              &eik::SolveDiagnostics::health_sampling_accepted)
+      .def_ro("health_sampling_score_delta",
+              &eik::SolveDiagnostics::health_sampling_score_delta)
+      .def_ro("health_sampling_joint_limit_delta",
+              &eik::SolveDiagnostics::health_sampling_joint_limit_delta)
+      .def_ro("health_sampling_singularity_delta",
+              &eik::SolveDiagnostics::health_sampling_singularity_delta)
+      .def_ro("health_sampling_collision_distance_delta",
+              &eik::SolveDiagnostics::
+                  health_sampling_collision_distance_delta)
+      .def_ro("health_sampling_bias_norm",
+              &eik::SolveDiagnostics::health_sampling_bias_norm)
+      .def_ro("health_sampling_time_ms",
+              &eik::SolveDiagnostics::health_sampling_time_ms);
 
   nb::class_<eik::SolverRuntimeConfig>(
       m, "SolverRuntimeConfig",
@@ -590,7 +673,8 @@ NB_MODULE(_embodik_impl, m) {
       .def_rw("auto_layout_binding_threshold_low",
               &eik::SolverRuntimeConfig::auto_layout_binding_threshold_low)
       .def_rw("auto_layout_cooldown_ticks",
-              &eik::SolverRuntimeConfig::auto_layout_cooldown_ticks);
+              &eik::SolverRuntimeConfig::auto_layout_cooldown_ticks)
+      .def_rw("health_sampling", &eik::SolverRuntimeConfig::health_sampling);
 
   nb::class_<eik::PositionIKResult, eik::VelocitySolverResult>(
       m, "PositionIKResult", "Result from position-level IK solving")
@@ -636,6 +720,22 @@ NB_MODULE(_embodik_impl, m) {
             d.active_task_layout = r.active_task_layout;
             d.recovery_stage = r.recovery_stage;
             d.binding_score = r.binding_score;
+            d.health_sampling_available = r.health_sampling_available;
+            d.health_sampling_applied = r.health_sampling_applied;
+            d.health_sampling_cache_available =
+                r.health_sampling_cache_available;
+            d.health_sampling_cache_used = r.health_sampling_cache_used;
+            d.health_sampling_sampled = r.health_sampling_sampled;
+            d.health_sampling_accepted = r.health_sampling_accepted;
+            d.health_sampling_score_delta = r.health_sampling_score_delta;
+            d.health_sampling_joint_limit_delta =
+                r.health_sampling_joint_limit_delta;
+            d.health_sampling_singularity_delta =
+                r.health_sampling_singularity_delta;
+            d.health_sampling_collision_distance_delta =
+                r.health_sampling_collision_distance_delta;
+            d.health_sampling_bias_norm = r.health_sampling_bias_norm;
+            d.health_sampling_time_ms = r.health_sampling_time_ms;
             return d;
           });
 
