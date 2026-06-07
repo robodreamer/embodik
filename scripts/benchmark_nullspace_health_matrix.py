@@ -44,6 +44,7 @@ _HEALTH_SAMPLING_MODES = {
     "health_sampling",
     "health_sampling_cache_only",
     "health_sampling_collision",
+    "health_sampling_gentle",
     "health_sampling_parallel_seed",
     "ramped_parallel_seed_cache",
 }
@@ -171,6 +172,7 @@ def _make_runtime(
         "health_sampling",
         "health_sampling_cache_only",
         "health_sampling_collision",
+        "health_sampling_gentle",
         "parallel_seed_recovery",
         "health_sampling_parallel_seed",
         "ramped_parallel_seed",
@@ -193,7 +195,7 @@ def _make_runtime(
             else int(sample_budget)
         )
         cfg.health_sampling.sample_radius = 0.02
-        cfg.health_sampling.gain = 0.2
+        cfg.health_sampling.gain = 0.025 if mode == "health_sampling_gentle" else 0.2
         cfg.health_sampling.collision_scoring = bool(collision_scoring)
     return cfg
 
@@ -1609,6 +1611,7 @@ def main() -> None:
             "health_sampling",
             "health_sampling_cache_only",
             "health_sampling_collision",
+            "health_sampling_gentle",
             "parallel_seed_recovery",
             "health_sampling_parallel_seed",
             "ramped_parallel_seed",

@@ -17,7 +17,7 @@ DEFAULT_ADAPTIVE_DT_REFERENCE_DISTANCE = 0.02
 DEFAULT_HEALTH_SAMPLING_ENABLED = True
 DEFAULT_HEALTH_SAMPLING_SAMPLE_COUNT = 8
 DEFAULT_HEALTH_SAMPLING_SAMPLE_RADIUS = 0.02
-DEFAULT_HEALTH_SAMPLING_GAIN = 0.2
+DEFAULT_HEALTH_SAMPLING_GAIN = 0.025
 DEFAULT_HEALTH_SAMPLING_MIN_SCORE_IMPROVEMENT = 1e-4
 DEFAULT_HEALTH_SAMPLING_ACTIVATION_JOINT_LIMIT_COST = 50.0
 DEFAULT_HEALTH_SAMPLING_ACTIVATION_SINGULARITY_THRESHOLD = -1.0
@@ -54,9 +54,7 @@ def configure_solver_runtime_policy(solver: embodik.KinematicsSolver) -> None:
         cfg.health_sampling.sample_count = DEFAULT_HEALTH_SAMPLING_SAMPLE_COUNT
         cfg.health_sampling.sample_radius = DEFAULT_HEALTH_SAMPLING_SAMPLE_RADIUS
         cfg.health_sampling.gain = DEFAULT_HEALTH_SAMPLING_GAIN
-        cfg.health_sampling.min_score_improvement = (
-            DEFAULT_HEALTH_SAMPLING_MIN_SCORE_IMPROVEMENT
-        )
+        cfg.health_sampling.min_score_improvement = DEFAULT_HEALTH_SAMPLING_MIN_SCORE_IMPROVEMENT
         cfg.health_sampling.activation_joint_limit_cost = (
             DEFAULT_HEALTH_SAMPLING_ACTIVATION_JOINT_LIMIT_COST
         )
