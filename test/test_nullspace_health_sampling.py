@@ -97,10 +97,26 @@ def test_health_sampling_adds_nullspace_bias_away_from_joint_limit():
 
         assert result.status == eik.SolverStatus.SUCCESS
         assert result.health_sampling_available is True
+        assert result.health_sampling_activation_allowed is True
         assert result.health_sampling_sampled == 6
         assert result.health_sampling_accepted >= 1
+        assert (
+            result.health_sampling_accepted
+            + result.health_sampling_rejected_invalid
+            + result.health_sampling_rejected_limit
+            + result.health_sampling_rejected_collision
+            + result.health_sampling_rejected_score
+            == result.health_sampling_sampled
+        )
         assert result.health_sampling_applied is True
         assert math.isfinite(result.health_sampling_score_delta)
+        assert math.isfinite(result.health_sampling_base_score)
+        assert math.isfinite(result.health_sampling_best_score)
+        assert result.health_sampling_best_score > result.health_sampling_base_score
+        assert result.health_sampling_best_source in (
+            eik.HealthSamplingCandidateSource.GRADIENT,
+            eik.HealthSamplingCandidateSource.RANDOM,
+        )
         assert result.health_sampling_joint_limit_delta > 0.0
         assert result.health_sampling_bias_norm > 0.0
         assert dq[0] > 0.0
@@ -159,6 +175,7 @@ def test_health_sampling_cache_reuses_best_observed_posture_without_random_sampl
         assert near_limit.health_sampling_cache_available is True
         assert near_limit.health_sampling_cache_used is True
         assert near_limit.health_sampling_applied is True
+        assert near_limit.health_sampling_best_source == eik.HealthSamplingCandidateSource.CACHE
         assert near_limit.health_sampling_sampled == 1
         assert near_limit.health_sampling_accepted == 1
         assert near_limit.health_sampling_joint_limit_delta > 0.0

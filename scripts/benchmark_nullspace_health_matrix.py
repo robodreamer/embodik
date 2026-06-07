@@ -1233,7 +1233,15 @@ def _run_case(
     health_applied = 0
     health_cache_available = 0
     health_cache_used = 0
+    health_activation_allowed = 0
     accepted_samples = 0
+    health_rejected_invalid = 0
+    health_rejected_limit = 0
+    health_rejected_collision = 0
+    health_rejected_score = 0
+    health_base_scores: list[float] = []
+    health_best_scores: list[float] = []
+    health_best_source_counts: dict[str, int] = {}
     exact_collision_queries = 0
     start_error = None
     final_error = None
@@ -1327,7 +1335,28 @@ def _run_case(
                 bool(getattr(diag, "health_sampling_cache_available", False))
             )
             health_cache_used += int(bool(getattr(diag, "health_sampling_cache_used", False)))
+            health_activation_allowed += int(
+                bool(getattr(diag, "health_sampling_activation_allowed", False))
+            )
             accepted_samples += int(diag.health_sampling_accepted)
+            health_rejected_invalid += int(getattr(diag, "health_sampling_rejected_invalid", 0))
+            health_rejected_limit += int(getattr(diag, "health_sampling_rejected_limit", 0))
+            health_rejected_collision += int(getattr(diag, "health_sampling_rejected_collision", 0))
+            health_rejected_score += int(getattr(diag, "health_sampling_rejected_score", 0))
+            base_score = float(getattr(diag, "health_sampling_base_score", float("nan")))
+            if math.isfinite(base_score):
+                health_base_scores.append(base_score)
+            best_score = float(getattr(diag, "health_sampling_best_score", float("nan")))
+            if math.isfinite(best_score):
+                health_best_scores.append(best_score)
+            best_source = getattr(diag, "health_sampling_best_source", None)
+            best_source_name = getattr(best_source, "name", None)
+            if best_source_name is None and best_source is not None:
+                best_source_name = str(best_source).split(".")[-1]
+            if best_source_name and best_source_name != "NONE":
+                health_best_source_counts[best_source_name] = (
+                    health_best_source_counts.get(best_source_name, 0) + 1
+                )
             exact_collision_queries += int(getattr(result, "collision_exact_distance_queries", 0))
             final_error = float(result.position_error + result.orientation_error)
             if start_error is None:
@@ -1487,7 +1516,15 @@ def _run_case(
         "health_sampling_applied_steps": int(health_applied),
         "health_sampling_cache_available_steps": int(health_cache_available),
         "health_sampling_cache_used_steps": int(health_cache_used),
+        "health_sampling_activation_allowed_steps": int(health_activation_allowed),
         "health_sampling_accepted_samples": int(accepted_samples),
+        "health_sampling_rejected_invalid": int(health_rejected_invalid),
+        "health_sampling_rejected_limit": int(health_rejected_limit),
+        "health_sampling_rejected_collision": int(health_rejected_collision),
+        "health_sampling_rejected_score": int(health_rejected_score),
+        "health_sampling_base_score": _stats(health_base_scores),
+        "health_sampling_best_score": _stats(health_best_scores),
+        "health_sampling_best_source_counts": health_best_source_counts,
         "collision_exact_distance_queries": int(exact_collision_queries),
         "parallel_seed_worker_mode": (
             seed_worker_mode if mode in _PARALLEL_SEED_MODES else "disabled"

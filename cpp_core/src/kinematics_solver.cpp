@@ -5312,6 +5312,7 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
 
       const HealthScore base_score = compute_health_score();
       const double base_combined_score = combined_health_score(base_score);
+      result.health_sampling_base_score = base_combined_score;
       const bool joint_activation_gate_enabled =
           std::isfinite(health_cfg.activation_joint_limit_cost) &&
           health_cfg.activation_joint_limit_cost >= 0.0;
@@ -5328,21 +5329,24 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
           (singularity_activation_gate_enabled &&
            base_score.singularity_raw <=
                health_cfg.activation_singularity_threshold);
-      if (health_activation_allowed) {
+      result.health_sampling_activation_allowed = health_activation_allowed;
       const bool cache_can_be_used =
           health_cfg.best_config_cache_enabled && health_sampling_cache_valid_ &&
           health_sampling_cache_q_.size() == nq &&
           health_sampling_cache_q_.allFinite();
       result.health_sampling_cache_available = cache_can_be_used;
+      if (health_activation_allowed) {
       Eigen::VectorXd best_delta_v = Eigen::VectorXd::Zero(nv);
       double best_score_delta = -std::numeric_limits<double>::infinity();
+      double best_combined_score = std::numeric_limits<double>::quiet_NaN();
       double best_joint_delta = std::numeric_limits<double>::quiet_NaN();
       double best_singularity_delta = std::numeric_limits<double>::quiet_NaN();
       double best_collision_delta = std::numeric_limits<double>::quiet_NaN();
-      bool best_from_cache = false;
+      HealthSamplingCandidateSource best_source =
+          HealthSamplingCandidateSource::kNone;
 
       auto evaluate_delta = [&](const Eigen::VectorXd &delta_v,
-                                bool from_cache) {
+                                HealthSamplingCandidateSource source) {
         if (delta_v.size() != nv || !delta_v.allFinite() ||
             delta_v.norm() <= 1e-12) {
           return;
@@ -5351,20 +5355,24 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
         const Eigen::VectorXd q_candidate =
             pinocchio::integrate(robot_->model(), q_eval, delta_v);
         if (q_candidate.size() != nq || !q_candidate.allFinite()) {
+          ++result.health_sampling_rejected_invalid;
           return;
         }
         for (int idx : active_velocity_indices) {
           const int qi = velocity_to_config_index[idx];
           if (qi < 0 || qi >= q_candidate.size() ||
               qi >= q_lower.size() || qi >= q_upper.size()) {
+            ++result.health_sampling_rejected_invalid;
             return;
           }
           if (std::isfinite(q_lower(qi)) &&
               q_candidate(qi) < q_lower(qi) - 1e-9) {
+            ++result.health_sampling_rejected_limit;
             return;
           }
           if (std::isfinite(q_upper(qi)) &&
               q_candidate(qi) > q_upper(qi) + 1e-9) {
+            ++result.health_sampling_rejected_limit;
             return;
           }
         }
@@ -5382,6 +5390,7 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
           collision_delta =
               *cand_score.collision_distance - *base_score.collision_distance;
           if (collision_delta < -std::max(0.0, health_cfg.collision_worsen_tolerance)) {
+            ++result.health_sampling_rejected_collision;
             return;
           }
         }
@@ -5391,12 +5400,14 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
             health_cfg.singularity_weight * singularity_delta +
             health_cfg.collision_weight * collision_delta;
         if (score_delta <= health_cfg.min_score_improvement) {
+          ++result.health_sampling_rejected_score;
           return;
         }
 
         ++result.health_sampling_accepted;
         if (score_delta > best_score_delta) {
           best_score_delta = score_delta;
+          best_combined_score = combined_health_score(cand_score);
           best_delta_v = delta_v;
           best_joint_delta = joint_delta;
           best_singularity_delta = singularity_delta;
@@ -5405,7 +5416,7 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
                cand_score.collision_distance)
                   ? collision_delta
                   : std::numeric_limits<double>::quiet_NaN();
-          best_from_cache = from_cache;
+          best_source = source;
         }
       };
 
@@ -5427,7 +5438,7 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
           const double projected_norm = projected_gradient.norm();
           if (projected_norm > 1e-12) {
             evaluate_delta((radius / projected_norm) * projected_gradient,
-                           false);
+                           HealthSamplingCandidateSource::kGradient);
           }
         }
       }
@@ -5455,7 +5466,8 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
                 project_primary_nullspace(scale * cache_delta);
             const double projected_norm = projected_cache_delta.norm();
             if (projected_norm > 1e-12) {
-              evaluate_delta(projected_cache_delta, true);
+              evaluate_delta(projected_cache_delta,
+                             HealthSamplingCandidateSource::kCache);
             }
           }
         }
@@ -5482,7 +5494,8 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
             project_primary_nullspace((radius / norm) * delta);
         const double projected_norm = projected_delta.norm();
         if (projected_norm > 1e-12) {
-          evaluate_delta((radius / projected_norm) * projected_delta, false);
+          evaluate_delta((radius / projected_norm) * projected_delta,
+                         HealthSamplingCandidateSource::kRandom);
         }
       }
 
@@ -5526,13 +5539,16 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
           objective_tasks.push_back(nullptr);
           result.health_sampling_applied = true;
           result.health_sampling_score_delta = best_score_delta;
+          result.health_sampling_best_score = best_combined_score;
+          result.health_sampling_best_source = best_source;
           result.health_sampling_joint_limit_delta = best_joint_delta;
           result.health_sampling_singularity_delta = best_singularity_delta;
           result.health_sampling_collision_distance_delta =
               best_collision_delta;
           result.health_sampling_bias_norm =
               (health_cfg.gain * best_delta_v / std::max(dt_, 1e-9)).norm();
-          result.health_sampling_cache_used = best_from_cache;
+          result.health_sampling_cache_used =
+              best_source == HealthSamplingCandidateSource::kCache;
         }
       }
       }

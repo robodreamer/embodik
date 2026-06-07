@@ -103,6 +103,61 @@ def _assert_diagnostics_mirror_result(result) -> None:
     assert list(diagnostics.task_modes_effective) == list(result.task_modes_effective)
     expected_any = result.collision_rejection_count > 0 or result.stall_escape_count > 0
     assert diagnostics.any_intervention is expected_any
+    assert diagnostics.health_sampling_available == result.health_sampling_available
+    assert diagnostics.health_sampling_applied == result.health_sampling_applied
+    assert diagnostics.health_sampling_cache_available == result.health_sampling_cache_available
+    assert diagnostics.health_sampling_cache_used == result.health_sampling_cache_used
+    assert (
+        diagnostics.health_sampling_activation_allowed == result.health_sampling_activation_allowed
+    )
+    assert diagnostics.health_sampling_sampled == result.health_sampling_sampled
+    assert diagnostics.health_sampling_accepted == result.health_sampling_accepted
+    assert diagnostics.health_sampling_rejected_invalid == result.health_sampling_rejected_invalid
+    assert diagnostics.health_sampling_rejected_limit == result.health_sampling_rejected_limit
+    assert (
+        diagnostics.health_sampling_rejected_collision == result.health_sampling_rejected_collision
+    )
+    assert diagnostics.health_sampling_rejected_score == result.health_sampling_rejected_score
+    _assert_float_mirror(
+        diagnostics.health_sampling_score_delta,
+        result.health_sampling_score_delta,
+    )
+    _assert_float_mirror(
+        diagnostics.health_sampling_base_score,
+        result.health_sampling_base_score,
+    )
+    _assert_float_mirror(
+        diagnostics.health_sampling_best_score,
+        result.health_sampling_best_score,
+    )
+    assert diagnostics.health_sampling_best_source == result.health_sampling_best_source
+    _assert_float_mirror(
+        diagnostics.health_sampling_joint_limit_delta,
+        result.health_sampling_joint_limit_delta,
+    )
+    _assert_float_mirror(
+        diagnostics.health_sampling_singularity_delta,
+        result.health_sampling_singularity_delta,
+    )
+    _assert_float_mirror(
+        diagnostics.health_sampling_collision_distance_delta,
+        result.health_sampling_collision_distance_delta,
+    )
+    _assert_float_mirror(
+        diagnostics.health_sampling_bias_norm,
+        result.health_sampling_bias_norm,
+    )
+    _assert_float_mirror(
+        diagnostics.health_sampling_time_ms,
+        result.health_sampling_time_ms,
+    )
+
+
+def _assert_float_mirror(diagnostics_value: float, result_value: float) -> None:
+    if np.isnan(result_value):
+        assert np.isnan(diagnostics_value)
+    else:
+        assert diagnostics_value == result_value
 
 
 def test_solve_diagnostics_mirror_invalid_input_result() -> None:

@@ -70,6 +70,14 @@ NB_MODULE(_embodik_impl, m) {
              eik::SolverRecoveryStage::kWeightedFallback)
       .export_values();
 
+  nb::enum_<eik::HealthSamplingCandidateSource>(
+      m, "HealthSamplingCandidateSource")
+      .value("NONE", eik::HealthSamplingCandidateSource::kNone)
+      .value("GRADIENT", eik::HealthSamplingCandidateSource::kGradient)
+      .value("CACHE", eik::HealthSamplingCandidateSource::kCache)
+      .value("RANDOM", eik::HealthSamplingCandidateSource::kRandom)
+      .export_values();
+
   // Types
   nb::class_<eik::BasicSolverConfig>(m, "BasicSolverConfig",
                                      "Basic configuration for solver")
@@ -176,12 +184,28 @@ NB_MODULE(_embodik_impl, m) {
               &eik::VelocitySolverResult::health_sampling_cache_available)
       .def_ro("health_sampling_cache_used",
               &eik::VelocitySolverResult::health_sampling_cache_used)
+      .def_ro("health_sampling_activation_allowed",
+              &eik::VelocitySolverResult::health_sampling_activation_allowed)
       .def_ro("health_sampling_sampled",
               &eik::VelocitySolverResult::health_sampling_sampled)
       .def_ro("health_sampling_accepted",
               &eik::VelocitySolverResult::health_sampling_accepted)
+      .def_ro("health_sampling_rejected_invalid",
+              &eik::VelocitySolverResult::health_sampling_rejected_invalid)
+      .def_ro("health_sampling_rejected_limit",
+              &eik::VelocitySolverResult::health_sampling_rejected_limit)
+      .def_ro("health_sampling_rejected_collision",
+              &eik::VelocitySolverResult::health_sampling_rejected_collision)
+      .def_ro("health_sampling_rejected_score",
+              &eik::VelocitySolverResult::health_sampling_rejected_score)
       .def_ro("health_sampling_score_delta",
               &eik::VelocitySolverResult::health_sampling_score_delta)
+      .def_ro("health_sampling_base_score",
+              &eik::VelocitySolverResult::health_sampling_base_score)
+      .def_ro("health_sampling_best_score",
+              &eik::VelocitySolverResult::health_sampling_best_score)
+      .def_ro("health_sampling_best_source",
+              &eik::VelocitySolverResult::health_sampling_best_source)
       .def_ro("health_sampling_joint_limit_delta",
               &eik::VelocitySolverResult::health_sampling_joint_limit_delta)
       .def_ro("health_sampling_singularity_delta",
@@ -607,12 +631,28 @@ NB_MODULE(_embodik_impl, m) {
               &eik::SolveDiagnostics::health_sampling_cache_available)
       .def_ro("health_sampling_cache_used",
               &eik::SolveDiagnostics::health_sampling_cache_used)
+      .def_ro("health_sampling_activation_allowed",
+              &eik::SolveDiagnostics::health_sampling_activation_allowed)
       .def_ro("health_sampling_sampled",
               &eik::SolveDiagnostics::health_sampling_sampled)
       .def_ro("health_sampling_accepted",
               &eik::SolveDiagnostics::health_sampling_accepted)
+      .def_ro("health_sampling_rejected_invalid",
+              &eik::SolveDiagnostics::health_sampling_rejected_invalid)
+      .def_ro("health_sampling_rejected_limit",
+              &eik::SolveDiagnostics::health_sampling_rejected_limit)
+      .def_ro("health_sampling_rejected_collision",
+              &eik::SolveDiagnostics::health_sampling_rejected_collision)
+      .def_ro("health_sampling_rejected_score",
+              &eik::SolveDiagnostics::health_sampling_rejected_score)
       .def_ro("health_sampling_score_delta",
               &eik::SolveDiagnostics::health_sampling_score_delta)
+      .def_ro("health_sampling_base_score",
+              &eik::SolveDiagnostics::health_sampling_base_score)
+      .def_ro("health_sampling_best_score",
+              &eik::SolveDiagnostics::health_sampling_best_score)
+      .def_ro("health_sampling_best_source",
+              &eik::SolveDiagnostics::health_sampling_best_source)
       .def_ro("health_sampling_joint_limit_delta",
               &eik::SolveDiagnostics::health_sampling_joint_limit_delta)
       .def_ro("health_sampling_singularity_delta",
@@ -725,9 +765,22 @@ NB_MODULE(_embodik_impl, m) {
             d.health_sampling_cache_available =
                 r.health_sampling_cache_available;
             d.health_sampling_cache_used = r.health_sampling_cache_used;
+            d.health_sampling_activation_allowed =
+                r.health_sampling_activation_allowed;
             d.health_sampling_sampled = r.health_sampling_sampled;
             d.health_sampling_accepted = r.health_sampling_accepted;
+            d.health_sampling_rejected_invalid =
+                r.health_sampling_rejected_invalid;
+            d.health_sampling_rejected_limit =
+                r.health_sampling_rejected_limit;
+            d.health_sampling_rejected_collision =
+                r.health_sampling_rejected_collision;
+            d.health_sampling_rejected_score =
+                r.health_sampling_rejected_score;
             d.health_sampling_score_delta = r.health_sampling_score_delta;
+            d.health_sampling_base_score = r.health_sampling_base_score;
+            d.health_sampling_best_score = r.health_sampling_best_score;
+            d.health_sampling_best_source = r.health_sampling_best_source;
             d.health_sampling_joint_limit_delta =
                 r.health_sampling_joint_limit_delta;
             d.health_sampling_singularity_delta =

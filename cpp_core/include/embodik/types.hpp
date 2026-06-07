@@ -52,6 +52,13 @@ enum class SolverRecoveryStage {
   kWeightedFallback = 1,
 };
 
+enum class HealthSamplingCandidateSource {
+  kNone = 0,
+  kGradient = 1,
+  kCache = 2,
+  kRandom = 3,
+};
+
 enum class SolverStatus {
   kSuccess = 0,
   kInvalidInput = 1,
@@ -192,10 +199,21 @@ struct VelocitySolverResult : public SolverResult {
   bool health_sampling_applied = false;
   bool health_sampling_cache_available = false;
   bool health_sampling_cache_used = false;
+  bool health_sampling_activation_allowed = false;
   std::uint32_t health_sampling_sampled = 0;
   std::uint32_t health_sampling_accepted = 0;
+  std::uint32_t health_sampling_rejected_invalid = 0;
+  std::uint32_t health_sampling_rejected_limit = 0;
+  std::uint32_t health_sampling_rejected_collision = 0;
+  std::uint32_t health_sampling_rejected_score = 0;
   double health_sampling_score_delta =
       std::numeric_limits<double>::quiet_NaN();
+  double health_sampling_base_score =
+      std::numeric_limits<double>::quiet_NaN();
+  double health_sampling_best_score =
+      std::numeric_limits<double>::quiet_NaN();
+  HealthSamplingCandidateSource health_sampling_best_source =
+      HealthSamplingCandidateSource::kNone;
   double health_sampling_joint_limit_delta =
       std::numeric_limits<double>::quiet_NaN();
   double health_sampling_singularity_delta =
@@ -497,10 +515,21 @@ struct SolveDiagnostics {
   bool health_sampling_applied = false;
   bool health_sampling_cache_available = false;
   bool health_sampling_cache_used = false;
+  bool health_sampling_activation_allowed = false;
   std::uint32_t health_sampling_sampled = 0;
   std::uint32_t health_sampling_accepted = 0;
+  std::uint32_t health_sampling_rejected_invalid = 0;
+  std::uint32_t health_sampling_rejected_limit = 0;
+  std::uint32_t health_sampling_rejected_collision = 0;
+  std::uint32_t health_sampling_rejected_score = 0;
   double health_sampling_score_delta =
       std::numeric_limits<double>::quiet_NaN();
+  double health_sampling_base_score =
+      std::numeric_limits<double>::quiet_NaN();
+  double health_sampling_best_score =
+      std::numeric_limits<double>::quiet_NaN();
+  HealthSamplingCandidateSource health_sampling_best_source =
+      HealthSamplingCandidateSource::kNone;
   double health_sampling_joint_limit_delta =
       std::numeric_limits<double>::quiet_NaN();
   double health_sampling_singularity_delta =
