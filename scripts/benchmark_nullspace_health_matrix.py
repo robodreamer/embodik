@@ -42,22 +42,32 @@ class Scenario:
 
 _HEALTH_SAMPLING_MODES = {
     "health_sampling",
+    "health_sampling_cache_only",
     "health_sampling_collision",
     "health_sampling_parallel_seed",
+    "ramped_parallel_seed_cache",
 }
 _PARALLEL_SEED_MODES = {
     "parallel_seed_recovery",
     "health_sampling_parallel_seed",
     "ramped_parallel_seed",
+    "ramped_parallel_seed_cache",
+    "ramped_parallel_seed_strict",
 }
 _RAMPED_PARALLEL_SEED_MODES = {
     "ramped_parallel_seed",
+    "ramped_parallel_seed_cache",
+    "ramped_parallel_seed_strict",
 }
 _PROJECTED_GRADIENT_MODES = {
     "projected_health_gradient",
 }
 _HYBRID_MIN_ERROR_MODES = {
     "projected_min_error_hybrid",
+    "projected_min_error_hybrid_smooth",
+    "projected_min_error_hybrid_smooth_stall_only",
+    "projected_min_error_hybrid_smooth_strict",
+    "projected_min_error_hybrid_smooth_strict_throttled",
 }
 
 
@@ -102,6 +112,9 @@ class ParallelSeedExperimentConfig:
     hybrid_min_error_max_correction_delta_component: float = 0.00025
     hybrid_min_error_max_step_delta_norm: float = 0.0005
     hybrid_min_error_max_step_jerk_norm: float = 0.002
+    hybrid_min_error_exit_decay: float = 0.82
+    hybrid_min_error_hold_ticks: int = 6
+    hybrid_min_error_refresh_interval: int = 1
 
 
 @dataclass
@@ -124,6 +137,7 @@ class ParallelSeedExperimentStats:
     hybrid_min_error_applied_steps: int = 0
     hybrid_min_error_health_debt_steps: int = 0
     hybrid_min_error_time_ms_total: float = 0.0
+    hybrid_min_error_smoothed_steps: int = 0
 
 
 @dataclass
@@ -131,6 +145,8 @@ class RampedSeedRecoveryState:
     correction: np.ndarray | None = None
     target_q: np.ndarray | None = None
     active_ticks: int = 0
+    hold_ticks_remaining: int = 0
+    refresh_cooldown: int = 0
 
 
 def _stats(values: list[float]) -> dict[str, float]:
@@ -153,18 +169,29 @@ def _make_runtime(
         "baseline",
         "weighted_fallback",
         "health_sampling",
+        "health_sampling_cache_only",
         "health_sampling_collision",
         "parallel_seed_recovery",
         "health_sampling_parallel_seed",
         "ramped_parallel_seed",
+        "ramped_parallel_seed_cache",
+        "ramped_parallel_seed_strict",
         "projected_health_gradient",
         "projected_min_error_hybrid",
+        "projected_min_error_hybrid_smooth",
+        "projected_min_error_hybrid_smooth_stall_only",
+        "projected_min_error_hybrid_smooth_strict",
+        "projected_min_error_hybrid_smooth_strict_throttled",
     }
     cfg.weighted_advisor_enabled = mode == "weighted_fallback"
     if mode in _HEALTH_SAMPLING_MODES:
         cfg.health_sampling.enabled = True
         cfg.health_sampling.seed = 20260606
-        cfg.health_sampling.sample_count = int(sample_budget)
+        cfg.health_sampling.sample_count = (
+            0
+            if mode in {"health_sampling_cache_only", "ramped_parallel_seed_cache"}
+            else int(sample_budget)
+        )
         cfg.health_sampling.sample_radius = 0.02
         cfg.health_sampling.gain = 0.2
         cfg.health_sampling.collision_scoring = bool(collision_scoring)
@@ -921,89 +948,25 @@ def _projected_health_gradient_step(
     return q_candidate, True
 
 
-def _bounded_min_error_hybrid_step(
+def _evaluate_hybrid_correction(
     *,
     main_solver: eik.KinematicsSolver,
     main_robot: eik.RobotModel,
     main_task: eik.Task,
     q_current: np.ndarray,
     q_primary: np.ndarray,
-    target: np.ndarray,
-    task_name: str,
+    correction: np.ndarray,
     primary_error: float,
     base_health,
-    base_jacobian: np.ndarray,
     prev_step: np.ndarray,
     prev_step_delta: np.ndarray,
     collision_scoring: bool,
-    state: RampedSeedRecoveryState,
     stats: ParallelSeedExperimentStats,
     cfg: ParallelSeedExperimentConfig,
     opts: eik.PositionStepOptions,
-) -> tuple[np.ndarray, bool, float]:
-    del base_jacobian
-    q_current = np.asarray(q_current, dtype=float)
-    q_primary = np.asarray(q_primary, dtype=float)
-    primary_step = q_primary - q_current
-    if float(np.linalg.norm(primary_step)) > cfg.zero_motion_step_norm:
-        return q_primary, False, 0.0
-    if primary_error <= 1e-4:
-        return q_primary, False, 0.0
-    if state.correction is None or state.correction.size != q_current.size:
-        state.correction = np.zeros_like(q_current)
-
-    old_mode = main_task.solve_mode
-    old_fallback = main_task.allow_min_error_fallback
-    stats.hybrid_min_error_attempted_steps += 1
-    t0 = time.perf_counter()
-    try:
-        main_task.solve_mode = eik.TaskSolveMode.MIN_ERROR
-        main_task.allow_min_error_fallback = True
-        result = main_solver.solve_position_step(q_current, target, task_name, opts)
-    finally:
-        main_task.solve_mode = old_mode
-        main_task.allow_min_error_fallback = old_fallback
-    elapsed_ms = (time.perf_counter() - t0) * 1000.0
-    stats.hybrid_min_error_time_ms_total += elapsed_ms
-
-    q_candidate = np.asarray(result.q_solution, dtype=float)
-    if q_candidate.size != q_current.size or not np.all(np.isfinite(q_candidate)):
-        stats.rejected_limit += 1
-        return q_primary, False, elapsed_ms
-
-    desired = q_candidate - q_primary
-    gain = max(0.0, min(1.0, float(cfg.hybrid_min_error_ramp_gain)))
-    next_correction = state.correction + gain * (desired - state.correction)
-    next_correction = _limit_vector(
-        next_correction,
-        max_norm=cfg.hybrid_min_error_max_correction_norm,
-        max_component=cfg.hybrid_min_error_max_correction_component,
-    )
-    correction_delta = _limit_vector(
-        next_correction - state.correction,
-        max_norm=cfg.hybrid_min_error_max_correction_delta_norm,
-        max_component=cfg.hybrid_min_error_max_correction_delta_component,
-    )
-    next_correction = state.correction + correction_delta
-    if float(np.linalg.norm(next_correction)) <= 1e-12:
-        state.correction *= max(0.0, min(1.0, float(cfg.hybrid_min_error_ramp_decay)))
-        stats.rejected_continuity += 1
-        return q_primary, False, elapsed_ms
-
-    q_candidate = q_primary + next_correction
-
-    candidate_error = _task_error_at(main_robot, main_task, q_candidate)
-    main_robot.update_configuration(q_current)
-    main_task.update(main_robot)
-    required_gain = max(
-        cfg.hybrid_min_error_tracking_gain_abs,
-        cfg.hybrid_min_error_tracking_gain_rel * max(primary_error, 1e-12),
-    )
-    if candidate_error > primary_error - required_gain:
-        stats.rejected_tracking += 1
-        state.correction *= max(0.0, min(1.0, float(cfg.hybrid_min_error_ramp_decay)))
-        return q_primary, False, elapsed_ms
-
+    require_tracking_gain: bool,
+) -> tuple[np.ndarray | None, float]:
+    q_candidate = q_primary + correction
     q_lower, q_upper = main_robot.get_joint_limits()
     lower = np.asarray(q_lower, dtype=float)
     upper = np.asarray(q_upper, dtype=float)
@@ -1012,8 +975,7 @@ def _bounded_min_error_hybrid_step(
         q_candidate[:n] = np.clip(q_candidate[:n], lower[:n], upper[:n])
         if np.any(q_candidate[:n] < lower[:n] - 1e-9) or np.any(q_candidate[:n] > upper[:n] + 1e-9):
             stats.rejected_limit += 1
-            state.correction *= max(0.0, min(1.0, float(cfg.hybrid_min_error_ramp_decay)))
-            return q_primary, False, elapsed_ms
+            return None, 0.0
 
     step = q_candidate - q_current
     if (
@@ -1021,16 +983,14 @@ def _bounded_min_error_hybrid_step(
         or float(np.max(np.abs(step))) > cfg.max_step_component
     ):
         stats.rejected_continuity += 1
-        state.correction *= max(0.0, min(1.0, float(cfg.hybrid_min_error_ramp_decay)))
-        return q_primary, False, elapsed_ms
+        return None, 0.0
 
     vel_limits = np.asarray(main_robot.get_velocity_limits(), dtype=float)
     dt_safe = max(float(opts.dt if opts.dt > 0.0 else main_solver.dt), 1e-12)
     m = min(step.size, vel_limits.size)
     if m > 0 and np.any(np.abs(step[:m] / dt_safe) > vel_limits[:m] + 1e-9):
         stats.rejected_continuity += 1
-        state.correction *= max(0.0, min(1.0, float(cfg.hybrid_min_error_ramp_decay)))
-        return q_primary, False, elapsed_ms
+        return None, 0.0
 
     step_delta = step - prev_step
     step_jerk = step_delta - prev_step_delta
@@ -1039,20 +999,41 @@ def _bounded_min_error_hybrid_step(
         or float(np.linalg.norm(step_jerk)) > cfg.hybrid_min_error_max_step_jerk_norm
     ):
         stats.rejected_continuity += 1
-        state.correction *= max(0.0, min(1.0, float(cfg.hybrid_min_error_ramp_decay)))
-        return q_primary, False, elapsed_ms
+        return None, 0.0
+
+    candidate_error = _task_error_at(main_robot, main_task, q_candidate)
+    main_robot.update_configuration(q_current)
+    main_task.update(main_robot)
+    if require_tracking_gain:
+        required_gain = max(
+            cfg.hybrid_min_error_tracking_gain_abs,
+            cfg.hybrid_min_error_tracking_gain_rel * max(primary_error, 1e-12),
+        )
+        if candidate_error > primary_error - required_gain:
+            stats.rejected_tracking += 1
+            return None, 0.0
+    else:
+        allowed_error = primary_error + max(
+            cfg.task_error_abs_tolerance,
+            cfg.task_error_rel_tolerance * max(primary_error, 1e-12),
+        )
+        if candidate_error > allowed_error:
+            stats.rejected_tracking += 1
+            return None, 0.0
 
     current_collision = float("inf")
     candidate_collision = float("inf")
     if collision_scoring:
         current_collision = _collision_distance_at(main_solver, main_robot, q_current, q_current)
         candidate_collision = _collision_distance_at(
-            main_solver, main_robot, q_candidate, q_current
+            main_solver,
+            main_robot,
+            q_candidate,
+            q_current,
         )
         if candidate_collision - current_collision < -cfg.collision_worsen_tolerance:
             stats.rejected_collision += 1
-            state.correction *= max(0.0, min(1.0, float(cfg.hybrid_min_error_ramp_decay)))
-            return q_primary, False, elapsed_ms
+            return None, 0.0
 
     main_robot.update_configuration(q_candidate)
     main_task.update(main_robot)
@@ -1073,11 +1054,155 @@ def _bounded_min_error_hybrid_step(
     score_delta = candidate_score - base_score
     if score_delta < -cfg.hybrid_health_debt_tolerance:
         stats.rejected_health += 1
-        state.correction *= max(0.0, min(1.0, float(cfg.hybrid_min_error_ramp_decay)))
-        return q_primary, False, elapsed_ms
+        return None, score_delta
+
+    return q_candidate, score_delta
+
+
+def _bounded_min_error_hybrid_step(
+    *,
+    main_solver: eik.KinematicsSolver,
+    main_robot: eik.RobotModel,
+    main_task: eik.Task,
+    q_current: np.ndarray,
+    q_primary: np.ndarray,
+    target: np.ndarray,
+    task_name: str,
+    primary_error: float,
+    base_health,
+    base_jacobian: np.ndarray,
+    prev_step: np.ndarray,
+    prev_step_delta: np.ndarray,
+    collision_scoring: bool,
+    state: RampedSeedRecoveryState,
+    stats: ParallelSeedExperimentStats,
+    cfg: ParallelSeedExperimentConfig,
+    opts: eik.PositionStepOptions,
+    smooth_on_reject: bool,
+) -> tuple[np.ndarray, bool, float]:
+    del base_jacobian
+    q_current = np.asarray(q_current, dtype=float)
+    q_primary = np.asarray(q_primary, dtype=float)
+    primary_step = q_primary - q_current
+    if state.correction is None or state.correction.size != q_current.size:
+        state.correction = np.zeros_like(q_current)
+
+    def smooth_exit(elapsed_ms: float) -> tuple[np.ndarray, bool, float]:
+        if (
+            not smooth_on_reject
+            or state.correction is None
+            or state.hold_ticks_remaining <= 0
+            or float(np.linalg.norm(state.correction)) <= 1e-12
+        ):
+            state.correction *= max(0.0, min(1.0, float(cfg.hybrid_min_error_ramp_decay)))
+            return q_primary, False, elapsed_ms
+
+        state.hold_ticks_remaining -= 1
+        decayed = state.correction * max(0.0, min(1.0, float(cfg.hybrid_min_error_exit_decay)))
+        if float(np.linalg.norm(decayed)) <= 1e-12:
+            state.correction = decayed
+            return q_primary, False, elapsed_ms
+
+        q_smooth, score_delta = _evaluate_hybrid_correction(
+            main_solver=main_solver,
+            main_robot=main_robot,
+            main_task=main_task,
+            q_current=q_current,
+            q_primary=q_primary,
+            correction=decayed,
+            primary_error=primary_error,
+            base_health=base_health,
+            prev_step=prev_step,
+            prev_step_delta=prev_step_delta,
+            collision_scoring=collision_scoring,
+            stats=stats,
+            cfg=cfg,
+            opts=opts,
+            require_tracking_gain=False,
+        )
+        if q_smooth is None:
+            state.correction *= max(0.0, min(1.0, float(cfg.hybrid_min_error_ramp_decay)))
+            return q_primary, False, elapsed_ms
+
+        state.correction = decayed
+        state.active_ticks += 1
+        stats.accepted_steps += 1
+        stats.hybrid_min_error_applied_steps += 1
+        stats.hybrid_min_error_smoothed_steps += 1
+        stats.hybrid_min_error_health_debt_steps += int(score_delta < 0.0)
+        stats.best_score_delta = max(stats.best_score_delta, score_delta)
+        return q_smooth, True, elapsed_ms
+
+    if float(np.linalg.norm(primary_step)) > cfg.zero_motion_step_norm:
+        return smooth_exit(0.0)
+    if primary_error <= 1e-4:
+        return smooth_exit(0.0)
+    if smooth_on_reject and state.refresh_cooldown > 0:
+        state.refresh_cooldown -= 1
+        return smooth_exit(0.0)
+
+    old_mode = main_task.solve_mode
+    old_fallback = main_task.allow_min_error_fallback
+    stats.hybrid_min_error_attempted_steps += 1
+    t0 = time.perf_counter()
+    try:
+        main_task.solve_mode = eik.TaskSolveMode.MIN_ERROR
+        main_task.allow_min_error_fallback = True
+        result = main_solver.solve_position_step(q_current, target, task_name, opts)
+    finally:
+        main_task.solve_mode = old_mode
+        main_task.allow_min_error_fallback = old_fallback
+    elapsed_ms = (time.perf_counter() - t0) * 1000.0
+    stats.hybrid_min_error_time_ms_total += elapsed_ms
+
+    q_candidate = np.asarray(result.q_solution, dtype=float)
+    if q_candidate.size != q_current.size or not np.all(np.isfinite(q_candidate)):
+        stats.rejected_limit += 1
+        return smooth_exit(elapsed_ms)
+
+    desired = q_candidate - q_primary
+    gain = max(0.0, min(1.0, float(cfg.hybrid_min_error_ramp_gain)))
+    next_correction = state.correction + gain * (desired - state.correction)
+    next_correction = _limit_vector(
+        next_correction,
+        max_norm=cfg.hybrid_min_error_max_correction_norm,
+        max_component=cfg.hybrid_min_error_max_correction_component,
+    )
+    correction_delta = _limit_vector(
+        next_correction - state.correction,
+        max_norm=cfg.hybrid_min_error_max_correction_delta_norm,
+        max_component=cfg.hybrid_min_error_max_correction_delta_component,
+    )
+    next_correction = state.correction + correction_delta
+    if float(np.linalg.norm(next_correction)) <= 1e-12:
+        stats.rejected_continuity += 1
+        return smooth_exit(elapsed_ms)
+
+    q_candidate, score_delta = _evaluate_hybrid_correction(
+        main_solver=main_solver,
+        main_robot=main_robot,
+        main_task=main_task,
+        q_current=q_current,
+        q_primary=q_primary,
+        correction=next_correction,
+        primary_error=primary_error,
+        base_health=base_health,
+        prev_step=prev_step,
+        prev_step_delta=prev_step_delta,
+        collision_scoring=collision_scoring,
+        stats=stats,
+        cfg=cfg,
+        opts=opts,
+        require_tracking_gain=True,
+    )
+    if q_candidate is None:
+        return smooth_exit(elapsed_ms)
 
     state.correction = next_correction
+    state.target_q = q_candidate.copy()
     state.active_ticks += 1
+    state.hold_ticks_remaining = max(0, int(cfg.hybrid_min_error_hold_ticks))
+    state.refresh_cooldown = max(0, int(cfg.hybrid_min_error_refresh_interval) - 1)
     stats.accepted_steps += 1
     stats.hybrid_min_error_applied_steps += 1
     stats.hybrid_min_error_health_debt_steps += int(score_delta < 0.0)
@@ -1121,8 +1246,42 @@ def _run_case(
     opts.orientation_gain = 10.0
 
     parallel_cfg = ParallelSeedExperimentConfig()
-    if mode in _RAMPED_PARALLEL_SEED_MODES:
+    if (
+        mode in _RAMPED_PARALLEL_SEED_MODES
+        or mode == "projected_min_error_hybrid_smooth_stall_only"
+    ):
         parallel_cfg = replace(parallel_cfg, activation_joint_limit_cost=float("inf"))
+    if mode == "ramped_parallel_seed_strict":
+        parallel_cfg = replace(
+            parallel_cfg,
+            ramp_gain=0.15,
+            ramp_max_correction_norm=0.0015,
+            ramp_max_correction_component=0.00075,
+            ramp_max_correction_delta_norm=0.0001,
+            ramp_max_correction_delta_component=0.00005,
+            max_primary_deviation_norm=0.004,
+            max_primary_deviation_component=0.002,
+        )
+    if mode in {
+        "projected_min_error_hybrid_smooth_strict",
+        "projected_min_error_hybrid_smooth_strict_throttled",
+    }:
+        parallel_cfg = replace(
+            parallel_cfg,
+            activation_joint_limit_cost=float("inf"),
+            hybrid_min_error_ramp_gain=0.2,
+            hybrid_min_error_max_correction_norm=0.003,
+            hybrid_min_error_max_correction_component=0.0015,
+            hybrid_min_error_max_correction_delta_norm=0.0001,
+            hybrid_min_error_max_correction_delta_component=0.00005,
+            hybrid_min_error_max_step_delta_norm=0.0002,
+            hybrid_min_error_max_step_jerk_norm=0.0005,
+            hybrid_min_error_exit_decay=0.9,
+            hybrid_min_error_hold_ticks=10,
+            hybrid_min_error_refresh_interval=(
+                3 if mode == "projected_min_error_hybrid_smooth_strict_throttled" else 1
+            ),
+        )
     parallel_stats = ParallelSeedExperimentStats()
     ramp_state = RampedSeedRecoveryState()
     hybrid_state = RampedSeedRecoveryState()
@@ -1267,6 +1426,13 @@ def _run_case(
                     stats=parallel_stats,
                     cfg=parallel_cfg,
                     opts=opts,
+                    smooth_on_reject=mode
+                    in {
+                        "projected_min_error_hybrid_smooth",
+                        "projected_min_error_hybrid_smooth_stall_only",
+                        "projected_min_error_hybrid_smooth_strict",
+                        "projected_min_error_hybrid_smooth_strict_throttled",
+                    },
                 )
                 if timings:
                     timings[-1] += extra_ms
@@ -1359,6 +1525,7 @@ def _run_case(
             parallel_stats.hybrid_min_error_health_debt_steps
         ),
         "hybrid_min_error_active_ticks": int(hybrid_state.active_ticks),
+        "hybrid_min_error_smoothed_steps": int(parallel_stats.hybrid_min_error_smoothed_steps),
         "hybrid_min_error_avg_time_ms": (
             float(
                 parallel_stats.hybrid_min_error_time_ms_total
@@ -1403,12 +1570,19 @@ def main() -> None:
             "min_error",
             "elastic_scale",
             "health_sampling",
+            "health_sampling_cache_only",
             "health_sampling_collision",
             "parallel_seed_recovery",
             "health_sampling_parallel_seed",
             "ramped_parallel_seed",
+            "ramped_parallel_seed_cache",
+            "ramped_parallel_seed_strict",
             "projected_health_gradient",
             "projected_min_error_hybrid",
+            "projected_min_error_hybrid_smooth",
+            "projected_min_error_hybrid_smooth_stall_only",
+            "projected_min_error_hybrid_smooth_strict",
+            "projected_min_error_hybrid_smooth_strict_throttled",
         ],
     )
     parser.add_argument(

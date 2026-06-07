@@ -7855,6 +7855,7 @@ PositionIKResult KinematicsSolver::solve_position_step(
 
   clear_all_target_velocities();
 
+  robot_->update_configuration(q);
   result.q_solution = q;
   result.achieved_pose = robot_->get_frame_pose(frame_task->getFrameName());
   result.iterations_used = steps_used;
@@ -8886,6 +8887,7 @@ PositionIKResult KinematicsSolver::solve_position_step(
     }
   }
 
+  robot_->update_configuration(q);
   result.q_solution = q;
   result.iterations_used = steps_used;
 

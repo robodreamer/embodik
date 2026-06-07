@@ -180,6 +180,75 @@ class TestCollisionViolatedStatusFromSafeSeed:
             ), f"Unexpected status: {result.status}"
 
 
+class TestPositionStepResultErrors:
+    """Position-step diagnostics should describe the returned q_solution."""
+
+    def test_min_error_step_reports_error_at_returned_configuration(
+        self, panda_robot, panda_solver
+    ):
+        panda_solver.configure_collision_constraint(
+            min_distance=0.03,
+            include_pairs=[],
+            exclude_pairs=[],
+            nearest_points_all_pairs=False,
+            max_constraints=3,
+        )
+
+        panda_solver.clear_tasks()
+        task = panda_solver.add_frame_task("ee_task", "panda_hand")
+        task.priority = 0
+        task.weight = 1.0
+        task.solve_mode = embodik.TaskSolveMode.SCALE
+        task.allow_min_error_fallback = False
+        panda_solver.dt = 0.01
+        panda_solver.set_damping(0.1)
+
+        q = np.array([0.0, -0.785, 0.0, -2.85, 0.0, 0.08, 0.785, 0.04, 0.04], dtype=float)
+        panda_robot.update_configuration(q)
+        pose = panda_robot.get_frame_pose("panda_hand")
+        target = np.eye(4, dtype=float)
+        target[:3, :3] = np.asarray(pose.rotation, dtype=float)
+        target[:3, 3] = np.asarray(pose.translation, dtype=float) + np.array([-0.12, 0.0, 0.08])
+
+        opts = embodik.PositionStepOptions()
+        opts.dt = 0.01
+        opts.max_steps = 1
+        opts.position_gain = 1.0
+        opts.orientation_gain = 1.0
+        opts.stall_recovery = False
+
+        q_stalled = None
+        scale_error = None
+        for _ in range(40):
+            out = panda_solver.solve_position_step(q, target, "ee_task", opts)
+            q_next = np.asarray(out.q_solution, dtype=float)
+            if np.linalg.norm(q_next - q) < 1e-8:
+                q_stalled = q.copy()
+                scale_error = float(out.position_error + out.orientation_error)
+                break
+            q = q_next
+            panda_robot.update_configuration(q)
+
+        assert q_stalled is not None
+        assert scale_error is not None
+
+        task.solve_mode = embodik.TaskSolveMode.MIN_ERROR
+        out = panda_solver.solve_position_step(q_stalled, target, "ee_task", opts)
+        q_solution = np.asarray(out.q_solution, dtype=float)
+        assert out.status == embodik.SolverStatus.SUCCESS
+        assert np.linalg.norm(q_solution - q_stalled) > 1e-4
+
+        panda_robot.update_configuration(q_solution)
+        task.update(panda_robot)
+        error = np.asarray(task.get_error(), dtype=float)
+        evaluated_error = float(np.linalg.norm(error[:3]) + np.linalg.norm(error[3:]))
+
+        assert evaluated_error < scale_error
+        assert out.position_error + out.orientation_error == pytest.approx(
+            evaluated_error, abs=1e-10
+        )
+
+
 class TestPerPairMinDistanceOverride:
     """Per-pair min_distance override API: set / get / clear."""
 
