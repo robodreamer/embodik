@@ -8,8 +8,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
 
-import embodik
 import numpy as np
+
+import embodik
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
@@ -32,6 +33,9 @@ try:
         _configure_collision_constraint,
         _generate_common_bimanual_collision_include_pairs,
         _generate_consecutive_collision_exclusions,
+        _is_arm_joint,
+        _is_left_arm_joint,
+        _is_right_arm_joint,
         _shrink_polygon_2d,
     )
     from example_helpers.ik_common import configure_solver_runtime_policy
@@ -55,6 +59,9 @@ except ModuleNotFoundError as exc:
         _configure_collision_constraint,
         _generate_common_bimanual_collision_include_pairs,
         _generate_consecutive_collision_exclusions,
+        _is_arm_joint,
+        _is_left_arm_joint,
+        _is_right_arm_joint,
         _shrink_polygon_2d,
     )
     from examples.example_helpers.ik_common import configure_solver_runtime_policy
@@ -106,9 +113,9 @@ def _collect_joint_indices(robot, joint_names: Iterable[str], ik_joint_names: It
         else:
             nv_joint = 1
         target = None
-        if joint_name.startswith(("arm_l_", "gripper_l_")):
+        if _is_left_arm_joint(joint_name):
             target = left_arm
-        elif joint_name.startswith(("arm_r_", "gripper_r_")):
+        elif _is_right_arm_joint(joint_name):
             target = right_arm
         elif joint_name.startswith("lift_"):
             target = lift
@@ -116,7 +123,7 @@ def _collect_joint_indices(robot, joint_names: Iterable[str], ik_joint_names: It
             expanded_idx = idx_v + offset
             if target is not None:
                 target.append(expanded_idx)
-            if joint_name.startswith("arm_"):
+            if _is_arm_joint(joint_name):
                 arm_controlled.append(expanded_idx)
             if joint_name in allowed:
                 continue

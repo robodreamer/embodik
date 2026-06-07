@@ -23,8 +23,12 @@ from examples.example_helpers.common_bimanual_model_utils import (  # noqa: E402
 )
 from examples.example_helpers.common_bimanual_teleop_app import (  # noqa: E402
     COMMON_BIMANUAL_SUPPORT_CONTACT_FRAMES,
+    DEFAULT_ADAPTIVE_DT_MAX_SCALE,
     DEFAULT_COMMON_BIMANUAL_SEED,
+    DEFAULT_MAX_ANGULAR_SPEED,
+    DEFAULT_MAX_LINEAR_SPEED,
     _apply_named_joint_seed,
+    _apply_position_step_speed_caps,
     _apply_soft_lift_margin,
     _compute_support_polygon_from_contacts,
     _configure_collision_constraint,
@@ -729,24 +733,197 @@ def _drive_unreachable_left_reach(*, allow_fallback: bool) -> tuple[float, int, 
     return extension, terminal_zero_motion, status
 
 
-def test_worker_unreachable_reach_does_not_freeze_with_min_error_fallback() -> None:
-    # Dragging a gizmo to a far, unreachable pose drives the prioritized SCALE
-    # solve to a zero task scale (the arm freezes mid-extension). With the
-    # min-error fallback enabled (the bimanual teleop app's default), the step
-    # degrades to MIN_ERROR and the arm keeps extending toward the target instead
-    # of freezing. Guards against regressing that hardening.
-    ext_off, stalls_off, _ = _drive_unreachable_left_reach(allow_fallback=False)
+def test_worker_unreachable_reach_no_longer_relies_on_min_error_fallback() -> None:
+    # Earlier hardening relied on MIN_ERROR fallback to keep a far unreachable
+    # reach from freezing. The newer weighted/advisor recovery stack should avoid
+    # that terminal freeze without needing far-target MIN_ERROR fallback, which
+    # keeps the fallback available as a near-target recovery tool instead of a
+    # large-residual tracking policy.
+    ext_off, stalls_off, status_off = _drive_unreachable_left_reach(allow_fallback=False)
     ext_on, stalls_on, status_on = _drive_unreachable_left_reach(allow_fallback=True)
 
-    assert ext_on > ext_off + 0.03, (
-        f"min-error fallback should reach further toward an unreachable target "
-        f"(on={ext_on*1000:.0f} mm vs off={ext_off*1000:.0f} mm)"
-    )
-    assert stalls_on < stalls_off, (
-        f"min-error fallback should reduce zero-motion freezing "
-        f"(on={stalls_on} vs off={stalls_off} terminal stalled steps)"
-    )
+    assert ext_off > 0.75, f"baseline recovery should still reach far target, got {ext_off:.3f} m"
+    assert stalls_off == 0
+    assert stalls_on <= stalls_off + 1
+    assert ext_on >= ext_off - 0.02
+    assert status_off == "SUCCESS"
     assert status_on == "SUCCESS"
+
+
+def _drive_far_left_reach_smoothness(
+    *,
+    max_linear_speed: float,
+    max_angular_speed: float,
+    adaptive_dt_max_scale: float,
+) -> dict[str, float | int | str]:
+    """Drive a discontinuous far target and return smoothness metrics."""
+    robot, frames, collision_urdf = _load_worker_collision_robot()
+    q_lo, q_hi = robot.get_joint_limits()
+    joint_name_to_cfg = {
+        name: int(robot.get_joint_config_index(name)) for name in robot.get_joint_names()
+    }
+    q = _apply_named_joint_seed(
+        robot.neutral_configuration(), joint_name_to_cfg, q_lo, q_hi, DEFAULT_COMMON_BIMANUAL_SEED
+    )
+    q = _apply_soft_lift_margin(q, joint_name_to_cfg=joint_name_to_cfg, q_lo=q_lo, q_hi=q_hi)
+    robot.update_configuration(q)
+
+    solver = embodik.KinematicsSolver(robot)
+    solver.dt = 0.01
+    configure_solver_runtime_policy(solver)
+    solver.enable_position_limits(True)
+    solver.enable_velocity_limits(True)
+    if hasattr(solver, "set_non_worsening_collision_floor_enabled"):
+        solver.set_non_worsening_collision_floor_enabled(True)
+
+    right_task = solver.add_frame_task(
+        "right_tool_pose", frames["right_tool"], embodik.TaskType.FRAME_POSE
+    )
+    left_task = solver.add_frame_task(
+        "left_tool_pose", frames["left_tool"], embodik.TaskType.FRAME_POSE
+    )
+    for task in (right_task, left_task):
+        task.priority = 0
+        task.weight = 1.0
+        task.solve_mode = embodik.TaskSolveMode.SCALE_ELASTIC
+        task.allow_min_error_fallback = True
+
+    left_arm_v = sorted(
+        int(robot.get_joint_velocity_index(n))
+        for n in robot.get_joint_names()
+        if n.startswith(("arm_l_", "gripper_l_"))
+    )
+    right_arm_v = sorted(
+        int(robot.get_joint_velocity_index(n))
+        for n in robot.get_joint_names()
+        if n.startswith(("arm_r_", "gripper_r_"))
+    )
+    right_task.set_excluded_joint_indices(left_arm_v)
+    left_task.set_excluded_joint_indices(right_arm_v)
+
+    posture = solver.add_posture_task("bimanual_posture")
+    posture.priority = 1
+    posture.weight = 1e-2
+    posture.set_target_configuration(q.copy())
+
+    exclusions = _generate_consecutive_collision_exclusions(robot, collision_urdf)
+    include_pairs = _generate_common_bimanual_collision_include_pairs(
+        robot, collision_urdf, exclusions
+    )
+    _configure_collision_constraint(
+        solver,
+        enabled=True,
+        min_distance_m=0.035,
+        max_constraints=3,
+        tuning_mode="balanced",
+        include_pairs=include_pairs,
+        exclude_pairs=exclusions,
+    )
+    if hasattr(solver, "configure_com_constraint") and "base" in frames:
+        polygon = _compute_support_polygon_from_contacts(
+            robot, COMMON_BIMANUAL_SUPPORT_CONTACT_FRAMES
+        )
+        solver.configure_com_constraint(
+            support_polygon=polygon,
+            margin=0.10,
+            frame_name=frames["base"],
+            com_vel_max=1.0,
+            com_acc_max=10.0,
+            use_acceleration_limits=False,
+            proximity_fraction=0.05,
+        )
+
+    right0 = _frame_pose_matrix(robot, frames["right_tool"])
+    left0 = _frame_pose_matrix(robot, frames["left_tool"])
+    left_start = left0[:3, 3].copy()
+    target = left_start + np.array([1.2, 0.0, 0.8], dtype=float)
+    target_direction = (target - left_start) / float(np.linalg.norm(target - left_start))
+
+    opts = embodik.PositionStepOptions()
+    opts.max_steps = 2
+    opts.position_gain = 10.0
+    opts.orientation_gain = 10.0
+    opts.adaptive_dt = True
+    opts.adaptive_dt_max_scale = float(adaptive_dt_max_scale)
+    opts.adaptive_dt_reference_distance = 0.02
+    if hasattr(opts, "primary_solve_mode"):
+        opts.primary_solve_mode = embodik.TaskSolveMode.SCALE_ELASTIC
+        opts.primary_allow_min_error_fallback = True
+    if hasattr(opts, "stall_recovery"):
+        opts.stall_recovery = True
+    _apply_position_step_speed_caps(
+        opts,
+        max_linear_speed=float(max_linear_speed),
+        max_angular_speed=float(max_angular_speed),
+    )
+
+    q_trace = []
+    errors = []
+    progress = []
+    status = "UNKNOWN"
+    fallback_steps = 0
+    left_pose = left0.copy()
+    left_pose[:3, 3] = target
+    for _ in range(80):
+        result = solver.solve_position_step(
+            q,
+            [
+                embodik.TaskTarget("right_tool_pose", right0, 10.0, 10.0),
+                embodik.TaskTarget("left_tool_pose", left_pose, 10.0, 10.0),
+            ],
+            opts,
+        )
+        q_next = np.asarray(getattr(result, "q_solution", q), dtype=float)
+        if q_next.shape == q.shape and np.all(np.isfinite(q_next)):
+            q = q_next
+        robot.update_configuration(q)
+        ee_pos = _frame_pose_matrix(robot, frames["left_tool"])[:3, 3]
+        errors.append(float(np.linalg.norm(target - ee_pos)))
+        progress.append(float(np.dot(ee_pos - left_start, target_direction)))
+        q_trace.append(q.copy())
+        status = result.status.name
+        diagnostics = getattr(result, "diagnostics", None)
+        fallback_steps += int(bool(getattr(diagnostics, "weighted_fallback_used", False)))
+
+    q_arr = np.vstack(q_trace)
+    q_steps = np.linalg.norm(np.diff(q_arr, axis=0), axis=1)
+    q_accel = np.linalg.norm(np.diff(q_arr, n=2, axis=0), axis=1)
+    error_arr = np.asarray(errors, dtype=float)
+    progress_arr = np.asarray(progress, dtype=float)
+    return {
+        "final_error": float(error_arr[-1]),
+        "min_error": float(error_arr.min()),
+        "error_increases": int(np.sum(np.diff(error_arr) > 1e-4)),
+        "backsteps": int(np.sum(np.diff(progress_arr) < -1e-4)),
+        "max_step_norm": float(q_steps.max()) if q_steps.size else 0.0,
+        "p95_step_norm": float(np.percentile(q_steps, 95)) if q_steps.size else 0.0,
+        "max_accel_norm": float(q_accel.max()) if q_accel.size else 0.0,
+        "fallback_steps": int(fallback_steps),
+        "final_status": status,
+    }
+
+
+def test_worker_far_target_default_speed_caps_dampen_oscillation() -> None:
+    uncapped = _drive_far_left_reach_smoothness(
+        max_linear_speed=0.0,
+        max_angular_speed=0.0,
+        adaptive_dt_max_scale=10.0,
+    )
+    capped = _drive_far_left_reach_smoothness(
+        max_linear_speed=DEFAULT_MAX_LINEAR_SPEED,
+        max_angular_speed=DEFAULT_MAX_ANGULAR_SPEED,
+        adaptive_dt_max_scale=DEFAULT_ADAPTIVE_DT_MAX_SCALE,
+    )
+
+    assert uncapped["error_increases"] >= 5
+    assert uncapped["backsteps"] >= 5
+    assert capped["error_increases"] <= 1, capped
+    assert capped["backsteps"] <= int(uncapped["backsteps"] * 0.75), (uncapped, capped)
+    assert capped["max_step_norm"] < uncapped["max_step_norm"] * 0.6
+    assert capped["max_accel_norm"] < uncapped["max_accel_norm"] * 0.6
+    assert capped["final_error"] <= uncapped["final_error"] + 1e-3
+    assert capped["fallback_steps"] == 0
+    assert capped["final_status"] == "SUCCESS"
 
 
 def _held_arm_drift_when_dragging_other(*, solve_mode, protect_held: bool = False) -> float:

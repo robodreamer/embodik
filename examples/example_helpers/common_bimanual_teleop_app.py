@@ -16,8 +16,9 @@ import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-import embodik
 import numpy as np
+
+import embodik
 from embodik.utils import q2r, r2q
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -73,6 +74,9 @@ except ModuleNotFoundError as exc:
 DEFAULT_SOLVER_DT = 0.01
 DEFAULT_POS_GAIN = 10.0
 DEFAULT_ROT_GAIN = 10.0
+DEFAULT_MAX_LINEAR_SPEED = 0.5
+DEFAULT_MAX_ANGULAR_SPEED = 1.0
+DEFAULT_ADAPTIVE_DT_MAX_SCALE = 5.0
 DEFAULT_POSTURE_WEIGHT = 1e-2
 DEFAULT_ARM_NULLSPACE_WEIGHT = 1.0
 COLLISION_TUNING_OPTIONS = ("speed", "balanced", "precise")
@@ -80,6 +84,7 @@ GEOMETRY_VIEW_OPTIONS = ("Visual", "Collision", "Both")
 POSTURE_SLIDER_DEADBAND = 1e-3
 EE_POSITION_DEADBAND = 1e-4
 EE_ROTATION_DEADBAND = 1e-3
+MIN_ERROR_FALLBACK_MAX_POSITION_ERROR_M = 0.25
 LIFT_LIMIT_MARGIN = 1e-3
 _ADAPTIVE_GAIN_CONFIG = AdaptiveGainTuningConfig()
 
@@ -96,6 +101,23 @@ def _require_position_step_primary_opts(opts: object) -> None:
             "Installed embodik is missing PositionStepOptions fields "
             f"{missing}. Rebuild this worktree with: pixi run install"
         )
+
+
+def _near_enough_for_min_error_fallback(position_error_m: float) -> bool:
+    return bool(
+        np.isfinite(position_error_m)
+        and position_error_m <= MIN_ERROR_FALLBACK_MAX_POSITION_ERROR_M
+    )
+
+
+def _apply_position_step_speed_caps(
+    opts: object, *, max_linear_speed: float, max_angular_speed: float
+) -> None:
+    """Apply task-space speed caps when supported by the installed bindings."""
+    if hasattr(opts, "max_linear_speed"):
+        opts.max_linear_speed = float(max_linear_speed)
+    if hasattr(opts, "max_angular_speed"):
+        opts.max_angular_speed = float(max_angular_speed)
 
 
 DEFAULT_MAX_COLLISION_CONSTRAINTS = 3
@@ -247,6 +269,100 @@ def _is_right_arm_joint(joint_name: str) -> bool:
 
 def _is_arm_joint(joint_name: str) -> bool:
     return _is_left_arm_joint(joint_name) or _is_right_arm_joint(joint_name)
+
+
+def _is_torso_contribution_joint(joint_name: str, lock_joint_names: set[str] | None = None) -> bool:
+    """Return True for the mobile-base / torso chain used by the contribution knob."""
+    if lock_joint_names is not None and joint_name in lock_joint_names:
+        return True
+    low = joint_name.lower()
+    return any(
+        token in low
+        for token in (
+            "torso",
+            "lift",
+            "waist",
+            "base_yaw",
+            "base_pitch",
+            "knee",
+            "hip",
+        )
+    )
+
+
+def _collect_torso_arm_contribution_indices(
+    robot: object,
+    joint_names: list[str],
+    *,
+    lock_joint_names: set[str] | None = None,
+) -> tuple[list[int], list[int], int]:
+    """Collect velocity indices for the soft torso-vs-arm contribution metric."""
+    torso_indices: list[int] = []
+    arm_indices: list[int] = []
+    nv = 0
+    for joint_name in joint_names:
+        if not hasattr(robot, "get_joint_velocity_index"):
+            continue
+        idx_v = int(robot.get_joint_velocity_index(joint_name))
+        if hasattr(robot, "get_joint_velocity_size"):
+            nv_joint = int(robot.get_joint_velocity_size(joint_name))
+        else:
+            nv_joint = 1
+        nv_joint = max(nv_joint, 1)
+        expanded = list(range(idx_v, idx_v + nv_joint))
+        nv = max(nv, idx_v + nv_joint)
+        if _is_torso_contribution_joint(joint_name, lock_joint_names):
+            torso_indices.extend(expanded)
+        elif _is_arm_joint(joint_name):
+            arm_indices.extend(expanded)
+    return sorted(set(torso_indices)), sorted(set(arm_indices)), nv
+
+
+def _torso_arm_contribution_metric_weights(
+    contribution: float,
+    *,
+    torso_velocity_indices: list[int],
+    arm_velocity_indices: list[int],
+    nv: int,
+    max_weight: float = 8.0,
+) -> np.ndarray | None:
+    """Build the soft primary-solve metric for the torso contribution slider."""
+    if not torso_velocity_indices or not arm_velocity_indices or int(nv) <= 0:
+        return None
+    contribution = float(np.clip(contribution, 0.0, 1.0))
+    if abs(contribution - 0.5) < 1e-6:
+        return None
+    spread = (contribution - 0.5) * 2.0
+    weights = np.ones(int(nv), dtype=float)
+    for idx in torso_velocity_indices:
+        weights[int(idx)] = float(max_weight) ** (-spread)
+    for idx in arm_velocity_indices:
+        weights[int(idx)] = float(max_weight) ** spread
+    return weights
+
+
+def _apply_torso_arm_contribution_metric(
+    solver: object,
+    contribution: float,
+    *,
+    torso_velocity_indices: list[int],
+    arm_velocity_indices: list[int],
+    nv: int,
+) -> None:
+    """Apply or clear the soft torso-vs-arm contribution metric on a solver."""
+    if not hasattr(solver, "set_joint_metric_weights"):
+        return
+    weights = _torso_arm_contribution_metric_weights(
+        contribution,
+        torso_velocity_indices=torso_velocity_indices,
+        arm_velocity_indices=arm_velocity_indices,
+        nv=nv,
+    )
+    if weights is None:
+        if hasattr(solver, "clear_joint_metric_weights"):
+            solver.clear_joint_metric_weights()
+        return
+    solver.set_joint_metric_weights(weights)
 
 
 def _resolve_lock_joint_names(
@@ -1374,11 +1490,37 @@ def main() -> None:
         ori_gain = server.gui.add_slider(
             "Orientation Gain", min=0.1, max=200.0, initial_value=DEFAULT_ROT_GAIN, step=0.1
         )
+        # Soft torso-vs-arms contribution knob (EmbodiK joint metric): 0 = arms do
+        # the work, 1 = torso does the work, 0.5 = neutral.
+        torso_contribution = server.gui.add_slider(
+            "Torso contribution", min=0.0, max=1.0, step=0.05, initial_value=0.5
+        )
+        _contrib_torso_vi, _contrib_arm_vi, _contrib_nv = _collect_torso_arm_contribution_indices(
+            robot, joint_names, lock_joint_names=lock_joint_name_set
+        )
+        max_linear_speed = server.gui.add_slider(
+            "Max Linear Speed (m/s)",
+            min=0.0,
+            max=2.0,
+            initial_value=DEFAULT_MAX_LINEAR_SPEED,
+            step=0.05,
+        )
+        max_angular_speed = server.gui.add_slider(
+            "Max Angular Speed (rad/s)",
+            min=0.0,
+            max=5.0,
+            initial_value=DEFAULT_MAX_ANGULAR_SPEED,
+            step=0.1,
+        )
         auto_tune_gains = server.gui.add_checkbox("Auto-tune gains", initial_value=False)
         ik_steps = server.gui.add_slider("IK Iterations", min=1, max=20, initial_value=2, step=1)
         adaptive_dt = server.gui.add_checkbox("Adaptive dt", initial_value=True)
         adaptive_dt_max_scale = server.gui.add_slider(
-            "Adaptive dt Max Scale", min=1.0, max=10.0, step=0.5, initial_value=10.0
+            "Adaptive dt Max Scale",
+            min=1.0,
+            max=10.0,
+            step=0.5,
+            initial_value=DEFAULT_ADAPTIVE_DT_MAX_SCALE,
         )
         adaptive_dt_ref_dist = server.gui.add_slider(
             "Adaptive dt Ref Dist (m)", min=0.01, max=0.20, step=0.01, initial_value=0.02
@@ -1997,6 +2139,13 @@ def main() -> None:
 
     def _solve_position_step(active_targets: list[object], q_seed: np.ndarray) -> _SolverStep:
         """Execute one solver-owned position step."""
+        _apply_torso_arm_contribution_metric(
+            solver,
+            float(torso_contribution.value),
+            torso_velocity_indices=_contrib_torso_vi,
+            arm_velocity_indices=_contrib_arm_vi,
+            nv=_contrib_nv,
+        )
         t0 = time.perf_counter()
         result = solver.solve_position_step(q_seed, active_targets, opts)
         elapsed_ms = (time.perf_counter() - t0) * 1e3
@@ -2232,20 +2381,6 @@ def main() -> None:
         else:
             right_ctrl.visible = True
             left_ctrl.visible = True
-        # When the locked-joint chain is frozen during IK,
-        # the reduced-DOF arm can hit SNS task-scale collapse against an active
-        # collision row: the SCALE solve drives the primary scale toward zero and
-        # the step goes INFEASIBLE (the arm freezes). MIN_ERROR instead yields
-        # graceful, collision-safe partial motion (move as close as the locked
-        # DOF allow). Apply it only while the chain is locked; the user's chosen
-        # mode governs when nothing is locked.
-        torso_chain_locked = bool(lock_lift_joint.value) and bool(lift_velocity_indices)
-        effective_solve_mode = (
-            embodik.TaskSolveMode.MIN_ERROR if torso_chain_locked else active_mode
-        )
-        for task in (right_task, left_task):
-            task.solve_mode = effective_solve_mode
-
         posture.weight = float(posture_weight.value)
         for joint_name in posture_control_joint_names:
             idx = joint_name_to_cfg.get(joint_name)
@@ -2302,6 +2437,26 @@ def main() -> None:
             seer_target_poses["right"] = None
 
         right_pos_err, left_pos_err, right_rot_err, left_rot_err = _current_task_errors()
+        active_target_pos_err = max(
+            float(right_pos_err) if right_active else 0.0,
+            float(left_pos_err) if left_active else 0.0,
+        )
+        near_enough_for_min_error = _near_enough_for_min_error_fallback(active_target_pos_err)
+        # When the locked-joint chain is frozen during IK, the reduced-DOF arm can
+        # hit SNS task-scale collapse against an active collision row. MIN_ERROR is
+        # useful as a near-target recovery tool, but far marker jumps should keep
+        # SCALE/SCALE_ELASTIC semantics so the robot does not chase the full
+        # residual with all remaining DOFs.
+        torso_chain_locked = bool(lock_lift_joint.value) and bool(lift_velocity_indices)
+        effective_solve_mode = active_mode
+        if (
+            torso_chain_locked
+            and active_mode != embodik.TaskSolveMode.MIN_ERROR
+            and near_enough_for_min_error
+        ):
+            effective_solve_mode = embodik.TaskSolveMode.MIN_ERROR
+        for task in (right_task, left_task):
+            task.solve_mode = effective_solve_mode
         if posture_controlled_indices:
             posture_err = float(
                 np.linalg.norm(
@@ -2495,6 +2650,11 @@ def main() -> None:
         opts.adaptive_dt = bool(adaptive_dt.value) and not bool(auto_tune_gains.value)
         opts.adaptive_dt_max_scale = float(adaptive_dt_max_scale.value)
         opts.adaptive_dt_reference_distance = float(adaptive_dt_ref_dist.value)
+        _apply_position_step_speed_caps(
+            opts,
+            max_linear_speed=float(max_linear_speed.value),
+            max_angular_speed=float(max_angular_speed.value),
+        )
         if hasattr(opts, "stall_recovery"):
             opts.stall_recovery = bool(enable_collision.value or enable_com_constraint.value)
         if hasattr(opts, "no_progress_max_steps"):
@@ -2511,6 +2671,7 @@ def main() -> None:
             allow_fallback.value
             and effective_solve_mode != embodik.TaskSolveMode.MIN_ERROR
             and constrained_teleop
+            and near_enough_for_min_error
         )
         opts.primary_solve_mode = effective_solve_mode
         opts.primary_allow_min_error_fallback = primary_allow_fallback

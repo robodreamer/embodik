@@ -231,6 +231,62 @@ public:
   void enable_velocity_limits(bool enable) { use_velocity_limits_ = enable; }
 
   /**
+   * @brief Override the velocity limit for a single joint (nv index).
+   *
+   * Shrinks (or relaxes) that joint's velocity-box bound in the QP. Used to bias
+   * how much a joint group contributes to a task: throttling arm joints makes the
+   * solver recruit other DOFs (e.g. torso) to keep tracking the EE. Negative
+   * values clamp to 0. Applied whether or not global velocity limits are enabled.
+   */
+  void set_joint_velocity_limit(int nv_idx, double limit) {
+    joint_velocity_limit_overrides_[nv_idx] = limit < 0.0 ? 0.0 : limit;
+  }
+
+  /** @brief Clear all per-joint velocity-limit overrides (restore defaults). */
+  void clear_joint_velocity_limit_overrides() {
+    joint_velocity_limit_overrides_.clear();
+  }
+
+  /**
+   * @brief Set a soft per-joint joint-space metric for the velocity solve.
+   *
+   * @param weights Per-joint cost weights (size nv). A higher weight makes that
+   *   joint "more expensive", so it contributes less to the achieved task motion
+   *   (weighted least-norm: min dq^T W dq). The EE task is still tracked and no
+   *   joint is hard-excluded, so the feasibility override is preserved. All-ones
+   *   (or empty) is a no-op. This is the torso-vs-arm contribution knob.
+   */
+  void set_joint_metric_weights(const Eigen::VectorXd &weights) {
+    if (weights.size() == 0) {
+      joint_metric_col_scale_.resize(0);
+      return;
+    }
+    bool all_one = true;
+    double log_sum = 0.0;
+    Eigen::VectorXd w(weights.size());
+    for (Eigen::Index i = 0; i < weights.size(); ++i) {
+      w(i) = weights(i) > 1e-12 ? weights(i) : 1e-12;
+      log_sum += std::log(w(i));
+      if (std::abs(weights(i) - 1.0) > 1e-12) all_one = false;
+    }
+    if (all_one) {  // exact no-op vs. today's solve
+      joint_metric_col_scale_.resize(0);
+      return;
+    }
+    // Normalize to geometric mean 1 so only the RATIOS bias distribution: this
+    // keeps the task-space gram J W^-1 J^T at a stable magnitude, so the solver's
+    // damping does not eat task achievement under suppression.
+    const double gm = std::exp(log_sum / static_cast<double>(w.size()));
+    Eigen::VectorXd s(w.size());
+    for (Eigen::Index i = 0; i < w.size(); ++i)
+      s(i) = 1.0 / std::sqrt(w(i) / gm);
+    joint_metric_col_scale_ = s;
+  }
+
+  /** @brief Clear the joint-space metric (restore unweighted solve). */
+  void clear_joint_metric_weights() { joint_metric_col_scale_.resize(0); }
+
+  /**
    * @brief Enable/disable joint position limits
    * @param enable True to enable position limit constraints
    */
@@ -1157,6 +1213,10 @@ private:
   // Constraint options
   bool use_velocity_limits_ = true;
   bool use_position_limits_ = true;
+  // Per-joint velocity-limit overrides (nv index -> max |v|); override lever.
+  std::unordered_map<int, double> joint_velocity_limit_overrides_;
+  // Soft joint-space metric as a column scale (1/sqrt(w), size nv); empty = off.
+  Eigen::VectorXd joint_metric_col_scale_;
 
   /// Sentinel in ``velocity_to_config_index_cache_`` for unmapped velocity indices.
   static constexpr int kVelocityToConfigUnmapped = -1;

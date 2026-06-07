@@ -3,6 +3,13 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
+from examples.example_helpers.common_bimanual_teleop_app import (
+    DEFAULT_ADAPTIVE_DT_MAX_SCALE,
+    DEFAULT_MAX_ANGULAR_SPEED,
+    DEFAULT_MAX_LINEAR_SPEED,
+    MIN_ERROR_FALLBACK_MAX_POSITION_ERROR_M,
+    _near_enough_for_min_error_fallback,
+)
 from examples.example_helpers.ik_common import configure_solver_runtime_policy
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -114,6 +121,24 @@ def test_example_runtime_policy_enables_auto_switch_and_weighted_fallback() -> N
     assert solver.config.health_sampling.activation_joint_limit_cost == 50.0
     assert solver.config.health_sampling.activation_singularity_threshold == -1.0
     assert solver.config.health_sampling.singularity_normalization_scale == 1e-6
+
+
+def test_common_bimanual_min_error_recovery_is_near_target_and_bounded() -> None:
+    assert 1.0 <= DEFAULT_ADAPTIVE_DT_MAX_SCALE <= 5.0
+    assert 0.0 < DEFAULT_MAX_LINEAR_SPEED <= 1.0
+    assert 0.0 < DEFAULT_MAX_ANGULAR_SPEED <= 2.0
+    assert _near_enough_for_min_error_fallback(MIN_ERROR_FALLBACK_MAX_POSITION_ERROR_M)
+    assert not _near_enough_for_min_error_fallback(MIN_ERROR_FALLBACK_MAX_POSITION_ERROR_M + 1e-3)
+    assert not _near_enough_for_min_error_fallback(float("inf"))
+
+    source = (REPO_ROOT / "examples/example_helpers/common_bimanual_teleop_app.py").read_text(
+        encoding="utf-8"
+    )
+    assert "_apply_position_step_speed_caps(" in source
+    assert "max_linear_speed=float(max_linear_speed.value)" in source
+    assert "max_angular_speed=float(max_angular_speed.value)" in source
+    assert "and near_enough_for_min_error" in source
+    assert "and active_mode != embodik.TaskSolveMode.MIN_ERROR" in source
 
 
 def test_examples_that_construct_solvers_apply_runtime_policy() -> None:

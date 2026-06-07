@@ -17,9 +17,14 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from examples.example_helpers.common_bimanual_teleop_app import (
+    DEFAULT_MAX_ANGULAR_SPEED,
+    DEFAULT_MAX_LINEAR_SPEED,
+    _apply_position_step_speed_caps,
+    _collect_torso_arm_contribution_indices,
     _is_arm_joint,
     _is_left_arm_joint,
     _is_right_arm_joint,
+    _torso_arm_contribution_metric_weights,
 )
 
 ALPHA_LEFT_ARM = [
@@ -69,3 +74,82 @@ def test_legacy_ffw_arm_naming_still_classified() -> None:
     assert _is_right_arm_joint("arm_r_joint3")
     assert _is_left_arm_joint("gripper_l_joint2")
     assert _is_right_arm_joint("gripper_r_joint2")
+
+
+class _FakeRobot:
+    def __init__(self, names: list[str]) -> None:
+        self._indices = {name: idx for idx, name in enumerate(names)}
+
+    def get_joint_velocity_index(self, joint_name: str) -> int:
+        return self._indices[joint_name]
+
+    def get_joint_velocity_size(self, _joint_name: str) -> int:
+        return 1
+
+
+def test_alpha_torso_contribution_metric_groups_torso_and_arms() -> None:
+    names = [
+        "base_yaw_joint",
+        "base_pitch_joint",
+        "knee_pitch_joint",
+        "hip_pitch_joint",
+        "torso_yaw_joint",
+        *ALPHA_LEFT_ARM,
+        *ALPHA_RIGHT_ARM,
+        "neck_yaw_joint",
+        "left_robotiq_85_left_knuckle_joint",
+    ]
+    torso, arms, nv = _collect_torso_arm_contribution_indices(
+        _FakeRobot(names), names, lock_joint_names=set(ALPHA_NON_ARM[:5])
+    )
+
+    assert torso == list(range(5))
+    assert arms == list(range(5, 19))
+    assert nv == len(names)
+
+    arms_do_work = _torso_arm_contribution_metric_weights(
+        0.0,
+        torso_velocity_indices=torso,
+        arm_velocity_indices=arms,
+        nv=nv,
+    )
+    torso_does_work = _torso_arm_contribution_metric_weights(
+        1.0,
+        torso_velocity_indices=torso,
+        arm_velocity_indices=arms,
+        nv=nv,
+    )
+
+    assert arms_do_work is not None
+    assert torso_does_work is not None
+    assert arms_do_work[torso[0]] > arms_do_work[arms[0]]
+    assert torso_does_work[arms[0]] > torso_does_work[torso[0]]
+    assert (
+        _torso_arm_contribution_metric_weights(
+            0.5,
+            torso_velocity_indices=torso,
+            arm_velocity_indices=arms,
+            nv=nv,
+        )
+        is None
+    )
+
+
+def test_common_bimanual_default_speed_caps_apply_to_position_step_options() -> None:
+    class _Opts:
+        max_linear_speed = 0.0
+        max_angular_speed = 0.0
+
+    opts = _Opts()
+    _apply_position_step_speed_caps(
+        opts,
+        max_linear_speed=DEFAULT_MAX_LINEAR_SPEED,
+        max_angular_speed=DEFAULT_MAX_ANGULAR_SPEED,
+    )
+
+    assert opts.max_linear_speed == DEFAULT_MAX_LINEAR_SPEED
+    assert opts.max_angular_speed == DEFAULT_MAX_ANGULAR_SPEED
+
+
+def test_common_bimanual_speed_caps_are_backward_compatible_with_old_options() -> None:
+    _apply_position_step_speed_caps(object(), max_linear_speed=0.5, max_angular_speed=1.0)
