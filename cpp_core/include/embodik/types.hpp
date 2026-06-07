@@ -223,6 +223,19 @@ struct VelocitySolverResult : public SolverResult {
   double health_sampling_bias_norm =
       std::numeric_limits<double>::quiet_NaN();
   double health_sampling_time_ms = 0.0;
+
+  // Preferred-lock candidate diagnostics.
+  bool preferred_lock_attempted = false;
+  bool preferred_lock_used = false;
+  bool preferred_lock_fallback_used = false;
+  SolverStatus preferred_lock_candidate_status = SolverStatus::kInvalidInput;
+  double preferred_lock_candidate_position_error =
+      std::numeric_limits<double>::quiet_NaN();
+  double preferred_lock_candidate_orientation_error =
+      std::numeric_limits<double>::quiet_NaN();
+  double preferred_lock_candidate_step_norm =
+      std::numeric_limits<double>::quiet_NaN();
+  double preferred_lock_candidate_time_ms = 0.0;
 };
 
 // Configuration for regularized matrix inversion
@@ -434,6 +447,22 @@ struct PositionStepOptions {
   /// scale collapse or NUMERICAL_ERROR under active collision/CoM constraints.
   /// Mirrors PositionIKOptions::primary_allow_min_error_fallback semantics.
   bool primary_allow_min_error_fallback = false;
+  /// Try one extra solve with these nv-indices hard locked before the normal
+  /// solve. The locked candidate is accepted only when it is continuous and still
+  /// tracks the active target(s) within the tolerances below; otherwise the normal
+  /// solve runs from the original current_q. Empty = no extra solve.
+  std::vector<int> preferred_locked_joint_indices;
+  /// Primary pose-task solve mode used only by the preferred-lock candidate.
+  TaskSolveMode preferred_lock_solve_mode = TaskSolveMode::kMinError;
+  /// Maximum active-target position error allowed for the preferred-lock
+  /// candidate (metres).
+  double preferred_lock_tracking_tolerance = 0.035;
+  /// Maximum active-target orientation error allowed for the preferred-lock
+  /// candidate (radians). Set <=0 to disable this orientation gate.
+  double preferred_lock_orientation_tolerance = 0.25;
+  /// Maximum configuration step norm allowed for the preferred-lock candidate.
+  /// Set <=0 to disable this continuity gate.
+  double preferred_lock_max_step_norm = 0.35;
 };
 
 // Per-task target for multi-task solve_position_step().
@@ -539,6 +568,18 @@ struct SolveDiagnostics {
   double health_sampling_bias_norm =
       std::numeric_limits<double>::quiet_NaN();
   double health_sampling_time_ms = 0.0;
+  /// Mirrors VelocitySolverResult preferred-lock candidate diagnostics.
+  bool preferred_lock_attempted = false;
+  bool preferred_lock_used = false;
+  bool preferred_lock_fallback_used = false;
+  SolverStatus preferred_lock_candidate_status = SolverStatus::kInvalidInput;
+  double preferred_lock_candidate_position_error =
+      std::numeric_limits<double>::quiet_NaN();
+  double preferred_lock_candidate_orientation_error =
+      std::numeric_limits<double>::quiet_NaN();
+  double preferred_lock_candidate_step_norm =
+      std::numeric_limits<double>::quiet_NaN();
+  double preferred_lock_candidate_time_ms = 0.0;
 };
 
 /// Bundled runtime defaults for interactive solve loops.

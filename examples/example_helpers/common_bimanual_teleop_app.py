@@ -14,6 +14,7 @@ import sys
 import tempfile
 import time
 import xml.etree.ElementTree as ET
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -85,6 +86,18 @@ POSTURE_SLIDER_DEADBAND = 1e-3
 EE_POSITION_DEADBAND = 1e-4
 EE_ROTATION_DEADBAND = 1e-3
 MIN_ERROR_FALLBACK_MAX_POSITION_ERROR_M = 0.25
+DEFAULT_TARGET_MEMORY_ENABLED = True
+DEFAULT_TARGET_MEMORY_MAX_ENTRIES = 64
+DEFAULT_TARGET_MEMORY_POSITION_BIN_M = 0.02
+DEFAULT_TARGET_MEMORY_ROTATION_BIN_RAD = 0.20
+DEFAULT_TARGET_MEMORY_POSITION_TOLERANCE_M = 0.035
+DEFAULT_TARGET_MEMORY_ROTATION_TOLERANCE_RAD = 0.25
+DEFAULT_TARGET_MEMORY_STORE_POSITION_ERROR_M = 0.030
+DEFAULT_TARGET_MEMORY_STORE_ROTATION_ERROR_RAD = 0.20
+DEFAULT_TARGET_MEMORY_MIN_STORE_POSITION_SEPARATION_M = 0.020
+DEFAULT_TARGET_MEMORY_MIN_STORE_ROTATION_SEPARATION_RAD = 0.12
+DEFAULT_TARGET_MEMORY_MAX_BIAS_STEP_NORM = 0.08
+DEFAULT_TARGET_MEMORY_BIAS_GAIN = 0.25
 LIFT_LIMIT_MARGIN = 1e-3
 _ADAPTIVE_GAIN_CONFIG = AdaptiveGainTuningConfig()
 
@@ -516,6 +529,320 @@ def _rotation_error_rad(R_target: np.ndarray, R_current: np.ndarray) -> float:
     cos_theta = float((np.trace(R_rel) - 1.0) * 0.5)
     cos_theta = float(np.clip(cos_theta, -1.0, 1.0))
     return float(np.arccos(cos_theta))
+
+
+def _rotation_vector_for_key(rotation: np.ndarray) -> np.ndarray:
+    """Compact SO(3) log vector for deterministic coarse target bins."""
+    R = np.asarray(rotation, dtype=float).reshape(3, 3)
+    cos_theta = float((np.trace(R) - 1.0) * 0.5)
+    cos_theta = float(np.clip(cos_theta, -1.0, 1.0))
+    theta = float(np.arccos(cos_theta))
+    if theta < 1e-9:
+        return np.zeros(3, dtype=float)
+    denom = 2.0 * np.sin(theta)
+    if abs(denom) < 1e-9:
+        # At pi the log map axis is not unique. Use the diagonal-derived axis for
+        # stable bins; the tolerance-based lookup remains the final authority.
+        axis = np.sqrt(np.maximum(np.diag(R) + 1.0, 0.0))
+        if axis[0] < 1e-9 and axis[1] < 1e-9 and axis[2] < 1e-9:
+            axis = np.array([1.0, 0.0, 0.0], dtype=float)
+        axis = axis / max(float(np.linalg.norm(axis)), 1e-12)
+        return axis * theta
+    axis = np.array(
+        [
+            R[2, 1] - R[1, 2],
+            R[0, 2] - R[2, 0],
+            R[1, 0] - R[0, 1],
+        ],
+        dtype=float,
+    )
+    return (theta / denom) * axis
+
+
+def _quantized_tuple(values: np.ndarray, bin_size: float) -> tuple[int, ...]:
+    safe_bin = float(bin_size) if np.isfinite(bin_size) and bin_size > 0.0 else 1.0
+    return tuple(int(v) for v in np.round(np.asarray(values, dtype=float) / safe_bin))
+
+
+def _pose_memory_key(
+    pose: np.ndarray,
+    *,
+    position_bin_m: float = DEFAULT_TARGET_MEMORY_POSITION_BIN_M,
+    rotation_bin_rad: float = DEFAULT_TARGET_MEMORY_ROTATION_BIN_RAD,
+) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    pose_arr = np.asarray(pose, dtype=float).reshape(4, 4)
+    return (
+        _quantized_tuple(pose_arr[:3, 3], position_bin_m),
+        _quantized_tuple(_rotation_vector_for_key(pose_arr[:3, :3]), rotation_bin_rad),
+    )
+
+
+@dataclass
+class _TargetMemoryEntry:
+    context_key: tuple[object, ...]
+    active_sides: tuple[str, ...]
+    target_poses: dict[str, np.ndarray]
+    q_solution: np.ndarray
+    health_score: float
+    max_position_error_m: float
+    max_rotation_error_rad: float
+    tick: int
+    hits: int = 0
+
+
+class _TargetReturnMemory:
+    """Target-keyed healthy-solution recall as a continuity-safe bias advisor."""
+
+    def __init__(
+        self,
+        *,
+        max_entries: int = DEFAULT_TARGET_MEMORY_MAX_ENTRIES,
+        position_bin_m: float = DEFAULT_TARGET_MEMORY_POSITION_BIN_M,
+        rotation_bin_rad: float = DEFAULT_TARGET_MEMORY_ROTATION_BIN_RAD,
+        position_tolerance_m: float = DEFAULT_TARGET_MEMORY_POSITION_TOLERANCE_M,
+        rotation_tolerance_rad: float = DEFAULT_TARGET_MEMORY_ROTATION_TOLERANCE_RAD,
+        store_position_error_m: float = DEFAULT_TARGET_MEMORY_STORE_POSITION_ERROR_M,
+        store_rotation_error_rad: float = DEFAULT_TARGET_MEMORY_STORE_ROTATION_ERROR_RAD,
+        min_store_position_separation_m: float = (
+            DEFAULT_TARGET_MEMORY_MIN_STORE_POSITION_SEPARATION_M
+        ),
+        min_store_rotation_separation_rad: float = (
+            DEFAULT_TARGET_MEMORY_MIN_STORE_ROTATION_SEPARATION_RAD
+        ),
+        min_score_improvement: float = 1e-4,
+        max_bias_step_norm: float = DEFAULT_TARGET_MEMORY_MAX_BIAS_STEP_NORM,
+        bias_gain: float = DEFAULT_TARGET_MEMORY_BIAS_GAIN,
+    ) -> None:
+        self.max_entries = int(max(1, max_entries))
+        self.position_bin_m = float(position_bin_m)
+        self.rotation_bin_rad = float(rotation_bin_rad)
+        self.position_tolerance_m = float(position_tolerance_m)
+        self.rotation_tolerance_rad = float(rotation_tolerance_rad)
+        self.store_position_error_m = float(store_position_error_m)
+        self.store_rotation_error_rad = float(store_rotation_error_rad)
+        self.min_store_position_separation_m = float(max(0.0, min_store_position_separation_m))
+        self.min_store_rotation_separation_rad = float(max(0.0, min_store_rotation_separation_rad))
+        self.min_score_improvement = float(max(0.0, min_score_improvement))
+        self.max_bias_step_norm = float(max(0.0, max_bias_step_norm))
+        self.bias_gain = float(np.clip(bias_gain, 0.0, 1.0))
+        self._entries: collections.OrderedDict[tuple[object, ...], _TargetMemoryEntry] = (
+            collections.OrderedDict()
+        )
+        self._tick = 0
+
+    def clear(self) -> None:
+        self._entries.clear()
+        self._tick = 0
+
+    @property
+    def entry_count(self) -> int:
+        return len(self._entries)
+
+    def key_for(
+        self,
+        *,
+        context_key: tuple[object, ...],
+        active_sides: tuple[str, ...],
+        target_poses: dict[str, np.ndarray],
+    ) -> tuple[object, ...]:
+        pose_keys = tuple(
+            (
+                side,
+                _pose_memory_key(
+                    target_poses[side],
+                    position_bin_m=self.position_bin_m,
+                    rotation_bin_rad=self.rotation_bin_rad,
+                ),
+            )
+            for side in active_sides
+        )
+        return (tuple(context_key), tuple(active_sides), pose_keys)
+
+    def _targets_match(
+        self,
+        entry: _TargetMemoryEntry,
+        *,
+        context_key: tuple[object, ...],
+        active_sides: tuple[str, ...],
+        target_poses: dict[str, np.ndarray],
+    ) -> bool:
+        if entry.context_key != tuple(context_key) or entry.active_sides != tuple(active_sides):
+            return False
+        for side in active_sides:
+            if side not in entry.target_poses or side not in target_poses:
+                return False
+            stored = np.asarray(entry.target_poses[side], dtype=float)
+            current = np.asarray(target_poses[side], dtype=float)
+            if float(np.linalg.norm(stored[:3, 3] - current[:3, 3])) > self.position_tolerance_m:
+                return False
+            if _rotation_error_rad(stored[:3, :3], current[:3, :3]) > self.rotation_tolerance_rad:
+                return False
+        return True
+
+    def _valid_q(
+        self,
+        q: np.ndarray,
+        q_current: np.ndarray,
+        q_lower: np.ndarray,
+        q_upper: np.ndarray,
+    ) -> bool:
+        q_arr = np.asarray(q, dtype=float)
+        return bool(
+            q_arr.shape == np.asarray(q_current).shape
+            and q_arr.shape == np.asarray(q_lower).shape
+            and q_arr.shape == np.asarray(q_upper).shape
+            and np.all(np.isfinite(q_arr))
+            and np.all(q_arr >= np.asarray(q_lower, dtype=float) - 1e-9)
+            and np.all(q_arr <= np.asarray(q_upper, dtype=float) + 1e-9)
+        )
+
+    def lookup(
+        self,
+        *,
+        context_key: tuple[object, ...],
+        active_sides: tuple[str, ...],
+        target_poses: dict[str, np.ndarray],
+        q_current: np.ndarray,
+        q_lower: np.ndarray,
+        q_upper: np.ndarray,
+    ) -> _TargetMemoryEntry | None:
+        key = self.key_for(
+            context_key=context_key,
+            active_sides=active_sides,
+            target_poses=target_poses,
+        )
+        candidates = []
+        if key in self._entries:
+            candidates.append((key, self._entries[key]))
+        candidates.extend(
+            (entry_key, entry) for entry_key, entry in self._entries.items() if entry_key != key
+        )
+        for entry_key, entry in candidates:
+            if not self._targets_match(
+                entry,
+                context_key=context_key,
+                active_sides=active_sides,
+                target_poses=target_poses,
+            ):
+                continue
+            if not self._valid_q(entry.q_solution, q_current, q_lower, q_upper):
+                continue
+            entry.hits += 1
+            self._entries.move_to_end(entry_key)
+            return entry
+        return None
+
+    def bias_configuration(self, entry: _TargetMemoryEntry, q_current: np.ndarray) -> np.ndarray:
+        q_arr = np.asarray(q_current, dtype=float)
+        delta = np.asarray(entry.q_solution, dtype=float) - q_arr
+        norm = float(np.linalg.norm(delta))
+        if norm <= 1e-12 or self.bias_gain <= 0.0 or self.max_bias_step_norm <= 0.0:
+            return q_arr.copy()
+        scale = min(self.bias_gain, self.max_bias_step_norm / norm)
+        return q_arr + scale * delta
+
+    def observe(
+        self,
+        *,
+        context_key: tuple[object, ...],
+        active_sides: tuple[str, ...],
+        target_poses: dict[str, np.ndarray],
+        q_solution: np.ndarray,
+        q_lower: np.ndarray,
+        q_upper: np.ndarray,
+        health_score: float,
+        max_position_error_m: float,
+        max_rotation_error_rad: float,
+    ) -> bool:
+        if not active_sides:
+            return False
+        if (
+            max_position_error_m > self.store_position_error_m
+            or max_rotation_error_rad > self.store_rotation_error_rad
+        ):
+            return False
+        q_arr = np.asarray(q_solution, dtype=float)
+        if not self._valid_q(q_arr, q_arr, q_lower, q_upper):
+            return False
+        if not np.isfinite(health_score):
+            return False
+        self._tick += 1
+        key = self.key_for(
+            context_key=context_key,
+            active_sides=active_sides,
+            target_poses=target_poses,
+        )
+        sparse_key = None
+        if key not in self._entries:
+            sparse_key = self._nearest_sparse_duplicate_key(
+                context_key=context_key,
+                active_sides=active_sides,
+                target_poses=target_poses,
+            )
+            if sparse_key is not None:
+                key = sparse_key
+        existing = self._entries.get(key)
+        if existing is not None and (
+            health_score < existing.health_score + self.min_score_improvement
+            and max_position_error_m >= existing.max_position_error_m - 1e-6
+        ):
+            existing.tick = self._tick
+            self._entries.move_to_end(key)
+            return False
+        self._entries[key] = _TargetMemoryEntry(
+            context_key=tuple(context_key),
+            active_sides=tuple(active_sides),
+            target_poses={
+                side: np.asarray(target_poses[side], dtype=float).copy() for side in active_sides
+            },
+            q_solution=q_arr.copy(),
+            health_score=float(health_score),
+            max_position_error_m=float(max_position_error_m),
+            max_rotation_error_rad=float(max_rotation_error_rad),
+            tick=self._tick,
+        )
+        self._entries.move_to_end(key)
+        while len(self._entries) > self.max_entries:
+            self._entries.popitem(last=False)
+        return True
+
+    def _nearest_sparse_duplicate_key(
+        self,
+        *,
+        context_key: tuple[object, ...],
+        active_sides: tuple[str, ...],
+        target_poses: dict[str, np.ndarray],
+    ) -> tuple[object, ...] | None:
+        if (
+            self.min_store_position_separation_m <= 0.0
+            and self.min_store_rotation_separation_rad <= 0.0
+        ):
+            return None
+        for entry_key, entry in self._entries.items():
+            if entry.context_key != tuple(context_key) or entry.active_sides != tuple(active_sides):
+                continue
+            near = True
+            for side in active_sides:
+                if side not in entry.target_poses or side not in target_poses:
+                    near = False
+                    break
+                stored = np.asarray(entry.target_poses[side], dtype=float)
+                current = np.asarray(target_poses[side], dtype=float)
+                if (
+                    float(np.linalg.norm(stored[:3, 3] - current[:3, 3]))
+                    > self.min_store_position_separation_m
+                ):
+                    near = False
+                    break
+                if (
+                    _rotation_error_rad(stored[:3, :3], current[:3, :3])
+                    > self.min_store_rotation_separation_rad
+                ):
+                    near = False
+                    break
+            if near:
+                return entry_key
+        return None
 
 
 def _convex_hull_2d(points_xy: np.ndarray) -> np.ndarray:
@@ -1274,6 +1601,7 @@ def main() -> None:
     q = _apply_named_joint_seed(q, joint_name_to_cfg, q_lo, q_hi, default_joint_seed)
     q = _apply_soft_lift_margin(q, joint_name_to_cfg=joint_name_to_cfg, q_lo=q_lo, q_hi=q_hi)
     nullspace_bias_q = np.asarray(q, dtype=float).copy()
+    target_memory = _TargetReturnMemory()
     robot.update_configuration(q)
     support_polygon = _compute_support_polygon_from_contacts(
         robot, COMMON_BIMANUAL_SUPPORT_CONTACT_FRAMES
@@ -1659,6 +1987,9 @@ def main() -> None:
         arm_nullspace_enable = server.gui.add_checkbox(
             "Enable Arm Nullspace Bias",
             initial_value=_initial_arm_nullspace_enabled(),
+        )
+        target_memory_enable = server.gui.add_checkbox(
+            "Target Memory", initial_value=DEFAULT_TARGET_MEMORY_ENABLED
         )
         arm_nullspace_weight = server.gui.add_slider(
             "Arm Nullspace Gain",
@@ -2135,6 +2466,7 @@ def main() -> None:
         _sync_targets_from_robot()
         _configure_acceleration_limits_if_needed(force=True)
         _configure_com_constraint_if_needed(force=True)
+        target_memory.clear()
         status.value = f"Status: solver reset after {reason}"
 
     def _solve_position_step(active_targets: list[object], q_seed: np.ndarray) -> _SolverStep:
@@ -2190,6 +2522,7 @@ def main() -> None:
         _sync_posture_sliders_from_q(q)
         _update_collision_debug()
         _update_com_visualization()
+        target_memory.clear()
         timing_handle.value = 0.0
         solve_ms.value = "--"
         status.value = status_message
@@ -2262,6 +2595,72 @@ def main() -> None:
         right_rot_err = _rotation_error_rad(right_target_pose[:3, :3], right_pose_now[:3, :3])
         left_rot_err = _rotation_error_rad(left_target_pose[:3, :3], left_pose_now[:3, :3])
         return right_pos_err, left_pos_err, right_rot_err, left_rot_err
+
+    def _max_active_pose_error(
+        active_sides: tuple[str, ...],
+        target_poses: dict[str, np.ndarray],
+    ) -> tuple[float, float]:
+        max_pos = 0.0
+        max_rot = 0.0
+        frame_for_side = {"right": frame_map["right_tool"], "left": frame_map["left_tool"]}
+        for side in active_sides:
+            current_pose = frame_pose(frame_for_side[side])
+            target_pose = np.asarray(target_poses[side], dtype=float)
+            max_pos = max(
+                max_pos,
+                float(np.linalg.norm(target_pose[:3, 3] - current_pose[:3, 3])),
+            )
+            max_rot = max(
+                max_rot,
+                _rotation_error_rad(target_pose[:3, :3], current_pose[:3, :3]),
+            )
+        return max_pos, max_rot
+
+    def _target_memory_health_score(result: object) -> float:
+        values: list[float] = []
+        for source in (getattr(result, "diagnostics", None), result):
+            if source is None:
+                continue
+            for name in ("health_sampling_best_score", "health_sampling_base_score"):
+                value = float(getattr(source, name, float("nan")))
+                if np.isfinite(value):
+                    values.append(value)
+        return max(values) if values else float("nan")
+
+    def _target_memory_result_is_clean(result: object, status_name: str) -> bool:
+        if status_name not in {"SUCCESS", "NO_PROGRESS"}:
+            return False
+        diagnostics = getattr(result, "diagnostics", None)
+        sources = [source for source in (diagnostics, result) if source is not None]
+        for source in sources:
+            if int(getattr(source, "collision_rejection_count", 0) or 0) > 0:
+                return False
+            if int(getattr(source, "stall_escape_count", 0) or 0) > 0:
+                return False
+            if bool(getattr(source, "weighted_fallback_used", False)):
+                return False
+            raw_task_scales = getattr(source, "task_scales", ())
+            task_scales = [] if raw_task_scales is None else list(raw_task_scales)
+            if task_scales and min(float(v) for v in task_scales) < 0.05:
+                return False
+        return True
+
+    def _target_memory_context_key(
+        active_sides: tuple[str, ...],
+        solve_mode_value: object,
+        *,
+        collision_min_distance_m: float,
+    ) -> tuple[object, ...]:
+        return (
+            str(getattr(solve_mode_value, "name", solve_mode_value)),
+            tuple(active_sides),
+            bool(lock_passive.value),
+            bool(lock_lift_joint.value),
+            bool(enable_collision.value),
+            round(float(collision_min_distance_m), 4),
+            bool(enable_com_constraint.value),
+            round(float(torso_contribution.value), 2),
+        )
 
     def _format_seer_pos(side: str, ctrl) -> str:
         if _seer_side_active(side) and seer_target_poses.get(side) is not None:
@@ -2381,27 +2780,6 @@ def main() -> None:
         else:
             right_ctrl.visible = True
             left_ctrl.visible = True
-        posture.weight = float(posture_weight.value)
-        for joint_name in posture_control_joint_names:
-            idx = joint_name_to_cfg.get(joint_name)
-            if idx is not None and idx < posture_target.size:
-                posture_target[idx] = float(nullspace_bias_q[idx])
-        posture.set_target_configuration(posture_target)
-        if bool(arm_nullspace_enable.value) and float(arm_nullspace_weight.value) > 0.0:
-            arm_nullspace.set_target_configuration(nullspace_bias_q)
-            if hasattr(arm_nullspace, "set_controlled_joint_indices"):
-                active_arm_indices = []
-                if bool(enable_left_ee.value):
-                    active_arm_indices.extend(left_arm_velocity_indices)
-                if bool(enable_right_ee.value):
-                    active_arm_indices.extend(right_arm_velocity_indices)
-                arm_nullspace.set_controlled_joint_indices(sorted(set(active_arm_indices)))
-            arm_nullspace.weight = float(arm_nullspace_weight.value)
-        else:
-            arm_nullspace.weight = 0.0
-            if hasattr(arm_nullspace, "set_controlled_joint_indices"):
-                arm_nullspace.set_controlled_joint_indices([])
-
         right_active = bool(enable_right_ee.value)
         left_active = bool(enable_left_ee.value)
 
@@ -2457,15 +2835,6 @@ def main() -> None:
             effective_solve_mode = embodik.TaskSolveMode.MIN_ERROR
         for task in (right_task, left_task):
             task.solve_mode = effective_solve_mode
-        if posture_controlled_indices:
-            posture_err = float(
-                np.linalg.norm(
-                    np.asarray(posture_target, dtype=float)[posture_controlled_indices]
-                    - np.asarray(q, dtype=float)[posture_controlled_indices]
-                )
-            )
-        else:
-            posture_err = 0.0
 
         # Held-arm protection: detect which target is actively moving (gizmo drag
         # or teleop stream), then demote that arm to priority 1 so the held arm
@@ -2509,6 +2878,75 @@ def main() -> None:
                 left_task.priority = 1
             elif right_target_moved and not left_target_moved:
                 right_task.priority = 1
+
+        active_sides = tuple(
+            side
+            for side, is_active in (("right", right_active), ("left", left_active))
+            if is_active
+        )
+        active_target_poses = {
+            "right": cur_right_target_pose.copy(),
+            "left": cur_left_target_pose.copy(),
+        }
+        collision_min_distance_m = float(collision_min_dist_mm.value) * 1e-3
+        target_memory_context = _target_memory_context_key(
+            active_sides,
+            effective_solve_mode,
+            collision_min_distance_m=collision_min_distance_m,
+        )
+        target_memory_pose_moving = bool(right_target_moved or left_target_moved)
+        target_memory_disabled_by_replay = bool(
+            _seg_player is not None and _seg_player.state not in ("idle", "hold")
+        )
+        remembered_entry = None
+        remembered_bias_q = np.asarray(nullspace_bias_q, dtype=float).copy()
+        if (
+            bool(target_memory_enable.value)
+            and active_sides
+            and not target_memory_pose_moving
+            and not target_memory_disabled_by_replay
+        ):
+            remembered_entry = target_memory.lookup(
+                context_key=target_memory_context,
+                active_sides=active_sides,
+                target_poses=active_target_poses,
+                q_current=q,
+                q_lower=q_lo,
+                q_upper=q_hi,
+            )
+            if remembered_entry is not None:
+                remembered_bias_q = target_memory.bias_configuration(remembered_entry, q)
+
+        posture.weight = float(posture_weight.value)
+        for joint_name in posture_control_joint_names:
+            idx = joint_name_to_cfg.get(joint_name)
+            if idx is not None and idx < posture_target.size:
+                posture_target[idx] = float(remembered_bias_q[idx])
+        posture.set_target_configuration(posture_target)
+        if bool(arm_nullspace_enable.value) and float(arm_nullspace_weight.value) > 0.0:
+            arm_nullspace.set_target_configuration(remembered_bias_q)
+            if hasattr(arm_nullspace, "set_controlled_joint_indices"):
+                active_arm_indices = []
+                if left_active:
+                    active_arm_indices.extend(left_arm_velocity_indices)
+                if right_active:
+                    active_arm_indices.extend(right_arm_velocity_indices)
+                arm_nullspace.set_controlled_joint_indices(sorted(set(active_arm_indices)))
+            arm_nullspace.weight = float(arm_nullspace_weight.value)
+        else:
+            arm_nullspace.weight = 0.0
+            if hasattr(arm_nullspace, "set_controlled_joint_indices"):
+                arm_nullspace.set_controlled_joint_indices([])
+
+        if posture_controlled_indices:
+            posture_err = float(
+                np.linalg.norm(
+                    np.asarray(posture_target, dtype=float)[posture_controlled_indices]
+                    - np.asarray(q, dtype=float)[posture_controlled_indices]
+                )
+            )
+        else:
+            posture_err = 0.0
 
         # Segment replay block — gated so flag-off is byte-equivalent (no-op).
         if _seg_player is not None and _seg_player.state != "idle":
@@ -2607,7 +3045,6 @@ def main() -> None:
             time.sleep(0.002)
             continue
 
-        collision_min_distance_m = float(collision_min_dist_mm.value) * 1e-3
         tune_pos_err = 0.0
         tune_rot_err = 0.0
         if right_active:
@@ -2720,6 +3157,29 @@ def main() -> None:
         )
 
         robot.update_configuration(q)
+        target_memory_stored = False
+        if (
+            bool(target_memory_enable.value)
+            and active_sides
+            and not target_memory_pose_moving
+            and not streaming_active
+            and _target_memory_result_is_clean(result, result_status_name)
+        ):
+            memory_pos_err, memory_rot_err = _max_active_pose_error(
+                active_sides,
+                active_target_poses,
+            )
+            target_memory_stored = target_memory.observe(
+                context_key=target_memory_context,
+                active_sides=active_sides,
+                target_poses=active_target_poses,
+                q_solution=q,
+                q_lower=q_lo,
+                q_upper=q_hi,
+                health_score=_target_memory_health_score(result),
+                max_position_error_m=memory_pos_err,
+                max_rotation_error_rad=memory_rot_err,
+            )
         _update_robot_visuals(q)
         _sync_joint_sliders_from_q(q)
         _sync_posture_sliders_from_q(q)
@@ -2757,6 +3217,10 @@ def main() -> None:
             status.value = f"Status: {result.status.name}" + (
                 f" | {result.status_message}" if getattr(result, "status_message", "") else ""
             )
+        if remembered_entry is not None:
+            status.value += " | memory bias"
+        elif target_memory_stored:
+            status.value += " | memory stored"
         timing_handle.value = float(step.elapsed_ms)
         solve_ms.value = f"{step.elapsed_ms:.2f}"
         prev_manual_state = False

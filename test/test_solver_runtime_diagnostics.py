@@ -101,7 +101,12 @@ def _assert_diagnostics_mirror_result(result) -> None:
     assert list(diagnostics.task_scales) == list(result.task_scales)
     assert list(diagnostics.task_used_fallback) == list(result.task_used_fallback)
     assert list(diagnostics.task_modes_effective) == list(result.task_modes_effective)
-    expected_any = result.collision_rejection_count > 0 or result.stall_escape_count > 0
+    expected_any = (
+        result.collision_rejection_count > 0
+        or result.stall_escape_count > 0
+        or result.preferred_lock_used
+        or result.preferred_lock_fallback_used
+    )
     assert diagnostics.any_intervention is expected_any
     assert diagnostics.health_sampling_available == result.health_sampling_available
     assert diagnostics.health_sampling_applied == result.health_sampling_applied
@@ -150,6 +155,26 @@ def _assert_diagnostics_mirror_result(result) -> None:
     _assert_float_mirror(
         diagnostics.health_sampling_time_ms,
         result.health_sampling_time_ms,
+    )
+    assert diagnostics.preferred_lock_attempted == result.preferred_lock_attempted
+    assert diagnostics.preferred_lock_used == result.preferred_lock_used
+    assert diagnostics.preferred_lock_fallback_used == result.preferred_lock_fallback_used
+    assert diagnostics.preferred_lock_candidate_status == result.preferred_lock_candidate_status
+    _assert_float_mirror(
+        diagnostics.preferred_lock_candidate_position_error,
+        result.preferred_lock_candidate_position_error,
+    )
+    _assert_float_mirror(
+        diagnostics.preferred_lock_candidate_orientation_error,
+        result.preferred_lock_candidate_orientation_error,
+    )
+    _assert_float_mirror(
+        diagnostics.preferred_lock_candidate_step_norm,
+        result.preferred_lock_candidate_step_norm,
+    )
+    _assert_float_mirror(
+        diagnostics.preferred_lock_candidate_time_ms,
+        result.preferred_lock_candidate_time_ms,
     )
 
 
