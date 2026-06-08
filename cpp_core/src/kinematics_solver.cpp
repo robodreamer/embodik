@@ -4891,6 +4891,16 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
     c_upper.segment(constraint_idx, robot_->nv())
         .setConstant(kUnboundedConstraintLimit);
   }
+  // Per-joint velocity-limit overrides (contribution knob): shrink the box so the
+  // solver recruits other DOFs when a group is throttled. Applied in both
+  // branches; hard velocity locks below still take priority.
+  for (const auto &kv : joint_velocity_limit_overrides_) {
+    const int idx = kv.first;
+    if (idx >= 0 && idx < robot_->nv()) {
+      c_lower(constraint_idx + idx) = -kv.second;
+      c_upper(constraint_idx + idx) = kv.second;
+    }
+  }
   for (int idx : pending_velocity_lock_indices_) {
     if (idx >= 0 && idx < robot_->nv()) {
       c_lower(constraint_idx + idx) = 0.0;
@@ -5473,9 +5483,33 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
 
   warm_start_selector_cache_.reset();
   warm_start_constraint_rows_ = -1;
+  // Soft joint-space metric (contribution knob): change of variables dq = D u with
+  // D = diag(1/sqrt(w)). Solve the existing prioritized/SNS problem in u-space on
+  // scaled copies (J D, C D), then un-scale the solution dq = D u. This yields the
+  // weighted least-norm solution while keeping the EE task and the true-space
+  // velocity/position limits intact (bounds are unchanged; columns carry D).
+  const bool metric_active =
+      joint_metric_col_scale_.size() == robot_->nv();
+  std::vector<Eigen::MatrixXd> metric_jacobians;
+  Eigen::MatrixXd metric_C;
+  const std::vector<Eigen::MatrixXd> *solve_jacobians = &jacobians;
+  const Eigen::MatrixXd *solve_C = &C;
+  if (metric_active) {
+    const auto D = joint_metric_col_scale_.asDiagonal();
+    metric_jacobians.reserve(jacobians.size());
+    for (const auto &J : jacobians) metric_jacobians.push_back(J * D);
+    metric_C = C * D;
+    solve_jacobians = &metric_jacobians;
+    solve_C = &metric_C;
+  }
   auto backend_result = computeMultiObjectiveVelocitySolutionEigen(
-      goals, jacobians, C, c_lower, c_upper, config, objective_configs,
-      has_soft_rows ? &max_softening_factors : nullptr);
+      goals, *solve_jacobians, *solve_C, c_lower, c_upper, config,
+      objective_configs, has_soft_rows ? &max_softening_factors : nullptr);
+  if (metric_active &&
+      static_cast<int>(backend_result.solution.size()) == robot_->nv()) {
+    for (int j = 0; j < robot_->nv(); ++j)
+      backend_result.solution[j] *= joint_metric_col_scale_(j);
+  }
   if (backend_result.status == SolverStatus::kNonFiniteInput) {
     // Robust fallback: keep control loop stable by returning a zero-velocity
     // step instead of propagating a hard non-finite status.
@@ -6416,8 +6450,30 @@ PositionIKResult KinematicsSolver::solve_position(
     config.regularization_config.epsilon = solver_tolerance_;
     config.regularization_config.regularization_factor = damping_;
 
+    // Soft joint-space metric (contribution knob), same change of variables as
+    // solve_velocity: solve in u-space on scaled copies (J D, C D), un-scale dq.
+    const bool metric_active_ps =
+        joint_metric_col_scale_.size() == robot_->nv();
+    std::vector<Eigen::MatrixXd> metric_jacobians_ps;
+    Eigen::MatrixXd metric_C_ps;
+    const std::vector<Eigen::MatrixXd> *solve_jacobians_ps = &jacobians;
+    const Eigen::MatrixXd *solve_C_ps = &C;
+    if (metric_active_ps) {
+      const auto D = joint_metric_col_scale_.asDiagonal();
+      metric_jacobians_ps.reserve(jacobians.size());
+      for (const auto &J : jacobians) metric_jacobians_ps.push_back(J * D);
+      metric_C_ps = C * D;
+      solve_jacobians_ps = &metric_jacobians_ps;
+      solve_C_ps = &metric_C_ps;
+    }
     auto vel_result = computeMultiObjectiveVelocitySolutionEigen(
-        goals, jacobians, C, c_lower, c_upper, config, objective_configs);
+        goals, *solve_jacobians_ps, *solve_C_ps, c_lower, c_upper, config,
+        objective_configs);
+    if (metric_active_ps &&
+        static_cast<int>(vel_result.solution.size()) == robot_->nv()) {
+      for (int j = 0; j < robot_->nv(); ++j)
+        vel_result.solution[j] *= joint_metric_col_scale_(j);
+    }
 
     if (stall_config_.enabled) {
       double primary_goal_norm =

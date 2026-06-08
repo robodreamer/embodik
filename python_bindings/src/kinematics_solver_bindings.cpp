@@ -177,6 +177,26 @@ void bind_kinematics_solver(nb::module_ &m) {
       .def("enable_velocity_limits", &KinematicsSolver::enable_velocity_limits,
            nb::arg("enable"), "Enable or disable velocity limit constraints")
 
+      .def("set_joint_velocity_limit",
+           &KinematicsSolver::set_joint_velocity_limit, nb::arg("nv_idx"),
+           nb::arg("limit"),
+           "Override one joint's velocity limit (nv index); throttles that joint "
+           "so the solver recruits other DOFs to keep tracking")
+
+      .def("clear_joint_velocity_limit_overrides",
+           &KinematicsSolver::clear_joint_velocity_limit_overrides,
+           "Clear all per-joint velocity-limit overrides")
+
+      .def("set_joint_metric_weights",
+           &KinematicsSolver::set_joint_metric_weights, nb::arg("weights"),
+           "Soft per-joint joint-space metric (size nv): higher weight => that "
+           "joint contributes less to the achieved task motion (weighted "
+           "least-norm). All-ones is a no-op. Torso-vs-arm contribution knob.")
+
+      .def("clear_joint_metric_weights",
+           &KinematicsSolver::clear_joint_metric_weights,
+           "Clear the joint-space metric (restore unweighted solve)")
+
       .def("enable_position_limits", &KinematicsSolver::enable_position_limits,
            nb::arg("enable"), "Enable or disable position limit constraints")
 

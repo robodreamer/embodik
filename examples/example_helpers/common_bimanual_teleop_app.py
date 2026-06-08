@@ -16,8 +16,9 @@ import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-import embodik
 import numpy as np
+
+import embodik
 from embodik.utils import q2r, r2q
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -73,6 +74,9 @@ except ModuleNotFoundError as exc:
 DEFAULT_SOLVER_DT = 0.01
 DEFAULT_POS_GAIN = 10.0
 DEFAULT_ROT_GAIN = 10.0
+DEFAULT_MAX_LINEAR_SPEED = 0.5
+DEFAULT_MAX_ANGULAR_SPEED = 1.0
+DEFAULT_ADAPTIVE_DT_MAX_SCALE = 5.0
 DEFAULT_POSTURE_WEIGHT = 1e-2
 DEFAULT_ARM_NULLSPACE_WEIGHT = 1.0
 COLLISION_TUNING_OPTIONS = ("speed", "balanced", "precise")
@@ -96,6 +100,16 @@ def _require_position_step_primary_opts(opts: object) -> None:
             "Installed embodik is missing PositionStepOptions fields "
             f"{missing}. Rebuild this worktree with: pixi run install"
         )
+
+
+def _apply_position_step_speed_caps(
+    opts: object, *, max_linear_speed: float, max_angular_speed: float
+) -> None:
+    """Apply task-space speed caps when supported by the installed bindings."""
+    if hasattr(opts, "max_linear_speed"):
+        opts.max_linear_speed = float(max_linear_speed)
+    if hasattr(opts, "max_angular_speed"):
+        opts.max_angular_speed = float(max_angular_speed)
 
 
 DEFAULT_MAX_COLLISION_CONSTRAINTS = 3
@@ -247,6 +261,146 @@ def _is_right_arm_joint(joint_name: str) -> bool:
 
 def _is_arm_joint(joint_name: str) -> bool:
     return _is_left_arm_joint(joint_name) or _is_right_arm_joint(joint_name)
+
+
+def _is_torso_contribution_joint(joint_name: str, lock_joint_names: set[str] | None = None) -> bool:
+    """Return True for the mobile-base / torso chain used by the contribution knob."""
+    if lock_joint_names is not None and joint_name in lock_joint_names:
+        return True
+    low = joint_name.lower()
+    return any(
+        token in low
+        for token in (
+            "torso",
+            "lift",
+            "waist",
+            "base_yaw",
+            "base_pitch",
+            "knee",
+            "hip",
+        )
+    )
+
+
+def _collect_torso_arm_contribution_indices(
+    robot: object,
+    joint_names: list[str],
+    *,
+    lock_joint_names: set[str] | None = None,
+) -> tuple[list[int], list[int], int]:
+    """Collect velocity indices for the soft torso-vs-arm contribution metric."""
+    torso_indices: list[int] = []
+    arm_indices: list[int] = []
+    nv = 0
+    for joint_name in joint_names:
+        if not hasattr(robot, "get_joint_velocity_index"):
+            continue
+        idx_v = int(robot.get_joint_velocity_index(joint_name))
+        if hasattr(robot, "get_joint_velocity_size"):
+            nv_joint = int(robot.get_joint_velocity_size(joint_name))
+        else:
+            nv_joint = 1
+        expanded = list(range(idx_v, idx_v + max(nv_joint, 1)))
+        nv = max(nv, idx_v + max(nv_joint, 1))
+        if _is_torso_contribution_joint(joint_name, lock_joint_names):
+            torso_indices.extend(expanded)
+        elif _is_arm_joint(joint_name):
+            arm_indices.extend(expanded)
+    return sorted(set(torso_indices)), sorted(set(arm_indices)), nv
+
+
+def _torso_arm_contribution_metric_weights(
+    contribution: float,
+    *,
+    torso_velocity_indices: list[int],
+    arm_velocity_indices: list[int],
+    nv: int,
+    max_weight: float = 8.0,
+) -> np.ndarray | None:
+    """Build the soft primary-solve metric for the torso contribution slider.
+
+    ``contribution=0`` makes torso motion expensive so arms do more work.
+    ``contribution=1`` makes arm motion expensive so the torso does more work.
+    ``contribution=0.5`` is neutral and returns None so callers can clear the metric.
+    """
+    if not torso_velocity_indices or not arm_velocity_indices or int(nv) <= 0:
+        return None
+    contribution = float(np.clip(contribution, 0.0, 1.0))
+    if abs(contribution - 0.5) < 1e-6:
+        return None
+    spread = (contribution - 0.5) * 2.0
+    weights = np.ones(int(nv), dtype=float)
+    for idx in torso_velocity_indices:
+        weights[int(idx)] = float(max_weight) ** (-spread)
+    for idx in arm_velocity_indices:
+        weights[int(idx)] = float(max_weight) ** spread
+    return weights
+
+
+def _apply_torso_arm_contribution_metric(
+    solver: object,
+    contribution: float,
+    *,
+    torso_velocity_indices: list[int],
+    arm_velocity_indices: list[int],
+    nv: int,
+) -> None:
+    """Apply or clear the soft torso-vs-arm contribution metric on a solver."""
+    if not hasattr(solver, "set_joint_metric_weights"):
+        return
+    weights = _torso_arm_contribution_metric_weights(
+        contribution,
+        torso_velocity_indices=torso_velocity_indices,
+        arm_velocity_indices=arm_velocity_indices,
+        nv=nv,
+    )
+    if weights is None:
+        if hasattr(solver, "clear_joint_metric_weights"):
+            solver.clear_joint_metric_weights()
+        return
+    solver.set_joint_metric_weights(weights)
+
+
+def _set_task_excluded_joint_indices(task: object, indices: list[int]) -> None:
+    """Set or clear per-task velocity exclusions when the binding supports it."""
+    unique = sorted(set(int(i) for i in indices))
+    if unique and hasattr(task, "set_excluded_joint_indices"):
+        task.set_excluded_joint_indices(unique)
+    elif hasattr(task, "clear_excluded_joint_indices"):
+        task.clear_excluded_joint_indices()
+
+
+def _apply_bimanual_task_dof_ownership(
+    *,
+    right_task: object,
+    left_task: object,
+    torso_task: object,
+    right_active: bool,
+    left_active: bool,
+    torso_active: bool,
+    decouple_torso_and_arms: bool,
+    left_arm_velocity_indices: list[int],
+    right_arm_velocity_indices: list[int],
+    torso_velocity_indices: list[int],
+) -> None:
+    """Apply optional hard ownership between EE and torso tasks.
+
+    In shared mode, keep the historical behavior: each EE task excludes the
+    opposite arm, but torso DOFs remain available to serve EE targets. In
+    decoupled mode, EE tasks can spend only their own arm DOFs while the torso
+    task keeps arm DOFs available. This lets torso-marker motion use the torso
+    chain without stealing torso DOFs from EEF tracking, while the arm tasks can
+    still counter-move the arms to hold the tools in place.
+    """
+    right_excluded = list(left_arm_velocity_indices)
+    left_excluded = list(right_arm_velocity_indices)
+    if decouple_torso_and_arms:
+        right_excluded.extend(torso_velocity_indices)
+        left_excluded.extend(torso_velocity_indices)
+
+    _set_task_excluded_joint_indices(right_task, right_excluded if right_active else [])
+    _set_task_excluded_joint_indices(left_task, left_excluded if left_active else [])
+    _set_task_excluded_joint_indices(torso_task, [])
 
 
 def _resolve_lock_joint_names(
@@ -1174,8 +1328,20 @@ def main() -> None:
     _set_geometry_view(default_geometry_view)
     _update_robot_visuals(q)
     frame_map = resolve_common_bimanual_frames(robot.get_frame_names())
+    # Torso interactive-marker frame: prefer the top of the torso chain (visible,
+    # outside the body mesh) over the torso body link so the gizmo is reachable.
+    _frame_name_set = set(robot.get_frame_names())
+    torso_marker_frame = next(
+        (
+            f
+            for f in ("torso_yaw_joint", "torso_yaw_link", "link_torso_5", "torso_link")
+            if f in _frame_name_set
+        ),
+        frame_map["base"],
+    )
     print(f"[bimanual] variant={args.variant} urdf={urdf_path}")
     print(f"[bimanual] frames={frame_map}")
+    print(f"[bimanual] torso_marker_frame={torso_marker_frame}")
 
     def _build_solver(q_posture_seed: np.ndarray):
         solver_local = embodik.KinematicsSolver(robot)
@@ -1203,6 +1369,17 @@ def main() -> None:
         right_task_local.weight = 1.0
         left_task_local.weight = 1.0
 
+        # Optional torso interactive-marker task. Priority 0 so, when enabled, it
+        # commands the torso pose directly (overriding the priority-2 posture pin);
+        # weight 0 / inactive until the checkbox turns it on in the solve loop.
+        torso_task_local = solver_local.add_frame_task(
+            "torso_pose", torso_marker_frame, embodik.TaskType.FRAME_POSE
+        )
+        torso_task_local.priority = 0
+        torso_task_local.weight = 0.0
+        if hasattr(torso_task_local, "active"):
+            torso_task_local.active = False
+
         # Posture/nullspace sit below the EE band. The EE tasks use priority 0,
         # or 0/1 when held-arm protection demotes the actively-dragged arm to keep
         # the held arm planted (see the solve loop); keep regularizers at 2 so
@@ -1219,9 +1396,16 @@ def main() -> None:
         arm_nullspace_local.set_target_configuration(
             np.asarray(nullspace_bias_q, dtype=float).copy()
         )
-        return solver_local, right_task_local, left_task_local, posture_local, arm_nullspace_local
+        return (
+            solver_local,
+            right_task_local,
+            left_task_local,
+            torso_task_local,
+            posture_local,
+            arm_nullspace_local,
+        )
 
-    solver, right_task, left_task, posture, arm_nullspace = _build_solver(q)
+    solver, right_task, left_task, torso_task, posture, arm_nullspace = _build_solver(q)
 
     allowed_joint_names = set(ik_joint_names)
     lock_joint_name_set = set(_resolve_lock_joint_names(joint_names, joint_name_to_cfg))
@@ -1349,6 +1533,31 @@ def main() -> None:
             float(left_wxyz0_xyzw[2]),
         ),
     )
+    # Torso interactive marker: a gizmo at the torso / arm-base frame that drives
+    # the priority-0 torso_pose task when enabled. The contribution knob biases how
+    # torso vs arms serve the EE targets. Hidden until "Enable torso marker" is checked.
+    torso_zero_pose = frame_pose(torso_marker_frame)
+    torso_wxyz0_xyzw = r2q(torso_zero_pose[:3, :3], order="xyzs")
+    torso_ctrl = server.scene.add_transform_controls(
+        "/target/torso",
+        scale=0.3,
+        position=tuple(np.asarray(torso_zero_pose[:3, 3], dtype=float)),
+        wxyz=(
+            float(torso_wxyz0_xyzw[3]),
+            float(torso_wxyz0_xyzw[0]),
+            float(torso_wxyz0_xyzw[1]),
+            float(torso_wxyz0_xyzw[2]),
+        ),
+    )
+    torso_ctrl.visible = False
+
+    def _torso_target_matrix() -> np.ndarray:
+        pose = np.eye(4)
+        w = torso_ctrl.wxyz  # (w, x, y, z)
+        pose[:3, :3] = q2r(np.array([w[1], w[2], w[3], w[0]], dtype=float), order="xyzs")
+        pose[:3, 3] = np.asarray(torso_ctrl.position, dtype=float)
+        return pose
+
     posture_target = q.copy()
 
     def _joint_value(name: str, default: float = 0.0) -> float:
@@ -1368,20 +1577,54 @@ def main() -> None:
         auto_ik_solve = server.gui.add_checkbox("Auto IK Solve", initial_value=True)
         enable_left_ee = server.gui.add_checkbox("Enable Left EE", initial_value=True)
         enable_right_ee = server.gui.add_checkbox("Enable Right EE", initial_value=True)
+        # Torso interactive marker, grouped with the arm enables. Visibility is
+        # driven each tick in the solve loop (robust to on_update quirks).
+        enable_torso_marker = server.gui.add_checkbox("Enable torso marker", initial_value=False)
+        decouple_torso_and_arms = server.gui.add_checkbox(
+            "Decouple torso and arm DOFs", initial_value=True
+        )
         pos_gain = server.gui.add_slider(
             "Position Gain", min=0.1, max=200.0, initial_value=DEFAULT_POS_GAIN, step=0.1
         )
         ori_gain = server.gui.add_slider(
             "Orientation Gain", min=0.1, max=200.0, initial_value=DEFAULT_ROT_GAIN, step=0.1
         )
+        # Soft torso-vs-arms contribution knob (EmbodiK joint metric): 0 = arms do
+        # the work (torso suppressed), 1 = torso does the work, 0.5 = neutral. It is
+        # a soft metric over the hard EE task + limits, so the torso is still
+        # recruited when the arm runs out of workspace (feasibility override).
+        torso_contribution = server.gui.add_slider(
+            "Torso contribution", min=0.0, max=1.0, step=0.05, initial_value=0.5
+        )
+        _contrib_torso_vi, _contrib_arm_vi, _contrib_nv = _collect_torso_arm_contribution_indices(
+            robot, joint_names, lock_joint_names=lock_joint_name_set
+        )
         auto_tune_gains = server.gui.add_checkbox("Auto-tune gains", initial_value=False)
         ik_steps = server.gui.add_slider("IK Iterations", min=1, max=20, initial_value=2, step=1)
         adaptive_dt = server.gui.add_checkbox("Adaptive dt", initial_value=True)
         adaptive_dt_max_scale = server.gui.add_slider(
-            "Adaptive dt Max Scale", min=1.0, max=10.0, step=0.5, initial_value=10.0
+            "Adaptive dt Max Scale",
+            min=1.0,
+            max=10.0,
+            step=0.5,
+            initial_value=DEFAULT_ADAPTIVE_DT_MAX_SCALE,
         )
         adaptive_dt_ref_dist = server.gui.add_slider(
             "Adaptive dt Ref Dist (m)", min=0.01, max=0.20, step=0.01, initial_value=0.02
+        )
+        max_linear_speed = server.gui.add_slider(
+            "Max Linear Speed (m/s)",
+            min=0.0,
+            max=2.0,
+            step=0.05,
+            initial_value=DEFAULT_MAX_LINEAR_SPEED,
+        )
+        max_angular_speed = server.gui.add_slider(
+            "Max Angular Speed (rad/s)",
+            min=0.0,
+            max=5.0,
+            step=0.1,
+            initial_value=DEFAULT_MAX_ANGULAR_SPEED,
         )
         # SCALE_ELASTIC default: the elastic band lets a saturated joint push past
         # its limit and relax back cleanly (much better limit-saturation recovery
@@ -1973,6 +2216,14 @@ def main() -> None:
         left_pose = frame_pose(frame_map["left_tool"])
         _ctrl_from_solver_pose("right", right_ctrl, right_pose)
         _ctrl_from_solver_pose("left", left_ctrl, left_pose)
+        # While the marker is off, keep the hidden torso target on the live pose
+        # so enabling it does not snap the torso to a stale target.
+        torso_ctrl.visible = bool(enable_torso_marker.value)
+        if not bool(enable_torso_marker.value):
+            _torso_pose_now = frame_pose(torso_marker_frame)
+            _tw = r2q(_torso_pose_now[:3, :3], order="xyzs")
+            torso_ctrl.position = tuple(np.asarray(_torso_pose_now[:3, 3], dtype=float))
+            torso_ctrl.wxyz = (float(_tw[3]), float(_tw[0]), float(_tw[1]), float(_tw[2]))
         seer_target_poses = {"left": None, "right": None}
         for task, pose in ((right_task, right_pose), (left_task, left_pose)):
             try:
@@ -1983,8 +2234,10 @@ def main() -> None:
         left_err.value = "0.0000 m"
 
     def _reset_solver_state(reason: str) -> None:
-        nonlocal solver, right_task, left_task, posture, arm_nullspace, collision_cfg, com_cfg, accel_cfg
-        solver, right_task, left_task, posture, arm_nullspace = _build_solver(posture_target)
+        nonlocal solver, right_task, left_task, torso_task, posture, arm_nullspace, collision_cfg, com_cfg, accel_cfg
+        solver, right_task, left_task, torso_task, posture, arm_nullspace = _build_solver(
+            posture_target
+        )
         if hasattr(arm_nullspace, "set_controlled_joint_indices"):
             arm_nullspace.set_controlled_joint_indices(list(arm_controlled_indices))
         collision_cfg = None
@@ -1997,6 +2250,14 @@ def main() -> None:
 
     def _solve_position_step(active_targets: list[object], q_seed: np.ndarray) -> _SolverStep:
         """Execute one solver-owned position step."""
+        # Guarded; survives solver rebuilds because it is set each step.
+        _apply_torso_arm_contribution_metric(
+            solver,
+            float(torso_contribution.value),
+            torso_velocity_indices=_contrib_torso_vi,
+            arm_velocity_indices=_contrib_arm_vi,
+            nv=_contrib_nv,
+        )
         t0 = time.perf_counter()
         result = solver.solve_position_step(q_seed, active_targets, opts)
         elapsed_ms = (time.perf_counter() - t0) * 1e3
@@ -2239,7 +2500,11 @@ def main() -> None:
         # graceful, collision-safe partial motion (move as close as the locked
         # DOF allow). Apply it only while the chain is locked; the user's chosen
         # mode governs when nothing is locked.
-        torso_chain_locked = bool(lock_lift_joint.value) and bool(lift_velocity_indices)
+        _torso_marker_on = bool(enable_torso_marker.value)
+        torso_ctrl.visible = _torso_marker_on
+        torso_chain_locked = (
+            bool(lock_lift_joint.value) and bool(lift_velocity_indices) and not _torso_marker_on
+        )
         effective_solve_mode = (
             embodik.TaskSolveMode.MIN_ERROR if torso_chain_locked else active_mode
         )
@@ -2489,12 +2754,32 @@ def main() -> None:
                     float(eff_rot_gain),
                 )
             )
+        # Torso interactive marker: when enabled, command the torso to the gizmo
+        # (priority-0 torso_pose task), so the torso is directly controllable and
+        # frees from the posture pin; otherwise keep it inactive (weight 0).
+        torso_task.weight = 1.0 if _torso_marker_on else 0.0
+        if hasattr(torso_task, "active"):
+            torso_task.active = _torso_marker_on
+        if _torso_marker_on:
+            targets.append(
+                embodik.TaskTarget(
+                    "torso_pose",
+                    _torso_target_matrix(),
+                    float(eff_pos_gain),
+                    float(eff_rot_gain),
+                )
+            )
         opts.max_steps = int(ik_steps.value)
         opts.position_gain = float(eff_pos_gain)
         opts.orientation_gain = float(eff_rot_gain)
         opts.adaptive_dt = bool(adaptive_dt.value) and not bool(auto_tune_gains.value)
         opts.adaptive_dt_max_scale = float(adaptive_dt_max_scale.value)
         opts.adaptive_dt_reference_distance = float(adaptive_dt_ref_dist.value)
+        _apply_position_step_speed_caps(
+            opts,
+            max_linear_speed=float(max_linear_speed.value),
+            max_angular_speed=float(max_angular_speed.value),
+        )
         if hasattr(opts, "stall_recovery"):
             opts.stall_recovery = bool(enable_collision.value or enable_com_constraint.value)
         if hasattr(opts, "no_progress_max_steps"):
@@ -2517,26 +2802,23 @@ def main() -> None:
         for task in (right_task, left_task):
             task.allow_min_error_fallback = primary_allow_fallback
         dynamic_freeze_indices = []
-        right_task_excluded = list(left_arm_velocity_indices)
-        left_task_excluded = list(right_arm_velocity_indices)
-        if bool(lock_lift_joint.value):
-            right_task_excluded.extend(lift_velocity_indices)
-            left_task_excluded.extend(lift_velocity_indices)
-        if hasattr(right_task, "set_excluded_joint_indices"):
-            if right_active and right_task_excluded:
-                right_task.set_excluded_joint_indices(sorted(set(right_task_excluded)))
-            elif hasattr(right_task, "clear_excluded_joint_indices"):
-                right_task.clear_excluded_joint_indices()
-        if hasattr(left_task, "set_excluded_joint_indices"):
-            if left_active and left_task_excluded:
-                left_task.set_excluded_joint_indices(sorted(set(left_task_excluded)))
-            elif hasattr(left_task, "clear_excluded_joint_indices"):
-                left_task.clear_excluded_joint_indices()
+        _apply_bimanual_task_dof_ownership(
+            right_task=right_task,
+            left_task=left_task,
+            torso_task=torso_task,
+            right_active=right_active,
+            left_active=left_active,
+            torso_active=_torso_marker_on,
+            decouple_torso_and_arms=bool(decouple_torso_and_arms.value),
+            left_arm_velocity_indices=left_arm_velocity_indices,
+            right_arm_velocity_indices=right_arm_velocity_indices,
+            torso_velocity_indices=lift_velocity_indices,
+        )
         if right_active and not left_active:
             dynamic_freeze_indices.extend(left_arm_velocity_indices)
         elif left_active and not right_active:
             dynamic_freeze_indices.extend(right_arm_velocity_indices)
-        if bool(lock_lift_joint.value):
+        if bool(lock_lift_joint.value) and not _torso_marker_on:
             dynamic_freeze_indices.extend(lift_velocity_indices)
         if lock_passive.value:
             opts.excluded_joint_indices = sorted(
