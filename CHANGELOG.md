@@ -17,12 +17,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added per-joint velocity-limit overrides (`set_joint_velocity_limit`,
   `clear_joint_velocity_limit_overrides`) for safety and hard-lock use cases.
 - Added bimanual teleop controls for torso contribution, optional torso marker
-  control, task-space speed caps, and a `Torso Policy` dropdown. The current
-  public policies are `Free`, `Locked`, and `Decoupled`; `Auto / Prefer Locked`
-  remains hidden until the preferred-lock solver primitive lands.
+  control, task-space speed caps, and a `Torso Policy` dropdown with `Free`,
+  `Locked`, and `Decoupled` modes.
 - Added regression coverage for joint metrics, velocity-limit overrides,
-  alpha-style arm classifiers, torso/arm ownership, and far-target damping in
-  the shared bimanual teleop app.
+  arm-joint classifiers, torso/arm ownership, and far-target damping in the
+  shared bimanual teleop app.
 
 ### Changed
 

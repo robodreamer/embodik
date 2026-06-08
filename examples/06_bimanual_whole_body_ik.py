@@ -9,9 +9,7 @@ torso-contribution slider for both robot families.
 
 Current public torso policies are ``Free`` (default whole-body EEF tracking),
 ``Locked`` (freeze the configured lift/torso chain while the torso marker is
-off), and ``Decoupled`` (EEF tasks exclude torso-chain DOFs). ``Auto / Prefer
-Locked`` appears only with future core builds that expose preferred-lock
-``PositionStepOptions``.
+off), and ``Decoupled`` (EEF tasks exclude torso-chain DOFs).
 
 URDF sources:
 - explicit ``--urdf`` / ``--collision-urdf``
