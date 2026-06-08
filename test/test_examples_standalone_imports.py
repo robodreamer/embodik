@@ -51,6 +51,32 @@ def test_bimanual_example_imports_from_copied_examples_layout(monkeypatch, tmp_p
     assert Path(module_globals["common_app"].__file__).is_relative_to(copied_examples_dir)
 
 
+def test_ai_worker_bimanual_entrypoint_exposes_torso_gizmo_controls(monkeypatch, tmp_path) -> None:
+    copied_examples_dir = _copy_examples_dir(tmp_path)
+    _clear_example_helper_imports()
+    monkeypatch.syspath_prepend(str(copied_examples_dir))
+
+    module_globals = runpy.run_path(
+        str(copied_examples_dir / "06_bimanual_whole_body_ik.py"),
+        run_name="embodik_bimanual_gui_contract_check",
+    )
+    common_app_path = Path(module_globals["common_app"].__file__)
+    source = common_app_path.read_text(encoding="utf-8")
+
+    monkeypatch.setattr(sys, "argv", ["06_bimanual_whole_body_ik.py"])
+    assert module_globals["parse_args"]().robot == "ai-worker"
+    assert "common_app.main()" in Path(module_globals["main"].__code__.co_filename).read_text(
+        encoding="utf-8"
+    )
+    assert 'server.scene.add_transform_controls(\n        "/target/torso"' in source
+    assert '"Enable torso marker"' in source
+    assert '"Torso Policy"' in source
+    assert "TORSO_POLICY_FREE" in source
+    assert "TORSO_POLICY_LOCKED" in source
+    assert "TORSO_POLICY_DECOUPLED" in source
+    assert '"Torso contribution"' in source
+
+
 def test_public_viser_examples_use_shared_default_port() -> None:
     examples_dir = Path(__file__).resolve().parents[1] / "examples"
     hardcoded_port_patterns = (

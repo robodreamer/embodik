@@ -7,11 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.16] - 2026-06-08
+
+### Added
+
+- Added soft per-joint joint metric controls (`set_joint_metric_weights`,
+  `clear_joint_metric_weights`) with Python bindings so applications can bias
+  torso-vs-arm contribution without hard-excluding fallback DOFs.
+- Added per-joint velocity-limit overrides (`set_joint_velocity_limit`,
+  `clear_joint_velocity_limit_overrides`) for safety and hard-lock use cases.
+- Added bimanual teleop controls for torso contribution, optional torso marker
+  control, task-space speed caps, and a `Torso Policy` dropdown. The current
+  public policies are `Free`, `Locked`, and `Decoupled`; `Auto / Prefer Locked`
+  remains hidden until the preferred-lock solver primitive lands.
+- Added regression coverage for joint metrics, velocity-limit overrides,
+  alpha-style arm classifiers, torso/arm ownership, and far-target damping in
+  the shared bimanual teleop app.
+
 ### Changed
 
 - Made production `pixi run upload-pypi` refuse sdist-only uploads unless an
   explicit recovery override is set, so releases do not reach PyPI without the
   repaired wheel artifacts.
+- Updated the shared bimanual solver fixture to use the same arm-joint
+  classifiers as the interactive helper.
+
+### Fixed
+
+- Kept decoupled torso-marker ownership asymmetric: end-effector tasks exclude
+  torso-chain DOFs, while the torso task keeps arm DOFs available so tools can
+  be held in place during torso motion.
+- Kept marker-off bimanual control in `Free` whole-body mode by default so torso
+  DOFs can support end-effector target motion when no explicit torso marker is
+  active.
 
 ## [0.20.15] - 2026-06-02
 

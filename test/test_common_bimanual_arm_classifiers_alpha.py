@@ -21,6 +21,7 @@ from examples.example_helpers.common_bimanual_teleop_app import (
     DEFAULT_MAX_LINEAR_SPEED,
     _apply_bimanual_task_dof_ownership,
     _apply_position_step_speed_caps,
+    _apply_torso_control_priority_policy,
     _collect_torso_arm_contribution_indices,
     _is_arm_joint,
     _is_left_arm_joint,
@@ -91,12 +92,21 @@ class _FakeRobot:
 class _FakeTask:
     def __init__(self) -> None:
         self.excluded: list[int] = []
+        self.priority = 0
 
     def set_excluded_joint_indices(self, indices: list[int]) -> None:
         self.excluded = list(indices)
 
     def clear_excluded_joint_indices(self) -> None:
         self.excluded = []
+
+
+class _FakePostureTask:
+    def __init__(self) -> None:
+        self.controlled: list[int] = []
+
+    def set_controlled_joint_indices(self, indices: list[int]) -> None:
+        self.controlled = list(indices)
 
 
 def test_bimanual_task_dof_ownership_keeps_arms_available_to_torso_marker() -> None:
@@ -143,6 +153,42 @@ def test_bimanual_task_dof_ownership_shared_mode_preserves_torso_sharing() -> No
     assert right_task.excluded == [10, 11]
     assert left_task.excluded == [20, 21]
     assert torso_task.excluded == []
+
+
+def test_torso_control_shared_mode_is_secondary_and_removes_lift_bias() -> None:
+    torso_task = _FakeTask()
+    posture_task = _FakePostureTask()
+
+    torso_secondary = _apply_torso_control_priority_policy(
+        torso_task=torso_task,
+        posture_task=posture_task,
+        torso_active=True,
+        decouple_torso_and_arms=False,
+        posture_controlled_indices=[0, 1, 2],
+        lift_posture_indices=[0],
+    )
+
+    assert torso_secondary is True
+    assert torso_task.priority == 1
+    assert posture_task.controlled == [1, 2]
+
+
+def test_torso_control_decoupled_mode_stays_primary_and_keeps_posture_bias() -> None:
+    torso_task = _FakeTask()
+    posture_task = _FakePostureTask()
+
+    torso_secondary = _apply_torso_control_priority_policy(
+        torso_task=torso_task,
+        posture_task=posture_task,
+        torso_active=True,
+        decouple_torso_and_arms=True,
+        posture_controlled_indices=[0, 1, 2],
+        lift_posture_indices=[0],
+    )
+
+    assert torso_secondary is False
+    assert torso_task.priority == 0
+    assert posture_task.controlled == [0, 1, 2]
 
 
 def test_alpha_torso_contribution_metric_groups_torso_and_arms() -> None:

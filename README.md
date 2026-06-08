@@ -79,7 +79,7 @@ The pip-facing examples are intentionally split by purpose:
 | `03_teleop_ik.py` | Small adapter showing how teleop input drives the same IK solver path. |
 | `04_com_constraint_example.py` | CoM support-polygon constraint visualization. |
 | `05_dual_arm_ects.py` | Dual-arm ECTS and orthogonal coordination modes. |
-| `06_bimanual_whole_body_ik.py` | Bimanual whole-body teleop, defaulting to AI Worker and optionally supporting RB-Y1, with CoM, collision handling, adaptive tuning, and optional Seer input. |
+| `06_bimanual_whole_body_ik.py` | Bimanual whole-body teleop, defaulting to AI Worker and optionally supporting RB-Y1, with CoM, collision handling, torso gizmo control, torso/arm contribution controls, adaptive tuning, and optional Seer input. |
 | `07_unitree_g1_retargeting_ik.py` | Unitree G1 whole-body retargeting IK with CoM and optional collision handling. |
 | `08_spot_full_body_ik_viser.py` | Spot full-body IK in regular Viser with arm+torso, torso-only, full-body, and two-stage modes. |
 | `09_spot_locomanip_mjviser.py` | Spot locomanipulation ONNX policy rollout in MuJoCo through mjviser. |

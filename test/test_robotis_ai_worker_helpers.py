@@ -30,7 +30,10 @@ from examples.example_helpers.common_bimanual_teleop_app import (
     _generate_common_bimanual_collision_include_pairs,
     _generate_consecutive_collision_exclusions,
     _posture_control_joint_names,
+    _resolve_torso_marker_frame,
+    _resolve_torso_marker_z_bounds,
 )
+from examples.example_helpers.public_ai_worker_paths import resolve_public_ai_worker_urdf_paths
 
 
 def _load_bimanual_example_module():
@@ -58,6 +61,79 @@ def _pose_matrix(robot, frame_name: str) -> np.ndarray:
     mat[:3, :3] = np.asarray(pose.rotation, dtype=float)
     mat[:3, 3] = np.asarray(pose.translation, dtype=float)
     return mat
+
+
+def test_resolve_torso_marker_frame_prefers_ai_worker_arm_base() -> None:
+    frame_map = {
+        "base": "base_link",
+        "arm_base": "arm_base_link",
+        "head": "head_link2",
+        "right_tool": "gripper_r_rh_p12_rn_base",
+        "left_tool": "gripper_l_rh_p12_rn_base",
+    }
+
+    assert (
+        _resolve_torso_marker_frame(
+            frame_map,
+            [
+                "base_link",
+                "lift_link",
+                "lift_joint",
+                "arm_base_link",
+                "head_link2",
+            ],
+        )
+        == "arm_base_link"
+    )
+
+
+def test_resolve_torso_marker_frame_prefers_explicit_torso_frame() -> None:
+    frame_map = {
+        "base": "base_link",
+        "arm_base": "arm_base_link",
+    }
+
+    assert (
+        _resolve_torso_marker_frame(
+            frame_map,
+            [
+                "base_link",
+                "arm_base_link",
+                "torso_yaw_joint",
+            ],
+        )
+        == "torso_yaw_joint"
+    )
+
+
+def test_resolve_ai_worker_torso_marker_z_bounds_from_lift_joint() -> None:
+    urdf_path, collision_urdf_path = resolve_public_ai_worker_urdf_paths(variant="sg2")
+    model_path = collision_urdf_path or urdf_path
+    full_robot = embodik.RobotModel(str(model_path), floating_base=False)
+    robot = embodik.RobotModel(
+        str(model_path),
+        actuated_joint_names=default_common_bimanual_ik_joint_names(full_robot.get_joint_names()),
+        floating_base=False,
+    )
+    q0 = robot.neutral_configuration()
+    frames = resolve_common_bimanual_frames(robot.get_frame_names())
+    frame = _resolve_torso_marker_frame(frames, robot.get_frame_names())
+    q_lo, q_hi = robot.get_joint_limits()
+    joint_name_to_cfg = {
+        name: int(robot.get_joint_config_index(name)) for name in robot.get_joint_names()
+    }
+
+    z_bounds = _resolve_torso_marker_z_bounds(
+        robot,
+        frame,
+        q_ref=q0,
+        joint_name_to_cfg=joint_name_to_cfg,
+        q_lo=np.asarray(q_lo, dtype=float),
+        q_hi=np.asarray(q_hi, dtype=float),
+    )
+
+    assert frame == "arm_base_link"
+    assert z_bounds == pytest.approx((0.9316, 1.4316), abs=1e-4)
 
 
 def _load_reduced_rby1_visual_robot():
