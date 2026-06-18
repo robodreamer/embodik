@@ -84,6 +84,42 @@ def _create_lower_limited_two_joint_urdf(*, velocity_limit: float = 100.0) -> st
     return path
 
 
+def _create_soft_infeasible_three_joint_urdf(*, velocity_limit: float = 100.0) -> str:
+    urdf_content = f"""<?xml version="1.0"?>
+<robot name="soft_infeasible_test_robot">
+  <link name="base_link"/>
+  <joint name="joint1" type="revolute">
+    <parent link="base_link"/>
+    <child link="link1"/>
+    <origin xyz="0 0 0.1"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-0.1" upper="0.1" effort="100" velocity="{velocity_limit}"/>
+  </joint>
+  <link name="link1"/>
+  <joint name="joint2" type="revolute">
+    <parent link="link1"/>
+    <child link="ee"/>
+    <origin xyz="0.2 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-3.14" upper="3.14" effort="100" velocity="{velocity_limit}"/>
+  </joint>
+  <link name="ee"/>
+  <joint name="joint3" type="revolute">
+    <parent link="ee"/>
+    <child link="tail"/>
+    <origin xyz="0 0 0"/>
+    <axis xyz="1 0 0"/>
+    <limit lower="-3.14" upper="3.14" effort="100" velocity="{velocity_limit}"/>
+  </joint>
+  <link name="tail"/>
+</robot>
+"""
+    fd, path = tempfile.mkstemp(suffix=".urdf")
+    with os.fdopen(fd, "w") as f:
+        f.write(urdf_content)
+    return path
+
+
 def _make_solver_with_posture():
     urdf_path = _create_two_joint_urdf()
     robot = eik.RobotModel(urdf_path, floating_base=False)
@@ -97,6 +133,40 @@ def _make_solver_with_posture():
     posture.weight = 1.0
     posture.set_target_velocity(np.array([0.4, -0.4], dtype=float))
     return urdf_path, robot, solver, ee_task, posture
+
+
+def _make_soft_infeasible_step_case():
+    urdf_path = _create_soft_infeasible_three_joint_urdf()
+    robot = eik.RobotModel(urdf_path, floating_base=False)
+    solver = eik.KinematicsSolver(robot)
+    solver.dt = 0.02
+    solver.enable_position_limits(True)
+    solver.enable_velocity_limits(True)
+
+    ee_task = solver.add_frame_task("ee_task", "ee", eik.TaskType.FRAME_POSE)
+    ee_task.priority = 0
+    ee_task.weight = 1.0
+    ee_task.solve_mode = eik.TaskSolveMode.SCALE
+
+    posture = solver.add_posture_task("posture")
+    posture.priority = 1
+    posture.weight = 10.0
+    posture.set_target_velocity(np.array([0.0, 0.0, 5.0], dtype=float))
+
+    q = np.array([0.099, 0.0, 0.0], dtype=float)
+    robot.update_configuration(q)
+    pose = robot.get_frame_pose("ee")
+    target = np.eye(4, dtype=float)
+    target[:3, :3] = np.asarray(pose.rotation, dtype=float)
+    target[:3, 3] = np.asarray(pose.translation, dtype=float)
+    target[1, 3] += 0.4
+
+    opts = eik.PositionStepOptions()
+    opts.max_steps = 1
+    opts.position_gain = 8000.0
+    opts.orientation_gain = 0.0
+    opts.primary_solve_mode = eik.TaskSolveMode.SCALE
+    return urdf_path, robot, solver, q, target, opts
 
 
 def test_integration_zero_velocity_indices_invalid_returns_invalid_input():
@@ -525,6 +595,59 @@ def test_duplicate_integration_indices_idempotent():
         res = solver.solve_position_step(q, target, "ee_task", opts)
         assert res.status == eik.SolverStatus.SUCCESS
         assert abs(float(np.asarray(res.q_solution, dtype=float)[1]) - q[1]) < 1e-8
+    finally:
+        os.unlink(urdf_path)
+
+
+def test_position_step_holds_current_q_on_soft_infeasible_self_motion():
+    urdf_path, _, solver, q, target, opts = _make_soft_infeasible_step_case()
+    try:
+        result = solver.solve_position_step(q, target, "ee_task", opts)
+
+        assert result.status == eik.SolverStatus.NO_PROGRESS
+        assert "held current configuration" in result.status_message
+        np.testing.assert_allclose(np.asarray(result.q_solution, dtype=float), q, atol=1e-12)
+        np.testing.assert_allclose(
+            np.asarray(result.joint_velocities, dtype=float),
+            np.zeros_like(q),
+            atol=1e-12,
+        )
+        assert np.min(np.asarray(result.task_scales, dtype=float)) <= 1e-4
+        assert result.position_error > 0.05
+    finally:
+        os.unlink(urdf_path)
+
+
+def test_multi_target_position_step_holds_current_q_on_soft_infeasible_self_motion():
+    urdf_path, _, solver, q, target, opts = _make_soft_infeasible_step_case()
+    try:
+        targets = [eik.TaskTarget("ee_task", target, opts.position_gain, opts.orientation_gain)]
+        result = solver.solve_position_step(q, targets, opts)
+
+        assert result.status == eik.SolverStatus.NO_PROGRESS
+        assert "held current configuration" in result.status_message
+        np.testing.assert_allclose(np.asarray(result.q_solution, dtype=float), q, atol=1e-12)
+        np.testing.assert_allclose(
+            np.asarray(result.joint_velocities, dtype=float),
+            np.zeros_like(q),
+            atol=1e-12,
+        )
+        assert np.min(np.asarray(result.task_scales, dtype=float)) <= 1e-4
+        assert result.position_error > 0.05
+    finally:
+        os.unlink(urdf_path)
+
+
+def test_position_step_min_error_mode_still_applies_motion_when_soft_infeasible():
+    urdf_path, _, solver, q, target, opts = _make_soft_infeasible_step_case()
+    try:
+        opts.primary_solve_mode = eik.TaskSolveMode.MIN_ERROR
+        result = solver.solve_position_step(q, target, "ee_task", opts)
+
+        assert result.status == eik.SolverStatus.SUCCESS
+        assert result.task_modes_effective[0] == eik.TaskSolveMode.MIN_ERROR
+        assert np.linalg.norm(np.asarray(result.q_solution, dtype=float) - q) > 0.02
+        assert "held current configuration" not in result.status_message
     finally:
         os.unlink(urdf_path)
 

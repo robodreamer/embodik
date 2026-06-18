@@ -74,6 +74,12 @@ constexpr double kAdaptiveDtFallbackMaxEESpeed = 1.0; // m/s
 // Lazy constraint reuse: skip recomputation when dq is tiny and distance is safe.
 constexpr double kLazyReuseMaxDqSqNorm = 1e-6;  // ~0.001 rad change
 constexpr double kLazyReuseMinDistMargin = 0.005; // 5mm safety margin
+constexpr double kSoftInfeasibleScaleHoldThreshold = 1e-4;
+constexpr double kSoftInfeasiblePositionErrorThreshold = 5e-2;
+constexpr double kSoftInfeasibleOrientationErrorThreshold = 2.5e-1;
+constexpr double kSoftInfeasibleMotionThreshold = 1e-2;
+constexpr double kSoftInfeasibleMinImprovement = 2e-3;
+constexpr double kSoftInfeasibleRelativeImprovement = 1e-2;
 
 // Velocity box constraint: minimum fraction of vel_limit when inside limits
 constexpr double kMinBoundFraction = 0.10;
@@ -126,6 +132,67 @@ static bool should_report_position_recovery_success(
     return false;
   }
   return (result.q_solution - current_q).norm() > motion_eps;
+}
+
+static bool is_scale_family_mode(TaskSolveMode mode) {
+  return mode == TaskSolveMode::kScale ||
+         mode == TaskSolveMode::kScaleElastic;
+}
+
+static bool should_hold_soft_infeasible_position_step(
+    const PositionIKResult &result, const Eigen::VectorXd &current_q,
+    double initial_combined_error, bool collision_violated,
+    bool recovery_inside_collision_margin) {
+  const bool primary_scale_collapsed_infeasible =
+      result.status == SolverStatus::kInfeasible &&
+      result.status_message.find("primary task scale collapsed") !=
+          std::string::npos;
+  if ((result.status != SolverStatus::kSuccess &&
+       !primary_scale_collapsed_infeasible) ||
+      collision_violated ||
+      recovery_inside_collision_margin || result.stall_escape_count > 0 ||
+      result.collision_rejection_count > 0 ||
+      result.q_solution.size() != current_q.size()) {
+    return false;
+  }
+  if (result.task_scales.empty() || result.task_modes_effective.empty()) {
+    return false;
+  }
+  if (!is_scale_family_mode(result.task_modes_effective[0])) {
+    return false;
+  }
+  if (!result.task_used_fallback.empty() && result.task_used_fallback[0]) {
+    return false;
+  }
+  if (std::abs(result.task_scales[0]) >
+      kSoftInfeasibleScaleHoldThreshold) {
+    return false;
+  }
+
+  const bool large_residual =
+      result.position_error > kSoftInfeasiblePositionErrorThreshold ||
+      result.orientation_error > kSoftInfeasibleOrientationErrorThreshold;
+  if (!large_residual) {
+    return false;
+  }
+
+  if ((result.q_solution - current_q).norm() <=
+      kSoftInfeasibleMotionThreshold) {
+    return false;
+  }
+
+  const double final_combined_error =
+      result.position_error + result.orientation_error;
+  if (!std::isfinite(initial_combined_error) ||
+      !std::isfinite(final_combined_error) ||
+      initial_combined_error <= 0.0) {
+    return false;
+  }
+  const double improvement = initial_combined_error - final_combined_error;
+  const double required_improvement =
+      std::max(kSoftInfeasibleMinImprovement,
+               kSoftInfeasibleRelativeImprovement * initial_combined_error);
+  return improvement < required_improvement;
 }
 
 static bool collision_recovery_candidate_acceptable(
@@ -6865,6 +6932,7 @@ PositionIKResult KinematicsSolver::solve_position_step(
   int steps_used = 0;
   Eigen::VectorXd vel(6);
   double prev_combined_error = std::numeric_limits<double>::infinity();
+  double initial_combined_error = std::numeric_limits<double>::quiet_NaN();
   int no_progress_count = 0;
   bool no_progress_exit = false;
   bool collision_violated_flag = false;
@@ -6909,6 +6977,9 @@ PositionIKResult KinematicsSolver::solve_position_step(
       result.status_message =
           "frame task has invalid pose error dimension for solve_position_step";
       break;
+    }
+    if (step == 0) {
+      initial_combined_error = combined_error;
     }
     if (step > 0 && options.no_progress_max_steps > 0 && have_vel_result) {
       const bool low_error_change =
@@ -7583,6 +7654,28 @@ PositionIKResult KinematicsSolver::solve_position_step(
       collision_violated_flag) {
     sync_position_result_applied_velocity(result, current_q, step_dt);
   }
+  if (should_hold_soft_infeasible_position_step(
+          result, current_q, initial_combined_error, collision_violated_flag,
+          recovery_inside_collision_margin)) {
+    q = current_q;
+    robot_->update_configuration(q);
+    result.q_solution = q;
+    result.achieved_pose = robot_->get_frame_pose(frame_task->getFrameName());
+    frame_task->update(*robot_);
+    const Eigen::VectorXd &held_error = frame_task->getError();
+    if (held_error.size() == 3) {
+      result.position_error = held_error.head<3>().norm();
+      result.orientation_error = 0.0;
+    } else if (held_error.size() >= 6) {
+      result.position_error = held_error.head<3>().norm();
+      result.orientation_error = held_error.tail<3>().norm();
+    }
+    result.status = SolverStatus::kNoProgress;
+    result.status_message =
+        "solve_position_step held current configuration because the primary "
+        "SCALE task was soft-infeasible";
+    sync_position_result_applied_velocity(result, current_q, step_dt);
+  }
 
   // In teleop-style loops (max_steps=1), stall handling must accumulate across
   // successive solve_position_step calls based on *applied* motion, not only
@@ -7830,6 +7923,8 @@ PositionIKResult KinematicsSolver::solve_position_step(
   int steps_used = 0;
   Eigen::Matrix<double, 6, 1> vel;
   double prev_combined_error = std::numeric_limits<double>::infinity();
+  double initial_primary_combined_error =
+      std::numeric_limits<double>::quiet_NaN();
   int no_progress_count = 0;
   bool no_progress_exit = false;
   bool collision_violated_flag_mts = false;  // multi-target solve_position_step
@@ -7838,6 +7933,7 @@ PositionIKResult KinematicsSolver::solve_position_step(
   for (int step = 0; step < steps; ++step) {
     double combined_error = 0.0;
     double max_position_error = 0.0;
+    double primary_combined_error = std::numeric_limits<double>::quiet_NaN();
     std::vector<Eigen::VectorXd> target_velocities(n_targets);
     bool task_apply_failed = false;
     std::string task_apply_error;
@@ -7896,6 +7992,9 @@ PositionIKResult KinematicsSolver::solve_position_step(
           }
         }
         const double task_position_error = error.head<3>().norm();
+        if (i == 0) {
+          primary_combined_error = task_position_error;
+        }
         combined_error += task_position_error;
         if (!is_orientation_only) {
           max_position_error =
@@ -7904,7 +8003,12 @@ PositionIKResult KinematicsSolver::solve_position_step(
         target_velocities[i] = v3;
       } else if (error.size() >= 6) {
         const double task_position_error = error.head<3>().norm();
-        combined_error += task_position_error + error.tail<3>().norm();
+        const double task_combined_error =
+            task_position_error + error.tail<3>().norm();
+        if (i == 0) {
+          primary_combined_error = task_combined_error;
+        }
+        combined_error += task_combined_error;
         max_position_error = std::max(max_position_error, task_position_error);
         vel.head<3>() = target.position_gain * error.head<3>();
         vel.tail<3>() = target.orientation_gain * error.tail<3>();
@@ -7923,6 +8027,9 @@ PositionIKResult KinematicsSolver::solve_position_step(
       result.status = SolverStatus::kInvalidInput;
       result.status_message = task_apply_error;
       break;
+    }
+    if (step == 0) {
+      initial_primary_combined_error = primary_combined_error;
     }
     if (step > 0 && options.no_progress_max_steps > 0 && have_vel_result) {
       const bool low_error_change =
@@ -8639,6 +8746,33 @@ PositionIKResult KinematicsSolver::solve_position_step(
   }
   if (result.stall_escape_count > 0 || result.collision_rejection_count > 0 ||
       collision_violated_flag_mts) {
+    sync_position_result_applied_velocity(result, current_q, step_dt);
+  }
+  if (should_hold_soft_infeasible_position_step(
+          result, current_q, initial_primary_combined_error,
+          collision_violated_flag_mts, recovery_inside_collision_margin)) {
+    q = current_q;
+    robot_->update_configuration(q);
+    result.q_solution = q;
+    primary.task->update(*robot_);
+    const Eigen::VectorXd &held_error = primary.task->getError();
+    if (held_error.size() == 3) {
+      result.position_error = held_error.head<3>().norm();
+      result.orientation_error = 0.0;
+    } else if (held_error.size() >= 6) {
+      result.position_error = held_error.head<3>().norm();
+      result.orientation_error = held_error.tail<3>().norm();
+    }
+    if (primary.kind == PoseTaskKind::kFrame) {
+      result.achieved_pose = robot_->get_frame_pose(
+          static_cast<FrameTask *>(primary.task.get())->getFrameName());
+    } else {
+      result.achieved_pose = targets.front().target_pose;
+    }
+    result.status = SolverStatus::kNoProgress;
+    result.status_message =
+        "solve_position_step held current configuration because the primary "
+        "SCALE task was soft-infeasible";
     sync_position_result_applied_velocity(result, current_q, step_dt);
   }
 

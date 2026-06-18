@@ -386,7 +386,9 @@ NB_MODULE(_embodik_impl, m) {
       "Options for solve_position_step(): gains, timestep, and optional joint "
       "controls. Field names match PositionIKOptions where applicable "
       "(excluded_joint_indices uses the same nv convention as "
-      "PositionIKOptions and Task.set_excluded_joint_indices).")
+      "PositionIKOptions and Task.set_excluded_joint_indices). SCALE-family "
+      "primary targets that are soft-infeasible and only induce self-motion "
+      "return NO_PROGRESS with q_solution held at current_q.")
       .def(nb::init<>())
       .def_rw("position_gain", &eik::PositionStepOptions::position_gain,
               "Multiplier on the linear pose error (default 1.0)")
