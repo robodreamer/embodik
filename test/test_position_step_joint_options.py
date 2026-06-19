@@ -56,6 +56,40 @@ def _create_two_joint_urdf(*, velocity_limit: float = 100.0) -> str:
     return path
 
 
+def _create_prismatic_torso_arm_urdf(*, velocity_limit: float = 100.0) -> str:
+    urdf_content = f"""<?xml version="1.0"?>
+<robot name="torso_arm_test_robot">
+  <link name="base_link"/>
+  <joint name="torso_y" type="prismatic">
+    <parent link="base_link"/>
+    <child link="torso_link"/>
+    <origin xyz="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-1.0" upper="1.0" effort="100" velocity="{velocity_limit}"/>
+  </joint>
+  <link name="torso_link"/>
+  <joint name="shoulder_z" type="revolute">
+    <parent link="torso_link"/>
+    <child link="arm_link"/>
+    <origin xyz="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-3.14" upper="3.14" effort="100" velocity="{velocity_limit}"/>
+  </joint>
+  <link name="arm_link"/>
+  <joint name="ee_fixed" type="fixed">
+    <parent link="arm_link"/>
+    <child link="ee"/>
+    <origin xyz="0.3 0 0"/>
+  </joint>
+  <link name="ee"/>
+</robot>
+"""
+    fd, path = tempfile.mkstemp(suffix=".urdf")
+    with os.fdopen(fd, "w") as f:
+        f.write(urdf_content)
+    return path
+
+
 def _create_lower_limited_two_joint_urdf(*, velocity_limit: float = 100.0) -> str:
     urdf_content = f"""<?xml version="1.0"?>
 <robot name="test_robot_lower_limited">
@@ -233,6 +267,24 @@ def test_preferred_locked_joint_indices_invalid():
         os.unlink(urdf_path)
 
 
+def test_preferred_lock_min_error_reduction_ratio_invalid():
+    urdf_path = _create_two_joint_urdf()
+    try:
+        robot = eik.RobotModel(urdf_path, floating_base=False)
+        solver = eik.KinematicsSolver(robot)
+        task = solver.add_frame_task("ee_task", "ee")
+        task.priority = 0
+        q = np.zeros(2, dtype=float)
+        target = np.eye(4, dtype=float)
+        opts = eik.PositionStepOptions()
+        opts.preferred_lock_min_error_reduction_ratio = -0.1
+        result = solver.solve_position_step(q, target, "ee_task", opts)
+        assert result.status == eik.SolverStatus.INVALID_INPUT
+        assert "preferred_lock_min_error_reduction_ratio" in result.status_message
+    finally:
+        os.unlink(urdf_path)
+
+
 def test_integration_zero_velocity_indices_masks_before_integrate():
     """With all nv-indices masked, configuration does not move despite EE error."""
     urdf_path, robot, solver, _, _ = _make_solver_with_posture()
@@ -290,6 +342,48 @@ def test_preferred_locked_candidate_accepts_when_tracking_is_good():
         assert abs(float(np.asarray(res.q_solution, dtype=float)[1]) - q[1]) < 1e-9
         assert float(np.asarray(res.joint_velocities, dtype=float)[1]) == 0.0
         assert res.diagnostics.preferred_lock_used is True
+    finally:
+        os.unlink(urdf_path)
+
+
+def test_preferred_locked_candidate_accepts_productive_step_before_tracking_tolerance():
+    urdf_path = _create_prismatic_torso_arm_urdf()
+    try:
+        robot = eik.RobotModel(urdf_path, floating_base=False)
+        solver = eik.KinematicsSolver(robot)
+        solver.dt = 0.01
+        task = solver.add_frame_task("ee_task", "ee")
+        task.priority = 0
+        task.weight = 1.0
+
+        q = np.array([0.0, 0.0], dtype=float)
+        robot.update_configuration(q)
+        pose = robot.get_frame_pose("ee")
+        target = np.eye(4, dtype=float)
+        target[:3, :3] = np.array(pose.rotation, dtype=float)
+        target[:3, 3] = np.array(pose.translation, dtype=float)
+        target[1, 3] += 0.12
+
+        opts = eik.PositionStepOptions()
+        opts.max_steps = 1
+        opts.position_gain = 40.0
+        opts.orientation_gain = 0.0
+        opts.preferred_locked_joint_indices = [0]
+        opts.preferred_lock_tracking_tolerance = 0.035
+        opts.preferred_lock_orientation_tolerance = 0.0
+        opts.preferred_lock_max_step_norm = 0.35
+
+        res = solver.solve_position_step(q, target, "ee_task", opts)
+
+        assert res.preferred_lock_attempted is True
+        assert res.preferred_lock_used is True
+        assert res.preferred_lock_fallback_used is False
+        assert res.preferred_lock_candidate_position_error > 0.035
+        assert res.preferred_lock_candidate_step_norm <= 0.35
+        q_out = np.asarray(res.q_solution, dtype=float)
+        assert abs(float(q_out[0] - q[0])) < 1e-10
+        assert abs(float(q_out[1] - q[1])) > 1e-3
+        assert float(np.asarray(res.joint_velocities, dtype=float)[0]) == 0.0
     finally:
         os.unlink(urdf_path)
 

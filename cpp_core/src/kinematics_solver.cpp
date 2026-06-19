@@ -721,6 +721,14 @@ static bool validate_position_step_joint_index_options(
     }
     return false;
   }
+  if (!std::isfinite(options.preferred_lock_min_error_reduction_ratio) ||
+      options.preferred_lock_min_error_reduction_ratio < 0.0) {
+    if (err != nullptr) {
+      *err =
+          "preferred_lock_min_error_reduction_ratio must be finite and >= 0";
+    }
+    return false;
+  }
   return true;
 }
 
@@ -807,22 +815,43 @@ static bool preferred_lock_status_acceptable(SolverStatus status) {
   return status == SolverStatus::kSuccess || status == SolverStatus::kNoProgress;
 }
 
+static bool preferred_lock_error_component_acceptable(
+    double entry_error, double candidate_error, double tolerance,
+    double min_reduction_ratio) {
+  if (std::isfinite(candidate_error) && candidate_error <= tolerance) {
+    return true;
+  }
+  if (!std::isfinite(entry_error) || !std::isfinite(candidate_error) ||
+      entry_error <= tolerance || candidate_error >= entry_error) {
+    return false;
+  }
+  constexpr double kMinAbsoluteReduction = 1e-4;
+  const double required_reduction =
+      std::max(kMinAbsoluteReduction, entry_error * min_reduction_ratio);
+  return (entry_error - candidate_error) >= required_reduction;
+}
+
 static bool preferred_lock_candidate_acceptable(
     const PositionIKResult &candidate,
-    const PositionStepTargetErrorSummary &errors, double step_norm,
+    const PositionStepTargetErrorSummary &entry_errors,
+    const PositionStepTargetErrorSummary &candidate_errors, double step_norm,
     const PositionStepOptions &options) {
   if (!preferred_lock_status_acceptable(candidate.status) ||
       candidate.q_solution.size() == 0 || !candidate.q_solution.allFinite()) {
     return false;
   }
-  if (!std::isfinite(errors.max_position_error) ||
-      errors.max_position_error > options.preferred_lock_tracking_tolerance) {
+  if (!preferred_lock_error_component_acceptable(
+          entry_errors.max_position_error, candidate_errors.max_position_error,
+          options.preferred_lock_tracking_tolerance,
+          options.preferred_lock_min_error_reduction_ratio)) {
     return false;
   }
   if (options.preferred_lock_orientation_tolerance > 0.0 &&
-      (!std::isfinite(errors.max_orientation_error) ||
-       errors.max_orientation_error >
-           options.preferred_lock_orientation_tolerance)) {
+      !preferred_lock_error_component_acceptable(
+          entry_errors.max_orientation_error,
+          candidate_errors.max_orientation_error,
+          options.preferred_lock_orientation_tolerance,
+          options.preferred_lock_min_error_reduction_ratio)) {
     return false;
   }
   if (options.preferred_lock_max_step_norm > 0.0 &&
@@ -4558,11 +4587,13 @@ PositionIKResult KinematicsSolver::solve_position_step_with_preferred_lock(
       current_q, target_pose, frame_task_name, locked_options);
   const double candidate_time_ms = elapsed_ms(candidate_start);
 
-  PositionStepTargetErrorSummary errors;
-  if (candidate.q_solution.size() == robot_->nq() &&
-      candidate.q_solution.allFinite()) {
+  auto compute_errors_at = [&](const Eigen::VectorXd &q) {
+    PositionStepTargetErrorSummary out;
+    if (q.size() != robot_->nq() || !q.allFinite()) {
+      return out;
+    }
     const Eigen::VectorXd saved_q = robot_->get_current_configuration();
-    robot_->update_configuration(candidate.q_solution);
+    robot_->update_configuration(q);
     auto it = task_map_.find(frame_task_name);
     auto frame_task =
         (it != task_map_.end()) ? std::dynamic_pointer_cast<FrameTask>(it->second)
@@ -4574,26 +4605,32 @@ PositionIKResult KinematicsSolver::solve_position_step_with_preferred_lock(
       const Eigen::VectorXd &error = frame_task->getError();
       if (error.size() == 3) {
         if (frame_task->getType() == TaskType::FRAME_ORIENTATION) {
-          errors.max_position_error = 0.0;
-          errors.max_orientation_error = error.head<3>().norm();
+          out.max_position_error = 0.0;
+          out.max_orientation_error = error.head<3>().norm();
         } else {
-          errors.max_position_error = error.head<3>().norm();
-          errors.max_orientation_error = 0.0;
+          out.max_position_error = error.head<3>().norm();
+          out.max_orientation_error = 0.0;
         }
       } else if (error.size() >= 6) {
-        errors.max_position_error = error.head<3>().norm();
-        errors.max_orientation_error = error.tail<3>().norm();
+        out.max_position_error = error.head<3>().norm();
+        out.max_orientation_error = error.tail<3>().norm();
       }
     }
     robot_->update_configuration(saved_q);
-  }
+    return out;
+  };
+
+  const PositionStepTargetErrorSummary entry_errors =
+      compute_errors_at(current_q);
+  const PositionStepTargetErrorSummary errors =
+      compute_errors_at(candidate.q_solution);
 
   const double step_norm =
       (candidate.q_solution.size() == current_q.size())
           ? (candidate.q_solution - current_q).norm()
           : std::numeric_limits<double>::quiet_NaN();
   const bool accept = preferred_lock_candidate_acceptable(
-      candidate, errors, step_norm, options);
+      candidate, entry_errors, errors, step_norm, options);
   if (accept) {
     annotate_preferred_lock_result(candidate, candidate, errors, step_norm,
                                    candidate_time_ms, true);
@@ -4649,11 +4686,13 @@ PositionIKResult KinematicsSolver::solve_position_step_with_preferred_lock(
       solve_position_step(current_q, targets, locked_options);
   const double candidate_time_ms = elapsed_ms(candidate_start);
 
-  PositionStepTargetErrorSummary errors;
-  if (candidate.q_solution.size() == robot_->nq() &&
-      candidate.q_solution.allFinite()) {
+  auto compute_errors_at = [&](const Eigen::VectorXd &q) {
+    PositionStepTargetErrorSummary out;
+    if (q.size() != robot_->nq() || !q.allFinite()) {
+      return out;
+    }
     const Eigen::VectorXd saved_q = robot_->get_current_configuration();
-    robot_->update_configuration(candidate.q_solution);
+    robot_->update_configuration(q);
     double max_position = 0.0;
     double max_orientation = 0.0;
     bool saw_target = false;
@@ -4704,18 +4743,24 @@ PositionIKResult KinematicsSolver::solve_position_step_with_preferred_lock(
       }
     }
     if (saw_target) {
-      errors.max_position_error = max_position;
-      errors.max_orientation_error = max_orientation;
+      out.max_position_error = max_position;
+      out.max_orientation_error = max_orientation;
     }
     robot_->update_configuration(saved_q);
-  }
+    return out;
+  };
+
+  const PositionStepTargetErrorSummary entry_errors =
+      compute_errors_at(current_q);
+  const PositionStepTargetErrorSummary errors =
+      compute_errors_at(candidate.q_solution);
 
   const double step_norm =
       (candidate.q_solution.size() == current_q.size())
           ? (candidate.q_solution - current_q).norm()
           : std::numeric_limits<double>::quiet_NaN();
   const bool accept = preferred_lock_candidate_acceptable(
-      candidate, errors, step_norm, options);
+      candidate, entry_errors, errors, step_norm, options);
   if (accept) {
     annotate_preferred_lock_result(candidate, candidate, errors, step_norm,
                                    candidate_time_ms, true);

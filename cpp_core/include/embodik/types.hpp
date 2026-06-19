@@ -370,9 +370,10 @@ struct PositionStepOptions {
   /// Mirrors PositionIKOptions::primary_allow_min_error_fallback semantics.
   bool primary_allow_min_error_fallback = false;
   /// Try one extra solve with these nv-indices hard locked before the normal
-  /// solve. The locked candidate is accepted only when it is continuous and still
-  /// tracks the active target(s) within the tolerances below; otherwise the normal
-  /// solve runs from the original current_q. Empty = no extra solve.
+  /// solve. The locked candidate is accepted when it is continuous and each
+  /// active-target error component is either inside tolerance or still making
+  /// meaningful progress; otherwise the normal solve runs from the original
+  /// current_q. Empty = no extra solve.
   std::vector<int> preferred_locked_joint_indices;
   /// Primary pose-task solve mode used only by the preferred-lock candidate.
   TaskSolveMode preferred_lock_solve_mode = TaskSolveMode::kMinError;
@@ -385,6 +386,10 @@ struct PositionStepOptions {
   /// Maximum configuration step norm allowed for the preferred-lock candidate.
   /// Set <=0 to disable this continuity gate.
   double preferred_lock_max_step_norm = 0.35;
+  /// Minimum fractional reduction required for each over-tolerance active-target
+  /// error component before accepting a preferred-lock candidate that is still
+  /// outside the final tracking tolerance.
+  double preferred_lock_min_error_reduction_ratio = 0.02;
 };
 
 // Per-task target for multi-task solve_position_step().

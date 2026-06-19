@@ -89,6 +89,8 @@ TORSO_POLICY_FREE = "Free"
 TORSO_POLICY_AUTO = "Auto / Prefer Locked"
 TORSO_POLICY_LOCKED = "Locked"
 TORSO_POLICY_DECOUPLED = "Decoupled"
+DEFAULT_AUTO_TORSO_CONTRIBUTION = 0.35
+DEFAULT_AUTO_PREFERRED_LOCK_MIN_ERROR_REDUCTION_RATIO = 0.08
 POSTURE_SLIDER_DEADBAND = 1e-3
 EE_POSITION_DEADBAND = 1e-4
 EE_ROTATION_DEADBAND = 1e-3
@@ -341,6 +343,16 @@ def _torso_arm_contribution_metric_weights(
     for idx in arm_velocity_indices:
         weights[int(idx)] = float(max_weight) ** spread
     return weights
+
+
+def _effective_torso_contribution(
+    contribution: float, *, torso_prefer_locked: bool
+) -> float:
+    """Return the contribution value actually applied to the solver metric."""
+    value = float(np.clip(contribution, 0.0, 1.0))
+    if torso_prefer_locked:
+        return min(value, DEFAULT_AUTO_TORSO_CONTRIBUTION)
+    return value
 
 
 def _apply_torso_arm_contribution_metric(
@@ -2387,7 +2399,10 @@ def main() -> None:
         # Guarded; survives solver rebuilds because it is set each step.
         _apply_torso_arm_contribution_metric(
             solver,
-            float(torso_contribution.value),
+            _effective_torso_contribution(
+                float(torso_contribution.value),
+                torso_prefer_locked=bool(torso_prefer_locked),
+            ),
             torso_velocity_indices=_contrib_torso_vi,
             arm_velocity_indices=_contrib_arm_vi,
             nv=_contrib_nv,
@@ -2974,6 +2989,10 @@ def main() -> None:
                     opts.preferred_lock_orientation_tolerance = 0.25
                 if hasattr(opts, "preferred_lock_max_step_norm"):
                     opts.preferred_lock_max_step_norm = 0.35
+                if hasattr(opts, "preferred_lock_min_error_reduction_ratio"):
+                    opts.preferred_lock_min_error_reduction_ratio = (
+                        DEFAULT_AUTO_PREFERRED_LOCK_MIN_ERROR_REDUCTION_RATIO
+                    )
                 if hasattr(opts, "preferred_lock_solve_mode"):
                     opts.preferred_lock_solve_mode = getattr(
                         embodik.TaskSolveMode,

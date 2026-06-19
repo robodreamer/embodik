@@ -483,7 +483,8 @@ NB_MODULE(_embodik_impl, m) {
       .def_rw("preferred_locked_joint_indices",
               &eik::PositionStepOptions::preferred_locked_joint_indices,
               "Nv-indices to try locked in one extra candidate solve before the "
-              "normal step. Accepted only when tracking and continuity gates pass.")
+              "normal step. Accepted when continuity passes and each active "
+              "target error is within tolerance or still making progress.")
       .def_rw("preferred_lock_solve_mode",
               &eik::PositionStepOptions::preferred_lock_solve_mode,
               "Primary pose-task solve mode used only by the preferred-lock "
@@ -499,7 +500,12 @@ NB_MODULE(_embodik_impl, m) {
       .def_rw("preferred_lock_max_step_norm",
               &eik::PositionStepOptions::preferred_lock_max_step_norm,
               "Maximum configuration step norm for accepting the preferred locked "
-              "candidate; <=0 disables this gate");
+              "candidate; <=0 disables this gate")
+      .def_rw("preferred_lock_min_error_reduction_ratio",
+              &eik::PositionStepOptions::preferred_lock_min_error_reduction_ratio,
+              "Minimum fractional active-target error reduction for accepting a "
+              "preferred locked candidate that is still outside final tracking "
+              "tolerance");
 
   nb::class_<eik::TaskTarget>(
       m, "TaskTarget",
