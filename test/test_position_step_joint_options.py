@@ -215,6 +215,24 @@ def test_locked_joint_indices_invalid():
         os.unlink(urdf_path)
 
 
+def test_preferred_locked_joint_indices_invalid():
+    urdf_path = _create_two_joint_urdf()
+    try:
+        robot = eik.RobotModel(urdf_path, floating_base=False)
+        solver = eik.KinematicsSolver(robot)
+        task = solver.add_frame_task("ee_task", "ee")
+        task.priority = 0
+        q = np.zeros(2, dtype=float)
+        target = np.eye(4, dtype=float)
+        opts = eik.PositionStepOptions()
+        opts.preferred_locked_joint_indices = [2]
+        result = solver.solve_position_step(q, target, "ee_task", opts)
+        assert result.status == eik.SolverStatus.INVALID_INPUT
+        assert "preferred_locked_joint_indices" in result.status_message
+    finally:
+        os.unlink(urdf_path)
+
+
 def test_integration_zero_velocity_indices_masks_before_integrate():
     """With all nv-indices masked, configuration does not move despite EE error."""
     urdf_path, robot, solver, _, _ = _make_solver_with_posture()
@@ -237,6 +255,140 @@ def test_integration_zero_velocity_indices_masks_before_integrate():
         dq = np.asarray(res.joint_velocities, dtype=float)
         assert abs(dq[0]) < 1e-12 and abs(dq[1]) < 1e-12
         np.testing.assert_allclose(np.asarray(res.q_solution, dtype=float), q, atol=1e-10)
+    finally:
+        os.unlink(urdf_path)
+
+
+def test_preferred_locked_candidate_accepts_when_tracking_is_good():
+    urdf_path, robot, solver, _, _ = _make_solver_with_posture()
+    try:
+        q = np.array([0.0, 0.0], dtype=float)
+        robot.update_configuration(q)
+        pose = robot.get_frame_pose("ee")
+        target = np.eye(4, dtype=float)
+        target[:3, :3] = np.array(pose.rotation, dtype=float)
+        target[:3, 3] = np.array(pose.translation, dtype=float)
+        target[1, 3] += 0.03
+
+        opts = eik.PositionStepOptions()
+        opts.max_steps = 1
+        opts.position_gain = 40.0
+        opts.orientation_gain = 0.0
+        opts.preferred_locked_joint_indices = [1]
+        opts.preferred_lock_tracking_tolerance = 0.04
+        opts.preferred_lock_orientation_tolerance = 0.0
+        opts.preferred_lock_max_step_norm = 0.35
+
+        res = solver.solve_position_step(q, target, "ee_task", opts)
+        assert res.status == eik.SolverStatus.SUCCESS
+        assert res.preferred_lock_attempted is True
+        assert res.preferred_lock_used is True
+        assert res.preferred_lock_fallback_used is False
+        assert res.preferred_lock_candidate_status == eik.SolverStatus.SUCCESS
+        assert res.preferred_lock_candidate_position_error <= 0.04
+        assert res.preferred_lock_candidate_step_norm <= 0.35
+        assert abs(float(np.asarray(res.q_solution, dtype=float)[1]) - q[1]) < 1e-9
+        assert float(np.asarray(res.joint_velocities, dtype=float)[1]) == 0.0
+        assert res.diagnostics.preferred_lock_used is True
+    finally:
+        os.unlink(urdf_path)
+
+
+def test_preferred_locked_candidate_rejects_and_restores_normal_fallback():
+    urdf_path = _create_two_joint_urdf()
+    try:
+        robot_a = eik.RobotModel(urdf_path, floating_base=False)
+        solver_a = eik.KinematicsSolver(robot_a)
+        task_a = solver_a.add_frame_task("ee_task", "ee")
+        task_a.priority = 0
+
+        robot_b = eik.RobotModel(urdf_path, floating_base=False)
+        solver_b = eik.KinematicsSolver(robot_b)
+        task_b = solver_b.add_frame_task("ee_task", "ee")
+        task_b.priority = 0
+
+        q = np.array([0.0, 0.0], dtype=float)
+        robot_a.update_configuration(q)
+        pose = robot_a.get_frame_pose("ee")
+        target = np.eye(4, dtype=float)
+        target[:3, :3] = np.array(pose.rotation, dtype=float)
+        target[:3, 3] = np.array(pose.translation, dtype=float)
+        target[1, 3] += 0.05
+
+        baseline_opts = eik.PositionStepOptions()
+        baseline_opts.max_steps = 1
+        baseline_opts.position_gain = 40.0
+        baseline_opts.orientation_gain = 0.0
+
+        preferred_opts = eik.PositionStepOptions()
+        preferred_opts.max_steps = 1
+        preferred_opts.position_gain = 40.0
+        preferred_opts.orientation_gain = 0.0
+        preferred_opts.preferred_locked_joint_indices = [0, 1]
+        preferred_opts.preferred_lock_tracking_tolerance = 1e-6
+        preferred_opts.preferred_lock_orientation_tolerance = 0.0
+
+        baseline = solver_a.solve_position_step(q, target, "ee_task", baseline_opts)
+        preferred = solver_b.solve_position_step(q, target, "ee_task", preferred_opts)
+
+        assert preferred.preferred_lock_attempted is True
+        assert preferred.preferred_lock_used is False
+        assert preferred.preferred_lock_fallback_used is True
+        assert preferred.preferred_lock_candidate_position_error > 1e-6
+        assert preferred.status == baseline.status
+        np.testing.assert_allclose(
+            np.asarray(preferred.q_solution, dtype=float),
+            np.asarray(baseline.q_solution, dtype=float),
+            atol=1e-10,
+        )
+        np.testing.assert_allclose(
+            np.asarray(preferred.joint_velocities, dtype=float),
+            np.asarray(baseline.joint_velocities, dtype=float),
+            atol=1e-10,
+        )
+    finally:
+        os.unlink(urdf_path)
+
+
+def test_preferred_locked_candidate_multi_target_path():
+    urdf_path = _create_two_joint_urdf()
+    try:
+        robot = eik.RobotModel(urdf_path, floating_base=False)
+        solver = eik.KinematicsSolver(robot)
+        solver.dt = 0.01
+        ee_task = solver.add_frame_task("ee_task", "ee")
+        ee_task.priority = 0
+        mid_task = solver.add_frame_task("mid_task", "link1")
+        mid_task.priority = 0
+
+        q = np.array([0.0, 0.0], dtype=float)
+        robot.update_configuration(q)
+        ee_target = np.eye(4, dtype=float)
+        ee_pose = robot.get_frame_pose("ee")
+        ee_target[:3, :3] = np.array(ee_pose.rotation, dtype=float)
+        ee_target[:3, 3] = np.array(ee_pose.translation, dtype=float)
+        ee_target[1, 3] += 0.02
+
+        mid_target = np.eye(4, dtype=float)
+        mid_pose = robot.get_frame_pose("link1")
+        mid_target[:3, :3] = np.array(mid_pose.rotation, dtype=float)
+        mid_target[:3, 3] = np.array(mid_pose.translation, dtype=float)
+
+        targets = [
+            eik.TaskTarget("ee_task", ee_target, 25.0, 0.0),
+            eik.TaskTarget("mid_task", mid_target, 1.0, 0.0),
+        ]
+        opts = eik.PositionStepOptions()
+        opts.max_steps = 1
+        opts.preferred_locked_joint_indices = [1]
+        opts.preferred_lock_tracking_tolerance = 0.04
+        opts.preferred_lock_orientation_tolerance = 0.0
+
+        res = solver.solve_position_step(q, targets, opts)
+        assert res.status == eik.SolverStatus.SUCCESS
+        assert res.preferred_lock_attempted is True
+        assert res.preferred_lock_used is True
+        assert abs(float(np.asarray(res.q_solution, dtype=float)[1]) - q[1]) < 1e-9
     finally:
         os.unlink(urdf_path)
 

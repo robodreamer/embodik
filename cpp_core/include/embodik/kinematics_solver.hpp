@@ -1249,6 +1249,8 @@ private:
   std::optional<double> pending_step_validation_dt_;
   /// Guards against recursive MIN_ERROR step retry in solve_position_step.
   bool suppress_min_error_step_retry_ = false;
+  /// Guards against recursive preferred-lock candidate retry in solve_position_step.
+  bool suppress_preferred_lock_step_retry_ = false;
   std::optional<Eigen::MatrixXd> warm_start_selector_cache_;
   int warm_start_constraint_rows_ = -1;
 
@@ -1279,6 +1281,14 @@ private:
       const std::function<bool(std::vector<std::pair<Task *, TaskSolveMode>> *)>
           &flip_primary_tasks,
       const std::function<PositionIKResult()> &rerun_step);
+
+  PositionIKResult solve_position_step_with_preferred_lock(
+      const Eigen::VectorXd &current_q, const Eigen::Matrix4d &target_pose,
+      const std::string &frame_task_name, const PositionStepOptions &options);
+
+  PositionIKResult solve_position_step_with_preferred_lock(
+      const Eigen::VectorXd &current_q, const std::vector<TaskTarget> &targets,
+      const PositionStepOptions &options);
 
   // Sort tasks by priority
   void sort_tasks_by_priority();
@@ -1555,6 +1565,51 @@ private:
       const std::vector<std::size_t> &pair_indices);
   std::vector<std::size_t> get_post_step_rejection_pair_indices() const;
   std::optional<CollisionConstraintResult> compute_collision_constraint();
+
+  struct PositionStepMutableStateSnapshot {
+    Eigen::VectorXd robot_q;
+    TaskLayout current_auto_task_layout = TaskLayout::kMerged;
+    int auto_layout_below_low_count = 0;
+    bool auto_layout_has_feedback = false;
+    double auto_layout_binding_score = 0.0;
+    StallHandlerConfig stall_config;
+    StallHandlerState stall_state;
+    bool stall_user_configured = false;
+    ElasticBandConfig elastic_band_config;
+    ElasticBandState elastic_band_state;
+    std::optional<CollisionConstraintConfig> collision_constraint;
+    std::unordered_map<std::string, double> per_pair_min_distance_overrides;
+    std::unordered_map<std::string, double> per_pair_deferred_overrides;
+    std::unordered_map<std::string, double> collision_pair_distance_floor;
+    std::vector<int> collision_cache_frozen_indices;
+    std::optional<CollisionDebugInfo> last_collision_debug;
+    std::vector<CollisionDebugInfo> last_collision_debug_list;
+    std::vector<std::size_t> last_collision_constraint_pair_indices;
+    std::vector<std::size_t> collision_cached_candidate_pair_indices;
+    std::vector<std::uint8_t> collision_pair_bound_valid;
+    std::vector<double> collision_pair_last_signed_distance;
+    std::vector<double> collision_pair_last_rel_translation_norm;
+    std::vector<std::array<double, 9>> collision_pair_last_rel_rotation;
+    bool collision_pair_cache_has_full_scan = false;
+    int collision_pair_cache_steps_since_refresh = 0;
+    std::uint64_t last_collision_pairs_considered = 0;
+    std::uint64_t last_collision_exact_distance_queries = 0;
+    std::uint64_t last_collision_bound_culled_pairs = 0;
+    bool last_collision_budget_exhausted = false;
+    double last_constraint_min_distance =
+        std::numeric_limits<double>::infinity();
+    bool last_constraint_was_full_scan = false;
+    std::optional<CollisionConstraintResult> last_collision_constraint_result;
+    Eigen::VectorXd last_collision_constraint_q;
+    std::uint64_t last_collision_sphere_culled_pairs = 0;
+    double last_solution_dq_norm = 0.0;
+    std::unordered_map<std::size_t, int> collision_stuck_counters;
+    std::unordered_map<std::size_t, double> collision_stuck_last_distances;
+  };
+
+  PositionStepMutableStateSnapshot capture_position_step_mutable_state() const;
+  void restore_position_step_mutable_state(
+      const PositionStepMutableStateSnapshot &snapshot);
 
 public:
   // ========== Position IK Methods ==========

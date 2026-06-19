@@ -106,6 +106,11 @@ struct ClassifiedOutcome {
   std::string status_message;
 };
 
+struct PositionStepTargetErrorSummary {
+  double max_position_error = std::numeric_limits<double>::infinity();
+  double max_orientation_error = 0.0;
+};
+
 static void sync_position_result_applied_velocity(
     PositionIKResult &result, const Eigen::VectorXd &current_q,
     double outer_dt) {
@@ -693,6 +698,29 @@ static bool validate_position_step_joint_index_options(
                               "integration_zero_velocity_indices", err)) {
     return false;
   }
+  if (!validate_nv_index_list(options.preferred_locked_joint_indices, nv,
+                              "preferred_locked_joint_indices", err)) {
+    return false;
+  }
+  if (!std::isfinite(options.preferred_lock_tracking_tolerance) ||
+      options.preferred_lock_tracking_tolerance < 0.0) {
+    if (err != nullptr) {
+      *err = "preferred_lock_tracking_tolerance must be finite and >= 0";
+    }
+    return false;
+  }
+  if (!std::isfinite(options.preferred_lock_orientation_tolerance)) {
+    if (err != nullptr) {
+      *err = "preferred_lock_orientation_tolerance must be finite";
+    }
+    return false;
+  }
+  if (!std::isfinite(options.preferred_lock_max_step_norm)) {
+    if (err != nullptr) {
+      *err = "preferred_lock_max_step_norm must be finite";
+    }
+    return false;
+  }
   return true;
 }
 
@@ -753,6 +781,71 @@ build_step_locked_indices(const PositionStepOptions &options) {
   std::sort(merged.begin(), merged.end());
   merged.erase(std::unique(merged.begin(), merged.end()), merged.end());
   return merged;
+}
+
+static void append_unique_indices(std::vector<int> &dst,
+                                  const std::vector<int> &src) {
+  dst.insert(dst.end(), src.begin(), src.end());
+  std::sort(dst.begin(), dst.end());
+  dst.erase(std::unique(dst.begin(), dst.end()), dst.end());
+}
+
+static PositionStepOptions
+make_preferred_lock_candidate_options(const PositionStepOptions &options) {
+  PositionStepOptions candidate = options;
+  append_unique_indices(candidate.locked_joint_indices,
+                        options.preferred_locked_joint_indices);
+  append_unique_indices(candidate.integration_zero_velocity_indices,
+                        options.preferred_locked_joint_indices);
+  candidate.preferred_locked_joint_indices.clear();
+  candidate.primary_solve_mode = options.preferred_lock_solve_mode;
+  candidate.primary_allow_min_error_fallback = false;
+  return candidate;
+}
+
+static bool preferred_lock_status_acceptable(SolverStatus status) {
+  return status == SolverStatus::kSuccess || status == SolverStatus::kNoProgress;
+}
+
+static bool preferred_lock_candidate_acceptable(
+    const PositionIKResult &candidate,
+    const PositionStepTargetErrorSummary &errors, double step_norm,
+    const PositionStepOptions &options) {
+  if (!preferred_lock_status_acceptable(candidate.status) ||
+      candidate.q_solution.size() == 0 || !candidate.q_solution.allFinite()) {
+    return false;
+  }
+  if (!std::isfinite(errors.max_position_error) ||
+      errors.max_position_error > options.preferred_lock_tracking_tolerance) {
+    return false;
+  }
+  if (options.preferred_lock_orientation_tolerance > 0.0 &&
+      (!std::isfinite(errors.max_orientation_error) ||
+       errors.max_orientation_error >
+           options.preferred_lock_orientation_tolerance)) {
+    return false;
+  }
+  if (options.preferred_lock_max_step_norm > 0.0 &&
+      (!std::isfinite(step_norm) ||
+       step_norm > options.preferred_lock_max_step_norm)) {
+    return false;
+  }
+  return true;
+}
+
+static void annotate_preferred_lock_result(
+    PositionIKResult &result, const PositionIKResult &candidate,
+    const PositionStepTargetErrorSummary &errors, double step_norm,
+    double candidate_time_ms, bool used) {
+  result.preferred_lock_attempted = true;
+  result.preferred_lock_used = used;
+  result.preferred_lock_fallback_used = !used;
+  result.preferred_lock_candidate_status = candidate.status;
+  result.preferred_lock_candidate_position_error = errors.max_position_error;
+  result.preferred_lock_candidate_orientation_error =
+      errors.max_orientation_error;
+  result.preferred_lock_candidate_step_norm = step_norm;
+  result.preferred_lock_candidate_time_ms = candidate_time_ms;
 }
 
 static void clamp_joint_velocity_solution_in_place(
@@ -4305,6 +4398,337 @@ KinematicsSolver::attempt_min_error_position_step_retry(
   return retry_result;
 }
 
+KinematicsSolver::PositionStepMutableStateSnapshot
+KinematicsSolver::capture_position_step_mutable_state() const {
+  PositionStepMutableStateSnapshot snapshot;
+  snapshot.robot_q = robot_->get_current_configuration();
+  snapshot.current_auto_task_layout = current_auto_task_layout_;
+  snapshot.auto_layout_below_low_count = auto_layout_below_low_count_;
+  snapshot.auto_layout_has_feedback = auto_layout_has_feedback_;
+  snapshot.auto_layout_binding_score = auto_layout_binding_score_;
+  snapshot.stall_config = stall_config_;
+  snapshot.stall_state = stall_state_;
+  snapshot.stall_user_configured = stall_user_configured_;
+  snapshot.elastic_band_config = elastic_band_config_;
+  snapshot.elastic_band_state = elastic_band_state_;
+  snapshot.collision_constraint = collision_constraint_;
+  snapshot.per_pair_min_distance_overrides = per_pair_min_distance_overrides_;
+  snapshot.per_pair_deferred_overrides = per_pair_deferred_overrides_;
+  snapshot.collision_pair_distance_floor = collision_pair_distance_floor_;
+  snapshot.collision_cache_frozen_indices = collision_cache_frozen_indices_;
+  snapshot.last_collision_debug = last_collision_debug_;
+  snapshot.last_collision_debug_list = last_collision_debug_list_;
+  snapshot.last_collision_constraint_pair_indices =
+      last_collision_constraint_pair_indices_;
+  snapshot.collision_cached_candidate_pair_indices =
+      collision_cached_candidate_pair_indices_;
+  snapshot.collision_pair_bound_valid = collision_pair_bound_valid_;
+  snapshot.collision_pair_last_signed_distance =
+      collision_pair_last_signed_distance_;
+  snapshot.collision_pair_last_rel_translation_norm =
+      collision_pair_last_rel_translation_norm_;
+  snapshot.collision_pair_last_rel_rotation =
+      collision_pair_last_rel_rotation_;
+  snapshot.collision_pair_cache_has_full_scan =
+      collision_pair_cache_has_full_scan_;
+  snapshot.collision_pair_cache_steps_since_refresh =
+      collision_pair_cache_steps_since_refresh_;
+  snapshot.last_collision_pairs_considered = last_collision_pairs_considered_;
+  snapshot.last_collision_exact_distance_queries =
+      last_collision_exact_distance_queries_;
+  snapshot.last_collision_bound_culled_pairs =
+      last_collision_bound_culled_pairs_;
+  snapshot.last_collision_budget_exhausted = last_collision_budget_exhausted_;
+  snapshot.last_constraint_min_distance = last_constraint_min_distance_;
+  snapshot.last_constraint_was_full_scan = last_constraint_was_full_scan_;
+  snapshot.last_collision_constraint_result =
+      last_collision_constraint_result_;
+  snapshot.last_collision_constraint_q = last_collision_constraint_q_;
+  snapshot.last_collision_sphere_culled_pairs =
+      last_collision_sphere_culled_pairs_;
+  snapshot.last_solution_dq_norm = last_solution_dq_norm_;
+  snapshot.collision_stuck_counters = collision_stuck_counters_;
+  snapshot.collision_stuck_last_distances = collision_stuck_last_distances_;
+  return snapshot;
+}
+
+void KinematicsSolver::restore_position_step_mutable_state(
+    const PositionStepMutableStateSnapshot &snapshot) {
+  if (snapshot.robot_q.size() == robot_->nq()) {
+    robot_->update_configuration(snapshot.robot_q);
+  }
+  current_auto_task_layout_ = snapshot.current_auto_task_layout;
+  auto_layout_below_low_count_ = snapshot.auto_layout_below_low_count;
+  auto_layout_has_feedback_ = snapshot.auto_layout_has_feedback;
+  auto_layout_binding_score_ = snapshot.auto_layout_binding_score;
+  for (auto &kv : pose_task_groups_) {
+    if (kv.second && kv.second->auto_switch()) {
+      kv.second->set_layout(current_auto_task_layout_);
+    }
+  }
+  stall_config_ = snapshot.stall_config;
+  stall_state_ = snapshot.stall_state;
+  stall_user_configured_ = snapshot.stall_user_configured;
+  elastic_band_config_ = snapshot.elastic_band_config;
+  elastic_band_state_ = snapshot.elastic_band_state;
+  collision_constraint_ = snapshot.collision_constraint;
+  per_pair_min_distance_overrides_ =
+      snapshot.per_pair_min_distance_overrides;
+  per_pair_deferred_overrides_ = snapshot.per_pair_deferred_overrides;
+  collision_pair_distance_floor_ = snapshot.collision_pair_distance_floor;
+  collision_cache_frozen_indices_ = snapshot.collision_cache_frozen_indices;
+  last_collision_debug_ = snapshot.last_collision_debug;
+  last_collision_debug_list_ = snapshot.last_collision_debug_list;
+  last_collision_constraint_pair_indices_ =
+      snapshot.last_collision_constraint_pair_indices;
+  collision_cached_candidate_pair_indices_ =
+      snapshot.collision_cached_candidate_pair_indices;
+  collision_pair_bound_valid_ = snapshot.collision_pair_bound_valid;
+  collision_pair_last_signed_distance_ =
+      snapshot.collision_pair_last_signed_distance;
+  collision_pair_last_rel_translation_norm_ =
+      snapshot.collision_pair_last_rel_translation_norm;
+  collision_pair_last_rel_rotation_ =
+      snapshot.collision_pair_last_rel_rotation;
+  collision_pair_cache_has_full_scan_ =
+      snapshot.collision_pair_cache_has_full_scan;
+  collision_pair_cache_steps_since_refresh_ =
+      snapshot.collision_pair_cache_steps_since_refresh;
+  last_collision_pairs_considered_ = snapshot.last_collision_pairs_considered;
+  last_collision_exact_distance_queries_ =
+      snapshot.last_collision_exact_distance_queries;
+  last_collision_bound_culled_pairs_ =
+      snapshot.last_collision_bound_culled_pairs;
+  last_collision_budget_exhausted_ = snapshot.last_collision_budget_exhausted;
+  last_constraint_min_distance_ = snapshot.last_constraint_min_distance;
+  last_constraint_was_full_scan_ = snapshot.last_constraint_was_full_scan;
+  last_collision_constraint_result_ =
+      snapshot.last_collision_constraint_result;
+  last_collision_constraint_q_ = snapshot.last_collision_constraint_q;
+  last_collision_sphere_culled_pairs_ =
+      snapshot.last_collision_sphere_culled_pairs;
+  last_solution_dq_norm_ = snapshot.last_solution_dq_norm;
+  collision_stuck_counters_ = snapshot.collision_stuck_counters;
+  collision_stuck_last_distances_ = snapshot.collision_stuck_last_distances;
+  pending_velocity_lock_indices_.clear();
+  position_step_locked_indices_.clear();
+  pending_step_torso_constraint_.reset();
+  pending_reuse_current_kinematics_ = false;
+  pending_step_validation_dt_.reset();
+}
+
+PositionIKResult KinematicsSolver::solve_position_step_with_preferred_lock(
+    const Eigen::VectorXd &current_q, const Eigen::Matrix4d &target_pose,
+    const std::string &frame_task_name, const PositionStepOptions &options) {
+  PositionStepOptions locked_options =
+      make_preferred_lock_candidate_options(options);
+  const PositionStepMutableStateSnapshot snapshot =
+      capture_position_step_mutable_state();
+
+  struct ScopedPreferredLockSuppression {
+    KinematicsSolver *solver;
+    bool saved = false;
+    explicit ScopedPreferredLockSuppression(KinematicsSolver *solver_in)
+        : solver(solver_in),
+          saved(solver_in != nullptr
+                    ? solver_in->suppress_preferred_lock_step_retry_
+                    : false) {
+      if (solver != nullptr) {
+        solver->suppress_preferred_lock_step_retry_ = true;
+      }
+    }
+    ~ScopedPreferredLockSuppression() {
+      if (solver != nullptr) {
+        solver->suppress_preferred_lock_step_retry_ = saved;
+      }
+    }
+  } suppress(this);
+  (void)suppress;
+
+  auto now = []() { return std::chrono::high_resolution_clock::now(); };
+  auto elapsed_ms = [](auto start) {
+    return std::chrono::duration_cast<std::chrono::microseconds>(
+               std::chrono::high_resolution_clock::now() - start)
+               .count() /
+           1000.0;
+  };
+
+  const auto candidate_start = now();
+  PositionIKResult candidate = solve_position_step(
+      current_q, target_pose, frame_task_name, locked_options);
+  const double candidate_time_ms = elapsed_ms(candidate_start);
+
+  PositionStepTargetErrorSummary errors;
+  if (candidate.q_solution.size() == robot_->nq() &&
+      candidate.q_solution.allFinite()) {
+    const Eigen::VectorXd saved_q = robot_->get_current_configuration();
+    robot_->update_configuration(candidate.q_solution);
+    auto it = task_map_.find(frame_task_name);
+    auto frame_task =
+        (it != task_map_.end()) ? std::dynamic_pointer_cast<FrameTask>(it->second)
+                                : nullptr;
+    if (frame_task) {
+      frame_task->setTargetPose(target_pose.block<3, 1>(0, 3),
+                                target_pose.block<3, 3>(0, 0));
+      frame_task->update(*robot_);
+      const Eigen::VectorXd &error = frame_task->getError();
+      if (error.size() == 3) {
+        if (frame_task->getType() == TaskType::FRAME_ORIENTATION) {
+          errors.max_position_error = 0.0;
+          errors.max_orientation_error = error.head<3>().norm();
+        } else {
+          errors.max_position_error = error.head<3>().norm();
+          errors.max_orientation_error = 0.0;
+        }
+      } else if (error.size() >= 6) {
+        errors.max_position_error = error.head<3>().norm();
+        errors.max_orientation_error = error.tail<3>().norm();
+      }
+    }
+    robot_->update_configuration(saved_q);
+  }
+
+  const double step_norm =
+      (candidate.q_solution.size() == current_q.size())
+          ? (candidate.q_solution - current_q).norm()
+          : std::numeric_limits<double>::quiet_NaN();
+  const bool accept = preferred_lock_candidate_acceptable(
+      candidate, errors, step_norm, options);
+  if (accept) {
+    annotate_preferred_lock_result(candidate, candidate, errors, step_norm,
+                                   candidate_time_ms, true);
+    return candidate;
+  }
+
+  restore_position_step_mutable_state(snapshot);
+  PositionIKResult fallback =
+      solve_position_step(current_q, target_pose, frame_task_name, options);
+  annotate_preferred_lock_result(fallback, candidate, errors, step_norm,
+                                 candidate_time_ms, false);
+  return fallback;
+}
+
+PositionIKResult KinematicsSolver::solve_position_step_with_preferred_lock(
+    const Eigen::VectorXd &current_q, const std::vector<TaskTarget> &targets,
+    const PositionStepOptions &options) {
+  PositionStepOptions locked_options =
+      make_preferred_lock_candidate_options(options);
+  const PositionStepMutableStateSnapshot snapshot =
+      capture_position_step_mutable_state();
+
+  struct ScopedPreferredLockSuppression {
+    KinematicsSolver *solver;
+    bool saved = false;
+    explicit ScopedPreferredLockSuppression(KinematicsSolver *solver_in)
+        : solver(solver_in),
+          saved(solver_in != nullptr
+                    ? solver_in->suppress_preferred_lock_step_retry_
+                    : false) {
+      if (solver != nullptr) {
+        solver->suppress_preferred_lock_step_retry_ = true;
+      }
+    }
+    ~ScopedPreferredLockSuppression() {
+      if (solver != nullptr) {
+        solver->suppress_preferred_lock_step_retry_ = saved;
+      }
+    }
+  } suppress(this);
+  (void)suppress;
+
+  auto now = []() { return std::chrono::high_resolution_clock::now(); };
+  auto elapsed_ms = [](auto start) {
+    return std::chrono::duration_cast<std::chrono::microseconds>(
+               std::chrono::high_resolution_clock::now() - start)
+               .count() /
+           1000.0;
+  };
+
+  const auto candidate_start = now();
+  PositionIKResult candidate =
+      solve_position_step(current_q, targets, locked_options);
+  const double candidate_time_ms = elapsed_ms(candidate_start);
+
+  PositionStepTargetErrorSummary errors;
+  if (candidate.q_solution.size() == robot_->nq() &&
+      candidate.q_solution.allFinite()) {
+    const Eigen::VectorXd saved_q = robot_->get_current_configuration();
+    robot_->update_configuration(candidate.q_solution);
+    double max_position = 0.0;
+    double max_orientation = 0.0;
+    bool saw_target = false;
+    for (const auto &target : targets) {
+      auto it = task_map_.find(target.task_name);
+      if (it == task_map_.end() || !it->second) {
+        continue;
+      }
+      const auto &task = it->second;
+      if (auto frame_task = std::dynamic_pointer_cast<FrameTask>(task)) {
+        frame_task->setTargetPose(target.target_pose.block<3, 1>(0, 3),
+                                  target.target_pose.block<3, 3>(0, 0));
+      } else if (auto absolute_task =
+                     std::dynamic_pointer_cast<AbsoluteFrameTask>(task)) {
+        if (target.has_secondary_target_pose) {
+          absolute_task->set_target_from_arm_targets(
+              target.target_pose, target.secondary_target_pose);
+        } else {
+          absolute_task->setTargetPose(target.target_pose.block<3, 1>(0, 3),
+                                       target.target_pose.block<3, 3>(0, 0));
+        }
+      } else if (auto relative_task =
+                     std::dynamic_pointer_cast<RelativeFrameTask>(task)) {
+        relative_task->setTargetPose(target.target_pose.block<3, 1>(0, 3),
+                                     target.target_pose.block<3, 3>(0, 0));
+      } else {
+        continue;
+      }
+
+      task->update(*robot_);
+      const Eigen::VectorXd &error = task->getError();
+      if (error.size() == 3) {
+        bool is_orientation_only = false;
+        if (auto frame_task = std::dynamic_pointer_cast<FrameTask>(task)) {
+          is_orientation_only =
+              frame_task->getType() == TaskType::FRAME_ORIENTATION;
+        }
+        if (is_orientation_only) {
+          max_orientation = std::max(max_orientation, error.head<3>().norm());
+        } else {
+          max_position = std::max(max_position, error.head<3>().norm());
+        }
+        saw_target = true;
+      } else if (error.size() >= 6) {
+        max_position = std::max(max_position, error.head<3>().norm());
+        max_orientation = std::max(max_orientation, error.tail<3>().norm());
+        saw_target = true;
+      }
+    }
+    if (saw_target) {
+      errors.max_position_error = max_position;
+      errors.max_orientation_error = max_orientation;
+    }
+    robot_->update_configuration(saved_q);
+  }
+
+  const double step_norm =
+      (candidate.q_solution.size() == current_q.size())
+          ? (candidate.q_solution - current_q).norm()
+          : std::numeric_limits<double>::quiet_NaN();
+  const bool accept = preferred_lock_candidate_acceptable(
+      candidate, errors, step_norm, options);
+  if (accept) {
+    annotate_preferred_lock_result(candidate, candidate, errors, step_norm,
+                                   candidate_time_ms, true);
+    return candidate;
+  }
+
+  restore_position_step_mutable_state(snapshot);
+  PositionIKResult fallback = solve_position_step(current_q, targets, options);
+  annotate_preferred_lock_result(fallback, candidate, errors, step_norm,
+                                 candidate_time_ms, false);
+  return fallback;
+}
+
 void KinematicsSolver::sort_tasks_by_priority() {
   if (std::is_sorted(
           tasks_.begin(), tasks_.end(),
@@ -6756,6 +7180,12 @@ PositionIKResult KinematicsSolver::solve_position_step(
     }
   }
 
+  if (!options.preferred_locked_joint_indices.empty() &&
+      !suppress_preferred_lock_step_retry_) {
+    return solve_position_step_with_preferred_lock(
+        current_q, target_pose, frame_task_name, options);
+  }
+
   std::optional<TorsoPoseConstraintOptions> step_torso_constraint = std::nullopt;
   const auto &torso_opts = options.torso_constraint;
   const bool torso_enabled = torso_opts.enabled;
@@ -7723,6 +8153,11 @@ PositionIKResult KinematicsSolver::solve_position_step(
       result.status_message = std::move(opt_err);
       return result;
     }
+  }
+
+  if (!options.preferred_locked_joint_indices.empty() &&
+      !suppress_preferred_lock_step_retry_) {
+    return solve_position_step_with_preferred_lock(current_q, targets, options);
   }
 
   std::optional<TorsoPoseConstraintOptions> step_torso_constraint = std::nullopt;

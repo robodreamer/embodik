@@ -167,7 +167,25 @@ NB_MODULE(_embodik_impl, m) {
       .def_ro("recovery_stage", &eik::VelocitySolverResult::recovery_stage,
               "Recovery stage that supplied the accepted velocity")
       .def_ro("binding_score", &eik::VelocitySolverResult::binding_score,
-              "Binding score used by the optional auto-switcher");
+              "Binding score used by the optional auto-switcher")
+      .def_ro("preferred_lock_attempted",
+              &eik::VelocitySolverResult::preferred_lock_attempted)
+      .def_ro("preferred_lock_used",
+              &eik::VelocitySolverResult::preferred_lock_used)
+      .def_ro("preferred_lock_fallback_used",
+              &eik::VelocitySolverResult::preferred_lock_fallback_used)
+      .def_ro("preferred_lock_candidate_status",
+              &eik::VelocitySolverResult::preferred_lock_candidate_status)
+      .def_ro("preferred_lock_candidate_position_error",
+              &eik::VelocitySolverResult::
+                  preferred_lock_candidate_position_error)
+      .def_ro("preferred_lock_candidate_orientation_error",
+              &eik::VelocitySolverResult::
+                  preferred_lock_candidate_orientation_error)
+      .def_ro("preferred_lock_candidate_step_norm",
+              &eik::VelocitySolverResult::preferred_lock_candidate_step_norm)
+      .def_ro("preferred_lock_candidate_time_ms",
+              &eik::VelocitySolverResult::preferred_lock_candidate_time_ms);
 
   nb::class_<eik::VelocityBoxHeadroomPolicy>(
       m, "VelocityBoxHeadroomPolicy",
@@ -461,7 +479,27 @@ NB_MODULE(_embodik_impl, m) {
       .def_rw("primary_allow_min_error_fallback",
               &eik::PositionStepOptions::primary_allow_min_error_fallback,
               "Re-run solve_position_step once in MIN_ERROR when SCALE collapses "
-              "under active constraints");
+              "under active constraints")
+      .def_rw("preferred_locked_joint_indices",
+              &eik::PositionStepOptions::preferred_locked_joint_indices,
+              "Nv-indices to try locked in one extra candidate solve before the "
+              "normal step. Accepted only when tracking and continuity gates pass.")
+      .def_rw("preferred_lock_solve_mode",
+              &eik::PositionStepOptions::preferred_lock_solve_mode,
+              "Primary pose-task solve mode used only by the preferred-lock "
+              "candidate")
+      .def_rw("preferred_lock_tracking_tolerance",
+              &eik::PositionStepOptions::preferred_lock_tracking_tolerance,
+              "Maximum active-target position error for accepting the preferred "
+              "locked candidate (metres)")
+      .def_rw("preferred_lock_orientation_tolerance",
+              &eik::PositionStepOptions::preferred_lock_orientation_tolerance,
+              "Maximum active-target orientation error for accepting the preferred "
+              "locked candidate (radians); <=0 disables this gate")
+      .def_rw("preferred_lock_max_step_norm",
+              &eik::PositionStepOptions::preferred_lock_max_step_norm,
+              "Maximum configuration step norm for accepting the preferred locked "
+              "candidate; <=0 disables this gate");
 
   nb::class_<eik::TaskTarget>(
       m, "TaskTarget",
@@ -542,7 +580,25 @@ NB_MODULE(_embodik_impl, m) {
               &eik::SolveDiagnostics::advisor_scale_adapt_active)
       .def_ro("active_task_layout", &eik::SolveDiagnostics::active_task_layout)
       .def_ro("recovery_stage", &eik::SolveDiagnostics::recovery_stage)
-      .def_ro("binding_score", &eik::SolveDiagnostics::binding_score);
+      .def_ro("binding_score", &eik::SolveDiagnostics::binding_score)
+      .def_ro("preferred_lock_attempted",
+              &eik::SolveDiagnostics::preferred_lock_attempted)
+      .def_ro("preferred_lock_used",
+              &eik::SolveDiagnostics::preferred_lock_used)
+      .def_ro("preferred_lock_fallback_used",
+              &eik::SolveDiagnostics::preferred_lock_fallback_used)
+      .def_ro("preferred_lock_candidate_status",
+              &eik::SolveDiagnostics::preferred_lock_candidate_status)
+      .def_ro("preferred_lock_candidate_position_error",
+              &eik::SolveDiagnostics::
+                  preferred_lock_candidate_position_error)
+      .def_ro("preferred_lock_candidate_orientation_error",
+              &eik::SolveDiagnostics::
+                  preferred_lock_candidate_orientation_error)
+      .def_ro("preferred_lock_candidate_step_norm",
+              &eik::SolveDiagnostics::preferred_lock_candidate_step_norm)
+      .def_ro("preferred_lock_candidate_time_ms",
+              &eik::SolveDiagnostics::preferred_lock_candidate_time_ms);
 
   nb::class_<eik::SolverRuntimeConfig>(
       m, "SolverRuntimeConfig",
@@ -622,7 +678,9 @@ NB_MODULE(_embodik_impl, m) {
             d.task_used_fallback = r.task_used_fallback;
             d.task_modes_effective = r.task_modes_effective;
             d.any_intervention = (r.collision_rejection_count > 0) ||
-                                 (r.stall_escape_count > 0);
+                                 (r.stall_escape_count > 0) ||
+                                 r.preferred_lock_used ||
+                                 r.preferred_lock_fallback_used;
             d.weighted_advisory_available = r.weighted_advisory_available;
             d.weighted_fallback_used = r.weighted_fallback_used;
             d.weighted_advisory_v_norm = r.weighted_advisory_v_norm;
@@ -638,6 +696,19 @@ NB_MODULE(_embodik_impl, m) {
             d.active_task_layout = r.active_task_layout;
             d.recovery_stage = r.recovery_stage;
             d.binding_score = r.binding_score;
+            d.preferred_lock_attempted = r.preferred_lock_attempted;
+            d.preferred_lock_used = r.preferred_lock_used;
+            d.preferred_lock_fallback_used = r.preferred_lock_fallback_used;
+            d.preferred_lock_candidate_status =
+                r.preferred_lock_candidate_status;
+            d.preferred_lock_candidate_position_error =
+                r.preferred_lock_candidate_position_error;
+            d.preferred_lock_candidate_orientation_error =
+                r.preferred_lock_candidate_orientation_error;
+            d.preferred_lock_candidate_step_norm =
+                r.preferred_lock_candidate_step_norm;
+            d.preferred_lock_candidate_time_ms =
+                r.preferred_lock_candidate_time_ms;
             return d;
           });
 
