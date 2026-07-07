@@ -124,6 +124,23 @@ static void sync_position_result_applied_velocity(
                              result.joint_velocities.size());
 }
 
+static bool clamp_configuration_delta_from_reference(
+    const pinocchio::Model &model, const Eigen::VectorXd &q_reference,
+    Eigen::VectorXd &q, double max_step_norm) {
+  if (max_step_norm <= 0.0 || q_reference.size() != model.nq ||
+      q.size() != model.nq) {
+    return false;
+  }
+  Eigen::VectorXd dq = pinocchio::difference(model, q_reference, q);
+  const double norm = dq.norm();
+  if (!std::isfinite(norm) || norm <= max_step_norm || norm <= 1e-12) {
+    return false;
+  }
+  dq *= max_step_norm / norm;
+  q = pinocchio::integrate(model, q_reference, dq);
+  return true;
+}
+
 static bool should_report_position_recovery_success(
     const PositionIKResult &result, const Eigen::VectorXd &current_q,
     double motion_eps) {
@@ -705,6 +722,13 @@ static bool validate_position_step_joint_index_options(
   }
   if (!validate_nv_index_list(options.preferred_locked_joint_indices, nv,
                               "preferred_locked_joint_indices", err)) {
+    return false;
+  }
+  if (!std::isfinite(options.max_configuration_step_norm) ||
+      options.max_configuration_step_norm < 0.0) {
+    if (err != nullptr) {
+      *err = "max_configuration_step_norm must be finite and >= 0";
+    }
     return false;
   }
   if (!std::isfinite(options.preferred_lock_tracking_tolerance) ||
@@ -7458,6 +7482,7 @@ PositionIKResult KinematicsSolver::solve_position_step(
   bool no_progress_exit = false;
   bool collision_violated_flag = false;
   bool recovery_inside_collision_margin = false;
+  bool configuration_step_limited = false;
 
   for (int step = 0; step < steps; ++step) {
     frame_task->update(*robot_);
@@ -7593,6 +7618,12 @@ PositionIKResult KinematicsSolver::solve_position_step(
       project_scalar_configuration_to_true_joint_limits(
           q, q_min_true, q_max_true, velocity_to_config_index, robot_->nv());
     }
+    const bool step_configuration_limited =
+        clamp_configuration_delta_from_reference(
+            robot_->model(), q_reference, q,
+            options.max_configuration_step_norm);
+    configuration_step_limited =
+        step_configuration_limited || configuration_step_limited;
     robot_->update_configuration(q);
 
     // Skip expensive post-step checks when integration produced no motion.
@@ -8108,6 +8139,16 @@ PositionIKResult KinematicsSolver::solve_position_step(
 
   clear_all_target_velocities();
 
+  const bool final_configuration_limited =
+      clamp_configuration_delta_from_reference(
+          robot_->model(), q_reference, q,
+          options.max_configuration_step_norm);
+  configuration_step_limited =
+      final_configuration_limited || configuration_step_limited;
+  if (final_configuration_limited) {
+    robot_->update_configuration(q);
+  }
+
   result.q_solution = q;
   result.achieved_pose = robot_->get_frame_pose(frame_task->getFrameName());
   result.iterations_used = steps_used;
@@ -8172,7 +8213,7 @@ PositionIKResult KinematicsSolver::solve_position_step(
         "solve_position_step applied constraint recovery motion";
   }
   if (result.stall_escape_count > 0 || result.collision_rejection_count > 0 ||
-      collision_violated_flag) {
+      collision_violated_flag || configuration_step_limited) {
     sync_position_result_applied_velocity(result, current_q, step_dt);
   }
   if (should_hold_soft_infeasible_position_step(
@@ -8459,6 +8500,7 @@ PositionIKResult KinematicsSolver::solve_position_step(
   bool no_progress_exit = false;
   bool collision_violated_flag_mts = false;  // multi-target solve_position_step
   bool recovery_inside_collision_margin = false;
+  bool configuration_step_limited = false;
 
   for (int step = 0; step < steps; ++step) {
     double combined_error = 0.0;
@@ -8674,6 +8716,12 @@ PositionIKResult KinematicsSolver::solve_position_step(
       project_scalar_configuration_to_true_joint_limits(
           q, q_min_true, q_max_true, velocity_to_config_index, robot_->nv());
     }
+    const bool step_configuration_limited =
+        clamp_configuration_delta_from_reference(
+            robot_->model(), q_reference, q,
+            options.max_configuration_step_norm);
+    configuration_step_limited =
+        step_configuration_limited || configuration_step_limited;
     robot_->update_configuration(q);
 
     // Skip expensive post-step checks when integration produced no motion.
@@ -9184,6 +9232,16 @@ PositionIKResult KinematicsSolver::solve_position_step(
     }
   }
 
+  const bool final_configuration_limited =
+      clamp_configuration_delta_from_reference(
+          robot_->model(), q_reference, q,
+          options.max_configuration_step_norm);
+  configuration_step_limited =
+      final_configuration_limited || configuration_step_limited;
+  if (final_configuration_limited) {
+    robot_->update_configuration(q);
+  }
+
   result.q_solution = q;
   result.iterations_used = steps_used;
 
@@ -9275,7 +9333,7 @@ PositionIKResult KinematicsSolver::solve_position_step(
         "solve_position_step applied constraint recovery motion";
   }
   if (result.stall_escape_count > 0 || result.collision_rejection_count > 0 ||
-      collision_violated_flag_mts) {
+      collision_violated_flag_mts || configuration_step_limited) {
     sync_position_result_applied_velocity(result, current_q, step_dt);
   }
   if (should_hold_soft_infeasible_position_step(

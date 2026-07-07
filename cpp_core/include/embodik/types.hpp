@@ -300,6 +300,12 @@ struct PositionStepOptions {
   // Optional task-space speed caps (0 or negative = unlimited).
   double max_linear_speed = 0.0;  // m/s cap on ||v_linear||
   double max_angular_speed = 0.0; // rad/s cap on ||v_angular||
+  /// Optional configuration-space cap for the whole solve_position_step call.
+  /// When >0, q_solution is constrained so
+  /// ||difference(current_q, q_solution)|| <= max_configuration_step_norm,
+  /// regardless of solve mode or max_steps. This bounds the outer control tick
+  /// while preserving the caller's selected hierarchy/fallback semantics.
+  double max_configuration_step_norm = 0.0;
   // Optional torso orientation task and torso pose bounds. Bounds are enforced
   // in solve_position_step via additional inequality rows, consistent with
   // solve_position semantics.

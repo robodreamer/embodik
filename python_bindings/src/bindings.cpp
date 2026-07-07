@@ -420,6 +420,10 @@ NB_MODULE(_embodik_impl, m) {
               "Maximum linear speed magnitude in solve_position_step (m/s); <=0 means unlimited")
       .def_rw("max_angular_speed", &eik::PositionStepOptions::max_angular_speed,
               "Maximum angular speed magnitude in solve_position_step (rad/s); <=0 means unlimited")
+      .def_rw("max_configuration_step_norm",
+              &eik::PositionStepOptions::max_configuration_step_norm,
+              "Maximum configuration-space delta for the whole "
+              "solve_position_step call; <=0 means unlimited")
       .def_rw("torso_constraint", &eik::PositionStepOptions::torso_constraint,
               "Optional torso orientation task and torso pose bounds for step IK")
       .def_rw("excluded_joint_indices",
