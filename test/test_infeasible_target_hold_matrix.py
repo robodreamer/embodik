@@ -158,6 +158,68 @@ def _disable_weighted_fallback(solver: eik.KinematicsSolver) -> None:
     solver.configure_runtime(cfg)
 
 
+def _make_soft_infeasible_matrix_step(
+    case: RobotMatrixCase,
+) -> tuple[eik.RobotModel, eik.KinematicsSolver, np.ndarray, np.ndarray, eik.PositionStepOptions]:
+    robot, frame_name, q_seed = case.load()
+    assert robot.has_frame(frame_name), f"matrix frame not found: {frame_name}"
+
+    q = np.asarray(q_seed, dtype=float).copy()
+    if q.size != robot.nq:
+        q = np.asarray(robot.neutral_configuration(), dtype=float)
+    q_lower, q_upper = robot.get_joint_limits()
+    primary_q, primary_v = _single_dof_joint_indices(robot, case.primary_joint)
+    posture_q, posture_v = _single_dof_joint_indices(robot, case.posture_joint)
+
+    for q_index in (primary_q, posture_q):
+        assert np.isfinite(q_lower[q_index])
+        assert np.isfinite(q_upper[q_index])
+    q[posture_q] = float(np.clip(q[posture_q], q_lower[posture_q] + 0.2, q_upper[posture_q] - 0.2))
+    q[primary_q] = float(q_upper[primary_q] - 1e-3)
+
+    robot.update_configuration(q)
+    current_pose = _pose_matrix(robot, frame_name)
+    q_inside = q.copy()
+    q_inside[primary_q] -= 1e-4
+    robot.update_configuration(q_inside)
+    inside_pose = _pose_matrix(robot, frame_name)
+    direction = (current_pose[:3, 3] - inside_pose[:3, 3]) / (q[primary_q] - q_inside[primary_q])
+    direction_norm = float(np.linalg.norm(direction))
+    assert direction_norm > 1e-8
+
+    target_pose = current_pose.copy()
+    target_pose[:3, 3] += 0.75 * direction / direction_norm
+
+    robot.update_configuration(q)
+    solver = eik.KinematicsSolver(robot)
+    _disable_weighted_fallback(solver)
+    solver.dt = 0.02
+    solver.enable_position_limits(True)
+    solver.enable_velocity_limits(True)
+
+    task = solver.add_frame_task("target_pose", frame_name, eik.TaskType.FRAME_POSE)
+    task.priority = 0
+    task.weight = 1.0
+    task.solve_mode = eik.TaskSolveMode.SCALE
+    task.set_excluded_joint_indices([idx for idx in range(robot.nv) if idx != primary_v])
+
+    posture = solver.add_posture_task("posture")
+    posture.priority = 1
+    posture.weight = 10.0
+    posture_velocity = np.zeros(robot.nv, dtype=float)
+    posture_velocity[posture_v] = 10.0
+    posture.set_target_velocity(posture_velocity)
+
+    opts = eik.PositionStepOptions()
+    opts.max_steps = 1
+    opts.dt = 0.02
+    opts.position_gain = 8000.0
+    opts.orientation_gain = 0.0
+    opts.primary_solve_mode = eik.TaskSolveMode.SCALE
+    opts.primary_allow_min_error_fallback = False
+    return robot, solver, q, target_pose, opts
+
+
 @pytest.mark.benchmark
 @pytest.mark.parametrize(
     "case",
@@ -250,3 +312,39 @@ def test_soft_infeasible_target_hold_matrix(
         np.zeros(robot.nv, dtype=float),
         atol=1e-12,
     )
+
+
+@pytest.mark.benchmark
+@pytest.mark.parametrize(
+    "case",
+    MATRIX_CASES,
+    ids=[case.case_id for case in MATRIX_CASES],
+)
+def test_stationary_far_target_stays_held_after_soft_infeasible_hold(
+    case: RobotMatrixCase,
+) -> None:
+    robot, solver, q, target_pose, opts = _make_soft_infeasible_matrix_step(case)
+
+    first = solver.solve_position_step(q, target_pose, "target_pose", opts)
+    assert first.status == eik.SolverStatus.NO_PROGRESS
+    assert "held current configuration" in first.status_message
+    np.testing.assert_allclose(np.asarray(first.q_solution, dtype=float), q, atol=1e-12)
+
+    q_stationary = q.copy()
+    q_trace = [q_stationary.copy()]
+    statuses: list[str] = []
+    for _ in range(12):
+        result = solver.solve_position_step(q_stationary, target_pose, "target_pose", opts)
+        q_next = np.asarray(result.q_solution, dtype=float)
+        assert q_next.shape == q_stationary.shape
+        assert np.all(np.isfinite(q_next))
+        q_stationary = q_next
+        robot.update_configuration(q_stationary)
+        q_trace.append(q_stationary.copy())
+        statuses.append(result.status.name)
+
+    q_arr = np.vstack(q_trace)
+    q_steps = np.linalg.norm(np.diff(q_arr, axis=0), axis=1)
+    assert "NUMERICAL_ERROR" not in statuses
+    assert float(q_steps.max(initial=0.0)) <= 1e-2
+    assert float(q_steps.sum()) <= 1e-2

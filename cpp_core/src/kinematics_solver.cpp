@@ -152,8 +152,13 @@ static bool should_hold_soft_infeasible_position_step(
       result.status == SolverStatus::kInfeasible &&
       result.status_message.find("primary task scale collapsed") !=
           std::string::npos;
+  const bool primary_scale_collapsed_numerical =
+      result.status == SolverStatus::kNumericalError &&
+      !result.task_scales.empty() &&
+      std::abs(result.task_scales[0]) <= kSoftInfeasibleScaleHoldThreshold;
   if ((result.status != SolverStatus::kSuccess &&
-       !primary_scale_collapsed_infeasible) ||
+       !primary_scale_collapsed_infeasible &&
+       !primary_scale_collapsed_numerical) ||
       collision_violated ||
       recovery_inside_collision_margin || result.stall_escape_count > 0 ||
       result.collision_rejection_count > 0 ||
@@ -8150,6 +8155,10 @@ PositionIKResult KinematicsSolver::solve_position_step(
         "solve_position_step held current configuration because the primary "
         "SCALE task was soft-infeasible";
     sync_position_result_applied_velocity(result, current_q, step_dt);
+    last_solution_dq_norm_ = 0.0;
+    if (previous_dq_.size() == robot_->nv()) {
+      previous_dq_.setZero();
+    }
   }
 
   // In teleop-style loops (max_steps=1), stall handling must accumulate across
@@ -9254,6 +9263,10 @@ PositionIKResult KinematicsSolver::solve_position_step(
         "solve_position_step held current configuration because the primary "
         "SCALE task was soft-infeasible";
     sync_position_result_applied_velocity(result, current_q, step_dt);
+    last_solution_dq_norm_ = 0.0;
+    if (previous_dq_.size() == robot_->nv()) {
+      previous_dq_.setZero();
+    }
   }
 
   // In teleop-style loops (max_steps=1), stall handling must accumulate across
