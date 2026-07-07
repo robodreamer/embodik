@@ -90,7 +90,9 @@ TORSO_POLICY_AUTO = "Auto / Prefer Locked"
 TORSO_POLICY_LOCKED = "Locked"
 TORSO_POLICY_DECOUPLED = "Decoupled"
 DEFAULT_AUTO_TORSO_CONTRIBUTION = 0.35
-DEFAULT_AUTO_PREFERRED_LOCK_MIN_ERROR_REDUCTION_RATIO = 0.08
+# Accept measurable arms-only progress before spending torso motion; stricter
+# gates reject productive far-target steps and reintroduce fallback oscillation.
+DEFAULT_AUTO_PREFERRED_LOCK_MIN_ERROR_REDUCTION_RATIO = 0.02
 POSTURE_SLIDER_DEADBAND = 1e-3
 EE_POSITION_DEADBAND = 1e-4
 EE_ROTATION_DEADBAND = 1e-3

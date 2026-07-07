@@ -24,16 +24,22 @@ from examples.example_helpers.common_bimanual_model_utils import (  # noqa: E402
 from examples.example_helpers.common_bimanual_teleop_app import (  # noqa: E402
     COMMON_BIMANUAL_SUPPORT_CONTACT_FRAMES,
     DEFAULT_ADAPTIVE_DT_MAX_SCALE,
+    DEFAULT_AUTO_PREFERRED_LOCK_MIN_ERROR_REDUCTION_RATIO,
     DEFAULT_COMMON_BIMANUAL_SEED,
     DEFAULT_MAX_ANGULAR_SPEED,
     DEFAULT_MAX_LINEAR_SPEED,
     _apply_named_joint_seed,
     _apply_position_step_speed_caps,
     _apply_soft_lift_margin,
+    _apply_torso_arm_contribution_metric,
+    _collect_torso_arm_contribution_indices,
     _compute_support_polygon_from_contacts,
     _configure_collision_constraint,
+    _effective_torso_contribution,
     _generate_common_bimanual_collision_include_pairs,
     _generate_consecutive_collision_exclusions,
+    _is_left_arm_joint,
+    _is_right_arm_joint,
 )
 from examples.example_helpers.ik_common import (  # noqa: E402
     configure_solver_runtime_policy,
@@ -932,6 +938,173 @@ def test_worker_far_target_default_speed_caps_dampen_oscillation() -> None:
     assert capped["final_error"] <= uncapped["final_error"] + 1e-3
     assert capped["fallback_steps"] == 0
     assert capped["final_status"] == "SUCCESS"
+
+
+def _drive_auto_bimanual_reach_smoothness(
+    *,
+    target_delta: np.ndarray,
+    steps: int = 30,
+) -> dict[str, float | int | list[str]]:
+    robot, frames, q = _load_reduced_worker_robot()
+    solver = embodik.KinematicsSolver(robot)
+    solver.dt = 0.02
+    configure_solver_runtime_policy(solver)
+    solver.enable_position_limits(True)
+    solver.enable_velocity_limits(True)
+
+    left_task = solver.add_frame_task(
+        "left_tool_pose", frames["left_tool"], embodik.TaskType.FRAME_POSE
+    )
+    right_task = solver.add_frame_task(
+        "right_tool_pose", frames["right_tool"], embodik.TaskType.FRAME_POSE
+    )
+    for task in (left_task, right_task):
+        task.priority = 0
+        task.weight = 1.0
+        task.solve_mode = embodik.TaskSolveMode.SCALE_ELASTIC
+        task.allow_min_error_fallback = True
+
+    joint_names = list(robot.get_joint_names())
+    torso_vi, arm_vi, nv = _collect_torso_arm_contribution_indices(
+        robot, joint_names, lock_joint_names=set()
+    )
+    left_arm_vi = [
+        int(robot.get_joint_velocity_index(name))
+        for name in joint_names
+        if _is_left_arm_joint(name)
+    ]
+    right_arm_vi = [
+        int(robot.get_joint_velocity_index(name))
+        for name in joint_names
+        if _is_right_arm_joint(name)
+    ]
+    right_task.set_excluded_joint_indices(sorted(left_arm_vi))
+    left_task.set_excluded_joint_indices(sorted(right_arm_vi))
+
+    posture = solver.add_posture_task("bimanual_posture")
+    posture.priority = 2
+    posture.weight = 1e-2
+    posture.set_target_configuration(q.copy())
+
+    left_target = _frame_pose_matrix(robot, frames["left_tool"])
+    right_target = _frame_pose_matrix(robot, frames["right_tool"])
+    start_mid = 0.5 * (left_target[:3, 3] + right_target[:3, 3])
+    delta = np.asarray(target_delta, dtype=float)
+    progress_axis = delta / max(float(np.linalg.norm(delta)), 1e-12)
+    left_target[:3, 3] += delta
+    right_target[:3, 3] += delta
+
+    q_trace = [q.copy()]
+    errors: list[float] = []
+    progress: list[float] = []
+    statuses: list[str] = []
+    preferred_lock_used = 0
+    preferred_lock_fallback = 0
+
+    for _ in range(int(steps)):
+        opts = embodik.PositionStepOptions()
+        opts.max_steps = 2
+        opts.dt = 0.02
+        opts.position_gain = 10.0
+        opts.orientation_gain = 10.0
+        opts.primary_solve_mode = embodik.TaskSolveMode.SCALE_ELASTIC
+        opts.primary_allow_min_error_fallback = True
+        opts.adaptive_dt = True
+        opts.adaptive_dt_max_scale = DEFAULT_ADAPTIVE_DT_MAX_SCALE
+        opts.adaptive_dt_reference_distance = 0.02
+        _apply_position_step_speed_caps(
+            opts,
+            max_linear_speed=DEFAULT_MAX_LINEAR_SPEED,
+            max_angular_speed=DEFAULT_MAX_ANGULAR_SPEED,
+        )
+        opts.preferred_locked_joint_indices = list(torso_vi)
+        opts.preferred_lock_tracking_tolerance = 0.035
+        opts.preferred_lock_orientation_tolerance = 0.25
+        opts.preferred_lock_max_step_norm = 0.35
+        opts.preferred_lock_min_error_reduction_ratio = (
+            DEFAULT_AUTO_PREFERRED_LOCK_MIN_ERROR_REDUCTION_RATIO
+        )
+        opts.preferred_lock_solve_mode = embodik.TaskSolveMode.MIN_ERROR
+        _apply_torso_arm_contribution_metric(
+            solver,
+            _effective_torso_contribution(0.5, torso_prefer_locked=True),
+            torso_velocity_indices=torso_vi,
+            arm_velocity_indices=arm_vi,
+            nv=nv,
+        )
+
+        result = solver.solve_position_step(
+            q,
+            [
+                embodik.TaskTarget("left_tool_pose", left_target, 10.0, 10.0),
+                embodik.TaskTarget("right_tool_pose", right_target, 10.0, 10.0),
+            ],
+            opts,
+        )
+        preferred_lock_used += int(bool(getattr(result, "preferred_lock_used", False)))
+        preferred_lock_fallback += int(bool(getattr(result, "preferred_lock_fallback_used", False)))
+        statuses.append(getattr(getattr(result, "status", None), "name", "UNKNOWN"))
+        q_next = np.asarray(getattr(result, "q_solution", q), dtype=float)
+        if q_next.shape == q.shape and np.all(np.isfinite(q_next)):
+            q = q_next
+        robot.update_configuration(q)
+        q_trace.append(q.copy())
+
+        left_now = _frame_pose_matrix(robot, frames["left_tool"])[:3, 3]
+        right_now = _frame_pose_matrix(robot, frames["right_tool"])[:3, 3]
+        errors.append(
+            max(
+                float(np.linalg.norm(left_target[:3, 3] - left_now)),
+                float(np.linalg.norm(right_target[:3, 3] - right_now)),
+            )
+        )
+        mid_now = 0.5 * (left_now + right_now)
+        progress.append(float(np.dot(mid_now - start_mid, progress_axis)))
+
+    q_arr = np.vstack(q_trace)
+    q_deltas = np.diff(q_arr, axis=0)
+    q_steps = np.linalg.norm(q_deltas, axis=1)
+    q_accel = np.linalg.norm(np.diff(q_arr, n=2, axis=0), axis=1)
+    torso_total = float(np.sum(np.linalg.norm(q_deltas[:, torso_vi], axis=1))) if torso_vi else 0.0
+    arm_total = float(np.sum(np.linalg.norm(q_deltas[:, arm_vi], axis=1))) if arm_vi else 0.0
+    error_arr = np.asarray(errors, dtype=float)
+    progress_arr = np.asarray(progress, dtype=float)
+    return {
+        "final_error": float(error_arr[-1]),
+        "min_error": float(error_arr.min()),
+        "error_increases": int(np.sum(np.diff(error_arr) > 1e-4)),
+        "backsteps": int(np.sum(np.diff(progress_arr) < -1e-4)),
+        "max_step_norm": float(q_steps.max()) if q_steps.size else 0.0,
+        "max_accel_norm": float(q_accel.max()) if q_accel.size else 0.0,
+        "total_motion_norm": float(np.sum(q_steps)),
+        "torso_motion_share": torso_total / max(torso_total + arm_total, 1e-12),
+        "preferred_lock_used_steps": int(preferred_lock_used),
+        "preferred_lock_fallback_steps": int(preferred_lock_fallback),
+        "statuses": sorted(set(statuses)),
+    }
+
+
+def test_worker_auto_preferred_lock_uses_arms_before_torso_without_far_oscillation() -> None:
+    reachable = _drive_auto_bimanual_reach_smoothness(
+        target_delta=np.array([0.0, 0.04, 0.0], dtype=float)
+    )
+    far = _drive_auto_bimanual_reach_smoothness(
+        target_delta=np.array([0.0, -1.0, 0.0], dtype=float)
+    )
+
+    assert reachable["statuses"] == ["SUCCESS"]
+    assert reachable["preferred_lock_used_steps"] > 0, reachable
+    assert reachable["preferred_lock_fallback_steps"] == 0, reachable
+    assert reachable["torso_motion_share"] <= 1e-9, reachable
+    assert reachable["final_error"] < 5e-3, reachable
+
+    assert far["statuses"] == ["SUCCESS"]
+    assert far["preferred_lock_fallback_steps"] > 0, far
+    assert far["error_increases"] <= 1, far
+    assert far["backsteps"] == 0, far
+    assert far["max_step_norm"] < 0.30, far
+    assert far["max_accel_norm"] < 0.30, far
+    assert far["torso_motion_share"] < 0.12, far
 
 
 def _held_arm_drift_when_dragging_other(*, solve_mode, protect_held: bool = False) -> float:
