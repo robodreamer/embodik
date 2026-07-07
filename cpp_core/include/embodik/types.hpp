@@ -373,7 +373,9 @@ struct PositionStepOptions {
   /// solve. The locked candidate is accepted when it is continuous and each
   /// active-target error component is either inside tolerance or still making
   /// meaningful progress; otherwise the normal solve runs from the original
-  /// current_q. Empty = no extra solve.
+  /// current_q. Candidate and fallback are each evaluated as one integration
+  /// step so a lock-policy handoff cannot hide a multi-step jump inside one
+  /// outer control tick. Empty = no extra solve.
   std::vector<int> preferred_locked_joint_indices;
   /// Primary pose-task solve mode used only by the preferred-lock candidate.
   TaskSolveMode preferred_lock_solve_mode = TaskSolveMode::kMinError;

@@ -243,7 +243,9 @@ void bind_kinematics_solver(nb::module_ &m) {
            "no-progress detection can return SolverStatus.NO_PROGRESS. If a "
            "SCALE-family primary task is soft-infeasible, keeps a large "
            "residual, and only produces self-motion, the step returns "
-           "SolverStatus.NO_PROGRESS with q_solution held at current_q.")
+           "SolverStatus.NO_PROGRESS with q_solution held at current_q. "
+           "Preferred-lock candidate/fallback policy handoffs are evaluated "
+           "as a single integration step from the entry configuration.")
       .def(
           "solve_position_step",
           [](KinematicsSolver &self, const Eigen::VectorXd &current_q,
@@ -269,7 +271,9 @@ void bind_kinematics_solver(nb::module_ &m) {
            "is called once to preserve coordinated multi-task behavior. If "
            "the primary SCALE-family target is soft-infeasible, keeps a large "
            "residual, and only produces self-motion, the step returns "
-           "SolverStatus.NO_PROGRESS with q_solution held at current_q.")
+           "SolverStatus.NO_PROGRESS with q_solution held at current_q. "
+           "Preferred-lock candidate/fallback policy handoffs are evaluated "
+           "as a single integration step from the entry configuration.")
 
       .def("solve_position_in_tcp", &KinematicsSolver::solve_position_in_tcp,
            nb::arg("seed_q"), nb::arg("relative_target"), nb::arg("frame_name"),

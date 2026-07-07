@@ -944,6 +944,7 @@ def _drive_auto_bimanual_reach_smoothness(
     *,
     target_delta: np.ndarray,
     steps: int = 30,
+    ramp_target: bool = False,
 ) -> dict[str, float | int | list[str]]:
     robot, frames, q = _load_reduced_worker_robot()
     solver = embodik.KinematicsSolver(robot)
@@ -986,22 +987,27 @@ def _drive_auto_bimanual_reach_smoothness(
     posture.weight = 1e-2
     posture.set_target_configuration(q.copy())
 
-    left_target = _frame_pose_matrix(robot, frames["left_tool"])
-    right_target = _frame_pose_matrix(robot, frames["right_tool"])
-    start_mid = 0.5 * (left_target[:3, 3] + right_target[:3, 3])
+    left_target0 = _frame_pose_matrix(robot, frames["left_tool"])
+    right_target0 = _frame_pose_matrix(robot, frames["right_tool"])
+    start_mid = 0.5 * (left_target0[:3, 3] + right_target0[:3, 3])
     delta = np.asarray(target_delta, dtype=float)
     progress_axis = delta / max(float(np.linalg.norm(delta)), 1e-12)
-    left_target[:3, 3] += delta
-    right_target[:3, 3] += delta
 
     q_trace = [q.copy()]
     errors: list[float] = []
     progress: list[float] = []
     statuses: list[str] = []
+    lock_modes: list[str] = []
     preferred_lock_used = 0
     preferred_lock_fallback = 0
 
-    for _ in range(int(steps)):
+    for step_idx in range(int(steps)):
+        target_fraction = float(step_idx + 1) / float(max(int(steps), 1)) if ramp_target else 1.0
+        left_target = left_target0.copy()
+        right_target = right_target0.copy()
+        left_target[:3, 3] += delta * target_fraction
+        right_target[:3, 3] += delta * target_fraction
+
         opts = embodik.PositionStepOptions()
         opts.max_steps = 2
         opts.dt = 0.02
@@ -1041,8 +1047,16 @@ def _drive_auto_bimanual_reach_smoothness(
             ],
             opts,
         )
-        preferred_lock_used += int(bool(getattr(result, "preferred_lock_used", False)))
-        preferred_lock_fallback += int(bool(getattr(result, "preferred_lock_fallback_used", False)))
+        lock_used = bool(getattr(result, "preferred_lock_used", False))
+        lock_fallback = bool(getattr(result, "preferred_lock_fallback_used", False))
+        preferred_lock_used += int(lock_used)
+        preferred_lock_fallback += int(lock_fallback)
+        if lock_used:
+            lock_modes.append("used")
+        elif lock_fallback:
+            lock_modes.append("fallback")
+        else:
+            lock_modes.append("none")
         statuses.append(getattr(getattr(result, "status", None), "name", "UNKNOWN"))
         q_next = np.asarray(getattr(result, "q_solution", q), dtype=float)
         if q_next.shape == q.shape and np.all(np.isfinite(q_next)):
@@ -1065,21 +1079,28 @@ def _drive_auto_bimanual_reach_smoothness(
     q_deltas = np.diff(q_arr, axis=0)
     q_steps = np.linalg.norm(q_deltas, axis=1)
     q_accel = np.linalg.norm(np.diff(q_arr, n=2, axis=0), axis=1)
+    q_jerk = np.linalg.norm(np.diff(q_arr, n=3, axis=0), axis=1)
     torso_total = float(np.sum(np.linalg.norm(q_deltas[:, torso_vi], axis=1))) if torso_vi else 0.0
     arm_total = float(np.sum(np.linalg.norm(q_deltas[:, arm_vi], axis=1))) if arm_vi else 0.0
     error_arr = np.asarray(errors, dtype=float)
     progress_arr = np.asarray(progress, dtype=float)
+    lock_toggle_count = int(
+        sum(1 for before, after in zip(lock_modes, lock_modes[1:]) if before != after)
+    )
     return {
         "final_error": float(error_arr[-1]),
         "min_error": float(error_arr.min()),
         "error_increases": int(np.sum(np.diff(error_arr) > 1e-4)),
         "backsteps": int(np.sum(np.diff(progress_arr) < -1e-4)),
         "max_step_norm": float(q_steps.max()) if q_steps.size else 0.0,
+        "p95_step_norm": float(np.percentile(q_steps, 95.0)) if q_steps.size else 0.0,
         "max_accel_norm": float(q_accel.max()) if q_accel.size else 0.0,
+        "max_jerk_norm": float(q_jerk.max()) if q_jerk.size else 0.0,
         "total_motion_norm": float(np.sum(q_steps)),
         "torso_motion_share": torso_total / max(torso_total + arm_total, 1e-12),
         "preferred_lock_used_steps": int(preferred_lock_used),
         "preferred_lock_fallback_steps": int(preferred_lock_fallback),
+        "preferred_lock_toggle_count": lock_toggle_count,
         "statuses": sorted(set(statuses)),
     }
 
@@ -1105,6 +1126,24 @@ def test_worker_auto_preferred_lock_uses_arms_before_torso_without_far_oscillati
     assert far["max_step_norm"] < 0.30, far
     assert far["max_accel_norm"] < 0.30, far
     assert far["torso_motion_share"] < 0.12, far
+
+
+def test_worker_auto_preferred_lock_ramp_limits_boundary_step_spike() -> None:
+    ramp = _drive_auto_bimanual_reach_smoothness(
+        target_delta=np.array([0.0, -0.6, 0.0], dtype=float),
+        steps=80,
+        ramp_target=True,
+    )
+
+    assert ramp["statuses"] == ["SUCCESS"], ramp
+    assert ramp["preferred_lock_used_steps"] > 0, ramp
+    assert ramp["preferred_lock_fallback_steps"] > 0, ramp
+    assert ramp["preferred_lock_toggle_count"] > 0, ramp
+    assert ramp["backsteps"] == 0, ramp
+    assert ramp["max_step_norm"] <= 0.13, ramp
+    assert ramp["max_step_norm"] / max(float(ramp["p95_step_norm"]), 1e-12) <= 1.8, ramp
+    assert ramp["max_accel_norm"] <= 0.09, ramp
+    assert ramp["max_jerk_norm"] <= 0.16, ramp
 
 
 def _held_arm_drift_when_dragging_other(*, solve_mode, protect_held: bool = False) -> float:

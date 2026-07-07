@@ -816,6 +816,13 @@ make_preferred_lock_candidate_options(const PositionStepOptions &options) {
   return candidate;
 }
 
+static PositionStepOptions
+make_preferred_lock_continuity_options(const PositionStepOptions &options) {
+  PositionStepOptions bounded = options;
+  bounded.max_steps = 1;
+  return bounded;
+}
+
 static bool preferred_lock_status_acceptable(SolverStatus status) {
   return status == SolverStatus::kSuccess || status == SolverStatus::kNoProgress;
 }
@@ -4582,8 +4589,10 @@ void KinematicsSolver::restore_position_step_mutable_state(
 PositionIKResult KinematicsSolver::solve_position_step_with_preferred_lock(
     const Eigen::VectorXd &current_q, const Eigen::Matrix4d &target_pose,
     const std::string &frame_task_name, const PositionStepOptions &options) {
+  PositionStepOptions continuity_options =
+      make_preferred_lock_continuity_options(options);
   PositionStepOptions locked_options =
-      make_preferred_lock_candidate_options(options);
+      make_preferred_lock_candidate_options(continuity_options);
   const PositionStepMutableStateSnapshot snapshot =
       capture_position_step_mutable_state();
 
@@ -4672,7 +4681,8 @@ PositionIKResult KinematicsSolver::solve_position_step_with_preferred_lock(
 
   restore_position_step_mutable_state(snapshot);
   PositionIKResult fallback =
-      solve_position_step(current_q, target_pose, frame_task_name, options);
+      solve_position_step(current_q, target_pose, frame_task_name,
+                          continuity_options);
   annotate_preferred_lock_result(fallback, candidate, errors, step_norm,
                                  candidate_time_ms, false);
   return fallback;
@@ -4681,8 +4691,10 @@ PositionIKResult KinematicsSolver::solve_position_step_with_preferred_lock(
 PositionIKResult KinematicsSolver::solve_position_step_with_preferred_lock(
     const Eigen::VectorXd &current_q, const std::vector<TaskTarget> &targets,
     const PositionStepOptions &options) {
+  PositionStepOptions continuity_options =
+      make_preferred_lock_continuity_options(options);
   PositionStepOptions locked_options =
-      make_preferred_lock_candidate_options(options);
+      make_preferred_lock_candidate_options(continuity_options);
   const PositionStepMutableStateSnapshot snapshot =
       capture_position_step_mutable_state();
 
@@ -4801,7 +4813,8 @@ PositionIKResult KinematicsSolver::solve_position_step_with_preferred_lock(
   }
 
   restore_position_step_mutable_state(snapshot);
-  PositionIKResult fallback = solve_position_step(current_q, targets, options);
+  PositionIKResult fallback =
+      solve_position_step(current_q, targets, continuity_options);
   annotate_preferred_lock_result(fallback, candidate, errors, step_norm,
                                  candidate_time_ms, false);
   return fallback;
