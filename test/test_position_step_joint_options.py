@@ -444,6 +444,71 @@ def test_preferred_locked_candidate_rejects_and_restores_normal_fallback():
         os.unlink(urdf_path)
 
 
+def test_preferred_locked_rejection_restores_acceleration_memory_before_fallback():
+    urdf_path = _create_prismatic_torso_arm_urdf()
+    try:
+
+        def _make_solver():
+            robot = eik.RobotModel(urdf_path, floating_base=False)
+            solver = eik.KinematicsSolver(robot)
+            solver.dt = 0.01
+            solver.enable_position_limits(True)
+            solver.enable_velocity_limits(True)
+            solver.set_acceleration_limits(np.full(robot.nv, 0.2, dtype=float))
+            solver.enable_acceleration_limits(True)
+            task = solver.add_frame_task("ee_task", "ee")
+            task.priority = 0
+            task.weight = 1.0
+            return robot, solver
+
+        robot_a, solver_a = _make_solver()
+        robot_b, solver_b = _make_solver()
+
+        q = np.array([0.0, 0.0], dtype=float)
+        robot_a.update_configuration(q)
+        pose = robot_a.get_frame_pose("ee")
+        target = np.eye(4, dtype=float)
+        target[:3, :3] = np.array(pose.rotation, dtype=float)
+        target[:3, 3] = np.array(pose.translation, dtype=float)
+        target[1, 3] += 0.12
+
+        baseline_opts = eik.PositionStepOptions()
+        baseline_opts.max_steps = 1
+        baseline_opts.position_gain = 40.0
+        baseline_opts.orientation_gain = 0.0
+
+        preferred_opts = eik.PositionStepOptions()
+        preferred_opts.max_steps = 1
+        preferred_opts.position_gain = 40.0
+        preferred_opts.orientation_gain = 0.0
+        preferred_opts.preferred_locked_joint_indices = [0]
+        preferred_opts.preferred_lock_tracking_tolerance = 1e-9
+        preferred_opts.preferred_lock_orientation_tolerance = 0.0
+        preferred_opts.preferred_lock_max_step_norm = 0.35
+        preferred_opts.preferred_lock_min_error_reduction_ratio = 10.0
+
+        baseline = solver_a.solve_position_step(q, target, "ee_task", baseline_opts)
+        preferred = solver_b.solve_position_step(q, target, "ee_task", preferred_opts)
+
+        assert preferred.preferred_lock_attempted is True
+        assert preferred.preferred_lock_used is False
+        assert preferred.preferred_lock_fallback_used is True
+        assert preferred.preferred_lock_candidate_position_error > 1e-9
+        assert preferred.status == baseline.status
+        np.testing.assert_allclose(
+            np.asarray(preferred.q_solution, dtype=float),
+            np.asarray(baseline.q_solution, dtype=float),
+            atol=1e-10,
+        )
+        np.testing.assert_allclose(
+            np.asarray(preferred.joint_velocities, dtype=float),
+            np.asarray(baseline.joint_velocities, dtype=float),
+            atol=1e-10,
+        )
+    finally:
+        os.unlink(urdf_path)
+
+
 def test_preferred_locked_candidate_multi_target_path():
     urdf_path = _create_two_joint_urdf()
     try:

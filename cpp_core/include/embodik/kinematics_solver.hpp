@@ -1567,11 +1567,24 @@ private:
   std::optional<CollisionConstraintResult> compute_collision_constraint();
 
   struct PositionStepMutableStateSnapshot {
+    struct TaskState {
+      Task *task = nullptr;
+      TaskSolveMode solve_mode = TaskSolveMode::kScale;
+      bool allow_min_error_fallback = false;
+      TaskSolveMode last_effective_mode = TaskSolveMode::kScale;
+      bool used_min_error_fallback = false;
+    };
     Eigen::VectorXd robot_q;
+    std::vector<TaskState> task_states;
     TaskLayout current_auto_task_layout = TaskLayout::kMerged;
     int auto_layout_below_low_count = 0;
     bool auto_layout_has_feedback = false;
     double auto_layout_binding_score = 0.0;
+    double advisor_scale_current = 1.0;
+    double advisor_scale_ratio_sum = 0.0;
+    double advisor_scale_epoch_time_s = 0.0;
+    int advisor_scale_sample_count = 0;
+    Eigen::VectorXd previous_dq;
     StallHandlerConfig stall_config;
     StallHandlerState stall_state;
     bool stall_user_configured = false;

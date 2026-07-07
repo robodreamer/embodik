@@ -4436,10 +4436,24 @@ KinematicsSolver::PositionStepMutableStateSnapshot
 KinematicsSolver::capture_position_step_mutable_state() const {
   PositionStepMutableStateSnapshot snapshot;
   snapshot.robot_q = robot_->get_current_configuration();
+  snapshot.task_states.reserve(tasks_.size());
+  for (const auto &task : tasks_) {
+    if (!task) {
+      continue;
+    }
+    snapshot.task_states.push_back(
+        {task.get(), task->getSolveMode(), task->getAllowMinErrorFallback(),
+         task->getLastEffectiveMode(), task->getUsedMinErrorFallback()});
+  }
   snapshot.current_auto_task_layout = current_auto_task_layout_;
   snapshot.auto_layout_below_low_count = auto_layout_below_low_count_;
   snapshot.auto_layout_has_feedback = auto_layout_has_feedback_;
   snapshot.auto_layout_binding_score = auto_layout_binding_score_;
+  snapshot.advisor_scale_current = advisor_scale_current_;
+  snapshot.advisor_scale_ratio_sum = advisor_scale_ratio_sum_;
+  snapshot.advisor_scale_epoch_time_s = advisor_scale_epoch_time_s_;
+  snapshot.advisor_scale_sample_count = advisor_scale_sample_count_;
+  snapshot.previous_dq = previous_dq_;
   snapshot.stall_config = stall_config_;
   snapshot.stall_state = stall_state_;
   snapshot.stall_user_configured = stall_user_configured_;
@@ -4491,10 +4505,24 @@ void KinematicsSolver::restore_position_step_mutable_state(
   if (snapshot.robot_q.size() == robot_->nq()) {
     robot_->update_configuration(snapshot.robot_q);
   }
+  for (const auto &state : snapshot.task_states) {
+    if (state.task == nullptr) {
+      continue;
+    }
+    state.task->setSolveMode(state.solve_mode);
+    state.task->setAllowMinErrorFallback(state.allow_min_error_fallback);
+    state.task->setLastEffectiveMode(state.last_effective_mode);
+    state.task->setUsedMinErrorFallback(state.used_min_error_fallback);
+  }
   current_auto_task_layout_ = snapshot.current_auto_task_layout;
   auto_layout_below_low_count_ = snapshot.auto_layout_below_low_count;
   auto_layout_has_feedback_ = snapshot.auto_layout_has_feedback;
   auto_layout_binding_score_ = snapshot.auto_layout_binding_score;
+  advisor_scale_current_ = snapshot.advisor_scale_current;
+  advisor_scale_ratio_sum_ = snapshot.advisor_scale_ratio_sum;
+  advisor_scale_epoch_time_s_ = snapshot.advisor_scale_epoch_time_s;
+  advisor_scale_sample_count_ = snapshot.advisor_scale_sample_count;
+  previous_dq_ = snapshot.previous_dq;
   for (auto &kv : pose_task_groups_) {
     if (kv.second && kv.second->auto_switch()) {
       kv.second->set_layout(current_auto_task_layout_);
