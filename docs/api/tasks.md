@@ -24,6 +24,63 @@ posture_task.priority = 1
 posture_task.set_target_configuration(q_default)
 ```
 
+### ManipulabilityTask
+
+Improve frame-Jacobian conditioning with the analytic gradient of a regularized
+log-determinant score:
+
+```python
+conditioning = solver.add_manipulability_task(
+    "ee_conditioning",
+    "panda_hand",
+    embodik.TaskType.FRAME_POSITION,
+)
+conditioning.priority = 1
+conditioning.weight = 10.0
+conditioning.solve_mode = embodik.TaskSolveMode.MIN_ERROR
+conditioning.set_controlled_joint_indices(arm_velocity_indices)
+conditioning.set_regularization(0.03)
+```
+
+The regularization keeps the score and gradient finite at singular
+configurations. The gradient magnitude is smoothly bounded below `1` before the
+task weight is applied. At an exactly symmetric singularity the first-order
+gradient can be zero; use a deterministic nominal `PostureTask` at a lower
+priority to select a bend direction when the robot has that symmetry.
+
+### JointLimitAvoidanceTask
+
+Move selected scalar joints inward before they become pinned at a hard limit:
+
+```python
+limit_avoidance = solver.add_joint_limit_avoidance_task(
+    "arm_limit_avoidance",
+    controlled_joint_indices=[elbow_velocity_index],
+)
+limit_avoidance.priority = 1
+limit_avoidance.weight = 0.012
+limit_avoidance.solve_mode = embodik.TaskSolveMode.MIN_ERROR
+limit_avoidance.set_activation_margin(0.002)
+```
+
+The task uses a signed cubic smoothstep. It is exactly zero outside the
+activation margin, rises continuously toward either limit, and never replaces
+the solver's hard position or velocity constraints. The margin uses each
+joint's configuration units (`rad` for revolute joints, `m` for prismatic
+joints).
+
+For limited-range arms, a useful hierarchy is:
+
+1. Position tracking at priority `0`.
+2. Joint-limit avoidance at priority `1`.
+3. Orientation recovery and manipulability conditioning at priority `2`.
+
+This split permits a continuous bend away from a fully extended limit while
+position continues to make progress. For these recovery objectives, near-limit
+Jacobian clamping evaluates the requested task direction so safe inward rows
+remain available. Ordinary tasks keep the historical row-sign clamp, and all
+hard position and velocity constraints remain enforced by the solver.
+
 ### COMTask
 
 Control center of mass position. Most current examples use the support-polygon
@@ -140,6 +197,14 @@ This behavior is consistent with a diagonal selection/weighting matrix:
       show_root_heading: true
 
 ::: embodik.PostureTask
+    options:
+      show_root_heading: true
+
+::: embodik.ManipulabilityTask
+    options:
+      show_root_heading: true
+
+::: embodik.JointLimitAvoidanceTask
     options:
       show_root_heading: true
 

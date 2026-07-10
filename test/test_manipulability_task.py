@@ -1,0 +1,96 @@
+#!/usr/bin/env python3
+"""Tests for the analytic singularity-conditioning objective."""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+import numpy as np
+import pytest
+
+import embodik as eik
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+EXAMPLES_DIR = REPO_ROOT / "examples"
+if str(EXAMPLES_DIR) not in sys.path:
+    sys.path.insert(0, str(EXAMPLES_DIR))
+
+from utils.robot_models import resolve_robot_configuration  # noqa: E402
+
+
+def _panda_arm_velocity_indices(robot: eik.RobotModel) -> list[int]:
+    return [
+        int(robot.get_joint_velocity_index(name))
+        for name in robot.get_joint_names()
+        if name.startswith("panda_joint")
+    ]
+
+
+def test_manipulability_gradient_matches_finite_difference() -> None:
+    config = resolve_robot_configuration("panda")
+    robot = config["robot"]
+    frame_name = str(config["target_link"])
+    upper = np.asarray(robot.get_joint_limits()[1], dtype=float)
+    elbow_index = int(robot.get_joint_config_index("panda_joint4"))
+    q = np.array(
+        [
+            0.0,
+            -0.017618,
+            0.0,
+            upper[elbow_index] - 1e-6,
+            0.0,
+            2.59284,
+            0.0,
+            0.02,
+            0.02,
+        ],
+        dtype=float,
+    )
+    controlled_indices = _panda_arm_velocity_indices(robot)
+    task = eik.ManipulabilityTask("conditioning", robot, frame_name, eik.TaskType.FRAME_POSITION)
+    task.set_controlled_joint_indices(controlled_indices)
+    task.set_regularization(0.03)
+
+    def update_and_score(configuration: np.ndarray) -> float:
+        robot.update_configuration(configuration)
+        task.update(robot)
+        return float(task.score)
+
+    update_and_score(q)
+    analytic = np.asarray(task.get_error(), dtype=float)
+    finite_difference = np.zeros(len(controlled_indices), dtype=float)
+    epsilon = 1e-6
+    for row, velocity_index in enumerate(controlled_indices):
+        tangent = np.zeros(robot.nv, dtype=float)
+        tangent[velocity_index] = epsilon
+        q_plus = np.asarray(robot.integrate(q, tangent, 1.0), dtype=float)
+        q_minus = np.asarray(robot.integrate(q, -tangent, 1.0), dtype=float)
+        finite_difference[row] = (update_and_score(q_plus) - update_and_score(q_minus)) / (
+            2.0 * epsilon
+        )
+
+    expected = finite_difference / np.sqrt(
+        1.0 + float(np.dot(finite_difference, finite_difference))
+    )
+    update_and_score(q)
+    analytic = np.asarray(task.get_error(), dtype=float)
+
+    assert np.isfinite(task.score)
+    assert np.all(np.isfinite(analytic))
+    assert np.linalg.norm(analytic) <= 1.0 + 1e-12
+    np.testing.assert_allclose(analytic, expected, atol=2e-5, rtol=2e-4)
+
+
+def test_manipulability_task_rejects_nonpositive_regularization() -> None:
+    config = resolve_robot_configuration("iiwa")
+    task = eik.ManipulabilityTask(
+        "conditioning",
+        config["robot"],
+        str(config["target_link"]),
+        eik.TaskType.FRAME_POSITION,
+    )
+    with pytest.raises(ValueError):
+        task.set_regularization(0.0)
+    with pytest.raises(ValueError):
+        task.set_regularization(float("nan"))

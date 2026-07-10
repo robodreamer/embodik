@@ -1150,6 +1150,36 @@ KinematicsSolver::add_posture_task(const std::string &name,
   return task;
 }
 
+std::shared_ptr<ManipulabilityTask>
+KinematicsSolver::add_manipulability_task(const std::string &name,
+                                          const std::string &frame_name,
+                                          TaskType frame_task_type) {
+  if (task_map_.find(name) != task_map_.end()) {
+    throw std::runtime_error("Task with name '" + name + "' already exists");
+  }
+
+  auto task = std::make_shared<ManipulabilityTask>(
+      name, robot_, frame_name, frame_task_type);
+  tasks_.push_back(task);
+  task_map_[name] = task;
+  return task;
+}
+
+std::shared_ptr<JointLimitAvoidanceTask>
+KinematicsSolver::add_joint_limit_avoidance_task(
+    const std::string &name,
+    const std::vector<int> &controlled_joint_indices) {
+  if (task_map_.find(name) != task_map_.end()) {
+    throw std::runtime_error("Task with name '" + name + "' already exists");
+  }
+
+  auto task = std::make_shared<JointLimitAvoidanceTask>(
+      name, robot_, controlled_joint_indices);
+  tasks_.push_back(task);
+  task_map_[name] = task;
+  return task;
+}
+
 std::shared_ptr<JointTask>
 KinematicsSolver::add_joint_task(const std::string &name,
                                  const std::string &joint_name,
@@ -4309,6 +4339,8 @@ const std::vector<int> &KinematicsSolver::velocity_to_config_index_cache() {
 
 void KinematicsSolver::clamp_jacobians_near_joint_limits(
     std::vector<Eigen::MatrixXd> &jacobians,
+    const std::vector<Eigen::VectorXd> &goals,
+    const std::vector<ObjectiveSolveConfig> &objective_configs,
     const std::vector<int> &velocity_to_config_index) const {
   constexpr double kJointLimitClampMargin = 5e-4;
   const int nv_clamp = robot_->nv();
@@ -4347,17 +4379,35 @@ void KinematicsSolver::clamp_jacobians_near_joint_limits(
       continue;
     }
 
-    for (auto &J : jacobians) {
+    for (size_t objective_index = 0; objective_index < jacobians.size();
+         ++objective_index) {
+      auto &J = jacobians[objective_index];
       if (J.cols() != nv_clamp || J.rows() <= 0) {
         continue;
       }
-      for (int r = 0; r < static_cast<int>(J.rows()); ++r) {
-        double &val = J(r, i);
-        if (clamp_lower && val < 0.0) {
-          val = 0.0;
+      const bool goal_directed_clamp =
+          objective_index < objective_configs.size() &&
+          objective_configs[objective_index].use_goal_directed_limit_clamp;
+      if (goal_directed_clamp) {
+        if (objective_index >= goals.size() ||
+            goals[objective_index].size() != J.rows()) {
+          continue;
         }
-        if (clamp_upper && val > 0.0) {
-          val = 0.0;
+        const double requested_direction =
+            J.col(i).dot(goals[objective_index]);
+        if ((clamp_lower && requested_direction < 0.0) ||
+            (clamp_upper && requested_direction > 0.0)) {
+          J.col(i).setZero();
+        }
+      } else {
+        for (int row = 0; row < static_cast<int>(J.rows()); ++row) {
+          double &value = J(row, i);
+          if (clamp_lower && value < 0.0) {
+            value = 0.0;
+          }
+          if (clamp_upper && value > 0.0) {
+            value = 0.0;
+          }
         }
       }
     }
@@ -4994,6 +5044,7 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
     bool all_min_error = true;
     bool fallback_value = group_tasks.front()->getAllowMinErrorFallback();
     bool fallback_consistent = true;
+    bool use_goal_directed_limit_clamp = false;
     for (const auto &task : group_tasks) {
       const auto mode = task->getSolveMode();
       all_scale_family =
@@ -5003,6 +5054,8 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
       fallback_consistent =
           fallback_consistent &&
           (task->getAllowMinErrorFallback() == fallback_value);
+      use_goal_directed_limit_clamp =
+          use_goal_directed_limit_clamp || task->usesGoalDirectedLimitClamp();
     }
 
     const bool combine_group =
@@ -5032,6 +5085,7 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
           current_priority,
           all_min_error ? TaskSolveMode::kMinError : TaskSolveMode::kScale,
           all_min_error ? false : fallback_value,
+          use_goal_directed_limit_clamp,
       });
       objective_tasks.push_back(nullptr);
     } else {
@@ -5048,6 +5102,7 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
             task->getPriority(),
             effective_mode,
             task->getAllowMinErrorFallback(),
+            task->usesGoalDirectedLimitClamp(),
         });
         objective_tasks.push_back(task);
       }
@@ -5117,7 +5172,8 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
   // motion further into that limit. This avoids whole-task SNS scale collapse
   // and preserves partial solutions through remaining DOFs.
   if (apply_limits && use_position_limits_) {
-    clamp_jacobians_near_joint_limits(jacobians, velocity_to_config_index);
+    clamp_jacobians_near_joint_limits(jacobians, goals, objective_configs,
+                                      velocity_to_config_index);
   }
 
   // If no active tasks, return early

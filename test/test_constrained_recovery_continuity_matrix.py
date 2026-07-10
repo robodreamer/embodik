@@ -92,12 +92,6 @@ def _single_dof_joint_indices(robot: eik.RobotModel, joint_name: str) -> tuple[i
     )
 
 
-def _singularity_proxy(robot: eik.RobotModel, frame_name: str) -> float:
-    jac = np.asarray(robot.get_frame_jacobian(frame_name), dtype=float)[:3, :]
-    singular_values = np.linalg.svd(jac, compute_uv=False)
-    return float(singular_values[-1]) if singular_values.size else 0.0
-
-
 def _configure_solver(robot: eik.RobotModel, frame_name: str) -> eik.KinematicsSolver:
     solver = eik.KinematicsSolver(robot)
     solver.dt = 0.02
@@ -198,7 +192,6 @@ def _run_recovery_case(
     errors: list[float] = []
     progress: list[float] = []
     target_progress: list[float] = []
-    singularity: list[float] = []
     statuses: list[str] = []
 
     for target in poses:
@@ -221,7 +214,6 @@ def _run_recovery_case(
         errors.append(float(np.linalg.norm(target[:3, 3] - current_pose[:3, 3])))
         progress.append(float(np.dot(current_pose[:3, 3] - start_pose[:3, 3], progress_axis)))
         target_progress.append(float(np.dot(target[:3, 3] - start_pose[:3, 3], progress_axis)))
-        singularity.append(_singularity_proxy(robot, frame_name))
 
     q_arr = np.vstack(q_trace)
     q_steps = np.linalg.norm(np.diff(q_arr, axis=0), axis=1)
@@ -260,7 +252,6 @@ def _run_recovery_case(
         "max_accel_norm": float(q_accel.max(initial=0.0)),
         "max_jerk_norm": float(q_jerk.max(initial=0.0)),
         "limit_slack_min": float(np.min(slack)),
-        "singularity_proxy_min": float(np.min(singularity)) if singularity else 0.0,
         "max_zero_motion_streak": int(max_zero_streak),
         "recovery_lag_steps": int(recovery_lag),
         "statuses": sorted(set(statuses)),
@@ -288,4 +279,3 @@ def test_public_constrained_recovery_continuity_matrix(
     assert int(metrics["recovery_lag_steps"]) <= 6, metrics
     assert int(metrics["error_increases"]) <= 2, metrics
     assert int(metrics["backsteps"]) <= scenario.backstep_limit, metrics
-    assert float(metrics["singularity_proxy_min"]) >= 0.0, metrics

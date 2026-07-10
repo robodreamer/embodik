@@ -8,8 +8,11 @@
 #include <embodik/robot_model.hpp>
 #include <embodik/tasks.hpp>
 #include <iostream>
+#include <numeric>
+#include <pinocchio/algorithm/kinematics-derivatives.hpp>
 #include <pinocchio/algorithm/kinematics.hpp>
 #include <stdexcept>
+#include <unordered_set>
 
 namespace embodik {
 
@@ -607,6 +610,386 @@ int PostureTask::getDimension() const {
   } else {
     return static_cast<int>(controlled_joint_indices_.size());
   }
+}
+
+//=============================================================================
+// ManipulabilityTask Implementation
+//=============================================================================
+
+ManipulabilityTask::ManipulabilityTask(const std::string &name,
+                                       std::shared_ptr<RobotModel> model,
+                                       const std::string &frame_name,
+                                       TaskType frame_task_type, int priority,
+                                       double weight)
+    : Task(name, priority, weight), model_(model), frame_name_(frame_name),
+      frame_task_type_(frame_task_type) {
+  if (frame_task_type != TaskType::FRAME_POSITION &&
+      frame_task_type != TaskType::FRAME_ORIENTATION &&
+      frame_task_type != TaskType::FRAME_POSE) {
+    throw std::invalid_argument("Invalid frame task type for ManipulabilityTask");
+  }
+
+  if (!model_->has_frame(frame_name)) {
+    throw std::invalid_argument("Frame '" + frame_name +
+                                "' not found in robot model");
+  }
+
+  bounded_gradient_ = Eigen::VectorXd::Zero(model_->nv());
+  updateJacobian();
+}
+
+void ManipulabilityTask::setControlledJointIndices(
+    const std::vector<int> &indices) {
+  for (int idx : indices) {
+    if (idx < 0 || idx >= model_->nv()) {
+      throw std::invalid_argument("Controlled joint index out of bounds");
+    }
+  }
+
+  controlled_joint_indices_ = indices;
+  bounded_gradient_ = Eigen::VectorXd::Zero(getDimension());
+  updateJacobian();
+}
+
+void ManipulabilityTask::setRegularization(double regularization) {
+  if (regularization <= 0.0 || !std::isfinite(regularization)) {
+    throw std::invalid_argument("Manipulability regularization must be > 0");
+  }
+  regularization_ = regularization;
+}
+
+void ManipulabilityTask::set_excluded_joint_indices(
+    const std::vector<int> &excluded_indices) {
+  Task::set_excluded_joint_indices(excluded_indices);
+  updateJacobian();
+}
+
+void ManipulabilityTask::clear_excluded_joint_indices() {
+  Task::clear_excluded_joint_indices();
+  updateJacobian();
+}
+
+std::vector<int> ManipulabilityTask::taskVelocityIndices() const {
+  if (!controlled_joint_indices_.empty()) {
+    return controlled_joint_indices_;
+  }
+
+  std::vector<int> indices(model_->nv());
+  for (int i = 0; i < model_->nv(); ++i) {
+    indices[i] = i;
+  }
+  return indices;
+}
+
+std::vector<int> ManipulabilityTask::metricVelocityIndices() const {
+  std::vector<int> indices;
+  for (int idx : taskVelocityIndices()) {
+    const bool excluded =
+        std::find(excluded_joint_indices_.begin(), excluded_joint_indices_.end(),
+                  idx) != excluded_joint_indices_.end();
+    if (!excluded) {
+      indices.push_back(idx);
+    }
+  }
+  return indices;
+}
+
+Eigen::MatrixXd
+ManipulabilityTask::selectTaskRows(const Eigen::MatrixXd &spatial) const {
+  switch (frame_task_type_) {
+  case TaskType::FRAME_POSITION:
+    return spatial.topRows(3);
+  case TaskType::FRAME_ORIENTATION:
+    return spatial.bottomRows(3);
+  case TaskType::FRAME_POSE:
+    return spatial;
+  default:
+    return Eigen::MatrixXd::Zero(0, spatial.cols());
+  }
+}
+
+void ManipulabilityTask::updateJacobian() {
+  const std::vector<int> task_indices = taskVelocityIndices();
+  jacobian_ = Eigen::MatrixXd::Zero(task_indices.size(), model_->nv());
+
+  for (size_t row = 0; row < task_indices.size(); ++row) {
+    const int idx = task_indices[row];
+    if (idx >= 0 && idx < model_->nv()) {
+      jacobian_(static_cast<Eigen::Index>(row), idx) = 1.0;
+    }
+  }
+
+  for (int excluded_idx : excluded_joint_indices_) {
+    if (excluded_idx >= 0 && excluded_idx < jacobian_.cols()) {
+      jacobian_.col(excluded_idx).setZero();
+    }
+  }
+}
+
+void ManipulabilityTask::update(const RobotModel &model) {
+  const int nv = model.nv();
+  const std::vector<int> task_indices = taskVelocityIndices();
+  const std::vector<int> metric_indices = metricVelocityIndices();
+  bounded_gradient_ = Eigen::VectorXd::Zero(task_indices.size());
+  score_ = 0.0;
+
+  if (metric_indices.empty()) {
+    return;
+  }
+
+  try {
+    pinocchio::Data &data = const_cast<pinocchio::Data &>(model.data());
+    const pinocchio::Model &pin_model = model.model();
+    const pinocchio::FrameIndex frame_id = pin_model.getFrameId(frame_name_);
+    if (frame_id >= pin_model.frames.size()) {
+      return;
+    }
+
+    pinocchio::computeJointKinematicHessians(
+        pin_model, data, model.get_current_configuration());
+
+    Matrix6Xd spatial_jacobian(6, nv);
+    pinocchio::getFrameJacobian(pin_model, data, frame_id, pinocchio::LOCAL,
+                                spatial_jacobian);
+
+    Eigen::MatrixXd selected_jacobian = selectTaskRows(spatial_jacobian);
+    Eigen::MatrixXd J(selected_jacobian.rows(), metric_indices.size());
+    for (size_t col = 0; col < metric_indices.size(); ++col) {
+      J.col(static_cast<Eigen::Index>(col)) =
+          selected_jacobian.col(metric_indices[col]);
+    }
+
+    Eigen::MatrixXd A =
+        J * J.transpose() +
+        regularization_ * regularization_ *
+            Eigen::MatrixXd::Identity(J.rows(), J.rows());
+
+    Eigen::LLT<Eigen::MatrixXd> llt(A);
+    if (llt.info() != Eigen::Success) {
+      return;
+    }
+
+    const Eigen::MatrixXd A_inv_J = llt.solve(J);
+    if (llt.info() != Eigen::Success || !A_inv_J.allFinite()) {
+      return;
+    }
+
+    const double log_det =
+        2.0 * llt.matrixL().toDenseMatrix().diagonal().array().log().sum();
+    if (std::isfinite(log_det)) {
+      score_ = 0.5 * log_det;
+    }
+
+    const auto &frame = pin_model.frames[frame_id];
+    const pinocchio::JointIndex joint_id = frame.parentJoint;
+    const pinocchio::SE3 frame_placement = frame.placement;
+    pinocchio::Tensor<double, 3, 0> joint_hessian =
+        pinocchio::getJointKinematicHessian(pin_model, data, joint_id,
+                                            pinocchio::LOCAL);
+    const Eigen::DenseIndex matrix_offset = 6 * nv;
+    const Eigen::Matrix<double, 6, 6> frame_action =
+        frame_placement.inverse().toActionMatrix();
+
+    Eigen::VectorXd raw_gradient = Eigen::VectorXd::Zero(task_indices.size());
+    for (size_t row = 0; row < task_indices.size(); ++row) {
+      const int v_idx = task_indices[row];
+      const bool excluded =
+          std::find(excluded_joint_indices_.begin(), excluded_joint_indices_.end(),
+                    v_idx) != excluded_joint_indices_.end();
+      if (excluded) {
+        continue;
+      }
+
+      Eigen::Map<const Eigen::Matrix<double, 6, Eigen::Dynamic>> hessian_slice(
+          joint_hessian.data() + v_idx * matrix_offset, 6, nv);
+      Eigen::MatrixXd selected_hessian =
+          selectTaskRows(frame_action * hessian_slice);
+      Eigen::MatrixXd H_i(selected_hessian.rows(), metric_indices.size());
+      for (size_t col = 0; col < metric_indices.size(); ++col) {
+        H_i.col(static_cast<Eigen::Index>(col)) =
+            selected_hessian.col(metric_indices[col]);
+      }
+
+      raw_gradient(static_cast<Eigen::Index>(row)) =
+          (A_inv_J * H_i.transpose()).trace();
+    }
+
+    if (!raw_gradient.allFinite()) {
+      raw_gradient.setZero();
+    }
+
+    const double norm = raw_gradient.norm();
+    if (std::isfinite(norm)) {
+      bounded_gradient_ = raw_gradient / std::sqrt(1.0 + norm * norm);
+    } else {
+      bounded_gradient_.setZero();
+    }
+  } catch (...) {
+    bounded_gradient_.setZero();
+    score_ = 0.0;
+  }
+}
+
+Eigen::VectorXd ManipulabilityTask::getError() const {
+  return bounded_gradient_;
+}
+
+Eigen::MatrixXd ManipulabilityTask::getJacobian() const { return jacobian_; }
+
+int ManipulabilityTask::getDimension() const {
+  if (controlled_joint_indices_.empty()) {
+    return model_->nv();
+  }
+  return static_cast<int>(controlled_joint_indices_.size());
+}
+
+//=============================================================================
+// JointLimitAvoidanceTask Implementation
+//=============================================================================
+
+JointLimitAvoidanceTask::JointLimitAvoidanceTask(
+    const std::string &name, std::shared_ptr<RobotModel> model,
+    const std::vector<int> &controlled_joint_indices, int priority,
+    double weight)
+    : Task(name, priority, weight), model_(std::move(model)) {
+  if (!model_) {
+    throw std::invalid_argument("Robot model cannot be null");
+  }
+  rebuildVelocityToConfigIndex();
+  setControlledJointIndices(controlled_joint_indices);
+}
+
+void JointLimitAvoidanceTask::setControlledJointIndices(
+    const std::vector<int> &indices) {
+  std::unordered_set<int> unique_indices;
+  for (int idx : indices) {
+    if (idx < 0 || idx >= model_->nv()) {
+      throw std::invalid_argument("Controlled joint index out of bounds");
+    }
+    if (!unique_indices.insert(idx).second) {
+      throw std::invalid_argument("Controlled joint indices must be unique");
+    }
+  }
+  controlled_joint_indices_ = indices;
+  avoidance_velocity_ = Eigen::VectorXd::Zero(getDimension());
+  updateJacobian();
+}
+
+void JointLimitAvoidanceTask::setActivationMargin(double activation_margin) {
+  if (activation_margin <= 0.0 || !std::isfinite(activation_margin)) {
+    throw std::invalid_argument("Joint-limit activation margin must be > 0");
+  }
+  activation_margin_ = activation_margin;
+}
+
+void JointLimitAvoidanceTask::set_excluded_joint_indices(
+    const std::vector<int> &excluded_indices) {
+  Task::set_excluded_joint_indices(excluded_indices);
+  updateJacobian();
+}
+
+void JointLimitAvoidanceTask::clear_excluded_joint_indices() {
+  Task::clear_excluded_joint_indices();
+  updateJacobian();
+}
+
+std::vector<int> JointLimitAvoidanceTask::taskVelocityIndices() const {
+  if (!controlled_joint_indices_.empty()) {
+    return controlled_joint_indices_;
+  }
+  std::vector<int> indices(model_->nv());
+  std::iota(indices.begin(), indices.end(), 0);
+  return indices;
+}
+
+void JointLimitAvoidanceTask::rebuildVelocityToConfigIndex() {
+  velocity_to_config_index_.assign(model_->nv(), -1);
+  for (const auto &joint_name : model_->get_joint_names()) {
+    const int velocity_index = model_->get_joint_velocity_index(joint_name);
+    const int velocity_size = model_->get_joint_velocity_size(joint_name);
+    const int config_index = model_->get_joint_config_index(joint_name);
+    const int config_size = model_->get_joint_config_size(joint_name);
+    if (velocity_size != 1 || config_size != 1 || velocity_index < 0 ||
+        config_index < 0 || velocity_index >= model_->nv() ||
+        config_index >= model_->nq()) {
+      continue;
+    }
+    velocity_to_config_index_[velocity_index] = config_index;
+  }
+}
+
+void JointLimitAvoidanceTask::updateJacobian() {
+  const std::vector<int> task_indices = taskVelocityIndices();
+  jacobian_ = Eigen::MatrixXd::Zero(task_indices.size(), model_->nv());
+  for (size_t row = 0; row < task_indices.size(); ++row) {
+    const int idx = task_indices[row];
+    const bool excluded =
+        std::find(excluded_joint_indices_.begin(), excluded_joint_indices_.end(),
+                  idx) != excluded_joint_indices_.end();
+    const bool active =
+        row < static_cast<size_t>(avoidance_velocity_.size()) &&
+        avoidance_velocity_(static_cast<Eigen::Index>(row)) != 0.0;
+    if (!excluded && active) {
+      jacobian_(static_cast<Eigen::Index>(row), idx) = 1.0;
+    }
+  }
+}
+
+void JointLimitAvoidanceTask::update(const RobotModel &model) {
+  const std::vector<int> task_indices = taskVelocityIndices();
+  avoidance_velocity_ = Eigen::VectorXd::Zero(task_indices.size());
+  const Eigen::VectorXd &q = model.get_current_configuration();
+  const auto [lower, upper] = model.get_joint_limits();
+
+  const auto smooth_activation = [&](double slack) {
+    const double normalized =
+        std::clamp((activation_margin_ - slack) / activation_margin_, 0.0, 1.0);
+    return normalized * normalized * (3.0 - 2.0 * normalized);
+  };
+
+  for (size_t row = 0; row < task_indices.size(); ++row) {
+    const int velocity_index = task_indices[row];
+    const bool excluded =
+        std::find(excluded_joint_indices_.begin(), excluded_joint_indices_.end(),
+                  velocity_index) != excluded_joint_indices_.end();
+    if (excluded || velocity_index < 0 ||
+        velocity_index >= static_cast<int>(velocity_to_config_index_.size())) {
+      continue;
+    }
+    const int config_index = velocity_to_config_index_[velocity_index];
+    if (config_index < 0 || config_index >= q.size() ||
+        config_index >= lower.size() || config_index >= upper.size() ||
+        !std::isfinite(q[config_index])) {
+      continue;
+    }
+
+    const double lower_activation =
+        std::isfinite(lower[config_index])
+            ? smooth_activation(q[config_index] - lower[config_index])
+            : 0.0;
+    const double upper_activation =
+        std::isfinite(upper[config_index])
+            ? smooth_activation(upper[config_index] - q[config_index])
+            : 0.0;
+    avoidance_velocity_(static_cast<Eigen::Index>(row)) =
+        lower_activation - upper_activation;
+  }
+  updateJacobian();
+}
+
+Eigen::VectorXd JointLimitAvoidanceTask::getError() const {
+  return avoidance_velocity_;
+}
+
+Eigen::MatrixXd JointLimitAvoidanceTask::getJacobian() const {
+  return jacobian_;
+}
+
+int JointLimitAvoidanceTask::getDimension() const {
+  if (controlled_joint_indices_.empty()) {
+    return model_->nv();
+  }
+  return static_cast<int>(controlled_joint_indices_.size());
 }
 
 //=============================================================================

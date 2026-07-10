@@ -189,6 +189,45 @@ void bind_tasks(nb::module_ &m) {
                    &PostureTask::getControlledJointIndices,
                    "Get controlled joint indices");
 
+  nb::class_<ManipulabilityTask, Task>(m, "ManipulabilityTask")
+      .def(nb::init<const std::string &, std::shared_ptr<RobotModel>,
+                    const std::string &, TaskType, int, double>(),
+           nb::arg("name"), nb::arg("model"), nb::arg("frame_name"),
+           nb::arg("frame_task_type") = TaskType::FRAME_POSITION,
+           nb::arg("priority") = 10, nb::arg("weight") = 1.0,
+           "Create a regularized frame manipulability gradient task")
+      .def("set_controlled_joint_indices",
+           &ManipulabilityTask::setControlledJointIndices, nb::arg("indices"),
+           "Set controlled velocity-space joint indices")
+      .def("set_regularization", &ManipulabilityTask::setRegularization,
+           nb::arg("regularization"),
+           "Set the positive log-determinant regularization epsilon")
+      .def_prop_ro("frame_name", &ManipulabilityTask::getFrameName)
+      .def_prop_ro("frame_task_type", &ManipulabilityTask::getFrameTaskType)
+      .def_prop_ro("score", &ManipulabilityTask::getScore)
+      .def_prop_ro("regularization", &ManipulabilityTask::getRegularization)
+      .def_prop_ro("controlled_joint_indices",
+                   &ManipulabilityTask::getControlledJointIndices);
+
+  nb::class_<JointLimitAvoidanceTask, Task>(m, "JointLimitAvoidanceTask")
+      .def(nb::init<const std::string &, std::shared_ptr<RobotModel>,
+                    const std::vector<int> &, int, double>(),
+           nb::arg("name"), nb::arg("model"),
+           nb::arg("controlled_joint_indices") = std::vector<int>{},
+           nb::arg("priority") = 10, nb::arg("weight") = 0.01,
+           "Create a smooth joint-limit avoidance task")
+      .def("set_controlled_joint_indices",
+           &JointLimitAvoidanceTask::setControlledJointIndices,
+           nb::arg("indices"), "Set controlled velocity-space indices")
+      .def("set_activation_margin",
+           &JointLimitAvoidanceTask::setActivationMargin,
+           nb::arg("activation_margin"),
+           "Set the smooth activation margin in joint configuration units")
+      .def_prop_ro("activation_margin",
+                   &JointLimitAvoidanceTask::getActivationMargin)
+      .def_prop_ro("controlled_joint_indices",
+                   &JointLimitAvoidanceTask::getControlledJointIndices);
+
   // JointTask
   nb::class_<JointTask, Task>(m, "JointTask")
       .def(nb::init<const std::string &, std::shared_ptr<RobotModel>,

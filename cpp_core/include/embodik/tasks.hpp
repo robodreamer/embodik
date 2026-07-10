@@ -15,6 +15,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace embodik {
 
@@ -143,6 +144,11 @@ public:
      * @return Type of this task
      */
     virtual TaskType getType() const = 0;
+
+    /**
+     * @brief Whether near-limit Jacobian clamping should use the task goal.
+     */
+    virtual bool usesGoalDirectedLimitClamp() const { return false; }
 
     // Getters and setters
     const std::string& getName() const { return name_; }
@@ -460,6 +466,117 @@ private:
     Eigen::MatrixXd jacobian_;
 
     void updateProjectionMatrix();
+};
+
+/**
+ * @brief Joint-space task that ascends a frame manipulability score.
+ *
+ * Computes the analytic gradient of
+ * 0.5 * log det(J J^T + epsilon^2 I) for a selected LOCAL frame Jacobian
+ * block, then smoothly bounds the gradient magnitude for singularity-safe use
+ * as a velocity task.
+ */
+class ManipulabilityTask : public Task {
+public:
+    ManipulabilityTask(const std::string& name,
+                       std::shared_ptr<RobotModel> model,
+                       const std::string& frame_name,
+                       TaskType frame_task_type = TaskType::FRAME_POSITION,
+                       int priority = 10,
+                       double weight = 1.0);
+
+    /**
+     * @brief Set controlled velocity-space indices. Empty controls all nv.
+     * @param indices Velocity-space indices to control
+     */
+    void setControlledJointIndices(const std::vector<int>& indices);
+
+    /**
+     * @brief Set positive determinant regularization epsilon.
+     */
+    void setRegularization(double regularization);
+
+    void set_excluded_joint_indices(
+        const std::vector<int>& excluded_indices) override;
+    void clear_excluded_joint_indices() override;
+
+    void update(const RobotModel& model) override;
+    Eigen::VectorXd getError() const override;
+    Eigen::MatrixXd getJacobian() const override;
+    int getDimension() const override;
+    TaskType getType() const override { return TaskType::POSTURE; }
+    bool usesGoalDirectedLimitClamp() const override { return true; }
+
+    const std::string& getFrameName() const { return frame_name_; }
+    TaskType getFrameTaskType() const { return frame_task_type_; }
+    double getScore() const { return score_; }
+    double getRegularization() const { return regularization_; }
+    const std::vector<int>& getControlledJointIndices() const {
+        return controlled_joint_indices_;
+    }
+
+private:
+    std::shared_ptr<RobotModel> model_;
+    std::string frame_name_;
+    TaskType frame_task_type_;
+    std::vector<int> controlled_joint_indices_;
+    double regularization_ = 1e-6;
+    double score_ = 0.0;
+    Eigen::VectorXd bounded_gradient_;
+    Eigen::MatrixXd jacobian_;
+
+    std::vector<int> taskVelocityIndices() const;
+    std::vector<int> metricVelocityIndices() const;
+    Eigen::MatrixXd selectTaskRows(const Eigen::MatrixXd& spatial) const;
+    void updateJacobian();
+};
+
+/**
+ * @brief Smooth joint-space objective that moves scalar joints away from limits.
+ *
+ * Each controlled joint contributes a signed cubic-smoothstep activation inside
+ * a configurable proximity margin. The task is exactly zero outside the margin
+ * and remains subject to the solver's hard position and velocity constraints.
+ */
+class JointLimitAvoidanceTask : public Task {
+public:
+    JointLimitAvoidanceTask(
+        const std::string& name,
+        std::shared_ptr<RobotModel> model,
+        const std::vector<int>& controlled_joint_indices = {},
+        int priority = 10,
+        double weight = 0.01);
+
+    void setControlledJointIndices(const std::vector<int>& indices);
+    void setActivationMargin(double activation_margin);
+
+    void set_excluded_joint_indices(
+        const std::vector<int>& excluded_indices) override;
+    void clear_excluded_joint_indices() override;
+
+    void update(const RobotModel& model) override;
+    Eigen::VectorXd getError() const override;
+    Eigen::MatrixXd getJacobian() const override;
+    int getDimension() const override;
+    TaskType getType() const override { return TaskType::POSTURE; }
+    bool usesGoalDirectedLimitClamp() const override { return true; }
+
+    double getActivationMargin() const { return activation_margin_; }
+    const std::vector<int>& getControlledJointIndices() const {
+        return controlled_joint_indices_;
+    }
+
+private:
+    std::shared_ptr<RobotModel> model_;
+    std::vector<int> controlled_joint_indices_;
+    std::vector<int> velocity_to_config_index_;
+    double activation_margin_ = 0.05;
+    Eigen::VectorXd avoidance_velocity_;
+    Eigen::MatrixXd jacobian_;
+
+    std::vector<int> taskVelocityIndices() const;
+    void rebuildVelocityToConfigIndex();
+    void updateJacobian();
 };
 
 /**

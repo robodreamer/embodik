@@ -88,6 +88,29 @@ public:
                    const std::vector<int> &controlled_joints = {});
 
   /**
+   * @brief Add a lower-priority frame manipulability gradient task.
+   * @param name Unique task name
+   * @param frame_name Frame whose Jacobian conditioning should improve
+   * @param frame_task_type Jacobian block (position/orientation/pose)
+   * @return Shared pointer to the created task
+   */
+  std::shared_ptr<ManipulabilityTask>
+  add_manipulability_task(
+      const std::string &name, const std::string &frame_name,
+      TaskType frame_task_type = TaskType::FRAME_POSITION);
+
+  /**
+   * @brief Add a smooth joint-limit avoidance objective.
+   * @param name Unique task name
+   * @param controlled_joint_indices Velocity-space indices; empty controls all
+   * scalar joints
+   * @return Shared pointer to the created task
+   */
+  std::shared_ptr<JointLimitAvoidanceTask> add_joint_limit_avoidance_task(
+      const std::string &name,
+      const std::vector<int> &controlled_joint_indices = {});
+
+  /**
    * @brief Add a joint task
    * @param name Unique task name
    * @param joint_name Joint to control
@@ -1299,6 +1322,8 @@ private:
   /// Zero Jacobian entries that command motion into nearby joint limits.
   void clamp_jacobians_near_joint_limits(
       std::vector<Eigen::MatrixXd> &jacobians,
+      const std::vector<Eigen::VectorXd> &goals,
+      const std::vector<ObjectiveSolveConfig> &objective_configs,
       const std::vector<int> &velocity_to_config_index) const;
 
   struct CollisionConstraintConfig {

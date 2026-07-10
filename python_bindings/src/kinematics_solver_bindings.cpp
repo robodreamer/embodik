@@ -85,6 +85,17 @@ void bind_kinematics_solver(nb::module_ &m) {
           nb::arg("name"), nb::arg("controlled_joints"),
           "Add a posture regularization task for specific joints")
 
+      .def("add_manipulability_task",
+           &KinematicsSolver::add_manipulability_task, nb::arg("name"),
+           nb::arg("frame_name"),
+           nb::arg("frame_task_type") = TaskType::FRAME_POSITION,
+           "Add a regularized frame manipulability gradient task")
+
+      .def("add_joint_limit_avoidance_task",
+           &KinematicsSolver::add_joint_limit_avoidance_task, nb::arg("name"),
+           nb::arg("controlled_joint_indices") = std::vector<int>{},
+           "Add a smooth joint-limit avoidance task")
+
       .def("add_joint_task", &KinematicsSolver::add_joint_task, nb::arg("name"),
            nb::arg("joint_name"), nb::arg("target_value") = 0.0,
            "Add a single joint tracking task")

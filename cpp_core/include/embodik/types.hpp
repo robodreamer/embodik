@@ -180,6 +180,7 @@ struct ObjectiveSolveConfig {
   int priority = 0;
   TaskSolveMode solve_mode = TaskSolveMode::kScale;
   bool allow_min_error_fallback = true;
+  bool use_goal_directed_limit_clamp = false;
 };
 
 // Optional torso tracking/constraint configuration for position IK.
