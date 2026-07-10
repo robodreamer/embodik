@@ -182,6 +182,28 @@ can exit penetration without treating interpenetration as a valid rest pose.
 
 See [KinematicsSolver — Collision recovery floor](api/kinematics_solver.md#collision-recovery-floor).
 
+### Tangential sliding at an active boundary
+
+When an unconstrained strict `SCALE` task velocity would violate an active collision row, EmbodiK
+separates the objective into two parts. The hard collision row owns affine normal recovery, while
+the task Jacobian and goal are projected into the joint-space collision tangent. Recomputing the
+goal through the projected Jacobian keeps every task row realizable. A rank-revealing row-space
+compression then removes equations made dependent by the projection, preserving the same
+achievable task residual while giving the strict solver the correct tangent rank. This retains
+tangent motion without scaling mandatory recovery toward zero. A task velocity that already
+provides enough separation is left intact. `SCALE_ELASTIC` retains its elastic-band behavior
+because applying the strict-scale transform there would change held-task priority and
+entry/release semantics.
+
+Constrained weighted fallback uses the same tangent-filtered Jacobian but keeps the original
+full-row residual as a soft error. Collision inequalities and post-step validation remain hard,
+so weighted trade-offs cannot restore unsafe normal approach.
+
+Task-local joint exclusions remain local to their tasks. A joint is removed from global collision
+rows only when every active task excludes it, or when the position-step options explicitly lock
+it. This lets decoupled arm tasks keep independent ownership while collision constraints still use
+the arm that can move the active pair.
+
 ### Position-step safety and fallback
 
 For teleop loops:
