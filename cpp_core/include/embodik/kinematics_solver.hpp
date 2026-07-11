@@ -691,19 +691,17 @@ public:
   double get_collision_recovery_scale() const       { return collision_recovery_scale_; }
 
   /** Non-worsening recovery floor. Default OFF (opt-in).
-   *  When enabled, a pair first seen closer than min_distance is treated as
-   *  structurally close and pinned to a small penetration-prevention floor rather
-   *  than recovered to the full clearance -- so links that rest closer than
-   *  min_distance by construction do not trigger an infeasible recovery (which
-   *  would over-constrain the QP and freeze the solve). Off by default because it
-   *  changes recovery semantics for pairs that start in violation; enable it for
-   *  robots whose links rest closer than the clearance (e.g. an arm near a torso). */
+   *  When enabled, a pair first seen closer than min_distance keeps its initial
+   *  clearance if it is above the structural floor, or recovers to the floor if
+   *  it starts below it. This avoids demanding the full global clearance from
+   *  structurally close pairs while still enforcing a minimum clearance. Use a
+   *  per-pair min-distance override for geometry that cannot reach the floor.
+   *  Off by default because it changes recovery semantics for violated seeds. */
   void   set_non_worsening_collision_floor_enabled(bool enable) { non_worsening_collision_floor_enabled_ = enable; }
   bool   get_non_worsening_collision_floor_enabled() const      { return non_worsening_collision_floor_enabled_; }
 
-  /** Penetration-prevention clearance (metres) used for structurally-close pairs
-   *  (those resting closer than min_distance). Default 5 mm. Must be below the
-   *  tightest structural resting distance to avoid an infeasible recovery. */
+  /** Minimum penetration-prevention clearance (metres) for pairs first observed
+   *  below min_distance. Default 5 mm. */
   void   set_collision_structural_floor(double metres) { collision_structural_floor_ = std::max(0.0, metres); }
   double get_collision_structural_floor() const        { return collision_structural_floor_; }
 
