@@ -62,17 +62,31 @@ FrameTask::FrameTask(const std::string &name, std::shared_ptr<RobotModel> model,
 }
 
 void FrameTask::setTargetPosition(const Eigen::Vector3d &position) {
+  if (!target_position_.has_value() ||
+      !target_position_->isApprox(position, 0.0)) {
+    markContinuityStateChanged();
+  }
   target_position_ = position;
   invalidateCache();
 }
 
 void FrameTask::setTargetOrientation(const Eigen::Matrix3d &rotation) {
+  if (!target_orientation_.has_value() ||
+      !target_orientation_->isApprox(rotation, 0.0)) {
+    markContinuityStateChanged();
+  }
   target_orientation_ = rotation;
   invalidateCache();
 }
 
 void FrameTask::setTargetPose(const Eigen::Vector3d &position,
                               const Eigen::Matrix3d &rotation) {
+  if (!target_position_.has_value() ||
+      !target_position_->isApprox(position, 0.0) ||
+      !target_orientation_.has_value() ||
+      !target_orientation_->isApprox(rotation, 0.0)) {
+    markContinuityStateChanged();
+  }
   target_position_ = position;
   target_orientation_ = rotation;
   invalidateCache();
@@ -85,12 +99,12 @@ void FrameTask::setTargetPositionVelocity(const Eigen::Vector3d &velocity) {
   }
 
   if (task_type_ == TaskType::FRAME_POSITION) {
-    target_velocity_ = velocity;
+    setTargetVelocity(velocity);
   } else { // FRAME_POSE
     Eigen::VectorXd full_velocity(6);
     full_velocity.head(3) = velocity;
     full_velocity.tail(3) = Eigen::Vector3d::Zero();
-    target_velocity_ = full_velocity;
+    setTargetVelocity(full_velocity);
   }
 }
 
@@ -101,12 +115,12 @@ void FrameTask::setTargetAngularVelocity(const Eigen::Vector3d &omega) {
   }
 
   if (task_type_ == TaskType::FRAME_ORIENTATION) {
-    target_velocity_ = omega;
+    setTargetVelocity(omega);
   } else { // FRAME_POSE
     Eigen::VectorXd full_velocity(6);
     full_velocity.head(3) = Eigen::Vector3d::Zero();
     full_velocity.tail(3) = omega;
-    target_velocity_ = full_velocity;
+    setTargetVelocity(full_velocity);
   }
 }
 
@@ -123,7 +137,7 @@ void FrameTask::setTargetVelocity(const Eigen::VectorXd &velocity) {
         "Pose task requires 6D velocity (linear + angular)");
   }
 
-  target_velocity_ = velocity;
+  Task::setTargetVelocity(velocity);
 }
 
 void FrameTask::update(const RobotModel &model) {
@@ -304,6 +318,9 @@ COMTask::COMTask(const std::string &name, std::shared_ptr<RobotModel> model,
     : Task(name, priority, weight), model_(model) {}
 
 void COMTask::setTargetPosition(const Eigen::Vector3d &position) {
+  if (!target_position_.isApprox(position, 0.0)) {
+    markContinuityStateChanged();
+  }
   target_position_ = position;
 }
 
@@ -403,7 +420,10 @@ void PostureTask::setTargetConfiguration(const Eigen::VectorXd &q_target) {
   if (q_target.size() != model_->nq()) {
     throw std::invalid_argument("Target configuration size mismatch");
   }
-  q_target_ = q_target;
+  if (!q_target_.isApprox(q_target, 0.0)) {
+    q_target_ = q_target;
+    markContinuityStateChanged();
+  }
 }
 
 void PostureTask::setControlledJointTargets(
@@ -414,6 +434,7 @@ void PostureTask::setControlledJointTargets(
         "Target values size must match number of controlled joints");
   }
 
+  const Eigen::VectorXd previous_target = q_target_;
   // Set target values for controlled joints only
   for (size_t i = 0; i < controlled_joint_indices_.size(); ++i) {
     int v_idx = controlled_joint_indices_[i];
@@ -433,10 +454,17 @@ void PostureTask::setControlledJointTargets(
       }
     }
   }
+  if (!q_target_.isApprox(previous_target, 0.0)) {
+    markContinuityStateChanged();
+  }
 }
 
 void PostureTask::setControlledJointIndices(const std::vector<int> &indices) {
+  if (controlled_joint_indices_ == indices) {
+    return;
+  }
   controlled_joint_indices_ = indices;
+  markContinuityStateChanged();
 
   // Update mask based on new indices
   joint_mask_.setZero();
@@ -462,6 +490,7 @@ void PostureTask::setControlledJointWeights(const Eigen::VectorXd &weights) {
         "Weights size must match number of controlled joints");
   }
 
+  const Eigen::VectorXd previous_weights = joint_weights_;
   // Set weights for controlled joints only
   for (size_t i = 0; i < controlled_joint_indices_.size(); ++i) {
     int v_idx = controlled_joint_indices_[i];
@@ -479,6 +508,9 @@ void PostureTask::setControlledJointWeights(const Eigen::VectorXd &weights) {
         joint_weights_(v_idx) = weights(i);
       }
     }
+  }
+  if (!joint_weights_.isApprox(previous_weights, 0.0)) {
+    markContinuityStateChanged();
   }
 }
 
@@ -646,7 +678,11 @@ void ManipulabilityTask::setControlledJointIndices(
     }
   }
 
+  if (controlled_joint_indices_ == indices) {
+    return;
+  }
   controlled_joint_indices_ = indices;
+  markContinuityStateChanged();
   bounded_gradient_ = Eigen::VectorXd::Zero(getDimension());
   updateJacobian();
 }
@@ -655,7 +691,10 @@ void ManipulabilityTask::setRegularization(double regularization) {
   if (regularization <= 0.0 || !std::isfinite(regularization)) {
     throw std::invalid_argument("Manipulability regularization must be > 0");
   }
-  regularization_ = regularization;
+  if (regularization_ != regularization) {
+    regularization_ = regularization;
+    markContinuityStateChanged();
+  }
 }
 
 void ManipulabilityTask::set_excluded_joint_indices(
@@ -870,7 +909,11 @@ void JointLimitAvoidanceTask::setControlledJointIndices(
       throw std::invalid_argument("Controlled joint indices must be unique");
     }
   }
+  const bool changed = controlled_joint_indices_ != indices;
   controlled_joint_indices_ = indices;
+  if (changed) {
+    markContinuityStateChanged();
+  }
   avoidance_velocity_ = Eigen::VectorXd::Zero(getDimension());
   updateJacobian();
 }
@@ -879,7 +922,10 @@ void JointLimitAvoidanceTask::setActivationMargin(double activation_margin) {
   if (activation_margin <= 0.0 || !std::isfinite(activation_margin)) {
     throw std::invalid_argument("Joint-limit activation margin must be > 0");
   }
-  activation_margin_ = activation_margin;
+  if (activation_margin_ != activation_margin) {
+    activation_margin_ = activation_margin;
+    markContinuityStateChanged();
+  }
 }
 
 void JointLimitAvoidanceTask::set_excluded_joint_indices(
@@ -1182,14 +1228,20 @@ void MultiJointTask::setTargetValues(const Eigen::VectorXd &values) {
     throw std::invalid_argument(
         "Target values size must match number of controlled joints");
   }
-  target_values_ = values;
+  if (!target_values_.isApprox(values, 0.0)) {
+    target_values_ = values;
+    markContinuityStateChanged();
+  }
 }
 
 void MultiJointTask::setTargetValue(int idx, double value) {
   if (idx < 0 || idx >= static_cast<int>(joint_indices_.size())) {
     throw std::invalid_argument("Index out of bounds for controlled joints");
   }
-  target_values_(idx) = value;
+  if (target_values_(idx) != value) {
+    target_values_(idx) = value;
+    markContinuityStateChanged();
+  }
 }
 
 void MultiJointTask::setJointWeights(const Eigen::VectorXd &weights) {
@@ -1197,7 +1249,10 @@ void MultiJointTask::setJointWeights(const Eigen::VectorXd &weights) {
     throw std::invalid_argument(
         "Weights size must match number of controlled joints");
   }
-  joint_weights_ = weights;
+  if (!joint_weights_.isApprox(weights, 0.0)) {
+    joint_weights_ = weights;
+    markContinuityStateChanged();
+  }
 }
 
 void MultiJointTask::update(const RobotModel &model) {
@@ -1253,11 +1308,23 @@ RelativeFrameTask::RelativeFrameTask(const std::string &name,
 
 void RelativeFrameTask::setTargetPose(const Eigen::Vector3d &position,
                                       const Eigen::Matrix3d &rotation) {
+  if (!target_position_.has_value() ||
+      !target_position_->isApprox(position, 0.0) ||
+      !target_orientation_.has_value() ||
+      !target_orientation_->isApprox(rotation, 0.0)) {
+    markContinuityStateChanged();
+  }
   target_position_ = position;
   target_orientation_ = rotation;
 }
 
 void RelativeFrameTask::captureCurrentAsTarget() {
+  if (!target_position_.has_value() ||
+      !target_position_->isApprox(current_rel_position_, 0.0) ||
+      !target_orientation_.has_value() ||
+      !target_orientation_->isApprox(current_rel_orientation_, 0.0)) {
+    markContinuityStateChanged();
+  }
   target_position_ = current_rel_position_;
   target_orientation_ = current_rel_orientation_;
 }
@@ -1338,16 +1405,30 @@ AbsoluteFrameTask::AbsoluteFrameTask(const std::string &name,
 
 void AbsoluteFrameTask::setTargetPose(const Eigen::Vector3d &position,
                                       const Eigen::Matrix3d &rotation) {
+  if (!target_position_.has_value() ||
+      !target_position_->isApprox(position, 0.0) ||
+      !target_orientation_.has_value() ||
+      !target_orientation_->isApprox(rotation, 0.0)) {
+    markContinuityStateChanged();
+  }
   target_position_ = position;
   target_orientation_ = rotation;
 }
 
 void AbsoluteFrameTask::setTcpOffsets(const Eigen::Matrix4d &offset_a,
                                       const Eigen::Matrix4d &offset_b) {
-  offset_a_ = pinocchio::SE3(offset_a.topLeftCorner<3, 3>(),
+  const pinocchio::SE3 next_a(offset_a.topLeftCorner<3, 3>(),
                               offset_a.topRightCorner<3, 1>());
-  offset_b_ = pinocchio::SE3(offset_b.topLeftCorner<3, 3>(),
+  const pinocchio::SE3 next_b(offset_b.topLeftCorner<3, 3>(),
                               offset_b.topRightCorner<3, 1>());
+  if (!offset_a_.translation().isApprox(next_a.translation(), 0.0) ||
+      !offset_a_.rotation().isApprox(next_a.rotation(), 0.0) ||
+      !offset_b_.translation().isApprox(next_b.translation(), 0.0) ||
+      !offset_b_.rotation().isApprox(next_b.rotation(), 0.0)) {
+    markContinuityStateChanged();
+  }
+  offset_a_ = next_a;
+  offset_b_ = next_b;
 }
 
 void AbsoluteFrameTask::setObjectCenterFrame(
@@ -1357,8 +1438,16 @@ void AbsoluteFrameTask::setObjectCenterFrame(
   pinocchio::SE3 T_a = model_->get_frame_pose(frame_a_);
   pinocchio::SE3 T_b = model_->get_frame_pose(frame_b_);
 
-  offset_a_ = T_a.inverse() * T_obj;
-  offset_b_ = T_b.inverse() * T_obj;
+  const pinocchio::SE3 next_a = T_a.inverse() * T_obj;
+  const pinocchio::SE3 next_b = T_b.inverse() * T_obj;
+  if (!offset_a_.translation().isApprox(next_a.translation(), 0.0) ||
+      !offset_a_.rotation().isApprox(next_a.rotation(), 0.0) ||
+      !offset_b_.translation().isApprox(next_b.translation(), 0.0) ||
+      !offset_b_.rotation().isApprox(next_b.rotation(), 0.0)) {
+    markContinuityStateChanged();
+  }
+  offset_a_ = next_a;
+  offset_b_ = next_b;
 }
 
 void AbsoluteFrameTask::calibrate_grasp_offsets(
@@ -1378,6 +1467,7 @@ void AbsoluteFrameTask::calibrate_grasp_offsets(
   inv_R_in_obj_ = R_in_obj_.inverse();
   grasp_offsets_calibrated_ = true;
   last_grasp_divergence_ = GraspDivergenceDiagnostic{};
+  markContinuityStateChanged();
 }
 
 void AbsoluteFrameTask::calibrate_grasp_offsets(

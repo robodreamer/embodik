@@ -34,7 +34,6 @@ from embodik.interactive_ik import (  # noqa: E402
     configure_primary_solve_mode,
     robust_solve_position_step,
 )
-
 from examples.example_helpers.common_bimanual_solver_fixture import (  # noqa: E402
     build_common_bimanual_solver_fixture,
     compute_inner_polygon,
@@ -86,6 +85,8 @@ class ScenarioMetrics:
     collision_breach_count: int = 0
     com_breach_count: int = 0
     unrecoverable_stall_count: int = 0
+    pre_release_unrecoverable_stall_count: int = 0
+    post_release_unrecoverable_stall_count: int = 0
     escape_events: int = 0
     avg_relaxed_collision_margin_mm: float = 0.0
     avg_solve_ms: float = 0.0
@@ -111,6 +112,8 @@ class ScenarioMetrics:
             "collision_breach_count": self.collision_breach_count,
             "com_breach_count": self.com_breach_count,
             "unrecoverable_stall_count": self.unrecoverable_stall_count,
+            "pre_release_unrecoverable_stall_count": (self.pre_release_unrecoverable_stall_count),
+            "post_release_unrecoverable_stall_count": (self.post_release_unrecoverable_stall_count),
             "escape_events": self.escape_events,
             "avg_relaxed_collision_margin_mm": round(self.avg_relaxed_collision_margin_mm, 4),
             "avg_solve_ms": round(self.avg_solve_ms, 4),
@@ -481,12 +484,21 @@ def run_scenario(
             metrics.stall_count += 1
             if step_idx >= duration_steps // 2:
                 metrics.late_stall_count += 1
+        release_scenario = scenario == "target_in_torso_release"
+        release_step = duration_steps // 2
+        if release_scenario and step_idx == release_step:
+            stall_window.clear()
         stall_window.append(stalled)
         if (
             len(stall_window) == UNRECOVERABLE_WINDOW
             and sum(stall_window) >= UNRECOVERABLE_STALL_FRAMES
         ):
-            metrics.unrecoverable_stall_count += 1
+            if release_scenario and step_idx < release_step:
+                metrics.pre_release_unrecoverable_stall_count += 1
+            else:
+                metrics.unrecoverable_stall_count += 1
+                if release_scenario:
+                    metrics.post_release_unrecoverable_stall_count += 1
 
         # Breach thresholds: only count meaningful (>1mm) violations, since the
         # solver may leave micrometer-scale slack at the boundary even when the

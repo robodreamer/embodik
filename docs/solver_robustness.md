@@ -87,6 +87,32 @@ Per-task `TaskSolveMode` controls how strictly a frame task must be met each vel
 `SCALE` / `SCALE_ELASTIC` step once with **MIN_ERROR** while keeping collision and CoM active —
 see [Collision-Aware IK](examples/collision_aware_ik.md).
 
+## Stationary-target continuity
+
+`solve_position_step()` evaluates nonlinear Cartesian merit over a 20-call window after the same
+pose target and solve policy remain unchanged. Productive windows continue even when individual
+joint steps reverse direction, as can happen while an automatic layout or redundant whole-body
+solve makes useful net progress. A window that moves without enough merit reduction, or repeatedly
+reverses without strong net progress, activates a hold at the last accepted configuration. The
+minimum absolute benefit scales with the number of calls in the window, so a longer policy dwell
+cannot hide the same low-rate drift. Aggregate progress also cannot excuse repeatedly worsening
+the currently worst commanded target. This prevents persistent null-space motion, target trading,
+and limit cycles after a far or constrained target has exhausted useful progress.
+
+The hold is mode-agnostic: it applies to `SCALE`, `SCALE_ELASTIC`, and `MIN_ERROR`, including the
+single-target and multi-target APIs. A held target that is already satisfied remains `SUCCESS`;
+an unsatisfied target with no useful nonlinear progress reports `NO_PROGRESS`. In both cases,
+`q_solution` and the reported applied velocity describe the unchanged configuration.
+
+The window restarts when an explicit step target, registered task target or control state, task
+policy, step option, runtime configuration, or task graph changes. This includes lower-priority
+posture and torso objectives, so a new command can make progress immediately even when a
+higher-priority target is already held. A hold caused by low progress can reopen when a later
+candidate becomes efficient. Explicit collision rejection and stall-escape candidates bypass the
+merit hold. Samples produced inside a collision margin remain part of the continuity window,
+preserving productive tangential sliding without allowing repeated contact-bound cycling to
+masquerade as recovery.
+
 ## Adaptive integration timestep
 
 Large marker jumps need larger effective steps; near the target, small steps prevent overshoot.

@@ -450,6 +450,7 @@ public:
     damping_ = cfg.damping;
     reset_adaptive_state();
     reset_auto_task_layout_state();
+    reset_position_step_continuity_state();
   }
 
   /**
@@ -1274,6 +1275,33 @@ private:
   bool suppress_min_error_step_retry_ = false;
   /// Guards against recursive preferred-lock candidate retry in solve_position_step.
   bool suppress_preferred_lock_step_retry_ = false;
+  struct PositionStepTargetSignature {
+    std::vector<std::string> task_names;
+    std::vector<Eigen::Matrix4d> target_poses;
+    std::vector<double> gains;
+  };
+  std::optional<PositionStepTargetSignature> last_position_step_target_signature_;
+  int position_step_call_depth_ = 0;
+  std::optional<double> position_step_merit_window_anchor_;
+  double position_step_merit_window_motion_ = 0.0;
+  int position_step_merit_window_samples_ = 0;
+  std::optional<Eigen::VectorXd> position_step_merit_window_last_delta_;
+  int position_step_merit_window_direction_reversals_ = 0;
+  std::optional<std::vector<double>> position_step_merit_window_last_merits_;
+  int position_step_merit_window_error_increases_ = 0;
+  bool position_step_stationary_guard_active_ = false;
+  bool position_step_stationary_guard_can_reopen_ = true;
+  void update_position_step_target_signature(
+      PositionStepTargetSignature signature);
+  void reset_position_step_continuity_state();
+  void reset_position_step_merit_window();
+  bool should_hold_position_step_for_continuity(
+      const PositionIKResult &result, const Eigen::VectorXd &current_q,
+      double initial_merit, double final_merit,
+      const std::vector<double> &initial_target_merits,
+      const std::vector<double> &final_target_merits,
+      double configuration_step_norm, bool owns_position_step_continuity,
+      bool collision_violated);
   std::optional<Eigen::MatrixXd> warm_start_selector_cache_;
   int warm_start_constraint_rows_ = -1;
 
@@ -1610,6 +1638,15 @@ private:
     double advisor_scale_epoch_time_s = 0.0;
     int advisor_scale_sample_count = 0;
     Eigen::VectorXd previous_dq;
+    std::optional<double> position_step_merit_window_anchor;
+    double position_step_merit_window_motion = 0.0;
+    int position_step_merit_window_samples = 0;
+    std::optional<Eigen::VectorXd> position_step_merit_window_last_delta;
+    int position_step_merit_window_direction_reversals = 0;
+    std::optional<std::vector<double>> position_step_merit_window_last_merits;
+    int position_step_merit_window_error_increases = 0;
+    bool position_step_stationary_guard_active = false;
+    bool position_step_stationary_guard_can_reopen = true;
     StallHandlerConfig stall_config;
     StallHandlerState stall_state;
     bool stall_user_configured = false;

@@ -528,7 +528,7 @@ def test_rby1_auto_pose_layout_keeps_bimanual_case_productive() -> None:
     merged_statuses, merged_layouts, merged_errors, merged_moved = (
         _run_limited_rby1_pose_group_case(mode="merged", limit_width=0.02, target_offset=offset)
     )
-    split_statuses, split_layouts, _split_errors, split_moved = _run_limited_rby1_pose_group_case(
+    split_statuses, split_layouts, split_errors, split_moved = _run_limited_rby1_pose_group_case(
         mode="split", limit_width=0.02, target_offset=offset
     )
     auto_statuses, auto_layouts, auto_errors, auto_moved = _run_limited_rby1_pose_group_case(
@@ -545,7 +545,8 @@ def test_rby1_auto_pose_layout_keeps_bimanual_case_productive() -> None:
         assert merged_moved < 25
     assert split_moved >= 35
     assert auto_moved >= 35
-    assert auto_moved >= split_moved
+    assert split_errors[-1] <= split_errors[0] - 0.005
+    assert auto_errors[-1] <= auto_errors[0] - 0.005
     assert auto_errors[-1] <= merged_errors[-1] + 0.02
 
 

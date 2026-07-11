@@ -228,6 +228,14 @@ def _run_case(case: SingularityCase) -> dict[str, float | int | list[str]]:
             float(np.linalg.norm(start_position - _frame_position(robot, frame_name)))
         )
 
+    stationary_run_steps = 240
+    settling_window_steps = 120
+    for _ in range(stationary_run_steps):
+        step(start_pose)
+        return_errors.append(
+            float(np.linalg.norm(start_position - _frame_position(robot, frame_name)))
+        )
+
     q_array = np.vstack(q_trace)
     input_array = np.vstack(solve_inputs)
     q_steps = np.linalg.norm(np.diff(q_array, axis=0), axis=1)
@@ -236,6 +244,15 @@ def _run_case(case: SingularityCase) -> dict[str, float | int | list[str]]:
     joint_slack = np.minimum(q_array - lower, upper - q_array)
     active_errors = np.concatenate([np.asarray(escape_errors[1:]), np.asarray(return_errors[1:])])
     zero_motion = (q_steps < 1e-5) & (active_errors > 2e-2)
+    hold_q = q_array[-(settling_window_steps + 1) :]
+    hold_deltas = np.diff(hold_q, axis=0)
+    hold_velocities = hold_deltas / options.dt
+    hold_speeds = np.linalg.norm(hold_velocities, axis=1)
+    hold_acceleration = np.diff(hold_velocities, axis=0) / options.dt
+    hold_jerk = np.diff(hold_acceleration, axis=0) / options.dt
+    hold_products = np.einsum("ij,ij->i", hold_velocities[:-1], hold_velocities[1:])
+    hold_active = (hold_speeds[:-1] > 1e-3) & (hold_speeds[1:] > 1e-3)
+    hold_errors = np.asarray(return_errors[-settling_window_steps:], dtype=float)
 
     return_recovery_lag = 16
     for index in range(6):
@@ -259,6 +276,8 @@ def _run_case(case: SingularityCase) -> dict[str, float | int | list[str]]:
         "tick6_limit_exit_rad": limit_exit,
         "return_tick6_error_reduction_m": return_errors[0] - return_errors[6],
         "return_tick6_normalized_sigma_min": normalized_sigma[return_start_index + 6],
+        "hold_start_error_m": return_errors[-(settling_window_steps + 1)],
+        "final_return_error_m": return_errors[-1],
         "return_switch_step_norm": q_steps[return_start_index],
         "return_recovery_lag_steps": return_recovery_lag,
         "max_step_norm": float(q_steps.max(initial=0.0)),
@@ -266,6 +285,18 @@ def _run_case(case: SingularityCase) -> dict[str, float | int | list[str]]:
         "max_jerk_norm": float(q_jerk.max(initial=0.0)),
         "minimum_joint_limit_slack": float(np.min(joint_slack)),
         "max_zero_motion_streak": _max_true_streak(zero_motion),
+        "post_settle_rms_joint_velocity": float(np.sqrt(np.mean(hold_speeds**2))),
+        "post_settle_peak_joint_velocity": float(hold_speeds.max(initial=0.0)),
+        "post_settle_velocity_total_variation": float(
+            np.sum(np.linalg.norm(np.diff(hold_velocities, axis=0), axis=1))
+        ),
+        "post_settle_configuration_drift": float(np.linalg.norm(hold_q[-1] - hold_q[0])),
+        "post_settle_alternating_steps": int(np.sum((hold_products < 0.0) & hold_active)),
+        "post_settle_error_increases": int(np.sum(np.diff(hold_errors) > 1e-4)),
+        "post_settle_peak_acceleration": float(
+            np.linalg.norm(hold_acceleration, axis=1).max(initial=0.0)
+        ),
+        "post_settle_peak_jerk": float(np.linalg.norm(hold_jerk, axis=1).max(initial=0.0)),
         "no_reset_input_mismatches": int(
             np.count_nonzero(np.any(input_array != q_array[:-1], axis=1))
         ),
@@ -293,6 +324,14 @@ def test_fully_extended_arm_escapes_and_returns_without_reset(
     assert metrics["max_acceleration_norm"] <= 0.16, failure_context
     assert metrics["max_jerk_norm"] <= 0.24, failure_context
     assert metrics["max_zero_motion_streak"] <= 2, failure_context
+    assert metrics["post_settle_rms_joint_velocity"] <= 0.005, failure_context
+    assert metrics["post_settle_peak_joint_velocity"] <= 0.02, failure_context
+    assert metrics["post_settle_velocity_total_variation"] <= 0.05, failure_context
+    assert metrics["post_settle_configuration_drift"] <= 0.005, failure_context
+    assert metrics["post_settle_alternating_steps"] <= 2, failure_context
+    assert metrics["post_settle_error_increases"] <= 1, failure_context
+    assert metrics["post_settle_peak_acceleration"] <= 2.5, failure_context
+    assert metrics["post_settle_peak_jerk"] <= 250.0, failure_context
     assert metrics["return_recovery_lag_steps"] <= 6, failure_context
     assert metrics["no_reset_input_mismatches"] == 0, failure_context
 

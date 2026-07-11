@@ -900,8 +900,8 @@ class TestDualEEBodyStall:
     to match the dual-EE teleop pattern.
     """
 
-    def test_stall_recovery_does_not_relax_margin_without_stall(self):
-        """The robust baseline should not spend margin budget when no stall occurs."""
+    def test_stationary_merit_hold_does_not_relax_collision_margin(self):
+        """A continuity hold must not spend collision-margin recovery budget."""
         setup = _setup_dual_iiwa_body_stall()
         if setup is None:
             pytest.skip("Dual iiwa model not available")
@@ -932,8 +932,8 @@ class TestDualEEBodyStall:
         assert final_min == pytest.approx(min_dist)
         solver.disable_stall_handler()
 
-    def test_stall_counter_stays_clear_when_solver_remains_productive(self):
-        """Do not report legacy collision stalls when robust solve keeps moving."""
+    def test_stationary_merit_hold_does_not_count_as_collision_stall(self):
+        """A deliberate continuity hold is not a collision-recovery stall."""
         setup = _setup_dual_iiwa_body_stall()
         if setup is None:
             pytest.skip("Dual iiwa model not available")

@@ -337,3 +337,148 @@ def test_axis_aligned_violated_margin_slides_without_weighted_fallback(tmp_path)
     assert float(np.dot(final_position - entry_position, tangent)) >= 0.02
     assert min(clearances) >= entry_clearance - 1e-6
     assert clearances[-1] >= entry_clearance + 0.0002 - 1e-6
+
+
+def test_stationary_continuity_preserves_collision_rejection_diagnostics(tmp_path):
+    robot = eik.RobotModel(str(_write_axis_aligned_contact_urdf(tmp_path)), floating_base=False)
+    q = np.array([0.02, 0.0], dtype=float)
+    robot.update_configuration(q)
+
+    solver = eik.KinematicsSolver(robot)
+    solver.dt = 0.02
+    solver.enable_position_limits(True)
+    solver.enable_velocity_limits(True)
+    pairs = list(robot.get_collision_pair_names())
+    solver.configure_collision_constraint(
+        min_distance=0.001,
+        include_pairs=pairs,
+        max_constraints=1,
+    )
+    solver.set_proximity_gated_collision_activation_enabled(True)
+    solver.set_collision_constraint_activation_multiplier(1.0)
+    solver.set_collision_pair_min_distance("base", "tool", 0.06, False)
+
+    task = solver.add_frame_task("rejected_contact", "tool", eik.TaskType.FRAME_POSITION)
+    task.solve_mode = eik.TaskSolveMode.MIN_ERROR
+    target_pose = np.eye(4, dtype=float)
+    target_pose[:3, 3] = np.asarray(robot.get_frame_pose("tool").translation, dtype=float)
+    target_pose[:3, 3] += np.array([-0.10, 0.08, 0.0], dtype=float)
+
+    options = eik.PositionStepOptions()
+    options.max_steps = 2
+    options.dt = 0.02
+    options.position_gain = 10.0
+    options.orientation_gain = 0.0
+    options.primary_solve_mode = eik.TaskSolveMode.MIN_ERROR
+
+    q_entry = q.copy()
+    rejection_counts: list[int] = []
+    for _ in range(30):
+        result = solver.solve_position_step(q, target_pose, "rejected_contact", options)
+        q = np.asarray(result.q_solution, dtype=float)
+        rejection_counts.append(int(result.collision_rejection_count))
+        assert result.stall_escape_count == 0
+        assert "held current configuration" not in result.status_message
+        assert "held satisfied stationary target" not in result.status_message
+
+    np.testing.assert_allclose(q, q_entry, atol=1e-12)
+    assert min(rejection_counts) >= 1
+    clearance = solver.evaluate_min_collision_distance(q)
+    assert clearance is not None
+    assert clearance >= 0.04 - 1e-9
+
+
+@pytest.mark.benchmark
+@pytest.mark.parametrize(
+    "solve_mode",
+    (
+        eik.TaskSolveMode.SCALE,
+        eik.TaskSolveMode.MIN_ERROR,
+    ),
+    ids=("scale", "min-error"),
+)
+def test_stationary_collision_bound_target_settles_after_sliding(tmp_path, solve_mode):
+    robot = eik.RobotModel(str(_write_axis_aligned_contact_urdf(tmp_path)), floating_base=False)
+    q = np.array([0.02, 0.0], dtype=float)
+    robot.update_configuration(q)
+
+    solver = eik.KinematicsSolver(robot)
+    solver.dt = 0.02
+    _disable_weighted_fallback(solver)
+    solver.enable_position_limits(True)
+    solver.enable_velocity_limits(True)
+
+    debug = solver.evaluate_collision_debug(q)
+    assert debug is not None
+    nearest_delta = np.asarray(debug.point_b_world) - np.asarray(debug.point_a_world)
+    normal = nearest_delta / np.linalg.norm(nearest_delta)
+    tangent = np.array([-normal[1], normal[0], 0.0], dtype=float)
+    tangent /= np.linalg.norm(tangent)
+    entry_position = np.asarray(robot.get_frame_pose("tool").translation, dtype=float)
+    target_pose = np.eye(4, dtype=float)
+    target_pose[:3, 3] = entry_position - 0.03 * normal + 0.08 * tangent
+
+    task = solver.add_frame_task("stationary_contact", "tool", eik.TaskType.FRAME_POSITION)
+    task.priority = 0
+    task.weight = 1.0
+    task.solve_mode = solve_mode
+    task.allow_min_error_fallback = False
+
+    entry_clearance = float(debug.distance)
+    structural_clearance = entry_clearance + 0.0002
+    solver.configure_collision_constraint(
+        min_distance=structural_clearance,
+        include_pairs=list(robot.get_collision_pair_names()),
+        max_constraints=1,
+    )
+    solver.set_proximity_gated_collision_activation_enabled(False)
+
+    options = eik.PositionStepOptions()
+    options.max_steps = 1
+    options.dt = 0.02
+    options.position_gain = 10.0
+    options.orientation_gain = 0.0
+    options.primary_solve_mode = solve_mode
+    options.primary_allow_min_error_fallback = False
+    options.max_configuration_step_norm = 0.08
+
+    q_trace = [q.copy()]
+    tangent_progress: list[float] = []
+    clearances: list[float] = []
+    errors: list[float] = []
+    for _ in range(320):
+        result = solver.solve_position_step(q, target_pose, "stationary_contact", options)
+        q = np.asarray(result.q_solution, dtype=float)
+        assert np.all(np.isfinite(q))
+        robot.update_configuration(q)
+        q_trace.append(q.copy())
+        position = np.asarray(robot.get_frame_pose("tool").translation, dtype=float)
+        tangent_progress.append(float(np.dot(position - entry_position, tangent)))
+        errors.append(float(np.linalg.norm(target_pose[:3, 3] - position)))
+        clearance = solver.evaluate_min_collision_distance(q)
+        assert clearance is not None
+        clearances.append(float(clearance))
+
+    settle_steps = 100
+    q_tail = np.vstack(q_trace[-(settle_steps + 1) :])
+    velocities = np.diff(q_tail, axis=0) / options.dt
+    speeds = np.linalg.norm(velocities, axis=1)
+    acceleration = np.diff(velocities, axis=0) / options.dt
+    jerk = np.diff(acceleration, axis=0) / options.dt
+    products = np.einsum("ij,ij->i", velocities[:-1], velocities[1:])
+    active = (speeds[:-1] > 1e-3) & (speeds[1:] > 1e-3)
+    error_tail = np.asarray(errors[-settle_steps:], dtype=float)
+    progress_tail = np.asarray(tangent_progress[-settle_steps:], dtype=float)
+
+    assert max(clearances) >= structural_clearance - 1e-6
+    assert min(clearances) >= entry_clearance - 1e-6
+    assert tangent_progress[-1] >= 0.02
+    assert float(np.sqrt(np.mean(speeds**2))) <= 0.005
+    assert float(speeds.max(initial=0.0)) <= 0.02
+    assert float(np.sum(np.linalg.norm(np.diff(velocities, axis=0), axis=1))) <= 0.05
+    assert float(np.linalg.norm(q_tail[-1] - q_tail[0])) <= 0.005
+    assert int(np.sum((products < 0.0) & active)) <= 2
+    assert int(np.sum(np.diff(error_tail) > 1e-4)) <= 1
+    assert int(np.sum(np.diff(progress_tail) < -1e-4)) <= 1
+    assert float(np.linalg.norm(acceleration, axis=1).max(initial=0.0)) <= 2.5
+    assert float(np.linalg.norm(jerk, axis=1).max(initial=0.0)) <= 250.0
