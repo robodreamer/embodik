@@ -561,11 +561,10 @@ public:
    * @param nearest_points_all_pairs If false, nearest points will be computed
    * only for the selected closest pair (constraint/debug) instead of for every
    *        evaluated pair.
-   * @param max_constraints Maximum number of simultaneous collision constraint
-   * rows to emit into the QP. The @p max_constraints closest pairs (each
-   * within @p upper_distance of the corresponding min_distance) each get their
-   * own Jacobian row and velocity-damper bounds, so the QP protects multiple
-   * pairs at once. Defaults to 1 (original behaviour). Values of 3-5 are
+   * @param max_constraints Nominal collision-row budget. The closest pairs get
+   * their own Jacobian rows and velocity-damper bounds. Controllable pairs that
+   * are penetrating or at their non-worsening recovery floor remain active even
+   * when this exceeds the nominal budget. Defaults to 1. Values of 3-5 are
    * recommended for complex robots with multiple tight-clearance regions.
    */
   void configure_collision_constraint(
@@ -1082,8 +1081,9 @@ public:
 
   /**
    * @brief Retrieve debug information for all active collision constraint pairs.
-   * Returns one entry per active constraint row (up to max_constraints). Empty
-   * when no collision constraint is configured or no solve has been performed.
+   * Returns one entry per active constraint row. Safety-critical rows can exceed
+   * the nominal max_constraints budget. Empty when no collision constraint is
+   * configured or no solve has been performed.
    */
   std::vector<CollisionDebugInfo> get_last_collision_debug_list() const {
     return last_collision_debug_list_;
@@ -1567,7 +1567,8 @@ private:
   // it changes which collision pairs are controllable / selectable.
   std::vector<int> collision_cache_frozen_indices_;
   std::optional<CollisionDebugInfo> last_collision_debug_;
-  // All active constraint pairs (up to max_constraints), populated after each solve.
+  // All active constraint pairs, including safety-critical rows beyond the
+  // nominal max_constraints budget, populated after each solve.
   std::vector<CollisionDebugInfo> last_collision_debug_list_;
   // Cached allow-mask aligned with Pinocchio's collisionPairs indices.
   std::vector<std::uint8_t> collision_allowed_pair_mask_;

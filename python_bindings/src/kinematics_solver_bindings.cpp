@@ -387,11 +387,12 @@ void bind_kinematics_solver(nb::module_ &m) {
           "  exclude_pairs: List of (geom_a, geom_b) tuples to ignore.\n"
           "  nearest_points_all_pairs: If False, compute nearest points only "
           "for the selected pair.\n"
-          "  max_constraints: Number of simultaneous QP constraint rows. Each "
-          "row protects one of the closest pairs independently. Defaults to 1 "
-          "(original behaviour). Values of 3-5 are recommended for complex "
-          "robots with multiple tight-clearance regions (e.g. base/leg and "
-          "arm/torso simultaneously).")
+          "  max_constraints: Nominal QP collision-row budget. Each row "
+          "protects one of the closest pairs independently. Penetrating pairs "
+          "and pairs at a non-worsening recovery floor remain active even when "
+          "that exceeds the budget. Defaults to 1. Values of 3-5 are "
+          "recommended for complex robots with multiple tight-clearance "
+          "regions (e.g. base/leg and arm/torso simultaneously).")
 
       .def(
           "add_collision_constraint",
@@ -461,8 +462,8 @@ void bind_kinematics_solver(nb::module_ &m) {
       // ---- Tunable collision boundary parameters (for sweep / autoresearch) ----
       .def("set_collision_repulsion_deadband",
            &KinematicsSolver::set_collision_repulsion_deadband, nb::arg("metres"),
-           "Width (m) of the no-braking zone above min_distance.  Default 0.003 m.\n"
-           "Set to 0 to eliminate the discontinuity that causes boundary oscillation.")
+           "Width (m) of the no-braking zone above min_distance. Defaults to 0, "
+           "which keeps the velocity bound continuous at the boundary.")
       .def("get_collision_repulsion_deadband",
            &KinematicsSolver::get_collision_repulsion_deadband)
       .def("set_collision_recovery_scale",
@@ -739,9 +740,10 @@ void bind_kinematics_solver(nb::module_ &m) {
       .def("get_last_collision_debug_list",
            &KinematicsSolver::get_last_collision_debug_list,
            "Retrieve debug information for all active collision constraint "
-           "pairs after the last solve (one entry per constraint row, up to "
-           "max_constraints). Returns an empty list when no collision "
-           "constraint is configured or no solve has been performed.")
+           "pairs after the last solve (one entry per constraint row). "
+           "Safety-critical rows can exceed the nominal max_constraints "
+           "budget. Returns an empty list when no collision constraint is "
+           "configured or no solve has been performed.")
 
       .def("evaluate_collision_debug",
            &KinematicsSolver::evaluate_collision_debug,

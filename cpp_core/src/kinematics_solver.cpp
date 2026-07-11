@@ -4477,9 +4477,75 @@ KinematicsSolver::compute_collision_constraint() {
     }
   }
 
-  const int max_k = collision_constraint_.has_value()
-                        ? collision_constraint_->max_constraints
-                        : 1;
+  const auto &config = *collision_constraint_;
+  auto collision_recovery_distances_for_pair =
+      [&](std::size_t pair_idx, double signed_distance,
+          double *effective_min_distance_out,
+          double *recovery_target_out) {
+        double effective_min_distance = config.min_distance;
+        const auto &pair = pairs[pair_idx];
+        const auto &name_a =
+            collision_model->geometryObjects[pair.first].name;
+        const auto &name_b =
+            collision_model->geometryObjects[pair.second].name;
+        const std::string pair_key = canonical_pair_key(name_a, name_b);
+
+        if (!per_pair_deferred_overrides_.empty()) {
+          const auto deferred = per_pair_deferred_overrides_.find(pair_key);
+          if (deferred != per_pair_deferred_overrides_.end() &&
+              signed_distance >= deferred->second) {
+            per_pair_min_distance_overrides_[pair_key] = deferred->second;
+            per_pair_deferred_overrides_.erase(deferred);
+          }
+        }
+        if (!per_pair_min_distance_overrides_.empty()) {
+          const auto override =
+              per_pair_min_distance_overrides_.find(pair_key);
+          if (override != per_pair_min_distance_overrides_.end()) {
+            effective_min_distance = override->second;
+          }
+        }
+
+        double recovery_target = effective_min_distance;
+        if (non_worsening_collision_floor_enabled_ && !pair_key.empty()) {
+          auto floor = collision_pair_distance_floor_.find(pair_key);
+          if (floor == collision_pair_distance_floor_.end()) {
+            const double seeded =
+                (signed_distance < effective_min_distance)
+                    ? std::min(effective_min_distance,
+                               collision_structural_floor_)
+                    : effective_min_distance;
+            floor = collision_pair_distance_floor_.emplace(pair_key, seeded)
+                        .first;
+          }
+          recovery_target =
+              std::min(floor->second, effective_min_distance);
+        }
+        if (effective_min_distance_out != nullptr) {
+          *effective_min_distance_out = effective_min_distance;
+        }
+        *recovery_target_out = recovery_target;
+      };
+
+  const int max_k = config.max_constraints;
+
+  // The nominal row budget is a performance control, not a safety limit.
+  // Every controllable penetrating pair and every pair close enough to cross
+  // its recovery floor during a row switch must remain in the QP. Reuse the
+  // pair-switch hysteresis as a selection-only guard band; this does not alter
+  // the continuous velocity-damper bounds.
+  const double recovery_selection_margin = kCollisionPairSwitchHysteresis;
+  std::unordered_set<std::size_t> mandatory_pair_indices;
+  for (const auto &[distance, pair_idx] : selectable_candidates) {
+    double recovery_target = config.min_distance;
+    collision_recovery_distances_for_pair(
+        pair_idx, distance, nullptr, &recovery_target);
+    if (distance < 0.0 ||
+        (non_worsening_collision_floor_enabled_ &&
+         distance <= recovery_target + recovery_selection_margin)) {
+      mandatory_pair_indices.insert(pair_idx);
+    }
+  }
 
   // Determine the distance threshold below which a previous pair "sticks".
   // A previous pair is kept if its distance is within hysteresis of the
@@ -4524,9 +4590,11 @@ KinematicsSolver::compute_collision_constraint() {
       selected_set.insert(prev_idx);
     }
   }
+  selected_set.insert(mandatory_pair_indices.begin(),
+                      mandatory_pair_indices.end());
 
   // Sort the selected set by distance to produce a deterministic order and
-  // trim to max_k if hysteresis temporarily pushed us over.
+  // retain all mandatory rows even when they exceed the nominal budget.
   std::vector<std::pair<double, std::size_t>> selected_sorted;
   selected_sorted.reserve(selected_set.size());
   for (std::size_t idx : selected_set) {
@@ -4535,28 +4603,30 @@ KinematicsSolver::compute_collision_constraint() {
   }
   std::sort(selected_sorted.begin(), selected_sorted.end());
 
-  // Safety: any penetrating pair (distance < 0) MUST be in the active set,
-  // even if max_constraints would normally exclude it.  Without this, the
-  // QP may miss a pair that transitions from out-of-cache to penetrating.
-  if (best_index_debug.has_value() && best_distance_debug < 0.0 &&
-      !pair_uncontrollable(*best_index_debug)) {
-    bool found = false;
+  const std::size_t selected_row_budget = std::max(
+      static_cast<std::size_t>(max_k), mandatory_pair_indices.size());
+  if (selected_sorted.size() > selected_row_budget) {
+    std::vector<std::pair<double, std::size_t>> retained;
+    retained.reserve(selected_row_budget);
     for (const auto &entry : selected_sorted) {
-      if (entry.second == *best_index_debug) { found = true; break; }
+      if (mandatory_pair_indices.count(entry.second) != 0) {
+        retained.push_back(entry);
+      }
     }
-    if (!found) {
-      selected_sorted.emplace_back(best_distance_debug, *best_index_debug);
-      std::sort(selected_sorted.begin(), selected_sorted.end());
+    for (const auto &entry : selected_sorted) {
+      if (retained.size() >= selected_row_budget) {
+        break;
+      }
+      if (mandatory_pair_indices.count(entry.second) == 0) {
+        retained.push_back(entry);
+      }
     }
-  }
-
-  if (static_cast<int>(selected_sorted.size()) > max_k) {
-    selected_sorted.resize(static_cast<std::size_t>(max_k));
+    std::sort(retained.begin(), retained.end());
+    selected_sorted = std::move(retained);
   }
 
   // Optional proximity-gated row activation.
   // When disabled (margin <= 0), behavior is unchanged.
-  const auto &config = *collision_constraint_;
   if (config.constraint_activation_enabled &&
       config.constraint_activation_margin > 0.0) {
     const double activation_threshold =
@@ -4564,7 +4634,11 @@ KinematicsSolver::compute_collision_constraint() {
     selected_sorted.erase(
         std::remove_if(
             selected_sorted.begin(), selected_sorted.end(),
-            [activation_threshold](const std::pair<double, std::size_t> &entry) {
+            [activation_threshold, &mandatory_pair_indices](
+                const std::pair<double, std::size_t> &entry) {
+              if (mandatory_pair_indices.count(entry.second) != 0) {
+                return false;
+              }
               return entry.first > activation_threshold;
             }),
         selected_sorted.end());
@@ -4662,56 +4736,10 @@ KinematicsSolver::compute_collision_constraint() {
   auto compute_bounds_for_pair = [&](std::size_t pair_idx,
                                      double signed_distance,
                                      bool *stuck_out) -> std::pair<double, double> {
-    const double target_min_distance = config.min_distance;
-    // Apply per-pair override (active or newly promoted from deferred).
-    double effective_min_distance = target_min_distance;
-    std::string pair_key;
-    {
-      const auto &pa = pairs[pair_idx];
-      const auto &name_a = collision_model->geometryObjects[pa.first].name;
-      const auto &name_b = collision_model->geometryObjects[pa.second].name;
-      pair_key = canonical_pair_key(name_a, name_b);
-      // Check deferred (pending) overrides first: promote when pair achieves
-      // the desired clearance for the first time (latch-on semantics).
-      if (!per_pair_deferred_overrides_.empty()) {
-        const auto dit = per_pair_deferred_overrides_.find(pair_key);
-        if (dit != per_pair_deferred_overrides_.end()) {
-          if (signed_distance >= dit->second) {
-            // Pair achieved desired clearance → promote to active.
-            per_pair_min_distance_overrides_[pair_key] = dit->second;
-            per_pair_deferred_overrides_.erase(dit);
-          }
-          // Else: pair is below threshold — use global min_distance, not override.
-        }
-      }
-      // Apply active override (possibly just promoted above).
-      if (!per_pair_min_distance_overrides_.empty()) {
-        const auto oit = per_pair_min_distance_overrides_.find(pair_key);
-        if (oit != per_pair_min_distance_overrides_.end()) {
-          effective_min_distance = oit->second;
-        }
-      }
-    }
-
-    // Non-worsening recovery target. A pair first seen below the configured
-    // clearance uses the structural floor as both its recovery target and minimum
-    // retained clearance. This recovers pairs below the floor without pinning
-    // already-safe pairs to their initial distance. Per-pair overrides remain the
-    // mechanism for geometry that physically cannot reach the global floor. A pair
-    // resting at or beyond the configured clearance keeps that full clearance.
-    double recovery_target = effective_min_distance;
-    if (non_worsening_collision_floor_enabled_ && !pair_key.empty()) {
-      auto it = collision_pair_distance_floor_.find(pair_key);
-      if (it == collision_pair_distance_floor_.end()) {
-        const double seeded =
-            (signed_distance < effective_min_distance)
-                ? std::min(effective_min_distance,
-                           collision_structural_floor_)
-                : effective_min_distance;
-        it = collision_pair_distance_floor_.emplace(pair_key, seeded).first;
-      }
-      recovery_target = std::min(it->second, effective_min_distance);
-    }
+    double effective_min_distance = config.min_distance;
+    double recovery_target = config.min_distance;
+    collision_recovery_distances_for_pair(
+        pair_idx, signed_distance, &effective_min_distance, &recovery_target);
 
     // Detect stuck: non-penetrating but significantly inside min_distance for
     // multiple consecutive cycles AND the previous dq was near-zero.
@@ -5738,6 +5766,8 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
       static_cast<std::size_t>(robot_->nv()), 0);
   std::vector<bool> project_collision_tangent_objective;
   project_collision_tangent_objective.reserve(tasks_.size());
+  std::vector<bool> project_elastic_collision_recovery_objective;
+  project_elastic_collision_recovery_objective.reserve(tasks_.size());
   int active_task_count = 0;
 
   int current_priority = std::numeric_limits<int>::min();
@@ -5801,6 +5831,8 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
       });
       objective_tasks.push_back(nullptr);
       project_collision_tangent_objective.push_back(all_strict_scale);
+      project_elastic_collision_recovery_objective.push_back(
+          all_scale_family && !all_strict_scale);
     } else {
       for (const auto &task : group_tasks) {
         goals.push_back(task->getVelocity());
@@ -5820,6 +5852,8 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
         objective_tasks.push_back(task);
         project_collision_tangent_objective.push_back(
             task->getSolveMode() == TaskSolveMode::kScale);
+        project_elastic_collision_recovery_objective.push_back(
+            task->getSolveMode() == TaskSolveMode::kScaleElastic);
       }
     }
 
@@ -5953,6 +5987,29 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
   bool collision_projection_applied = false;
   if (apply_limits && collision_constraint_result.has_value()) {
     const auto &coll = collision_constraint_result.value();
+    // Strict SCALE always projects at an active boundary. SCALE_ELASTIC keeps
+    // its normal elastic tradeoff unless contact recovery requires a positive
+    // separating velocity; projecting it earlier stalls useful tangent motion.
+    const std::size_t collision_row_count = std::min(
+        last_collision_debug_list_.size(),
+        static_cast<std::size_t>(coll.lower_bounds.size()));
+    bool contact_recovery_required = false;
+    for (std::size_t row = 0; row < collision_row_count; ++row) {
+      if (last_collision_debug_list_[row].distance <= kCollisionTolerance &&
+          coll.lower_bounds(static_cast<Eigen::Index>(row)) >
+              constraint_tolerance_) {
+        contact_recovery_required = true;
+        break;
+      }
+    }
+    if (contact_recovery_required) {
+      for (std::size_t index = 0;
+           index < project_collision_tangent_objective.size(); ++index) {
+        project_collision_tangent_objective[index] =
+            project_collision_tangent_objective[index] ||
+            project_elastic_collision_recovery_objective[index];
+      }
+    }
     const bool preserve_for_weighted =
         runtime_config_.weighted_advisor_enabled ||
         runtime_config_.weighted_fallback_enabled;

@@ -110,6 +110,40 @@ def _write_masked_floor_collision_urdf(tmp_path: pathlib.Path) -> pathlib.Path:
     return urdf_path
 
 
+def _write_two_floor_critical_pairs_urdf(tmp_path: pathlib.Path) -> pathlib.Path:
+    urdf_path = tmp_path / "two_floor_critical_pairs.urdf"
+    urdf_path.write_text(
+        """<?xml version="1.0"?>
+<robot name="two_floor_critical_pairs">
+  <link name="world"/>
+  <link name="left_obstacle">
+    <collision><geometry><sphere radius="0.05"/></geometry></collision>
+  </link>
+  <joint name="left_fixed" type="fixed">
+    <parent link="world"/><child link="left_obstacle"/>
+  </joint>
+  <link name="right_obstacle">
+    <collision><geometry><sphere radius="0.05"/></geometry></collision>
+  </link>
+  <joint name="right_fixed" type="fixed">
+    <parent link="world"/><child link="right_obstacle"/>
+    <origin xyz="0.223 0 0"/>
+  </joint>
+  <link name="moving">
+    <collision><geometry><sphere radius="0.05"/></geometry></collision>
+  </link>
+  <joint name="moving_slide" type="prismatic">
+    <parent link="world"/><child link="moving"/>
+    <origin xyz="0.1115 0 0"/><axis xyz="1 0 0"/>
+    <limit lower="-0.05" upper="0.05" effort="100" velocity="1"/>
+  </joint>
+</robot>
+""",
+        encoding="utf-8",
+    )
+    return urdf_path
+
+
 def _ensure_ros_package_path(urdf_path: pathlib.Path) -> None:
     existing = os.environ.get("ROS_PACKAGE_PATH", "")
     paths: set[str] = set()
@@ -299,6 +333,77 @@ class TestPerPairMinDistanceOverride:
 
 class TestNonWorseningCollisionFloor:
     """The structural floor is a minimum recovery target, not a ceiling."""
+
+    def test_floor_critical_pairs_are_not_dropped_by_nominal_row_budget(self, tmp_path):
+        robot = embodik.RobotModel(str(_write_two_floor_critical_pairs_urdf(tmp_path)))
+        solver = embodik.KinematicsSolver(robot)
+        solver.dt = 0.1
+        solver.set_damping(0.01)
+        solver.configure_collision_constraint(min_distance=0.07, max_constraints=1)
+        solver.set_non_worsening_collision_floor_enabled(True)
+        solver.set_collision_structural_floor(0.01)
+        solver.enable_collision_pair_cache(False)
+        solver.enable_sphere_broadphase(False)
+
+        task = solver.add_frame_task("moving_task", "moving")
+        task.priority = 0
+        task.weight = 1.0
+
+        q = np.array([0.0], dtype=float)
+        robot.update_configuration(q)
+        pose = robot.get_frame_pose("moving")
+        target = np.eye(4, dtype=float)
+        target[:3, :3] = np.asarray(pose.rotation, dtype=float)
+        target[:3, 3] = np.asarray(pose.translation, dtype=float)
+
+        task.set_target_pose(target[:3, 3], target[:3, :3])
+        solver.solve_velocity(q, apply_limits=True)
+        active_pairs = [
+            {row.object_a, row.object_b}
+            for row in solver.get_last_collision_debug_list()
+            if "moving" in row.object_a or "moving" in row.object_b
+        ]
+
+        assert len(active_pairs) == 2, solver.get_active_collision_pairs()
+        assert any(any("left_obstacle" in name for name in pair) for pair in active_pairs)
+        assert any(any("right_obstacle" in name for name in pair) for pair in active_pairs)
+
+    def test_proximity_activation_preserves_floor_critical_pair(self, tmp_path):
+        robot = embodik.RobotModel(str(_write_prismatic_collision_urdf(tmp_path)))
+        solver = embodik.KinematicsSolver(robot)
+        solver.dt = 0.1
+        solver.set_damping(0.01)
+        solver.configure_collision_constraint(min_distance=0.005, max_constraints=1)
+        solver.set_collision_pair_min_distance(
+            "obstacle", "moving", 0.02, activate_when_clear=False
+        )
+        solver.set_non_worsening_collision_floor_enabled(True)
+        solver.set_collision_structural_floor(0.01)
+        solver.set_collision_constraint_activation_multiplier(0.1)
+        solver.enable_collision_pair_cache(False)
+        solver.enable_sphere_broadphase(False)
+
+        task = solver.add_frame_task("moving_task", "moving")
+        task.priority = 0
+        task.weight = 1.0
+
+        q = np.array([0.0], dtype=float)
+        robot.update_configuration(q)
+        pose = robot.get_frame_pose("moving")
+        task.set_target_pose(
+            np.asarray(pose.translation, dtype=float),
+            np.asarray(pose.rotation, dtype=float),
+        )
+
+        solver.solve_velocity(q, apply_limits=True)
+        active_pairs = [
+            {row.object_a, row.object_b} for row in solver.get_last_collision_debug_list()
+        ]
+
+        assert any(
+            any("obstacle" in name for name in pair) and any("moving" in name for name in pair)
+            for pair in active_pairs
+        ), solver.get_active_collision_pairs()
 
     def test_pair_above_floor_can_move_toward_floor(self, tmp_path):
         robot = embodik.RobotModel(str(_write_prismatic_collision_urdf(tmp_path)))
