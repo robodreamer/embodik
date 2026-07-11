@@ -101,7 +101,7 @@ def _write_masked_floor_collision_urdf(tmp_path: pathlib.Path) -> pathlib.Path:
   <joint name="moving_slide" type="prismatic">
     <parent link="world"/><child link="moving"/>
     <origin xyz="0.12 0 0"/><axis xyz="1 0 0"/>
-    <limit lower="0" upper="0.1" effort="100" velocity="1"/>
+    <limit lower="-0.1" upper="0.1" effort="100" velocity="1"/>
   </joint>
 </robot>
 """,
@@ -444,6 +444,44 @@ class TestNonWorseningCollisionFloor:
         # still make useful progress without crossing its independent 10 mm
         # floor (q <= 15 mm).
         assert q_next[0] >= 0.005
+        assert q_next[0] <= 0.0151
+
+    def test_recovering_one_violated_pair_cannot_cross_another_pair_floor(self, tmp_path):
+        robot = embodik.RobotModel(str(_write_masked_floor_collision_urdf(tmp_path)))
+        solver = embodik.KinematicsSolver(robot)
+        solver.dt = 0.1
+        solver.set_damping(0.01)
+        solver.configure_collision_constraint(min_distance=0.07, max_constraints=1)
+        solver.set_non_worsening_collision_floor_enabled(True)
+        solver.set_collision_structural_floor(0.01)
+        solver.set_collision_pair_min_distance("structural_a", "structural_b", 0.005)
+
+        task = solver.add_frame_task("moving_task", "moving")
+        task.priority = 0
+        task.weight = 1.0
+
+        q = np.array([-0.015], dtype=float)
+        robot.update_configuration(q)
+        pose = robot.get_frame_pose("moving")
+        target = np.eye(4, dtype=float)
+        target[:3, :3] = np.asarray(pose.rotation, dtype=float)
+        target[:3, 3] = np.asarray(pose.translation, dtype=float)
+        target[0, 3] += 0.033
+
+        options = embodik.PositionStepOptions()
+        options.dt = 0.1
+        options.max_steps = 1
+        options.position_gain = 10.0
+        options.orientation_gain = 1.0
+        options.max_linear_speed = 1.0
+        options.stall_recovery = False
+
+        result = solver.solve_position_step(q, target, "moving_task", options)
+        q_next = np.asarray(result.q_solution, dtype=float)
+
+        # The left pair starts 5 mm inside its floor. Recovery should move right,
+        # but the independently safe right pair must remain at or above 10 mm.
+        assert q_next[0] >= q[0] + 0.005
         assert q_next[0] <= 0.0151
 
 

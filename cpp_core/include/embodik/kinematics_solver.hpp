@@ -1616,7 +1616,7 @@ private:
       const Eigen::VectorXd &current_q,
       const std::vector<std::size_t> &pair_indices);
   std::vector<std::size_t> get_post_step_rejection_pair_indices() const;
-  std::optional<double> evaluate_post_step_collision_recovery_margin(
+  std::vector<double> evaluate_post_step_collision_recovery_margins(
       const Eigen::VectorXd &current_q);
   std::optional<CollisionConstraintResult> compute_collision_constraint();
 

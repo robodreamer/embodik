@@ -425,6 +425,61 @@ static bool collision_recovery_candidate_acceptable(
          *current_dist - kCollisionPenetrationWorsenTolerance;
 }
 
+static bool collision_recovery_margins_acceptable(
+    const std::vector<double> &current_margins,
+    const std::vector<double> &candidate_margins, double safe_threshold) {
+  const std::size_t pair_count =
+      std::max(current_margins.size(), candidate_margins.size());
+  for (std::size_t pair_index = 0; pair_index < pair_count; ++pair_index) {
+    const double current_margin =
+        pair_index < current_margins.size()
+            ? current_margins[pair_index]
+            : std::numeric_limits<double>::quiet_NaN();
+    const double candidate_margin =
+        pair_index < candidate_margins.size()
+            ? candidate_margins[pair_index]
+            : std::numeric_limits<double>::quiet_NaN();
+    if (!std::isfinite(candidate_margin)) {
+      if (std::isfinite(current_margin)) {
+        return false;
+      }
+      continue;
+    }
+    if (!std::isfinite(current_margin)) {
+      if (candidate_margin < safe_threshold) {
+        return false;
+      }
+      continue;
+    }
+    if (current_margin >= safe_threshold) {
+      if (candidate_margin < safe_threshold) {
+        return false;
+      }
+      continue;
+    }
+    if (candidate_margin <
+        current_margin - kCollisionPenetrationWorsenTolerance) {
+      return false;
+    }
+  }
+  return true;
+}
+
+static bool collision_recovery_margins_are_safe(
+    const std::vector<double> &margins, double safe_threshold) {
+  bool found = false;
+  for (double margin : margins) {
+    if (!std::isfinite(margin)) {
+      continue;
+    }
+    found = true;
+    if (margin < safe_threshold) {
+      return false;
+    }
+  }
+  return found;
+}
+
 static double compute_adaptive_position_step_dt(
     const PositionStepOptions &options, double step_dt, double position_error,
     bool collision_constraint_enabled, double collision_min_distance,
@@ -2831,13 +2886,13 @@ KinematicsSolver::evaluate_post_step_collision_distance(
   return evaluate_min_collision_distance(q);
 }
 
-std::optional<double>
-KinematicsSolver::evaluate_post_step_collision_recovery_margin(
+std::vector<double>
+KinematicsSolver::evaluate_post_step_collision_recovery_margins(
     const Eigen::VectorXd &current_q) {
 #ifdef PINOCCHIO_WITH_HPP_FCL
   if (!collision_constraint_.has_value() ||
       !collision_constraint_->enabled) {
-    return std::nullopt;
+    return {};
   }
   if (current_q.size() != robot_->nq()) {
     throw std::runtime_error(
@@ -2847,15 +2902,16 @@ KinematicsSolver::evaluate_post_step_collision_recovery_margin(
   auto *collision_model = robot_->collision_model();
   auto *collision_data = robot_->collision_data();
   if (collision_model == nullptr || collision_data == nullptr) {
-    return std::nullopt;
+    return {};
   }
 
   robot_->update_kinematics(current_q);
   pinocchio::updateGeometryPlacements(robot_->model(), robot_->data(),
                                       *collision_model, *collision_data);
 
-  double worst_margin = std::numeric_limits<double>::infinity();
-  bool found = false;
+  std::vector<double> margins(
+      collision_model->collisionPairs.size(),
+      std::numeric_limits<double>::quiet_NaN());
   for (std::size_t pair_index = 0;
        pair_index < collision_model->collisionPairs.size(); ++pair_index) {
     if (!collision_allowed_pair_mask_.empty() &&
@@ -2905,15 +2961,13 @@ KinematicsSolver::evaluate_post_step_collision_recovery_margin(
           std::min(floor_iter->second, effective_min_distance);
     }
 
-    worst_margin =
-        std::min(worst_margin, signed_distance - recovery_target);
-    found = true;
+    margins[pair_index] = signed_distance - recovery_target;
   }
 
-  return found ? std::make_optional(worst_margin) : std::nullopt;
+  return margins;
 #else
   (void)current_q;
-  return std::nullopt;
+  return {};
 #endif
 }
 
@@ -7031,22 +7085,22 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
 
         const double current_com_violation = com_max_violation();
         const double current_rel_violation = relative_pose_max_violation();
-        const std::optional<double> current_collision_margin =
+        const std::vector<double> current_collision_margins =
             (collision_constraint_.has_value() &&
              collision_constraint_->enabled)
-                ? evaluate_post_step_collision_recovery_margin(q_eval)
-                : std::nullopt;
+                ? evaluate_post_step_collision_recovery_margins(q_eval)
+                : std::vector<double>{};
 
         const Eigen::VectorXd q_candidate = pinocchio::integrate(
             robot_->model(), q_eval, fallback_validation_dt * candidate);
         robot_->update_kinematics(q_candidate);
         const double candidate_com_violation = com_max_violation();
         const double candidate_rel_violation = relative_pose_max_violation();
-        const std::optional<double> candidate_collision_margin =
+        const std::vector<double> candidate_collision_margins =
             (collision_constraint_.has_value() &&
              collision_constraint_->enabled)
-                ? evaluate_post_step_collision_recovery_margin(q_candidate)
-                : std::nullopt;
+                ? evaluate_post_step_collision_recovery_margins(q_candidate)
+                : std::vector<double>{};
         robot_->update_kinematics(q_eval);
 
         constexpr double kViolationImproveTolerance = 1e-9;
@@ -7060,8 +7114,9 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
         }
         if (collision_constraint_.has_value() &&
             collision_constraint_->enabled) {
-          if (!collision_recovery_candidate_acceptable(
-                  current_collision_margin, candidate_collision_margin, 0.0)) {
+          if (!collision_recovery_margins_acceptable(
+                  current_collision_margins, candidate_collision_margins,
+                  0.0)) {
             return false;
           }
         }
@@ -7929,12 +7984,12 @@ PositionIKResult KinematicsSolver::solve_position(
       const double violation_threshold = collision_constraint_->min_distance;
       const auto pre_dist_debug =
           evaluate_post_step_collision_distance(q_pre_step);
-      const auto pre_recovery_margin =
-          evaluate_post_step_collision_recovery_margin(q_pre_step);
+      const auto pre_recovery_margins =
+          evaluate_post_step_collision_recovery_margins(q_pre_step);
       const auto post_dist_debug =
           evaluate_post_step_collision_distance(q_current);
-      const auto post_recovery_margin =
-          evaluate_post_step_collision_recovery_margin(q_current);
+      const auto post_recovery_margins =
+          evaluate_post_step_collision_recovery_margins(q_current);
       const double pre_dist =
           (pre_dist_debug.has_value() && std::isfinite(*pre_dist_debug))
               ? *pre_dist_debug
@@ -7952,12 +8007,10 @@ PositionIKResult KinematicsSolver::solve_position(
           post_dist < kCollisionHardPenetrationRejectDistance &&
           post_dist < pre_dist - kCollisionHardWorsenTolerance;
       const bool recovery_floor_unacceptable =
-          !collision_recovery_candidate_acceptable(
-              pre_recovery_margin, post_recovery_margin, 0.0);
+          !collision_recovery_margins_acceptable(
+              pre_recovery_margins, post_recovery_margins, 0.0);
       const bool recovery_floor_seed_was_safe =
-          pre_recovery_margin.has_value() &&
-          std::isfinite(*pre_recovery_margin) &&
-          *pre_recovery_margin >= 0.0;
+          collision_recovery_margins_are_safe(pre_recovery_margins, 0.0);
       if (seed_was_safe || deepened || hard_jump ||
           recovery_floor_unacceptable) {
         q_current = q_pre_step;
@@ -8468,14 +8521,14 @@ PositionIKResult KinematicsSolver::solve_position_step(
       const double violation_threshold = collision_constraint_->min_distance;
       const auto pre_dist_debug =
           evaluate_post_step_collision_distance(q_pre_step);
-      const auto pre_recovery_margin =
-          evaluate_post_step_collision_recovery_margin(q_pre_step);
+      const auto pre_recovery_margins =
+          evaluate_post_step_collision_recovery_margins(q_pre_step);
       std::optional<double> post_dist_debug =
           adaptive_step_large
           ? eval_broadphase_expanded(q)
           : evaluate_post_step_collision_distance(q);
-      const auto post_recovery_margin =
-          evaluate_post_step_collision_recovery_margin(q);
+      const auto post_recovery_margins =
+          evaluate_post_step_collision_recovery_margins(q);
       const double pre_dist =
           (pre_dist_debug.has_value() && std::isfinite(*pre_dist_debug))
               ? *pre_dist_debug
@@ -8485,12 +8538,10 @@ PositionIKResult KinematicsSolver::solve_position_step(
               ? *post_dist_debug
               : std::numeric_limits<double>::infinity();
       const bool recovery_floor_unacceptable =
-          !collision_recovery_candidate_acceptable(
-              pre_recovery_margin, post_recovery_margin, 0.0);
+          !collision_recovery_margins_acceptable(
+              pre_recovery_margins, post_recovery_margins, 0.0);
       const bool recovery_floor_seed_was_safe =
-          pre_recovery_margin.has_value() &&
-          std::isfinite(*pre_recovery_margin) &&
-          *pre_recovery_margin >= 0.0;
+          collision_recovery_margins_are_safe(pre_recovery_margins, 0.0);
       if (post_dist < violation_threshold ||
           recovery_floor_unacceptable) {
         bool seed_was_safe = (pre_dist >= violation_threshold);
@@ -8556,11 +8607,11 @@ PositionIKResult KinematicsSolver::solve_position_step(
                 adaptive_step_large
                 ? eval_broadphase_expanded(q_backoff)
                 : evaluate_post_step_collision_distance(q_backoff);
-            const auto backoff_recovery_margin =
-                evaluate_post_step_collision_recovery_margin(q_backoff);
+            const auto backoff_recovery_margins =
+                evaluate_post_step_collision_recovery_margins(q_backoff);
             const bool backoff_recovery_acceptable =
-                collision_recovery_candidate_acceptable(
-                    pre_recovery_margin, backoff_recovery_margin, 0.0);
+                collision_recovery_margins_acceptable(
+                    pre_recovery_margins, backoff_recovery_margins, 0.0);
             if (backoff_dist_debug.has_value() &&
                 std::isfinite(*backoff_dist_debug) &&
                 *backoff_dist_debug >= backoff_threshold &&
@@ -9661,13 +9712,13 @@ PositionIKResult KinematicsSolver::solve_position_step(
       const double violation_threshold = collision_constraint_->min_distance;
       const auto pre_dist_debug =
           evaluate_post_step_collision_distance(q_pre_step);
-      const auto pre_recovery_margin =
-          evaluate_post_step_collision_recovery_margin(q_pre_step);
+      const auto pre_recovery_margins =
+          evaluate_post_step_collision_recovery_margins(q_pre_step);
       auto post_dist_debug =
           adaptive_step_large ? eval_broadphase_expanded(q)
                               : evaluate_post_step_collision_distance(q);
-      const auto post_recovery_margin =
-          evaluate_post_step_collision_recovery_margin(q);
+      const auto post_recovery_margins =
+          evaluate_post_step_collision_recovery_margins(q);
       const double pre_dist =
           (pre_dist_debug.has_value() && std::isfinite(*pre_dist_debug))
               ? *pre_dist_debug
@@ -9677,12 +9728,10 @@ PositionIKResult KinematicsSolver::solve_position_step(
               ? *post_dist_debug
               : std::numeric_limits<double>::infinity();
       const bool recovery_floor_unacceptable =
-          !collision_recovery_candidate_acceptable(
-              pre_recovery_margin, post_recovery_margin, 0.0);
+          !collision_recovery_margins_acceptable(
+              pre_recovery_margins, post_recovery_margins, 0.0);
       const bool recovery_floor_seed_was_safe =
-          pre_recovery_margin.has_value() &&
-          std::isfinite(*pre_recovery_margin) &&
-          *pre_recovery_margin >= 0.0;
+          collision_recovery_margins_are_safe(pre_recovery_margins, 0.0);
       if (post_dist < violation_threshold ||
           recovery_floor_unacceptable) {
         bool seed_was_safe = (pre_dist >= violation_threshold);
@@ -9741,11 +9790,11 @@ PositionIKResult KinematicsSolver::solve_position_step(
                 adaptive_step_large
                     ? eval_broadphase_expanded(q_backoff)
                     : evaluate_post_step_collision_distance(q_backoff);
-            const auto backoff_recovery_margin =
-                evaluate_post_step_collision_recovery_margin(q_backoff);
+            const auto backoff_recovery_margins =
+                evaluate_post_step_collision_recovery_margins(q_backoff);
             const bool backoff_recovery_acceptable =
-                collision_recovery_candidate_acceptable(
-                    pre_recovery_margin, backoff_recovery_margin, 0.0);
+                collision_recovery_margins_acceptable(
+                    pre_recovery_margins, backoff_recovery_margins, 0.0);
             if (backoff_dist_debug.has_value() &&
                 std::isfinite(*backoff_dist_debug) &&
                 *backoff_dist_debug >= backoff_threshold &&
