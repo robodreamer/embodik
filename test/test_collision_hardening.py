@@ -252,6 +252,43 @@ class TestPerPairMinDistanceOverride:
 class TestNonWorseningCollisionFloor:
     """The structural floor is a minimum recovery target, not a ceiling."""
 
+    def test_pair_above_floor_can_move_toward_floor(self, tmp_path):
+        robot = embodik.RobotModel(str(_write_prismatic_collision_urdf(tmp_path)))
+        solver = embodik.KinematicsSolver(robot)
+        solver.dt = 0.01
+        solver.set_damping(0.01)
+        solver.configure_collision_constraint(min_distance=0.07, max_constraints=1)
+        solver.set_non_worsening_collision_floor_enabled(True)
+        solver.set_collision_structural_floor(0.01)
+
+        task = solver.add_frame_task("moving_task", "moving")
+        task.priority = 0
+        task.weight = 1.0
+
+        q = np.array([0.014], dtype=float)
+        robot.update_configuration(q)
+        pose = robot.get_frame_pose("moving")
+        target = np.eye(4, dtype=float)
+        target[:3, :3] = np.asarray(pose.rotation, dtype=float)
+        target[:3, 3] = np.asarray(pose.translation, dtype=float)
+        target[0, 3] -= 0.005
+
+        initial_distance = solver.evaluate_min_collision_distance(q)
+        assert initial_distance == pytest.approx(0.020, abs=5e-4)
+
+        options = embodik.PositionStepOptions()
+        options.max_steps = 1
+        options.position_gain = 10.0
+        options.orientation_gain = 1.0
+        options.stall_recovery = False
+
+        for _ in range(50):
+            result = solver.solve_position_step(q, target, "moving_task", options)
+            q = np.asarray(result.q_solution, dtype=float)
+
+        final_distance = solver.evaluate_min_collision_distance(q)
+        assert 0.0145 <= final_distance < 0.019
+
     def test_movable_pair_below_floor_recovers_to_floor(self, tmp_path):
         robot = embodik.RobotModel(str(_write_prismatic_collision_urdf(tmp_path)))
         solver = embodik.KinematicsSolver(robot)

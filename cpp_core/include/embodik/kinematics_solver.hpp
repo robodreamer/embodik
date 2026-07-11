@@ -691,12 +691,13 @@ public:
   double get_collision_recovery_scale() const       { return collision_recovery_scale_; }
 
   /** Non-worsening recovery floor. Default OFF (opt-in).
-   *  When enabled, a pair first seen closer than min_distance keeps its initial
-   *  clearance if it is above the structural floor, or recovers to the floor if
-   *  it starts below it. This avoids demanding the full global clearance from
-   *  structurally close pairs while still enforcing a minimum clearance. Use a
-   *  per-pair min-distance override for geometry that cannot reach the floor.
-   *  Off by default because it changes recovery semantics for violated seeds. */
+   *  When enabled, a pair first seen closer than min_distance uses the structural
+   *  floor as its recovery and retention target. Pairs below the floor recover to
+   *  it; pairs above the floor may move without being pinned to their initial
+   *  clearance as long as they stay above it. This avoids demanding the full
+   *  global clearance while preserving safe tangential freedom. Use a per-pair
+   *  min-distance override for geometry that cannot reach the floor. Off by
+   *  default because it changes recovery semantics for violated seeds. */
   void   set_non_worsening_collision_floor_enabled(bool enable) { non_worsening_collision_floor_enabled_ = enable; }
   bool   get_non_worsening_collision_floor_enabled() const      { return non_worsening_collision_floor_enabled_; }
 

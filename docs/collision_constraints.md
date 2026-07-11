@@ -178,7 +178,9 @@ solver.set_collision_structural_floor(0.005)  # default 5 mm; raise to match WBC
 
 **Penetrating vs close clearance:** if a pair is first seen **inside the mesh** (negative signed
 distance), EmbodiK seeds recovery toward the configured floor — not zero clearance — so the arm
-can exit penetration without treating interpenetration as a valid rest pose.
+can exit penetration without treating interpenetration as a valid rest pose. A pair first seen
+above the floor but below `min_distance` may move toward the floor instead of being pinned to its
+initial clearance, preserving safe tangential and whole-body motion.
 
 See [KinematicsSolver — Collision recovery floor](api/kinematics_solver.md#collision-recovery-floor).
 

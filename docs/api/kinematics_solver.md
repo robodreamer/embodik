@@ -69,12 +69,11 @@ solver.set_non_worsening_collision_floor_enabled(True)
 solver.set_collision_structural_floor(0.005)  # metres; default 5 mm
 ```
 
-The default 5 mm floor preserves the historical non-worsening behavior for
-positive structural clearances: pairs that already rest above the floor keep
-their observed clearance rather than being pushed to the global collision
-margin. When an app deliberately raises the floor, first-seen positive pairs
-below that raised floor recover toward the floor; first-seen penetrating pairs
-also recover toward the floor, capped by the active collision margin.
+For a pair first seen below the global collision margin, the floor is both the
+minimum retained clearance and the recovery target. A pair below the floor
+recovers toward it; a pair already above the floor may move down toward it
+instead of being pinned at its first observed clearance. The target is capped by
+the pair's active collision margin, including per-pair overrides.
 
 The floor is **off by default**. Getter/setter pairs:
 `get_non_worsening_collision_floor_enabled()` and

@@ -4545,22 +4545,20 @@ KinematicsSolver::compute_collision_constraint() {
       }
     }
 
-    // Non-worsening recovery target. Classify each pair the first time it is seen:
-    // a pair already resting closer than effective_min_distance keeps its current
-    // clearance when that clearance is above the structural floor. Pairs below the
-    // floor recover to it. Per-pair overrides remain the mechanism for geometry
-    // that physically cannot reach the global structural floor. A pair resting at
-    // or beyond the configured clearance keeps the full effective_min_distance.
+    // Non-worsening recovery target. A pair first seen below the configured
+    // clearance uses the structural floor as both its recovery target and minimum
+    // retained clearance. This recovers pairs below the floor without pinning
+    // already-safe pairs to their initial distance. Per-pair overrides remain the
+    // mechanism for geometry that physically cannot reach the global floor. A pair
+    // resting at or beyond the configured clearance keeps that full clearance.
     double recovery_target = effective_min_distance;
     if (non_worsening_collision_floor_enabled_ && !pair_key.empty()) {
       auto it = collision_pair_distance_floor_.find(pair_key);
       if (it == collision_pair_distance_floor_.end()) {
         const double seeded =
             (signed_distance < effective_min_distance)
-                ? std::min(
-                      effective_min_distance,
-                      std::max(collision_structural_floor_,
-                               std::max(0.0, signed_distance)))
+                ? std::min(effective_min_distance,
+                           collision_structural_floor_)
                 : effective_min_distance;
         it = collision_pair_distance_floor_.emplace(pair_key, seeded).first;
       }
