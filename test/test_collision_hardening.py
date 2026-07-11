@@ -478,6 +478,47 @@ class TestNonWorseningCollisionFloor:
         final_distance = solver.evaluate_min_collision_distance(q)
         assert final_distance >= 0.0095
 
+    def test_primary_scale_collapse_retries_min_error_despite_secondary_motion(self, tmp_path):
+        robot = embodik.RobotModel(str(_write_prismatic_collision_urdf(tmp_path)))
+        solver = embodik.KinematicsSolver(robot)
+        runtime = solver.runtime_config()
+        runtime.weighted_fallback_enabled = False
+        solver.configure_runtime(runtime)
+        solver.dt = 0.01
+        solver.set_damping(0.01)
+        solver.configure_collision_constraint(min_distance=0.07, max_constraints=1)
+        solver.set_non_worsening_collision_floor_enabled(True)
+        solver.set_collision_structural_floor(0.01)
+
+        task = solver.add_frame_task("moving_task", "moving")
+        task.priority = 0
+        task.weight = 1.0
+
+        q = np.array([0.0], dtype=float)
+        robot.update_configuration(q)
+        pose = robot.get_frame_pose("moving")
+        target = np.eye(4, dtype=float)
+        target[:3, :3] = np.asarray(pose.rotation, dtype=float)
+        target[:3, 3] = np.asarray(pose.translation, dtype=float)
+        target[0, 3] -= 0.005
+
+        initial_distance = solver.evaluate_min_collision_distance(q)
+        assert initial_distance == pytest.approx(0.006, abs=5e-4)
+
+        options = embodik.PositionStepOptions()
+        options.max_steps = 1
+        options.position_gain = 10.0
+        options.orientation_gain = 1.0
+        options.stall_recovery = False
+        options.primary_allow_min_error_fallback = True
+
+        result = solver.solve_position_step(q, target, "moving_task", options)
+        candidate_distance = solver.evaluate_min_collision_distance(result.q_solution)
+
+        assert result.status == embodik.SolverStatus.SUCCESS
+        assert result.task_modes_effective[0] == embodik.TaskSolveMode.MIN_ERROR
+        assert candidate_distance > initial_distance + 1e-5
+
     def test_per_pair_override_can_preserve_a_tighter_structural_clearance(self, tmp_path):
         robot = embodik.RobotModel(str(_write_prismatic_collision_urdf(tmp_path)))
         solver = embodik.KinematicsSolver(robot)

@@ -5148,22 +5148,18 @@ KinematicsSolver::attempt_min_error_position_step_retry(
   const bool numerical_stall =
       last_vel_result.status == SolverStatus::kNumericalError && constraints_active;
   constexpr double kPrimaryScaleEps = 1e-4;
-  bool primary_scale_saturated = false;
-  if (constraints_active && !last_vel_result.task_scales.empty()) {
-    for (double scale : last_vel_result.task_scales) {
-      if (std::abs(scale) <= kPrimaryScaleEps) {
-        primary_scale_saturated = true;
-        break;
-      }
-    }
-  }
+  const bool primary_scale_saturated =
+      constraints_active && !last_vel_result.task_scales.empty() &&
+      std::abs(last_vel_result.task_scales.front()) <= kPrimaryScaleEps;
   const bool soft_saturated =
       primary_scale_saturated &&
       (last_vel_result.status == SolverStatus::kSuccess ||
        last_vel_result.status == SolverStatus::kNoProgress ||
        last_vel_result.status == SolverStatus::kInfeasible);
-  if (applied_step_norm > applied_step_eps ||
-      (!scale_collapsed && !numerical_stall && !soft_saturated)) {
+  const bool primary_saturation_retry = scale_collapsed || soft_saturated;
+  const bool zero_motion_numerical_retry =
+      numerical_stall && applied_step_norm <= applied_step_eps;
+  if (!primary_saturation_retry && !zero_motion_numerical_retry) {
     return std::nullopt;
   }
 
