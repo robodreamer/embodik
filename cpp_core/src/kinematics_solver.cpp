@@ -1491,6 +1491,14 @@ bool KinematicsSolver::should_hold_position_step_for_continuity(
                   [](double merit) { return std::isfinite(merit); }) &&
       std::isfinite(configuration_step_norm);
   if (!nominal_candidate) {
+    const bool zero_motion_collision_rejection =
+        collision_violated && result.collision_rejection_count > 0 &&
+        result.stall_escape_count == 0 &&
+        std::isfinite(configuration_step_norm) &&
+        configuration_step_norm <= kPositionStepMeritMotionThreshold;
+    if (zero_motion_collision_rejection) {
+      return false;
+    }
     reset_position_step_merit_window();
     return false;
   }
@@ -2821,6 +2829,92 @@ KinematicsSolver::evaluate_post_step_collision_distance(
 
   // Tier 3: Full scan fallback (no constraint data available).
   return evaluate_min_collision_distance(q);
+}
+
+std::optional<double>
+KinematicsSolver::evaluate_post_step_collision_recovery_margin(
+    const Eigen::VectorXd &current_q) {
+#ifdef PINOCCHIO_WITH_HPP_FCL
+  if (!collision_constraint_.has_value() ||
+      !collision_constraint_->enabled) {
+    return std::nullopt;
+  }
+  if (current_q.size() != robot_->nq()) {
+    throw std::runtime_error(
+        "Invalid configuration size for collision recovery evaluation.");
+  }
+
+  auto *collision_model = robot_->collision_model();
+  auto *collision_data = robot_->collision_data();
+  if (collision_model == nullptr || collision_data == nullptr) {
+    return std::nullopt;
+  }
+
+  robot_->update_kinematics(current_q);
+  pinocchio::updateGeometryPlacements(robot_->model(), robot_->data(),
+                                      *collision_model, *collision_data);
+
+  double worst_margin = std::numeric_limits<double>::infinity();
+  bool found = false;
+  for (std::size_t pair_index = 0;
+       pair_index < collision_model->collisionPairs.size(); ++pair_index) {
+    if (!collision_allowed_pair_mask_.empty() &&
+        pair_index < collision_allowed_pair_mask_.size() &&
+        !collision_allowed_pair_mask_[pair_index]) {
+      continue;
+    }
+    if (!collision_data->activeCollisionPairs.empty() &&
+        !collision_data->activeCollisionPairs[pair_index]) {
+      continue;
+    }
+
+    pinocchio::computeDistance(*collision_model, *collision_data, pair_index);
+    const double signed_distance =
+        collision_data->distanceResults[pair_index].min_distance;
+    if (!std::isfinite(signed_distance)) {
+      continue;
+    }
+
+    const auto &pair = collision_model->collisionPairs[pair_index];
+    const auto &name_a =
+        collision_model->geometryObjects[pair.first].name;
+    const auto &name_b =
+        collision_model->geometryObjects[pair.second].name;
+    const std::string pair_key = canonical_pair_key(name_a, name_b);
+
+    double effective_min_distance = collision_constraint_->min_distance;
+    const auto override_iter =
+        per_pair_min_distance_overrides_.find(pair_key);
+    if (override_iter != per_pair_min_distance_overrides_.end()) {
+      effective_min_distance = override_iter->second;
+    }
+
+    double recovery_target = effective_min_distance;
+    if (non_worsening_collision_floor_enabled_) {
+      auto floor_iter = collision_pair_distance_floor_.find(pair_key);
+      if (floor_iter == collision_pair_distance_floor_.end()) {
+        const double seeded =
+            signed_distance < effective_min_distance
+                ? std::min(effective_min_distance,
+                           collision_structural_floor_)
+                : effective_min_distance;
+        floor_iter =
+            collision_pair_distance_floor_.emplace(pair_key, seeded).first;
+      }
+      recovery_target =
+          std::min(floor_iter->second, effective_min_distance);
+    }
+
+    worst_margin =
+        std::min(worst_margin, signed_distance - recovery_target);
+    found = true;
+  }
+
+  return found ? std::make_optional(worst_margin) : std::nullopt;
+#else
+  (void)current_q;
+  return std::nullopt;
+#endif
 }
 
 std::optional<double>
@@ -6937,10 +7031,10 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
 
         const double current_com_violation = com_max_violation();
         const double current_rel_violation = relative_pose_max_violation();
-        const std::optional<double> current_collision_distance =
+        const std::optional<double> current_collision_margin =
             (collision_constraint_.has_value() &&
              collision_constraint_->enabled)
-                ? evaluate_post_step_collision_distance(q_eval)
+                ? evaluate_post_step_collision_recovery_margin(q_eval)
                 : std::nullopt;
 
         const Eigen::VectorXd q_candidate = pinocchio::integrate(
@@ -6948,10 +7042,10 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
         robot_->update_kinematics(q_candidate);
         const double candidate_com_violation = com_max_violation();
         const double candidate_rel_violation = relative_pose_max_violation();
-        const std::optional<double> candidate_collision_distance =
+        const std::optional<double> candidate_collision_margin =
             (collision_constraint_.has_value() &&
              collision_constraint_->enabled)
-                ? evaluate_post_step_collision_distance(q_candidate)
+                ? evaluate_post_step_collision_recovery_margin(q_candidate)
                 : std::nullopt;
         robot_->update_kinematics(q_eval);
 
@@ -6966,11 +7060,8 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
         }
         if (collision_constraint_.has_value() &&
             collision_constraint_->enabled) {
-          const double safe_threshold =
-              collision_constraint_->min_distance - kCollisionTolerance;
           if (!collision_recovery_candidate_acceptable(
-                  current_collision_distance, candidate_collision_distance,
-                  safe_threshold)) {
+                  current_collision_margin, candidate_collision_margin, 0.0)) {
             return false;
           }
         }
@@ -7833,58 +7924,48 @@ PositionIKResult KinematicsSolver::solve_position(
     // Post-solve collision rejection (same logic as solve_position_step).
     if (step_moved && collision_constraint_.has_value() &&
         collision_constraint_->enabled) {
-      // violation_threshold: use global min_distance as the base.
-      // Per-pair overrides can have higher (stricter) thresholds; those are
-      // checked separately below via evaluate_per_pair_override_violations()
-      // so that custom pairs cannot penetrate past their individual limits
-      // even when the global threshold is more lenient (e.g. after stall
-      // handler relaxation or when global < per-pair override).
+      // Keep the legacy global guard for penetration diagnostics while the
+      // recovery margin below enforces every pair's effective floor.
       const double violation_threshold = collision_constraint_->min_distance;
-      auto post_dist_debug = evaluate_post_step_collision_distance(q_current);
-      if (post_dist_debug.has_value() &&
-          std::isfinite(*post_dist_debug) &&
-          *post_dist_debug < violation_threshold) {
-        auto pre_dist_debug = evaluate_post_step_collision_distance(q_pre_step);
-        double pre_dist = (pre_dist_debug.has_value() && std::isfinite(*pre_dist_debug))
-                              ? *pre_dist_debug
-                              : std::numeric_limits<double>::infinity();
-        bool seed_was_safe = (pre_dist >= violation_threshold);
-        bool deepened =
-            (pre_dist < violation_threshold &&
-             *post_dist_debug <
-                 pre_dist - kCollisionPenetrationWorsenTolerance);
-        const bool hard_jump =
-            std::isfinite(pre_dist) &&
-            *post_dist_debug < kCollisionHardPenetrationRejectDistance &&
-            *post_dist_debug < pre_dist - kCollisionHardWorsenTolerance;
-        if (seed_was_safe || deepened || hard_jump) {
-          q_current = q_pre_step;
-          robot_->update_configuration(q_current);
-          result.collision_rejection_count++;
-          if (seed_was_safe) {
-            collision_violated_flag_mt = true;
-            break;
-          }
-        }
-      } else if (!per_pair_min_distance_overrides_.empty() && step_moved) {
-        // Global check passed but per-pair overrides can be stricter.
-        // Check whether any custom pair is inside its individual threshold.
-        const auto pp_post = evaluate_per_pair_override_violations(q_current);
-        if (pp_post.has_value() && *pp_post < 0.0) {
-          const auto pp_pre = evaluate_per_pair_override_violations(q_pre_step);
-          const double pre_margin = pp_pre.value_or(std::numeric_limits<double>::infinity());
-          const bool seed_safe_pp = (pre_margin >= 0.0);
-          const bool deepened_pp = (pre_margin < 0.0 &&
-              *pp_post < pre_margin - kCollisionPenetrationWorsenTolerance);
-          if (seed_safe_pp || deepened_pp) {
-            q_current = q_pre_step;
-            robot_->update_configuration(q_current);
-            result.collision_rejection_count++;
-            if (seed_safe_pp) {
-              collision_violated_flag_mt = true;
-              break;
-            }
-          }
+      const auto pre_dist_debug =
+          evaluate_post_step_collision_distance(q_pre_step);
+      const auto pre_recovery_margin =
+          evaluate_post_step_collision_recovery_margin(q_pre_step);
+      const auto post_dist_debug =
+          evaluate_post_step_collision_distance(q_current);
+      const auto post_recovery_margin =
+          evaluate_post_step_collision_recovery_margin(q_current);
+      const double pre_dist =
+          (pre_dist_debug.has_value() && std::isfinite(*pre_dist_debug))
+              ? *pre_dist_debug
+              : std::numeric_limits<double>::infinity();
+      const double post_dist =
+          (post_dist_debug.has_value() && std::isfinite(*post_dist_debug))
+              ? *post_dist_debug
+              : std::numeric_limits<double>::infinity();
+      const bool seed_was_safe = pre_dist >= violation_threshold;
+      const bool deepened =
+          pre_dist < violation_threshold &&
+          post_dist < pre_dist - kCollisionPenetrationWorsenTolerance;
+      const bool hard_jump =
+          std::isfinite(pre_dist) &&
+          post_dist < kCollisionHardPenetrationRejectDistance &&
+          post_dist < pre_dist - kCollisionHardWorsenTolerance;
+      const bool recovery_floor_unacceptable =
+          !collision_recovery_candidate_acceptable(
+              pre_recovery_margin, post_recovery_margin, 0.0);
+      const bool recovery_floor_seed_was_safe =
+          pre_recovery_margin.has_value() &&
+          std::isfinite(*pre_recovery_margin) &&
+          *pre_recovery_margin >= 0.0;
+      if (seed_was_safe || deepened || hard_jump ||
+          recovery_floor_unacceptable) {
+        q_current = q_pre_step;
+        robot_->update_configuration(q_current);
+        result.collision_rejection_count++;
+        if (seed_was_safe || recovery_floor_seed_was_safe) {
+          collision_violated_flag_mt = true;
+          break;
         }
       }
     }
@@ -8382,35 +8463,45 @@ PositionIKResult KinematicsSolver::solve_position_step(
     // Post-solve collision rejection (same logic as multi-target overload).
     if (step_moved && collision_constraint_.has_value() &&
         collision_constraint_->enabled) {
-      // Use min_distance as the violation threshold so that q_solution is
-      // guaranteed collision-safe (not merely penetration-free).
-      // violation_threshold: use global min_distance as the base.
-      // Per-pair overrides can have higher (stricter) thresholds; those are
-      // checked separately below via evaluate_per_pair_override_violations()
-      // so that custom pairs cannot penetrate past their individual limits
-      // even when the global threshold is more lenient (e.g. after stall
-      // handler relaxation or when global < per-pair override).
+      // Keep the legacy global guard for penetration diagnostics while the
+      // recovery margin below enforces every pair's effective floor.
       const double violation_threshold = collision_constraint_->min_distance;
+      const auto pre_dist_debug =
+          evaluate_post_step_collision_distance(q_pre_step);
+      const auto pre_recovery_margin =
+          evaluate_post_step_collision_recovery_margin(q_pre_step);
       std::optional<double> post_dist_debug =
           adaptive_step_large
           ? eval_broadphase_expanded(q)
           : evaluate_post_step_collision_distance(q);
-      if (post_dist_debug.has_value() &&
-          std::isfinite(*post_dist_debug) &&
-          *post_dist_debug < violation_threshold) {
-        auto pre_dist_debug = evaluate_post_step_collision_distance(q_pre_step);
-        double pre_dist = (pre_dist_debug.has_value() && std::isfinite(*pre_dist_debug))
-                              ? *pre_dist_debug
-                              : std::numeric_limits<double>::infinity();
+      const auto post_recovery_margin =
+          evaluate_post_step_collision_recovery_margin(q);
+      const double pre_dist =
+          (pre_dist_debug.has_value() && std::isfinite(*pre_dist_debug))
+              ? *pre_dist_debug
+              : std::numeric_limits<double>::infinity();
+      const double post_dist =
+          (post_dist_debug.has_value() && std::isfinite(*post_dist_debug))
+              ? *post_dist_debug
+              : std::numeric_limits<double>::infinity();
+      const bool recovery_floor_unacceptable =
+          !collision_recovery_candidate_acceptable(
+              pre_recovery_margin, post_recovery_margin, 0.0);
+      const bool recovery_floor_seed_was_safe =
+          pre_recovery_margin.has_value() &&
+          std::isfinite(*pre_recovery_margin) &&
+          *pre_recovery_margin >= 0.0;
+      if (post_dist < violation_threshold ||
+          recovery_floor_unacceptable) {
         bool seed_was_safe = (pre_dist >= violation_threshold);
         bool deepened =
             (pre_dist < violation_threshold &&
-             *post_dist_debug <
+             post_dist <
                  pre_dist - kCollisionPenetrationWorsenTolerance);
         const bool hard_jump =
             std::isfinite(pre_dist) &&
-            *post_dist_debug < kCollisionHardPenetrationRejectDistance &&
-            *post_dist_debug < pre_dist - kCollisionHardWorsenTolerance;
+            post_dist < kCollisionHardPenetrationRejectDistance &&
+            post_dist < pre_dist - kCollisionHardWorsenTolerance;
         const bool pure_primary_min_error =
             !last_vel_result.task_modes_effective.empty() &&
             last_vel_result.task_modes_effective[0] == TaskSolveMode::kMinError &&
@@ -8422,7 +8513,7 @@ PositionIKResult KinematicsSolver::solve_position_step(
         const bool enforce_material_penetration_guard =
             !pure_primary_min_error || step_has_velocity_locks;
         const bool post_penetrating =
-            *post_dist_debug < kCollisionPenetrationDistanceThreshold;
+            post_dist < kCollisionPenetrationDistanceThreshold;
         const bool crossed_into_penetration =
             enforce_material_penetration_guard && post_penetrating &&
             (!std::isfinite(pre_dist) ||
@@ -8431,9 +8522,10 @@ PositionIKResult KinematicsSolver::solve_position_step(
             enforce_material_penetration_guard &&
             post_penetrating && std::isfinite(pre_dist) &&
             pre_dist < kCollisionPenetrationDistanceThreshold &&
-            *post_dist_debug < pre_dist - kCollisionTolerance;
+            post_dist < pre_dist - kCollisionTolerance;
         if (seed_was_safe || deepened || hard_jump ||
-            crossed_into_penetration || material_penetration_worsened) {
+            crossed_into_penetration || material_penetration_worsened ||
+            recovery_floor_unacceptable) {
           // Backoff threshold depends on seed state:
           //   safe seed   → must restore full safety (>= min_distance)
           //   violated seed + hard geometry jump → stop geometry penetration
@@ -8464,9 +8556,15 @@ PositionIKResult KinematicsSolver::solve_position_step(
                 adaptive_step_large
                 ? eval_broadphase_expanded(q_backoff)
                 : evaluate_post_step_collision_distance(q_backoff);
+            const auto backoff_recovery_margin =
+                evaluate_post_step_collision_recovery_margin(q_backoff);
+            const bool backoff_recovery_acceptable =
+                collision_recovery_candidate_acceptable(
+                    pre_recovery_margin, backoff_recovery_margin, 0.0);
             if (backoff_dist_debug.has_value() &&
                 std::isfinite(*backoff_dist_debug) &&
-                *backoff_dist_debug >= backoff_threshold) {
+                *backoff_dist_debug >= backoff_threshold &&
+                backoff_recovery_acceptable) {
               q = q_backoff;
               accepted_backoff = true;
               break;
@@ -8477,33 +8575,13 @@ PositionIKResult KinematicsSolver::solve_position_step(
             robot_->update_configuration(q);
             step_collision_rejected = true;
             result.collision_rejection_count++;
-            if (seed_was_safe) {
+            if (seed_was_safe || recovery_floor_seed_was_safe) {
               // Safe seed: no step could maintain min_distance → violation.
               // Signal after loop; break so we don't attempt further steps.
               collision_violated_flag = true;
               break;
             }
             // Violated seed: hold at seed, let stall handler relax min_distance.
-          }
-        }
-      } else if (!per_pair_min_distance_overrides_.empty() && step_moved) {
-        // Global check passed but per-pair overrides may be stricter.
-        const auto pp_post = evaluate_per_pair_override_violations(q);
-        if (pp_post.has_value() && *pp_post < 0.0) {
-          const auto pp_pre = evaluate_per_pair_override_violations(q_pre_step);
-          const double pre_margin = pp_pre.value_or(std::numeric_limits<double>::infinity());
-          const bool seed_safe_pp = (pre_margin >= 0.0);
-          const bool deepened_pp = (pre_margin < 0.0 &&
-              *pp_post < pre_margin - kCollisionPenetrationWorsenTolerance);
-          if (seed_safe_pp || deepened_pp) {
-            q = q_pre_step;
-            robot_->update_configuration(q);
-            step_collision_rejected = true;
-            result.collision_rejection_count++;
-            if (seed_safe_pp) {
-              collision_violated_flag = true;
-              break;
-            }
           }
         }
       }
@@ -9578,32 +9656,44 @@ PositionIKResult KinematicsSolver::solve_position_step(
     // threshold (mirrors single-target overload fix).
     if (step_moved && collision_constraint_.has_value() &&
         collision_constraint_->enabled) {
-      // violation_threshold: use global min_distance as the base.
-      // Per-pair overrides can have higher (stricter) thresholds; those are
-      // checked separately below via evaluate_per_pair_override_violations()
-      // so that custom pairs cannot penetrate past their individual limits
-      // even when the global threshold is more lenient (e.g. after stall
-      // handler relaxation or when global < per-pair override).
+      // Keep the legacy global guard for penetration diagnostics while the
+      // recovery margin below enforces every pair's effective floor.
       const double violation_threshold = collision_constraint_->min_distance;
+      const auto pre_dist_debug =
+          evaluate_post_step_collision_distance(q_pre_step);
+      const auto pre_recovery_margin =
+          evaluate_post_step_collision_recovery_margin(q_pre_step);
       auto post_dist_debug =
           adaptive_step_large ? eval_broadphase_expanded(q)
                               : evaluate_post_step_collision_distance(q);
-      if (post_dist_debug.has_value() &&
-          std::isfinite(*post_dist_debug) &&
-          *post_dist_debug < violation_threshold) {
-        auto pre_dist_debug = evaluate_post_step_collision_distance(q_pre_step);
-        double pre_dist = (pre_dist_debug.has_value() && std::isfinite(*pre_dist_debug))
-                              ? *pre_dist_debug
-                              : std::numeric_limits<double>::infinity();
+      const auto post_recovery_margin =
+          evaluate_post_step_collision_recovery_margin(q);
+      const double pre_dist =
+          (pre_dist_debug.has_value() && std::isfinite(*pre_dist_debug))
+              ? *pre_dist_debug
+              : std::numeric_limits<double>::infinity();
+      const double post_dist =
+          (post_dist_debug.has_value() && std::isfinite(*post_dist_debug))
+              ? *post_dist_debug
+              : std::numeric_limits<double>::infinity();
+      const bool recovery_floor_unacceptable =
+          !collision_recovery_candidate_acceptable(
+              pre_recovery_margin, post_recovery_margin, 0.0);
+      const bool recovery_floor_seed_was_safe =
+          pre_recovery_margin.has_value() &&
+          std::isfinite(*pre_recovery_margin) &&
+          *pre_recovery_margin >= 0.0;
+      if (post_dist < violation_threshold ||
+          recovery_floor_unacceptable) {
         bool seed_was_safe = (pre_dist >= violation_threshold);
         bool deepened =
             (pre_dist < violation_threshold &&
-             *post_dist_debug <
+             post_dist <
                  pre_dist - kCollisionPenetrationWorsenTolerance);
         const bool hard_jump =
             std::isfinite(pre_dist) &&
-            *post_dist_debug < kCollisionHardPenetrationRejectDistance &&
-            *post_dist_debug < pre_dist - kCollisionHardWorsenTolerance;
+            post_dist < kCollisionHardPenetrationRejectDistance &&
+            post_dist < pre_dist - kCollisionHardWorsenTolerance;
         const bool pure_primary_min_error =
             !last_vel_result.task_modes_effective.empty() &&
             last_vel_result.task_modes_effective[0] == TaskSolveMode::kMinError &&
@@ -9615,7 +9705,7 @@ PositionIKResult KinematicsSolver::solve_position_step(
         const bool enforce_material_penetration_guard =
             !pure_primary_min_error || step_has_velocity_locks;
         const bool post_penetrating =
-            *post_dist_debug < kCollisionPenetrationDistanceThreshold;
+            post_dist < kCollisionPenetrationDistanceThreshold;
         const bool crossed_into_penetration =
             enforce_material_penetration_guard && post_penetrating &&
             (!std::isfinite(pre_dist) ||
@@ -9624,9 +9714,10 @@ PositionIKResult KinematicsSolver::solve_position_step(
             enforce_material_penetration_guard &&
             post_penetrating && std::isfinite(pre_dist) &&
             pre_dist < kCollisionPenetrationDistanceThreshold &&
-            *post_dist_debug < pre_dist - kCollisionTolerance;
+            post_dist < pre_dist - kCollisionTolerance;
         if (seed_was_safe || deepened || hard_jump ||
-            crossed_into_penetration || material_penetration_worsened) {
+            crossed_into_penetration || material_penetration_worsened ||
+            recovery_floor_unacceptable) {
           double backoff_threshold;
           if (seed_was_safe) {
             backoff_threshold = violation_threshold;
@@ -9650,9 +9741,15 @@ PositionIKResult KinematicsSolver::solve_position_step(
                 adaptive_step_large
                     ? eval_broadphase_expanded(q_backoff)
                     : evaluate_post_step_collision_distance(q_backoff);
+            const auto backoff_recovery_margin =
+                evaluate_post_step_collision_recovery_margin(q_backoff);
+            const bool backoff_recovery_acceptable =
+                collision_recovery_candidate_acceptable(
+                    pre_recovery_margin, backoff_recovery_margin, 0.0);
             if (backoff_dist_debug.has_value() &&
                 std::isfinite(*backoff_dist_debug) &&
-                *backoff_dist_debug >= backoff_threshold) {
+                *backoff_dist_debug >= backoff_threshold &&
+                backoff_recovery_acceptable) {
               q = q_backoff;
               accepted_backoff = true;
               break;
@@ -9663,27 +9760,7 @@ PositionIKResult KinematicsSolver::solve_position_step(
             robot_->update_configuration(q);
             step_collision_rejected = true;
             result.collision_rejection_count++;
-            if (seed_was_safe) {
-              collision_violated_flag_mts = true;
-              break;
-            }
-          }
-        }
-      } else if (!per_pair_min_distance_overrides_.empty() && step_moved) {
-        // Per-pair override check (same pattern as other overloads).
-        const auto pp_post = evaluate_per_pair_override_violations(q);
-        if (pp_post.has_value() && *pp_post < 0.0) {
-          const auto pp_pre = evaluate_per_pair_override_violations(q_pre_step);
-          const double pre_margin = pp_pre.value_or(std::numeric_limits<double>::infinity());
-          const bool seed_safe_pp = (pre_margin >= 0.0);
-          const bool deepened_pp = (pre_margin < 0.0 &&
-              *pp_post < pre_margin - kCollisionPenetrationWorsenTolerance);
-          if (seed_safe_pp || deepened_pp) {
-            q = q_pre_step;
-            robot_->update_configuration(q);
-            step_collision_rejected = true;
-            result.collision_rejection_count++;
-            if (seed_safe_pp) {
+            if (seed_was_safe || recovery_floor_seed_was_safe) {
               collision_violated_flag_mts = true;
               break;
             }
