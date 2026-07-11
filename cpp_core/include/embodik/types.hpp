@@ -428,6 +428,10 @@ struct PositionIKResult : public VelocitySolverResult {
   /// Number of steps where a Jacobian-based escape nudge was applied to
   /// move the configuration out of collision penetration during a stall.
   int stall_escape_count = 0;
+  /// True when solve_position_step intentionally returned the unchanged input
+  /// configuration because a stationary or soft-infeasible command exhausted
+  /// useful progress. Callers may accept this non-success result as a hold.
+  bool position_step_hold_active = false;
 };
 
 /// Lightweight, derived bundle of diagnostics from a PositionIKResult.

@@ -677,6 +677,8 @@ NB_MODULE(_embodik_impl, m) {
               &eik::PositionIKResult::collision_rejection_count)
       .def_ro("stall_escape_count",
               &eik::PositionIKResult::stall_escape_count)
+      .def_ro("position_step_hold_active",
+              &eik::PositionIKResult::position_step_hold_active)
       .def_prop_ro(
           "diagnostics",
           [](const eik::PositionIKResult &r) {

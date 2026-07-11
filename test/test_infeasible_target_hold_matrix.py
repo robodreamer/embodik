@@ -302,6 +302,7 @@ def test_soft_infeasible_target_hold_matrix(
 
     assert result.status == eik.SolverStatus.NO_PROGRESS
     assert "held current configuration" in result.status_message
+    assert result.position_step_hold_active is True
     assert result.task_modes_effective[0] == eik.TaskSolveMode.SCALE
     assert not result.task_used_fallback[0]
     assert abs(task_scale) <= 1e-4

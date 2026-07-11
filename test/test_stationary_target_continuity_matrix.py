@@ -687,6 +687,7 @@ def test_changed_secondary_posture_target_reopens_satisfied_primary_hold(tmp_pat
         result = solver.solve_position_step(q, target_pose, "held_x", options)
         q = np.asarray(result.q_solution, dtype=float)
     assert "held satisfied stationary target" in result.status_message
+    assert result.position_step_hold_active is True
 
     posture.set_controlled_joint_targets(np.array([-0.5], dtype=float))
     result = solver.solve_position_step(q, target_pose, "held_x", options)
@@ -695,6 +696,7 @@ def test_changed_secondary_posture_target_reopens_satisfied_primary_hold(tmp_pat
     assert q_next[1] <= q[1] - 1e-3
     assert q_next[0] == pytest.approx(q[0], abs=1e-9)
     assert "held satisfied stationary target" not in result.status_message
+    assert result.position_step_hold_active is False
 
 
 @pytest.mark.parametrize("secondary_kind", ("posture", "frame"))

@@ -8927,6 +8927,7 @@ PositionIKResult KinematicsSolver::solve_position_step(
           candidate_step_norm, owns_position_step_continuity,
           collision_violated_flag);
   if (held_non_improving_step) {
+    result.position_step_hold_active = true;
     const bool target_satisfied =
         initial_commanded_error <= kPositionStepSatisfiedMeritTolerance;
     q = current_q;
@@ -8964,6 +8965,7 @@ PositionIKResult KinematicsSolver::solve_position_step(
       should_hold_soft_infeasible_position_step(
           result, current_q, initial_combined_error, collision_violated_flag,
           recovery_inside_collision_margin)) {
+    result.position_step_hold_active = true;
     q = current_q;
     robot_->update_configuration(q);
     result.q_solution = q;
@@ -10161,6 +10163,7 @@ PositionIKResult KinematicsSolver::solve_position_step(
           candidate_step_norm, owns_position_step_continuity,
           collision_violated_flag_mts);
   if (held_non_improving_step) {
+    result.position_step_hold_active = true;
     const bool target_satisfied =
         initial_commanded_error <= kPositionStepSatisfiedMeritTolerance;
     q = current_q;
@@ -10203,6 +10206,7 @@ PositionIKResult KinematicsSolver::solve_position_step(
       should_hold_soft_infeasible_position_step(
           result, current_q, initial_primary_combined_error,
           collision_violated_flag_mts, recovery_inside_collision_margin)) {
+    result.position_step_hold_active = true;
     q = current_q;
     robot_->update_configuration(q);
     result.q_solution = q;
