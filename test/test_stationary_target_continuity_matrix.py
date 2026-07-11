@@ -653,6 +653,71 @@ def test_stationary_unreachable_hold_resumes_when_target_returns(
     assert float(metrics["max_transition_jerk"]) <= 0.24 + 1e-9, metrics
 
 
+def test_stationary_guard_does_not_reopen_after_weak_reversal_window() -> None:
+    """Once exhausted motion is held, unchanged targets must stay held."""
+    config = resolve_robot_configuration("panda")
+    robot = config["robot"]
+    frame_name = str(config["target_link"])
+    q = np.asarray(config["default_configuration"], dtype=float).copy()
+    robot.update_configuration(q)
+
+    target_pose = _pose_matrix(robot, frame_name)
+    target_pose[:3, 3] += np.array(
+        [0.3649481129330421, 0.49391242483850917, 0.9058548242738668],
+        dtype=float,
+    )
+
+    solver = eik.KinematicsSolver(robot)
+    solver.dt = 0.02
+    solver.enable_position_limits(True)
+    solver.enable_velocity_limits(True)
+    runtime = eik.SolverRuntimeConfig()
+    runtime.weighted_fallback_enabled = False
+    runtime.enable_auto_task_layout = False
+    solver.configure_runtime(runtime)
+
+    task = solver.add_frame_task("stationary_target", frame_name, eik.TaskType.FRAME_POSITION)
+    task.priority = 0
+    task.weight = 1.0
+    task.solve_mode = eik.TaskSolveMode.MIN_ERROR
+    posture = solver.add_posture_task("posture")
+    posture.priority = 1
+    posture.weight = 1.0
+    posture.set_target_configuration(q.copy())
+
+    options = eik.PositionStepOptions()
+    options.max_steps = 1
+    options.dt = 0.02
+    options.position_gain = 10.0
+    options.orientation_gain = 0.0
+    options.primary_solve_mode = eik.TaskSolveMode.MIN_ERROR
+    options.max_configuration_step_norm = 0.08
+
+    held_q: np.ndarray | None = None
+    post_hold_results: list[object] = []
+    for _ in range(140):
+        result = solver.solve_position_step(q, target_pose, "stationary_target", options)
+        q = np.asarray(result.q_solution, dtype=float)
+        robot.update_configuration(q)
+        if held_q is None and result.position_step_hold_active:
+            held_q = q.copy()
+        elif held_q is not None:
+            post_hold_results.append(result)
+
+    assert held_q is not None
+    assert post_hold_results
+    assert all(result.position_step_hold_active for result in post_hold_results)
+    for result in post_hold_results:
+        np.testing.assert_allclose(result.q_solution, held_q, rtol=0.0, atol=1e-12)
+        np.testing.assert_allclose(result.joint_velocities, 0.0, rtol=0.0, atol=1e-12)
+
+    returned_target = _pose_matrix(robot, frame_name)
+    returned_target[:3, 3] += np.array([0.01, -0.005, 0.005], dtype=float)
+    resumed = solver.solve_position_step(q, returned_target, "stationary_target", options)
+    assert resumed.position_step_hold_active is False
+    assert np.linalg.norm(np.asarray(resumed.q_solution, dtype=float) - q) > 1e-6
+
+
 def test_changed_secondary_posture_target_reopens_satisfied_primary_hold(tmp_path: Path) -> None:
     robot = eik.RobotModel(str(_write_decoupled_xy_stage_urdf(tmp_path)), floating_base=False)
     q = np.zeros(robot.nq, dtype=float)

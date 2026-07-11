@@ -89,7 +89,9 @@ constexpr double kStationaryMinErrorReductionPerCall = 1e-6;
 constexpr double kStationaryOscillationMinErrorReductionPerConfiguration =
     5e-2;
 constexpr double kStationaryDirectionChangeMotionThreshold = 1e-4;
-constexpr int kStationaryMaxDirectionReversals = 4;
+// A single reversal or dominant-target regression is enough to latch an
+// exhausted stationary target unless the same window made strong net progress.
+constexpr int kStationaryMaxDirectionReversals = 0;
 constexpr double kStationaryTargetTranslationTolerance = 1e-9;
 constexpr double kStationaryTargetRotationTolerance = 1e-9;
 constexpr double kStationaryTargetGainTolerance = 1e-12;
