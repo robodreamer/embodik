@@ -219,6 +219,16 @@ void bind_kinematics_solver(nb::module_ &m) {
            &KinematicsSolver::set_acceleration_limits, nb::arg("limits"),
            "Set per-joint acceleration limits (rad/s^2)")
 
+      .def("set_previous_joint_velocities",
+           &KinematicsSolver::set_previous_joint_velocities,
+           nb::arg("velocities"),
+           "Synchronize acceleration state to the joint velocity applied by "
+           "the outer controller")
+
+      .def("get_previous_joint_velocities",
+           &KinematicsSolver::get_previous_joint_velocities,
+           "Return the joint velocity used as the acceleration reference")
+
       .def("set_base_position_bounds",
            &KinematicsSolver::set_base_position_bounds, nb::arg("lower"),
            nb::arg("upper"), "Set floating-base position bounds (3D)")

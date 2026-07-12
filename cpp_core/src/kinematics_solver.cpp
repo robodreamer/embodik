@@ -124,6 +124,33 @@ struct PositionStepTargetErrorSummary {
   double max_orientation_error = 0.0;
 };
 
+double discrete_stopping_velocity_limit(double margin, double acceleration,
+                                        double dt) {
+  const double margin_safe = std::max(0.0, margin);
+  const double dt_safe = std::max(dt, 1e-9);
+  if (margin_safe <= 0.0) {
+    return 0.0;
+  }
+  if (!std::isfinite(acceleration) || acceleration <= 0.0) {
+    return margin_safe / dt_safe;
+  }
+
+  // For n sampled braking intervals and x=v/(a*dt), the exact stopping
+  // distance is a*dt^2*(n*x - n*(n-1)/2), where n=ceil(x).
+  const double normalized_margin =
+      margin_safe / (acceleration * dt_safe * dt_safe);
+  const double root =
+      0.5 * (std::sqrt(1.0 + 8.0 * normalized_margin) - 1.0);
+  const double interval_count =
+      std::max(1.0, std::ceil(root - 1e-12));
+  const double normalized_velocity =
+      (normalized_margin +
+       0.5 * interval_count * (interval_count - 1.0)) /
+      interval_count;
+  return std::min(margin_safe / dt_safe,
+                  acceleration * dt_safe * normalized_velocity);
+}
+
 struct ScopedPositionStepCallDepth {
   explicit ScopedPositionStepCallDepth(int &depth_in) : depth(depth_in) {
     ++depth;
@@ -134,13 +161,14 @@ struct ScopedPositionStepCallDepth {
 };
 
 static void sync_position_result_applied_velocity(
-    PositionIKResult &result, const Eigen::VectorXd &current_q,
-    double outer_dt) {
+    PositionIKResult &result, const pinocchio::Model &model,
+    const Eigen::VectorXd &current_q, double outer_dt) {
   if (result.q_solution.size() != current_q.size()) {
     return;
   }
   const double dt_safe = std::max(outer_dt, 1e-9);
-  result.joint_velocities = (result.q_solution - current_q) / dt_safe;
+  result.joint_velocities =
+      pinocchio::difference(model, current_q, result.q_solution) / dt_safe;
   result.solution.assign(result.joint_velocities.data(),
                          result.joint_velocities.data() +
                              result.joint_velocities.size());
@@ -3020,7 +3048,7 @@ KinematicsSolver::evaluate_post_step_collision_recovery_margins(
       recovery_target =
           std::min(floor_iter->second, effective_min_distance);
     }
-    if (position_step_call_depth_ > 0 &&
+    if (!acceleration_limits_enabled_ && position_step_call_depth_ > 0 &&
         pair_index < position_step_collision_command_floor_distances_.size() &&
         std::isfinite(
             position_step_collision_command_floor_distances_[pair_index])) {
@@ -3044,6 +3072,13 @@ void KinematicsSolver::capture_position_step_collision_command_floor(
     const Eigen::VectorXd &current_q) {
   position_step_collision_command_floor_distances_.clear();
 #ifdef PINOCCHIO_WITH_HPP_FCL
+  // A command-local floor can jump when a moving target starts a new command,
+  // invalidating the previous tick's acceleration-feasible stopping proof.
+  // Acceleration-limited steps use the persistent recovery floor and braking
+  // certificate instead.
+  if (acceleration_limits_enabled_) {
+    return;
+  }
   if (!collision_constraint_.has_value() ||
       !collision_constraint_->enabled) {
     return;
@@ -4654,7 +4689,7 @@ KinematicsSolver::compute_collision_constraint() {
           recovery_target =
               std::min(floor->second, effective_min_distance);
         }
-        if (position_step_call_depth_ > 0 &&
+        if (!acceleration_limits_enabled_ && position_step_call_depth_ > 0 &&
             pair_idx <
                 position_step_collision_command_floor_distances_.size() &&
             std::isfinite(
@@ -4687,7 +4722,7 @@ KinematicsSolver::compute_collision_constraint() {
     collision_recovery_distances_for_pair(
         pair_idx, distance, nullptr, &recovery_target);
     const bool command_floor_active =
-        position_step_call_depth_ > 0 &&
+        !acceleration_limits_enabled_ && position_step_call_depth_ > 0 &&
         pair_idx < position_step_collision_command_floor_distances_.size() &&
         std::isfinite(
             position_step_collision_command_floor_distances_[pair_idx]);
@@ -5028,8 +5063,33 @@ KinematicsSolver::compute_collision_constraint() {
         (rotation_from_negative * jacobian_b).row(0);
 
     double recovery_margin = std::numeric_limits<double>::infinity();
-    const auto [lb, ub] = compute_bounds_for_pair(
+    auto [lb, ub] = compute_bounds_for_pair(
         pair_idx, signed_distance, nullptr, &recovery_margin);
+    if (acceleration_limits_enabled_ &&
+        acceleration_limits_.size() == nv &&
+        std::isfinite(recovery_margin) && recovery_margin > 0.0) {
+      double separating_acceleration_limit = 0.0;
+      const std::vector<int> locked_indices =
+          active_collision_lock_indices();
+      for (int index = 0; index < nv; ++index) {
+        if (std::find(locked_indices.begin(), locked_indices.end(), index) !=
+            locked_indices.end()) {
+          continue;
+        }
+        separating_acceleration_limit = std::max(
+            separating_acceleration_limit,
+            std::abs(result.jacobian(row, index)) *
+                acceleration_limits_[index]);
+      }
+      const double braking_slack =
+          std::max(0.0, recovery_margin - config.tolerance);
+      const double braking_speed = std::max(
+          0.0,
+          std::sqrt(2.0 * separating_acceleration_limit * braking_slack) -
+              separating_acceleration_limit * dt);
+      const double braking_lower_bound = -braking_speed;
+      lb = std::max(lb, braking_lower_bound);
+    }
     if (std::isfinite(recovery_margin)) {
       last_constraint_min_recovery_margin_ =
           std::min(last_constraint_min_recovery_margin_, recovery_margin);
@@ -5089,15 +5149,22 @@ std::pair<double, double> KinematicsSolver::calculate_velocity_box_constraint(
   position_margin_lower = std::max(0.0, position_margin_lower);
   position_margin_upper = std::max(0.0, position_margin_upper);
 
-  // Calculate velocity limits based on position margins
-  // Computed as: min of position/dt, vel_max, and sqrt(2*accel*margin)
+  // Preserve the legacy continuous stopping bound when acceleration history is
+  // not enforced.  With acceleration limits enabled, use the exact sampled-data
+  // stopping distance so the outer-tick command remains recursively feasible.
   double vel_from_pos_lower = -position_margin_lower / dt;
   double vel_from_pos_upper = position_margin_upper / dt;
 
-  double vel_from_accel_lower =
-      -std::sqrt(2 * acceleration_limit * position_margin_lower);
-  double vel_from_accel_upper =
-      std::sqrt(2 * acceleration_limit * position_margin_upper);
+  const double vel_from_accel_lower =
+      acceleration_limits_enabled_
+          ? -discrete_stopping_velocity_limit(position_margin_lower,
+                                               acceleration_limit, dt)
+          : -std::sqrt(2 * acceleration_limit * position_margin_lower);
+  const double vel_from_accel_upper =
+      acceleration_limits_enabled_
+          ? discrete_stopping_velocity_limit(position_margin_upper,
+                                              acceleration_limit, dt)
+          : std::sqrt(2 * acceleration_limit * position_margin_upper);
 
   // Take most restrictive limits
   double lower_limit =
@@ -5281,6 +5348,787 @@ void KinematicsSolver::apply_position_step_primary_task_options(
   if (options.primary_allow_min_error_fallback) {
     task->setAllowMinErrorFallback(true);
   }
+}
+
+bool KinematicsSolver::apply_position_step_outer_acceleration_limit(
+    const Eigen::VectorXd &current_q,
+    const Eigen::VectorXd &previous_applied_velocity,
+    const PositionStepOptions &options, double outer_dt,
+    Eigen::VectorXd &q_candidate) {
+  if (!acceleration_limits_enabled_ || q_candidate.size() != robot_->nq() ||
+      previous_applied_velocity.size() != robot_->nv() ||
+      acceleration_limits_.size() != robot_->nv()) {
+    return false;
+  }
+
+  const double dt_safe = std::max(outer_dt, 1e-9);
+  const int nv = robot_->nv();
+  Eigen::VectorXd desired_velocity =
+      pinocchio::difference(robot_->model(), current_q, q_candidate) / dt_safe;
+  Eigen::VectorXd velocity_lower = Eigen::VectorXd::Constant(
+      nv, -kUnboundedConstraintLimit);
+  Eigen::VectorXd velocity_upper = Eigen::VectorXd::Constant(
+      nv, kUnboundedConstraintLimit);
+  const Eigen::VectorXd velocity_limits = robot_->get_velocity_limits();
+  Eigen::VectorXd position_lower;
+  Eigen::VectorXd position_upper;
+  std::vector<int> velocity_to_config_index;
+  if (use_position_limits_) {
+    auto limits = robot_->get_joint_limits();
+    position_lower = std::move(limits.first);
+    position_upper = std::move(limits.second);
+    velocity_to_config_index = velocity_to_config_index_cache();
+  }
+  for (int i = 0; i < nv; ++i) {
+    const double acceleration_step = acceleration_limits_[i] * dt_safe;
+    const double deadband = acceleration_step * 0.01;
+    velocity_lower[i] =
+        previous_applied_velocity[i] - acceleration_step - deadband;
+    velocity_upper[i] =
+        previous_applied_velocity[i] + acceleration_step + deadband;
+    if (i < velocity_limits.size() && std::isfinite(velocity_limits[i]) &&
+        velocity_limits[i] > 0.0) {
+      velocity_lower[i] =
+          std::max(velocity_lower[i], -velocity_limits[i]);
+      velocity_upper[i] =
+          std::min(velocity_upper[i], velocity_limits[i]);
+    }
+    if (use_position_limits_ &&
+        i < static_cast<int>(velocity_to_config_index.size())) {
+      const int q_index = velocity_to_config_index[i];
+      if (q_index >= 0 && q_index < current_q.size() &&
+          q_index < position_lower.size() && q_index < position_upper.size() &&
+          std::isfinite(position_lower[q_index]) &&
+          std::isfinite(position_upper[q_index])) {
+        constexpr double kOuterPositionMargin = 1e-4;
+        const double lower_margin =
+            current_q[q_index] - position_lower[q_index] - kOuterPositionMargin;
+        const double upper_margin =
+            position_upper[q_index] - current_q[q_index] - kOuterPositionMargin;
+        const double velocity_limit =
+            i < velocity_limits.size() && std::isfinite(velocity_limits[i]) &&
+                    velocity_limits[i] > 0.0
+                ? velocity_limits[i]
+                : kUnboundedConstraintLimit;
+        const auto [position_velocity_lower, position_velocity_upper] =
+            calculate_velocity_box_constraint(
+                lower_margin, upper_margin, velocity_limit,
+                acceleration_limits_[i], dt_safe, 0.0, 0.0);
+        const double combined_lower =
+            std::max(velocity_lower[i], position_velocity_lower);
+        const double combined_upper =
+            std::min(velocity_upper[i], position_velocity_upper);
+        if (combined_lower <= combined_upper + constraint_tolerance_) {
+          velocity_lower[i] = combined_lower;
+          velocity_upper[i] = combined_upper;
+        } else {
+          // The caller can enter outside the controlled invariant set. In that
+          // case the hard position limit takes precedence over continuity.
+          velocity_lower[i] = position_velocity_lower;
+          velocity_upper[i] = position_velocity_upper;
+        }
+      }
+    }
+  }
+
+  const auto lock_velocity = [&](const std::vector<int> &indices) {
+    for (const int index : indices) {
+      if (index >= 0 && index < nv) {
+        velocity_lower[index] = 0.0;
+        velocity_upper[index] = 0.0;
+      }
+    }
+  };
+  lock_velocity(options.excluded_joint_indices);
+  lock_velocity(options.locked_joint_indices);
+  lock_velocity(options.integration_zero_velocity_indices);
+
+  Eigen::VectorXd limited_velocity = desired_velocity;
+  Eigen::VectorXd minimum_norm_feasible_velocity(nv);
+  for (int i = 0; i < nv; ++i) {
+    limited_velocity[i] = std::clamp(
+        limited_velocity[i], velocity_lower[i], velocity_upper[i]);
+    minimum_norm_feasible_velocity[i] =
+        std::clamp(0.0, velocity_lower[i], velocity_upper[i]);
+  }
+  bool minimum_norm_velocity_satisfies_collision_rows = true;
+
+  if (collision_constraint_.has_value() && collision_constraint_->enabled) {
+    robot_->update_configuration(current_q);
+    const auto collision_rows = compute_collision_constraint();
+    if (collision_rows.has_value() && collision_rows->jacobian.rows() > 0) {
+      const int collision_row_count =
+          static_cast<int>(collision_rows->jacobian.rows());
+      Eigen::MatrixXd constraints = Eigen::MatrixXd::Zero(
+          nv + collision_row_count, nv);
+      constraints.topRows(nv).setIdentity();
+      constraints.bottomRows(collision_row_count) =
+          collision_rows->jacobian;
+      Eigen::VectorXd lower(nv + collision_row_count);
+      Eigen::VectorXd upper(nv + collision_row_count);
+      lower.head(nv) = velocity_lower;
+      upper.head(nv) = velocity_upper;
+      lower.tail(collision_row_count) = collision_rows->lower_bounds;
+      upper.tail(collision_row_count) = collision_rows->upper_bounds;
+
+      VelocitySolverConfig projection_config;
+      projection_config.epsilon = constraint_tolerance_;
+      projection_config.precision_threshold = tight_tolerance_;
+      projection_config.iteration_limit = max_iterations_;
+      projection_config.magnitude_limit = norm_threshold_;
+      projection_config.stall_detection_count = max_zero_scale_iterations_;
+      projection_config.regularization_config.epsilon = solver_tolerance_;
+      projection_config.regularization_config.regularization_factor = damping_;
+      ObjectiveSolveConfig objective_config;
+      objective_config.solve_mode = TaskSolveMode::kMinError;
+      objective_config.allow_min_error_fallback = false;
+      const auto projection = computeMultiObjectiveVelocitySolutionEigen(
+          {desired_velocity}, {Eigen::MatrixXd::Identity(nv, nv)},
+          constraints, lower, upper, projection_config, {objective_config});
+      if (static_cast<int>(projection.solution.size()) == nv) {
+        const Eigen::Map<const Eigen::VectorXd> projected_velocity(
+            projection.solution.data(), nv);
+        const Eigen::VectorXd constraint_values =
+            constraints * projected_velocity;
+        const bool projection_feasible = projected_velocity.allFinite() &&
+            (constraint_values.array() >=
+             (lower.array() - 10.0 * constraint_tolerance_)).all() &&
+            (constraint_values.array() <=
+             (upper.array() + 10.0 * constraint_tolerance_)).all();
+        if (projection_feasible) {
+          limited_velocity = projected_velocity;
+        }
+      }
+      const double max_outer_velocity_norm =
+          options.max_configuration_step_norm > 0.0
+              ? options.max_configuration_step_norm / dt_safe
+              : std::numeric_limits<double>::infinity();
+      if (limited_velocity.norm() >
+          max_outer_velocity_norm + 10.0 * constraint_tolerance_) {
+        const auto minimum_norm_projection =
+            computeMultiObjectiveVelocitySolutionEigen(
+                {Eigen::VectorXd::Zero(nv)},
+                {Eigen::MatrixXd::Identity(nv, nv)}, constraints, lower,
+                upper, projection_config, {objective_config});
+        minimum_norm_velocity_satisfies_collision_rows = false;
+        if (static_cast<int>(minimum_norm_projection.solution.size()) == nv) {
+          const Eigen::Map<const Eigen::VectorXd> minimum_norm_velocity(
+              minimum_norm_projection.solution.data(), nv);
+          const Eigen::VectorXd minimum_norm_constraint_values =
+              constraints * minimum_norm_velocity;
+          const bool minimum_norm_projection_feasible =
+              minimum_norm_velocity.allFinite() &&
+              (minimum_norm_constraint_values.array() >=
+               (lower.array() - 10.0 * constraint_tolerance_))
+                  .all() &&
+              (minimum_norm_constraint_values.array() <=
+               (upper.array() + 10.0 * constraint_tolerance_))
+                  .all();
+          if (minimum_norm_projection_feasible) {
+            minimum_norm_feasible_velocity = minimum_norm_velocity;
+            minimum_norm_velocity_satisfies_collision_rows = true;
+          }
+        }
+      }
+    }
+  }
+
+  const double max_outer_velocity_norm =
+      options.max_configuration_step_norm > 0.0
+          ? options.max_configuration_step_norm / dt_safe
+          : std::numeric_limits<double>::infinity();
+  if (limited_velocity.norm() >
+      max_outer_velocity_norm + 10.0 * constraint_tolerance_) {
+    if (minimum_norm_velocity_satisfies_collision_rows &&
+        minimum_norm_feasible_velocity.norm() <=
+            max_outer_velocity_norm + 10.0 * constraint_tolerance_) {
+      double feasible_fraction = 0.0;
+      double infeasible_fraction = 1.0;
+      for (int iteration = 0; iteration < 40; ++iteration) {
+        const double fraction =
+            0.5 * (feasible_fraction + infeasible_fraction);
+        const Eigen::VectorXd trial_velocity =
+            minimum_norm_feasible_velocity +
+            fraction *
+                (limited_velocity - minimum_norm_feasible_velocity);
+        if (trial_velocity.norm() <= max_outer_velocity_norm) {
+          feasible_fraction = fraction;
+        } else {
+          infeasible_fraction = fraction;
+        }
+      }
+      limited_velocity =
+          minimum_norm_feasible_velocity +
+          feasible_fraction *
+              (limited_velocity - minimum_norm_feasible_velocity);
+    } else if (minimum_norm_velocity_satisfies_collision_rows) {
+      // The norm cap is infeasible with the acceleration/collision rows. Keep
+      // the minimum-norm hard-constraint solution instead of radially scaling
+      // outside the acceleration box.
+      limited_velocity = minimum_norm_feasible_velocity;
+    }
+  }
+
+  const auto configuration_for_velocity =
+      [&](const Eigen::VectorXd &reference_q,
+          const Eigen::VectorXd &velocity) {
+        Eigen::VectorXd candidate_q = pinocchio::integrate(
+            robot_->model(), reference_q, dt_safe * velocity);
+        if (use_position_limits_) {
+          auto [q_min, q_max] = robot_->get_joint_limits();
+          project_scalar_configuration_to_true_joint_limits(
+              candidate_q, q_min, q_max, velocity_to_config_index_cache(),
+              robot_->nv());
+        }
+        return candidate_q;
+      };
+
+  Eigen::VectorXd limited_q =
+      configuration_for_velocity(current_q, limited_velocity);
+
+  if (collision_constraint_.has_value() && collision_constraint_->enabled) {
+    robot_->update_configuration(current_q);
+    const auto current_distance =
+        evaluate_post_step_collision_distance(current_q);
+    const auto current_recovery_margins =
+        evaluate_post_step_collision_recovery_margins(current_q);
+    const double nominal_floor = collision_constraint_->min_distance;
+
+      const auto collision_acceptable =
+        [&](const Eigen::VectorXd &candidate,
+            double recovery_margin_threshold) {
+      robot_->update_configuration(candidate);
+      const auto candidate_distance =
+          evaluate_post_step_collision_distance(candidate);
+      const auto candidate_recovery_margins =
+          evaluate_post_step_collision_recovery_margins(candidate);
+      if (!collision_recovery_margins_acceptable(
+              current_recovery_margins, candidate_recovery_margins,
+              recovery_margin_threshold)) {
+        return false;
+      }
+      if (!current_distance.has_value() ||
+          !std::isfinite(*current_distance) ||
+          !candidate_distance.has_value() ||
+          !std::isfinite(*candidate_distance)) {
+        return true;
+      }
+      if (*current_distance >= nominal_floor - kCollisionTolerance) {
+        return *candidate_distance >= nominal_floor - kCollisionTolerance;
+      }
+      return *candidate_distance >=
+             *current_distance - kCollisionPenetrationWorsenTolerance;
+    };
+
+    const auto braking_velocity_from = [&](const Eigen::VectorXd &velocity) {
+      Eigen::VectorXd braking_velocity = velocity;
+      for (int i = 0; i < nv; ++i) {
+        const double acceleration_step = acceleration_limits_[i] * dt_safe;
+        const double deadband = acceleration_step * 0.01;
+        const double step = acceleration_step + deadband;
+        if (braking_velocity[i] > step) {
+          braking_velocity[i] -= step;
+        } else if (braking_velocity[i] < -step) {
+          braking_velocity[i] += step;
+        } else {
+          braking_velocity[i] = 0.0;
+        }
+      }
+      return braking_velocity;
+    };
+
+    const auto componentwise_braking_rollout_acceptable =
+        [&](const Eigen::VectorXd &candidate_q,
+            const Eigen::VectorXd &candidate_velocity,
+            double minimum_recovery_margin,
+            Eigen::VectorXd *first_q_out,
+            Eigen::VectorXd *first_velocity_out) {
+          if (!acceleration_limits_enabled_) {
+            return true;
+          }
+
+          int braking_steps = 0;
+          for (int i = 0; i < nv; ++i) {
+            const double acceleration_step = acceleration_limits_[i] * dt_safe;
+            const double deadband = acceleration_step * 0.01;
+            const double step = acceleration_step + deadband;
+            if (step <= constraint_tolerance_) {
+              if (std::abs(candidate_velocity[i]) > constraint_tolerance_) {
+                return false;
+              }
+              continue;
+            }
+            braking_steps = std::max(
+                braking_steps,
+                static_cast<int>(std::ceil(
+                    std::abs(candidate_velocity[i]) / step - 1e-12)));
+          }
+
+          Eigen::VectorXd rollout_q = candidate_q;
+          Eigen::VectorXd rollout_velocity = candidate_velocity;
+          Eigen::VectorXd first_q;
+          Eigen::VectorXd first_velocity;
+          for (int step_index = 0; step_index < braking_steps; ++step_index) {
+            rollout_velocity = braking_velocity_from(rollout_velocity);
+            rollout_q =
+                configuration_for_velocity(rollout_q, rollout_velocity);
+            if (step_index == 0) {
+              first_q = rollout_q;
+              first_velocity = rollout_velocity;
+            }
+            if (!collision_acceptable(rollout_q, minimum_recovery_margin)) {
+              return false;
+            }
+          }
+          if (braking_steps == 0) {
+            first_q = candidate_q;
+            first_velocity = candidate_velocity;
+          }
+          if (first_q_out != nullptr) {
+            *first_q_out = std::move(first_q);
+          }
+          if (first_velocity_out != nullptr) {
+            *first_velocity_out = std::move(first_velocity);
+          }
+          return true;
+        };
+
+    const auto collision_aware_braking_rollout_acceptable =
+        [&](const Eigen::VectorXd &candidate_q,
+            const Eigen::VectorXd &candidate_velocity,
+            double minimum_recovery_margin,
+            Eigen::VectorXd *first_q_out,
+            Eigen::VectorXd *first_velocity_out) {
+          int braking_step_budget = 0;
+          for (int i = 0; i < nv; ++i) {
+            const double acceleration_step = acceleration_limits_[i] * dt_safe;
+            const double deadband = acceleration_step * 0.01;
+            const double step = acceleration_step + deadband;
+            if (step <= constraint_tolerance_) {
+              if (std::abs(candidate_velocity[i]) > constraint_tolerance_) {
+                return false;
+              }
+              continue;
+            }
+            braking_step_budget += static_cast<int>(std::ceil(
+                std::abs(candidate_velocity[i]) / step - 1e-12));
+          }
+          if (braking_step_budget == 0) {
+            if (first_q_out != nullptr) {
+              *first_q_out = candidate_q;
+            }
+            if (first_velocity_out != nullptr) {
+              *first_velocity_out = candidate_velocity;
+            }
+            return true;
+          }
+
+          VelocitySolverConfig rollout_solver_config;
+          rollout_solver_config.epsilon = constraint_tolerance_;
+          rollout_solver_config.precision_threshold = tight_tolerance_;
+          rollout_solver_config.iteration_limit = max_iterations_;
+          rollout_solver_config.magnitude_limit = norm_threshold_;
+          rollout_solver_config.stall_detection_count =
+              max_zero_scale_iterations_;
+          rollout_solver_config.regularization_config.epsilon =
+              solver_tolerance_;
+          rollout_solver_config.regularization_config.regularization_factor =
+              damping_;
+          ObjectiveSolveConfig rollout_objective_config;
+          rollout_objective_config.solve_mode = TaskSolveMode::kMinError;
+          rollout_objective_config.allow_min_error_fallback = false;
+
+          Eigen::VectorXd rollout_q = candidate_q;
+          Eigen::VectorXd rollout_velocity = candidate_velocity;
+          Eigen::VectorXd first_q;
+          Eigen::VectorXd first_velocity;
+          bool have_first_step = false;
+          const auto publish_first_step = [&]() {
+            if (!have_first_step) {
+              return;
+            }
+            if (first_q_out != nullptr) {
+              *first_q_out = first_q;
+            }
+            if (first_velocity_out != nullptr) {
+              *first_velocity_out = first_velocity;
+            }
+          };
+          const auto fail_with_first_step = [&]() {
+            publish_first_step();
+            return false;
+          };
+          for (int step_index = 0; step_index < braking_step_budget;
+               ++step_index) {
+            Eigen::VectorXd successor_lower(nv);
+            Eigen::VectorXd successor_upper(nv);
+            for (int i = 0; i < nv; ++i) {
+              const double acceleration_step =
+                  acceleration_limits_[i] * dt_safe;
+              const double deadband = acceleration_step * 0.01;
+              successor_lower[i] =
+                  rollout_velocity[i] - acceleration_step - deadband;
+              successor_upper[i] =
+                  rollout_velocity[i] + acceleration_step + deadband;
+              if (i < velocity_limits.size() &&
+                  std::isfinite(velocity_limits[i]) &&
+                  velocity_limits[i] > 0.0) {
+                successor_lower[i] =
+                    std::max(successor_lower[i], -velocity_limits[i]);
+                successor_upper[i] =
+                    std::min(successor_upper[i], velocity_limits[i]);
+              }
+              if (use_position_limits_ &&
+                  i < static_cast<int>(velocity_to_config_index.size())) {
+                const int q_index = velocity_to_config_index[i];
+                if (q_index >= 0 && q_index < rollout_q.size() &&
+                    q_index < position_lower.size() &&
+                    q_index < position_upper.size() &&
+                    std::isfinite(position_lower[q_index]) &&
+                    std::isfinite(position_upper[q_index])) {
+                  constexpr double kOuterPositionMargin = 1e-4;
+                  const double lower_margin =
+                      rollout_q[q_index] - position_lower[q_index] -
+                      kOuterPositionMargin;
+                  const double upper_margin =
+                      position_upper[q_index] - rollout_q[q_index] -
+                      kOuterPositionMargin;
+                  const double velocity_limit =
+                      i < velocity_limits.size() &&
+                              std::isfinite(velocity_limits[i]) &&
+                              velocity_limits[i] > 0.0
+                          ? velocity_limits[i]
+                          : kUnboundedConstraintLimit;
+                  const auto [position_velocity_lower,
+                              position_velocity_upper] =
+                      calculate_velocity_box_constraint(
+                          lower_margin, upper_margin, velocity_limit,
+                          acceleration_limits_[i], dt_safe, 0.0, 0.0);
+                  const double combined_lower =
+                      std::max(successor_lower[i], position_velocity_lower);
+                  const double combined_upper =
+                      std::min(successor_upper[i], position_velocity_upper);
+                  if (combined_lower <=
+                      combined_upper + constraint_tolerance_) {
+                    successor_lower[i] = combined_lower;
+                    successor_upper[i] = combined_upper;
+                  } else {
+                    successor_lower[i] = position_velocity_lower;
+                    successor_upper[i] = position_velocity_upper;
+                  }
+                }
+              }
+            }
+            const auto lock_successor_velocity =
+                [&](const std::vector<int> &indices) {
+                  for (const int index : indices) {
+                    if (index >= 0 && index < nv) {
+                      successor_lower[index] = 0.0;
+                      successor_upper[index] = 0.0;
+                    }
+                  }
+                };
+            lock_successor_velocity(options.excluded_joint_indices);
+            lock_successor_velocity(options.locked_joint_indices);
+            lock_successor_velocity(
+                options.integration_zero_velocity_indices);
+
+            robot_->update_configuration(rollout_q);
+            const auto rollout_collision_rows =
+                compute_collision_constraint();
+            if (!rollout_collision_rows.has_value() ||
+                rollout_collision_rows->jacobian.rows() == 0) {
+              return fail_with_first_step();
+            }
+
+            const int collision_row_count = static_cast<int>(
+                rollout_collision_rows->jacobian.rows());
+            Eigen::MatrixXd constraints = Eigen::MatrixXd::Zero(
+                nv + collision_row_count, nv);
+            constraints.topRows(nv).setIdentity();
+            constraints.bottomRows(collision_row_count) =
+                rollout_collision_rows->jacobian;
+            Eigen::VectorXd lower(nv + collision_row_count);
+            Eigen::VectorXd upper(nv + collision_row_count);
+            lower.head(nv) = successor_lower;
+            upper.head(nv) = successor_upper;
+            lower.tail(collision_row_count) =
+                rollout_collision_rows->lower_bounds;
+            upper.tail(collision_row_count) =
+                rollout_collision_rows->upper_bounds;
+
+            Eigen::VectorXd terminal_lower = lower;
+            terminal_lower.tail(collision_row_count) =
+                terminal_lower.tail(collision_row_count)
+                    .cwiseMax(Eigen::VectorXd::Zero(collision_row_count));
+            const auto terminal_solution =
+                computeMultiObjectiveVelocitySolutionEigen(
+                    {braking_velocity_from(rollout_velocity)},
+                    {Eigen::MatrixXd::Identity(nv, nv)}, constraints,
+                    terminal_lower, upper, rollout_solver_config,
+                    {rollout_objective_config});
+            if (static_cast<int>(terminal_solution.solution.size()) == nv) {
+              const Eigen::Map<const Eigen::VectorXd> terminal_velocity_map(
+                  terminal_solution.solution.data(), nv);
+              const Eigen::VectorXd terminal_velocity = terminal_velocity_map;
+              const Eigen::VectorXd terminal_constraint_values =
+                  constraints * terminal_velocity;
+              const bool terminal_feasible = terminal_velocity.allFinite() &&
+                  (terminal_constraint_values.array() >=
+                   (terminal_lower.array() -
+                    10.0 * constraint_tolerance_))
+                      .all() &&
+                  (terminal_constraint_values.array() <=
+                   (upper.array() + 10.0 * constraint_tolerance_))
+                      .all();
+              if (terminal_feasible) {
+                Eigen::VectorXd terminal_q = configuration_for_velocity(
+                    rollout_q, terminal_velocity);
+                const Eigen::VectorXd applied_terminal_velocity =
+                    pinocchio::difference(robot_->model(), rollout_q,
+                                          terminal_q) /
+                    dt_safe;
+                bool terminal_acceleration_feasible = true;
+                for (int i = 0; i < nv; ++i) {
+                  if (applied_terminal_velocity[i] <
+                          successor_lower[i] -
+                              10.0 * constraint_tolerance_ ||
+                      applied_terminal_velocity[i] >
+                          successor_upper[i] +
+                              10.0 * constraint_tolerance_) {
+                    terminal_acceleration_feasible = false;
+                    break;
+                  }
+                }
+                if (terminal_acceleration_feasible &&
+                    collision_acceptable(terminal_q,
+                                         minimum_recovery_margin)) {
+                  robot_->update_configuration(terminal_q);
+                  const auto terminal_collision_rows =
+                      compute_collision_constraint();
+                  if (!terminal_collision_rows.has_value() ||
+                      terminal_collision_rows->jacobian.rows() == 0 ||
+                      ((terminal_collision_rows->jacobian *
+                        applied_terminal_velocity)
+                               .array() >=
+                           -10.0 * constraint_tolerance_)
+                          .all()) {
+                    rollout_q = std::move(terminal_q);
+                    rollout_velocity = applied_terminal_velocity;
+                    if (!have_first_step) {
+                      first_q = rollout_q;
+                      first_velocity = rollout_velocity;
+                      have_first_step = true;
+                    }
+                    if (rollout_velocity.norm() <=
+                        10.0 * constraint_tolerance_) {
+                      if (first_q_out != nullptr) {
+                        *first_q_out = std::move(first_q);
+                      }
+                      if (first_velocity_out != nullptr) {
+                        *first_velocity_out = std::move(first_velocity);
+                      }
+                      return true;
+                    }
+                    continue;
+                  }
+                }
+              }
+            }
+
+            const auto rollout_solution =
+                computeMultiObjectiveVelocitySolutionEigen(
+                    {Eigen::VectorXd::Zero(nv)},
+                    {Eigen::MatrixXd::Identity(nv, nv)}, constraints, lower,
+                    upper, rollout_solver_config,
+                    {rollout_objective_config});
+            if (static_cast<int>(rollout_solution.solution.size()) != nv) {
+              return fail_with_first_step();
+            }
+            const Eigen::Map<const Eigen::VectorXd> next_velocity_map(
+                rollout_solution.solution.data(), nv);
+            const Eigen::VectorXd next_velocity = next_velocity_map;
+            const Eigen::VectorXd constraint_values =
+                constraints * next_velocity;
+            const bool feasible = next_velocity.allFinite() &&
+                (constraint_values.array() >=
+                 (lower.array() - 10.0 * constraint_tolerance_))
+                    .all() &&
+                (constraint_values.array() <=
+                 (upper.array() + 10.0 * constraint_tolerance_))
+                    .all();
+            if (!feasible) {
+              return fail_with_first_step();
+            }
+
+            Eigen::VectorXd next_q =
+                configuration_for_velocity(rollout_q, next_velocity);
+            const Eigen::VectorXd applied_next_velocity =
+                pinocchio::difference(robot_->model(), rollout_q, next_q) /
+                dt_safe;
+            for (int i = 0; i < nv; ++i) {
+              if (applied_next_velocity[i] <
+                      successor_lower[i] - 10.0 * constraint_tolerance_ ||
+                  applied_next_velocity[i] >
+                      successor_upper[i] + 10.0 * constraint_tolerance_) {
+                return fail_with_first_step();
+              }
+            }
+            if (!collision_acceptable(next_q, minimum_recovery_margin)) {
+              return fail_with_first_step();
+            }
+            rollout_q = std::move(next_q);
+            rollout_velocity = applied_next_velocity;
+            if (!have_first_step) {
+              first_q = rollout_q;
+              first_velocity = rollout_velocity;
+              have_first_step = true;
+            }
+          }
+          publish_first_step();
+          return false;
+        };
+
+    const auto braking_rollout_acceptable =
+        [&](const Eigen::VectorXd &candidate_q,
+            const Eigen::VectorXd &candidate_velocity,
+            double minimum_recovery_margin,
+            Eigen::VectorXd *first_q_out,
+            Eigen::VectorXd *first_velocity_out) {
+          return componentwise_braking_rollout_acceptable(
+                     candidate_q, candidate_velocity, minimum_recovery_margin,
+                     first_q_out, first_velocity_out) ||
+                 collision_aware_braking_rollout_acceptable(
+                     candidate_q, candidate_velocity, minimum_recovery_margin,
+                     first_q_out, first_velocity_out);
+        };
+
+    const auto candidate_and_braking_rollout_acceptable =
+        [&](const Eigen::VectorXd &candidate_q,
+            const Eigen::VectorXd &candidate_velocity) {
+          return collision_acceptable(candidate_q, 0.0) &&
+                 braking_rollout_acceptable(candidate_q, candidate_velocity,
+                                             kCollisionTolerance, nullptr,
+                                             nullptr);
+        };
+
+    if (!candidate_and_braking_rollout_acceptable(limited_q,
+                                                   limited_velocity)) {
+      bool accepted_backoff = false;
+      if (acceleration_limits_enabled_) {
+        Eigen::VectorXd braking_q;
+        Eigen::VectorXd braking_velocity;
+        const bool full_braking_rollout_acceptable =
+            braking_rollout_acceptable(
+                current_q, previous_applied_velocity, 0.0, &braking_q,
+                &braking_velocity);
+        const bool have_safe_braking_step =
+            braking_q.size() == robot_->nq() &&
+            braking_velocity.size() == robot_->nv() &&
+            braking_q.allFinite() && braking_velocity.allFinite();
+        if ((full_braking_rollout_acceptable || have_safe_braking_step) &&
+            collision_acceptable(braking_q, 0.0)) {
+          Eigen::VectorXd best_velocity = braking_velocity;
+          Eigen::VectorXd best_q = std::move(braking_q);
+          double safe_fraction = 0.0;
+          double unsafe_fraction = 1.0;
+          for (int iteration = 0; iteration < 10; ++iteration) {
+            const double fraction =
+                0.5 * (safe_fraction + unsafe_fraction);
+            const Eigen::VectorXd trial_velocity =
+                braking_velocity +
+                fraction * (limited_velocity - braking_velocity);
+            Eigen::VectorXd trial_q =
+                configuration_for_velocity(current_q, trial_velocity);
+            if (candidate_and_braking_rollout_acceptable(trial_q,
+                                                          trial_velocity)) {
+              safe_fraction = fraction;
+              best_velocity = trial_velocity;
+              best_q = std::move(trial_q);
+            } else {
+              unsafe_fraction = fraction;
+            }
+          }
+          limited_velocity = std::move(best_velocity);
+          limited_q = std::move(best_q);
+          accepted_backoff = true;
+        }
+      }
+      if (!accepted_backoff && !acceleration_limits_enabled_) {
+        for (const double fraction : kCollisionRejectionBackoffFractions) {
+          const Eigen::VectorXd backoff_velocity =
+              fraction * limited_velocity;
+          Eigen::VectorXd backoff_q =
+              configuration_for_velocity(current_q, backoff_velocity);
+          if (collision_acceptable(backoff_q, 0.0)) {
+            limited_velocity = backoff_velocity;
+            limited_q = std::move(backoff_q);
+            accepted_backoff = true;
+            break;
+          }
+        }
+      }
+      if (!accepted_backoff) {
+        limited_velocity.setZero();
+        limited_q = current_q;
+      }
+    }
+  }
+
+  q_candidate = std::move(limited_q);
+  robot_->update_configuration(q_candidate);
+  return true;
+}
+
+bool KinematicsSolver::compute_position_step_continuity_brake(
+    const Eigen::VectorXd &current_q,
+    const Eigen::VectorXd &previous_applied_velocity,
+    const PositionStepOptions &options, double outer_dt,
+    Eigen::VectorXd &q_candidate) {
+  if (!acceleration_limits_enabled_ ||
+      previous_applied_velocity.size() != robot_->nv() ||
+      acceleration_limits_.size() != robot_->nv()) {
+    return false;
+  }
+
+  const double dt_safe = std::max(outer_dt, 1e-9);
+  Eigen::VectorXd braking_velocity = previous_applied_velocity;
+  for (int i = 0; i < robot_->nv(); ++i) {
+    const double acceleration_step = acceleration_limits_[i] * dt_safe;
+    const double deadband = acceleration_step * 0.01;
+    const double step = acceleration_step + deadband;
+    if (braking_velocity[i] > step) {
+      braking_velocity[i] -= step;
+    } else if (braking_velocity[i] < -step) {
+      braking_velocity[i] += step;
+    } else {
+      braking_velocity[i] = 0.0;
+    }
+  }
+
+  q_candidate = pinocchio::integrate(robot_->model(), current_q,
+                                     dt_safe * braking_velocity);
+  apply_position_step_outer_acceleration_limit(
+      current_q, previous_applied_velocity, options, dt_safe, q_candidate);
+
+  const Eigen::VectorXd applied_velocity =
+      pinocchio::difference(robot_->model(), current_q, q_candidate) / dt_safe;
+  if (applied_velocity.size() != robot_->nv() || !applied_velocity.allFinite()) {
+    q_candidate = current_q;
+    robot_->update_configuration(q_candidate);
+    return false;
+  }
+  for (int i = 0; i < robot_->nv(); ++i) {
+    const double allowed_change =
+        acceleration_limits_[i] * dt_safe * 1.01 + 10.0 * constraint_tolerance_;
+    if (std::abs(applied_velocity[i] - previous_applied_velocity[i]) >
+        allowed_change) {
+      q_candidate = current_q;
+      robot_->update_configuration(q_candidate);
+      return false;
+    }
+  }
+  return applied_velocity.norm() > 10.0 * constraint_tolerance_;
 }
 
 std::optional<PositionIKResult>
@@ -6788,7 +7636,7 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
   // velocity and the configured acceleration limits.
   // A deadband of 1% of the acceleration step prevents oscillation when
   // the velocity is small and the acceleration limit is tight.
-  if (acceleration_limits_enabled_ &&
+  if (acceleration_limits_enabled_ && position_step_call_depth_ == 0 &&
       previous_dq_.size() == robot_->nv() &&
       acceleration_limits_.size() == robot_->nv()) {
     const int nv = robot_->nv();
@@ -7460,8 +8308,10 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
         result.solution.data(), result.solution.size());
     last_solution_dq_norm_ = result.joint_velocities.norm();
 
-    // Cache velocity for next tick's acceleration constraint cascade
-    if (acceleration_limits_enabled_) {
+    // A position step may invoke several speculative velocity solves before it
+    // accepts one outer-tick command.  Only the accepted position result may
+    // advance acceleration history; direct velocity solves still commit here.
+    if (acceleration_limits_enabled_ && position_step_call_depth_ == 0) {
       previous_dq_ = result.joint_velocities;
     }
 
@@ -8299,6 +9149,7 @@ PositionIKResult KinematicsSolver::solve_position_step(
 
   PositionIKResult result;
   const double step_dt = (options.dt > 0.0) ? options.dt : dt_;
+  const Eigen::VectorXd previous_applied_velocity = previous_dq_;
 
   if (current_q.size() != robot_->nq()) {
     result.status = SolverStatus::kInvalidInput;
@@ -9223,6 +10074,8 @@ PositionIKResult KinematicsSolver::solve_position_step(
   if (final_configuration_limited) {
     robot_->update_configuration(q);
   }
+  apply_position_step_outer_acceleration_limit(
+      current_q, previous_applied_velocity, options, step_dt, q);
 
   result.q_solution = q;
   result.achieved_pose = robot_->get_frame_pose(frame_task->getFrameName());
@@ -9303,10 +10156,13 @@ PositionIKResult KinematicsSolver::solve_position_step(
           candidate_step_norm, owns_position_step_continuity,
           collision_violated_flag);
   if (held_non_improving_step) {
-    result.position_step_hold_active = true;
     const bool target_satisfied =
         initial_commanded_error <= kPositionStepSatisfiedMeritTolerance;
-    q = current_q;
+    Eigen::VectorXd braking_q = current_q;
+    const bool braking_to_hold = compute_position_step_continuity_brake(
+        current_q, previous_applied_velocity, options, step_dt, braking_q);
+    result.position_step_hold_active = !braking_to_hold;
+    q = braking_to_hold ? std::move(braking_q) : current_q;
     robot_->update_configuration(q);
     result.q_solution = q;
     result.achieved_pose = robot_->get_frame_pose(frame_task->getFrameName());
@@ -9319,30 +10175,39 @@ PositionIKResult KinematicsSolver::solve_position_step(
       result.position_error = held_error.head<3>().norm();
       result.orientation_error = held_error.tail<3>().norm();
     }
-    result.status = target_satisfied ? SolverStatus::kSuccess
-                                     : SolverStatus::kNoProgress;
-    result.status_message = target_satisfied
-                                ? "solve_position_step held satisfied stationary "
-                                  "target at the current configuration"
-                                : "solve_position_step held current configuration "
-                                  "because the nominal step did not reduce "
-                                  "commanded task error";
-    sync_position_result_applied_velocity(result, current_q, step_dt);
-    last_solution_dq_norm_ = 0.0;
-    if (previous_dq_.size() == robot_->nv()) {
+    result.status = braking_to_hold
+                        ? SolverStatus::kSuccess
+                        : (target_satisfied ? SolverStatus::kSuccess
+                                            : SolverStatus::kNoProgress);
+    result.status_message =
+        braking_to_hold
+            ? "solve_position_step decelerating before continuity hold"
+            : (target_satisfied
+                   ? "solve_position_step held satisfied stationary target at "
+                     "the current configuration"
+                   : "solve_position_step held current configuration because "
+                     "the nominal step did not reduce commanded task error");
+    sync_position_result_applied_velocity(result, robot_->model(), current_q,
+                                          step_dt);
+    last_solution_dq_norm_ = result.joint_velocities.norm();
+    if (!braking_to_hold && previous_dq_.size() == robot_->nv()) {
       previous_dq_.setZero();
     }
   }
   if (result.stall_escape_count > 0 || result.collision_rejection_count > 0 ||
       collision_violated_flag || configuration_step_limited) {
-    sync_position_result_applied_velocity(result, current_q, step_dt);
+    sync_position_result_applied_velocity(result, robot_->model(), current_q,
+                                          step_dt);
   }
   if (!held_non_improving_step &&
       should_hold_soft_infeasible_position_step(
           result, current_q, initial_combined_error, collision_violated_flag,
           recovery_inside_collision_margin)) {
-    result.position_step_hold_active = true;
-    q = current_q;
+    Eigen::VectorXd braking_q = current_q;
+    const bool braking_to_hold = compute_position_step_continuity_brake(
+        current_q, previous_applied_velocity, options, step_dt, braking_q);
+    result.position_step_hold_active = !braking_to_hold;
+    q = braking_to_hold ? std::move(braking_q) : current_q;
     robot_->update_configuration(q);
     result.q_solution = q;
     result.achieved_pose = robot_->get_frame_pose(frame_task->getFrameName());
@@ -9355,15 +10220,27 @@ PositionIKResult KinematicsSolver::solve_position_step(
       result.position_error = held_error.head<3>().norm();
       result.orientation_error = held_error.tail<3>().norm();
     }
-    result.status = SolverStatus::kNoProgress;
-    result.status_message =
-        "solve_position_step held current configuration because the primary "
-        "SCALE task was soft-infeasible";
-    sync_position_result_applied_velocity(result, current_q, step_dt);
-    last_solution_dq_norm_ = 0.0;
-    if (previous_dq_.size() == robot_->nv()) {
+    result.status = braking_to_hold ? SolverStatus::kSuccess
+                                    : SolverStatus::kNoProgress;
+    result.status_message = braking_to_hold
+                                ? "solve_position_step decelerating before "
+                                  "soft-infeasible continuity hold"
+                                : "solve_position_step held current configuration "
+                                  "because the primary SCALE task was "
+                                  "soft-infeasible";
+    sync_position_result_applied_velocity(result, robot_->model(), current_q,
+                                          step_dt);
+    last_solution_dq_norm_ = result.joint_velocities.norm();
+    if (!braking_to_hold && previous_dq_.size() == robot_->nv()) {
       previous_dq_.setZero();
     }
+  }
+
+  sync_position_result_applied_velocity(result, robot_->model(), current_q,
+                                        step_dt);
+  if (acceleration_limits_enabled_ &&
+      result.joint_velocities.size() == robot_->nv()) {
+    previous_dq_ = result.joint_velocities;
   }
 
   // In teleop-style loops (max_steps=1), stall handling must accumulate across
@@ -9395,6 +10272,7 @@ PositionIKResult KinematicsSolver::solve_position_step(
 
   PositionIKResult result;
   const double step_dt = (options.dt > 0.0) ? options.dt : dt_;
+  const Eigen::VectorXd previous_applied_velocity = previous_dq_;
 
   if (current_q.size() != robot_->nq()) {
     result.status = SolverStatus::kInvalidInput;
@@ -10446,6 +11324,8 @@ PositionIKResult KinematicsSolver::solve_position_step(
   if (final_configuration_limited) {
     robot_->update_configuration(q);
   }
+  apply_position_step_outer_acceleration_limit(
+      current_q, previous_applied_velocity, options, step_dt, q);
 
   result.q_solution = q;
   result.iterations_used = steps_used;
@@ -10568,10 +11448,13 @@ PositionIKResult KinematicsSolver::solve_position_step(
           candidate_step_norm, owns_position_step_continuity,
           collision_violated_flag_mts);
   if (held_non_improving_step) {
-    result.position_step_hold_active = true;
     const bool target_satisfied =
         initial_commanded_error <= kPositionStepSatisfiedMeritTolerance;
-    q = current_q;
+    Eigen::VectorXd braking_q = current_q;
+    const bool braking_to_hold = compute_position_step_continuity_brake(
+        current_q, previous_applied_velocity, options, step_dt, braking_q);
+    result.position_step_hold_active = !braking_to_hold;
+    q = braking_to_hold ? std::move(braking_q) : current_q;
     robot_->update_configuration(q);
     result.q_solution = q;
     primary.task->update(*robot_);
@@ -10589,30 +11472,39 @@ PositionIKResult KinematicsSolver::solve_position_step(
     } else {
       result.achieved_pose = targets.front().target_pose;
     }
-    result.status = target_satisfied ? SolverStatus::kSuccess
-                                     : SolverStatus::kNoProgress;
-    result.status_message = target_satisfied
-                                ? "solve_position_step held satisfied stationary "
-                                  "target at the current configuration"
-                                : "solve_position_step held current configuration "
-                                  "because the nominal step did not reduce "
-                                  "commanded task error";
-    sync_position_result_applied_velocity(result, current_q, step_dt);
-    last_solution_dq_norm_ = 0.0;
-    if (previous_dq_.size() == robot_->nv()) {
+    result.status = braking_to_hold
+                        ? SolverStatus::kSuccess
+                        : (target_satisfied ? SolverStatus::kSuccess
+                                            : SolverStatus::kNoProgress);
+    result.status_message =
+        braking_to_hold
+            ? "solve_position_step decelerating before continuity hold"
+            : (target_satisfied
+                   ? "solve_position_step held satisfied stationary target at "
+                     "the current configuration"
+                   : "solve_position_step held current configuration because "
+                     "the nominal step did not reduce commanded task error");
+    sync_position_result_applied_velocity(result, robot_->model(), current_q,
+                                          step_dt);
+    last_solution_dq_norm_ = result.joint_velocities.norm();
+    if (!braking_to_hold && previous_dq_.size() == robot_->nv()) {
       previous_dq_.setZero();
     }
   }
   if (result.stall_escape_count > 0 || result.collision_rejection_count > 0 ||
       collision_violated_flag_mts || configuration_step_limited) {
-    sync_position_result_applied_velocity(result, current_q, step_dt);
+    sync_position_result_applied_velocity(result, robot_->model(), current_q,
+                                          step_dt);
   }
   if (!held_non_improving_step &&
       should_hold_soft_infeasible_position_step(
           result, current_q, initial_primary_combined_error,
           collision_violated_flag_mts, recovery_inside_collision_margin)) {
-    result.position_step_hold_active = true;
-    q = current_q;
+    Eigen::VectorXd braking_q = current_q;
+    const bool braking_to_hold = compute_position_step_continuity_brake(
+        current_q, previous_applied_velocity, options, step_dt, braking_q);
+    result.position_step_hold_active = !braking_to_hold;
+    q = braking_to_hold ? std::move(braking_q) : current_q;
     robot_->update_configuration(q);
     result.q_solution = q;
     primary.task->update(*robot_);
@@ -10630,15 +11522,27 @@ PositionIKResult KinematicsSolver::solve_position_step(
     } else {
       result.achieved_pose = targets.front().target_pose;
     }
-    result.status = SolverStatus::kNoProgress;
-    result.status_message =
-        "solve_position_step held current configuration because the primary "
-        "SCALE task was soft-infeasible";
-    sync_position_result_applied_velocity(result, current_q, step_dt);
-    last_solution_dq_norm_ = 0.0;
-    if (previous_dq_.size() == robot_->nv()) {
+    result.status = braking_to_hold ? SolverStatus::kSuccess
+                                    : SolverStatus::kNoProgress;
+    result.status_message = braking_to_hold
+                                ? "solve_position_step decelerating before "
+                                  "soft-infeasible continuity hold"
+                                : "solve_position_step held current configuration "
+                                  "because the primary SCALE task was "
+                                  "soft-infeasible";
+    sync_position_result_applied_velocity(result, robot_->model(), current_q,
+                                          step_dt);
+    last_solution_dq_norm_ = result.joint_velocities.norm();
+    if (!braking_to_hold && previous_dq_.size() == robot_->nv()) {
       previous_dq_.setZero();
     }
+  }
+
+  sync_position_result_applied_velocity(result, robot_->model(), current_q,
+                                        step_dt);
+  if (acceleration_limits_enabled_ &&
+      result.joint_velocities.size() == robot_->nv()) {
+    previous_dq_ = result.joint_velocities;
   }
 
   // In teleop-style loops (max_steps=1), stall handling must accumulate across

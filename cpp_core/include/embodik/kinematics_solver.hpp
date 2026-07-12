@@ -350,6 +350,31 @@ public:
   }
 
   /**
+   * @brief Synchronize the acceleration reference to the velocity actually
+   * applied by an outer controller.
+   *
+   * Position-level callers may post-process q_solution or hold a rejected
+   * command. Feeding that applied velocity back prevents nonlinear retries
+   * from becoming the reference for the next control tick.
+   */
+  void set_previous_joint_velocities(const Eigen::VectorXd &velocities) {
+    if (velocities.size() != robot_->nv()) {
+      throw std::invalid_argument(
+          "previous joint velocities must have size nv");
+    }
+    if (!velocities.allFinite()) {
+      throw std::invalid_argument(
+          "previous joint velocities must be finite");
+    }
+    previous_dq_ = velocities;
+  }
+
+  /** @brief Return the velocity currently used as acceleration reference. */
+  Eigen::VectorXd get_previous_joint_velocities() const {
+    return previous_dq_;
+  }
+
+  /**
    * @brief Set floating-base position bounds (for floating-base robots)
    * @param lower Lower bounds for base position (3D)
    * @param upper Upper bounds for base position (3D)
@@ -1330,6 +1355,18 @@ private:
 
   void apply_position_step_primary_task_options(const PositionStepOptions &options,
                                                 Task *task);
+
+  bool apply_position_step_outer_acceleration_limit(
+      const Eigen::VectorXd &current_q,
+      const Eigen::VectorXd &previous_applied_velocity,
+      const PositionStepOptions &options, double outer_dt,
+      Eigen::VectorXd &q_candidate);
+
+  bool compute_position_step_continuity_brake(
+      const Eigen::VectorXd &current_q,
+      const Eigen::VectorXd &previous_applied_velocity,
+      const PositionStepOptions &options, double outer_dt,
+      Eigen::VectorXd &q_candidate);
 
   std::optional<PositionIKResult> attempt_min_error_position_step_retry(
       const Eigen::VectorXd &entry_q, const PositionStepOptions &options,
