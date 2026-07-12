@@ -264,8 +264,8 @@ class TestAccelerationConstraints:
         assert np.max(np.abs(one_step_velocity)) <= 2.0 * one_step_options.dt * 1.02
         assert np.max(np.abs(multistep_velocity)) <= 2.0 * multistep_options.dt * 1.02
 
-    def test_multistep_position_preserves_predictive_task_balance(self):
-        """Prediction may scale task blocks without changing their directions."""
+    def test_multistep_position_remaps_predictive_task_magnitude(self):
+        """Feasible predictor magnitude should survive without its direction drift."""
         pytest.importorskip("robot_descriptions.panda_description")
         from robot_descriptions.panda_description import URDF_PATH
 
@@ -337,7 +337,7 @@ class TestAccelerationConstraints:
                 predictive_scales.append(0.0)
                 continue
             predictive_scales.append(
-                abs(float(predictive_task_velocity[block] @ commanded)) / commanded_norm_sq
+                float(np.linalg.norm(predictive_task_velocity[block])) / np.sqrt(commanded_norm_sq)
             )
 
         normalization = max(1.0, *predictive_scales)

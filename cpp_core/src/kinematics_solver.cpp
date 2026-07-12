@@ -5830,10 +5830,9 @@ KinematicsSolver::apply_position_step_task_metric_projection(
       }
 
       const double predictive_scale =
-          predictive_task_velocity.segment(start, size).dot(commanded) /
-          commanded_norm_sq;
-      return std::isfinite(predictive_scale) ? std::abs(predictive_scale)
-                                             : 0.0;
+          predictive_task_velocity.segment(start, size).norm() /
+          std::sqrt(commanded_norm_sq);
+      return std::isfinite(predictive_scale) ? predictive_scale : 0.0;
     };
 
     if (task->getType() == TaskType::FRAME_POSE &&
