@@ -5820,9 +5820,12 @@ KinematicsSolver::apply_position_step_task_metric_projection(
 
     const Eigen::VectorXd predictive_task_velocity =
         jacobian * predictive_velocity;
+    if (!predictive_task_velocity.allFinite()) {
+      continue;
+    }
     Eigen::VectorXd projected_velocity =
         Eigen::VectorXd::Zero(commanded_velocity.size());
-    const auto command_axis_scale = [&](int start, int size) {
+    const auto predictor_to_command_norm_ratio = [&](int start, int size) {
       const auto commanded = commanded_velocity.segment(start, size);
       const double commanded_norm_sq = commanded.squaredNorm();
       if (commanded_norm_sq <= kCollisionEscapeNormEps) {
@@ -5837,18 +5840,27 @@ KinematicsSolver::apply_position_step_task_metric_projection(
 
     if (task->getType() == TaskType::FRAME_POSE &&
         commanded_velocity.size() == 6) {
-      const double linear_scale = command_axis_scale(0, 3);
-      const double angular_scale = command_axis_scale(3, 3);
+      const double linear_scale = predictor_to_command_norm_ratio(0, 3);
+      const double angular_scale = predictor_to_command_norm_ratio(3, 3);
       const double normalization =
           std::max({1.0, linear_scale, angular_scale});
-      projected_velocity.head<3>() =
-          (linear_scale / normalization) * commanded_velocity.head<3>();
-      projected_velocity.tail<3>() =
-          (angular_scale / normalization) * commanded_velocity.tail<3>();
+      if (commanded_velocity.head<3>().squaredNorm() >
+          kCollisionEscapeNormEps) {
+        projected_velocity.head<3>() =
+            predictive_task_velocity.head<3>() / normalization;
+      }
+      if (commanded_velocity.tail<3>().squaredNorm() >
+          kCollisionEscapeNormEps) {
+        projected_velocity.tail<3>() =
+            predictive_task_velocity.tail<3>() / normalization;
+      }
     } else {
-      const double scale = command_axis_scale(0, commanded_velocity.size());
-      projected_velocity =
-          (scale / std::max(1.0, scale)) * commanded_velocity;
+      const double scale =
+          predictor_to_command_norm_ratio(0, commanded_velocity.size());
+      if (commanded_velocity.squaredNorm() > kCollisionEscapeNormEps) {
+        projected_velocity =
+            predictive_task_velocity / std::max(1.0, scale);
+      }
     }
     task->setPositionStepTargetVelocity(projected_velocity);
     have_task_objective = true;

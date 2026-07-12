@@ -264,8 +264,13 @@ class TestAccelerationConstraints:
         assert np.max(np.abs(one_step_velocity)) <= 2.0 * one_step_options.dt * 1.02
         assert np.max(np.abs(multistep_velocity)) <= 2.0 * multistep_options.dt * 1.02
 
-    def test_multistep_position_remaps_predictive_task_magnitude(self):
-        """Feasible predictor magnitude should survive without its direction drift."""
+    @pytest.mark.parametrize(
+        "translation_offset",
+        (np.array([0.20, 0.12, 0.08]), np.zeros(3)),
+        ids=("full-pose", "orientation-only"),
+    )
+    def test_multistep_position_masks_uncommanded_predictive_blocks(self, translation_offset):
+        """Prediction stays feasible without activating an uncommanded pose block."""
         pytest.importorskip("robot_descriptions.panda_description")
         from robot_descriptions.panda_description import URDF_PATH
 
@@ -289,7 +294,7 @@ class TestAccelerationConstraints:
         target_robot, nominal_solver, _ = build_solver(acceleration_limited=False)
         target_robot.update_configuration(q)
         target = target_robot.get_frame_pose("panda_hand").homogeneous()
-        target[:3, 3] += np.array([0.20, 0.12, 0.08])
+        target[:3, 3] += translation_offset
         angle = 0.35
         rotation_delta = np.array(
             [
@@ -329,6 +334,7 @@ class TestAccelerationConstraints:
             np.asarray(direct_task.get_jacobian(), dtype=float) @ nominal_velocity
         )
 
+        projected_task_velocity = np.zeros(6, dtype=float)
         predictive_scales = []
         for block in (slice(0, 3), slice(3, 6)):
             commanded = current_task_velocity[block]
@@ -336,17 +342,13 @@ class TestAccelerationConstraints:
             if commanded_norm_sq <= 1e-12:
                 predictive_scales.append(0.0)
                 continue
+            projected_task_velocity[block] = predictive_task_velocity[block]
             predictive_scales.append(
                 float(np.linalg.norm(predictive_task_velocity[block])) / np.sqrt(commanded_norm_sq)
             )
 
         normalization = max(1.0, *predictive_scales)
-        projected_task_velocity = np.concatenate(
-            (
-                (predictive_scales[0] / normalization) * current_task_velocity[:3],
-                (predictive_scales[1] / normalization) * current_task_velocity[3:],
-            )
-        )
+        projected_task_velocity /= normalization
 
         direct_task.set_target_velocity(projected_task_velocity)
         direct_result = direct_solver.solve_velocity(q, apply_limits=True)
