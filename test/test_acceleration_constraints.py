@@ -305,21 +305,25 @@ class TestAccelerationConstraints:
         )
         target[:3, :3] = rotation_delta @ target[:3, :3]
 
-        position_gain = 10.0
-        orientation_gain = 10.0
+        position_gain = 1.0
+        orientation_gain = 1.0
         options = eik.PositionStepOptions()
         options.dt = 0.02
         options.max_steps = 3
         options.position_gain = position_gain
         options.orientation_gain = orientation_gain
+        options.primary_solve_mode = eik.TaskSolveMode.MIN_ERROR
 
+        options.max_steps = 1
         nominal_result = nominal_solver.solve_position_step(
             q, [eik.TaskTarget("ee", target)], options
         )
         assert nominal_result.status == eik.SolverStatus.SUCCESS
         nominal_velocity = (np.asarray(nominal_result.q_solution) - q) / options.dt
+        options.max_steps = 3
 
         direct_robot, direct_solver, direct_task = build_solver(acceleration_limited=True)
+        direct_task.solve_mode = eik.TaskSolveMode.MIN_ERROR
         direct_robot.update_configuration(q)
         direct_task.set_target_pose(target[:3, 3], target[:3, :3])
         direct_task.update(direct_robot)
@@ -335,20 +339,12 @@ class TestAccelerationConstraints:
         )
 
         projected_task_velocity = np.zeros(6, dtype=float)
-        predictive_scales = []
         for block in (slice(0, 3), slice(3, 6)):
             commanded = current_task_velocity[block]
             commanded_norm_sq = float(commanded @ commanded)
             if commanded_norm_sq <= 1e-12:
-                predictive_scales.append(0.0)
                 continue
             projected_task_velocity[block] = predictive_task_velocity[block]
-            predictive_scales.append(
-                float(np.linalg.norm(predictive_task_velocity[block])) / np.sqrt(commanded_norm_sq)
-            )
-
-        normalization = max(1.0, *predictive_scales)
-        projected_task_velocity /= normalization
 
         direct_task.set_target_velocity(projected_task_velocity)
         direct_result = direct_solver.solve_velocity(q, apply_limits=True)

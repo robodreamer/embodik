@@ -1381,6 +1381,7 @@ private:
   std::optional<VelocitySolverResult>
   apply_position_step_task_metric_projection(
       const Eigen::VectorXd &current_q, double outer_dt,
+      const Eigen::VectorXd &first_tick_velocity,
       const std::vector<int> &velocity_lock_indices,
       const std::optional<TorsoPoseConstraintOptions> &torso_constraint,
       Eigen::VectorXd &q_candidate);
