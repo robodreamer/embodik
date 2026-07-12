@@ -1385,6 +1385,13 @@ private:
       const std::optional<TorsoPoseConstraintOptions> &torso_constraint,
       Eigen::VectorXd &q_candidate);
 
+  std::optional<Eigen::VectorXd>
+  evaluate_position_step_componentwise_outer_candidate(
+      const Eigen::VectorXd &current_q,
+      const Eigen::VectorXd &previous_applied_velocity,
+      const PositionStepOptions &options, double outer_dt,
+      const Eigen::VectorXd &terminal_q);
+
   bool apply_position_step_outer_acceleration_limit(
       const Eigen::VectorXd &current_q,
       const Eigen::VectorXd &previous_applied_velocity,

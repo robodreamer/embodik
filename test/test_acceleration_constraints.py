@@ -367,6 +367,117 @@ class TestAccelerationConstraints:
             atol=1e-8,
         )
 
+    def test_multistep_position_selects_lower_merit_feasible_outer_candidate(self):
+        """Outer acceleration projection should keep the better safe task step."""
+        pytest.importorskip("robot_descriptions.panda_description")
+        from robot_descriptions.panda_description import URDF_PATH
+
+        def build_solver(*, acceleration_limited: bool):
+            robot = eik.RobotModel(URDF_PATH, floating_base=False)
+            solver = eik.KinematicsSolver(robot)
+            solver.dt = 0.02
+            solver.set_damping(0.05)
+            solver.enable_position_limits(True)
+            solver.enable_velocity_limits(True)
+            if acceleration_limited:
+                solver.set_acceleration_limits(np.full(robot.nv, 2.0))
+                solver.enable_acceleration_limits(True)
+            task = solver.add_frame_task("ee", "panda_hand", eik.TaskType.FRAME_POSE)
+            task.solve_mode = eik.TaskSolveMode.MIN_ERROR
+            return robot, solver, task
+
+        q = np.array(
+            [
+                -0.17136382,
+                -0.78512805,
+                -0.20969206,
+                -2.17748321,
+                0.05088892,
+                1.60011931,
+                0.95083846,
+                0.02,
+                0.02,
+            ]
+        )
+        translation_offset = np.array([-0.05516292, 0.0813279, -0.04271275])
+        axis = np.array([-0.75289164, 0.03292882, 0.51645381])
+        axis /= np.linalg.norm(axis)
+        angle = 0.7206624117090492
+        x, y, z = axis
+        c = np.cos(angle)
+        s = np.sin(angle)
+        one_minus_c = 1.0 - c
+        rotation_delta = np.array(
+            [
+                [
+                    c + x * x * one_minus_c,
+                    x * y * one_minus_c - z * s,
+                    x * z * one_minus_c + y * s,
+                ],
+                [
+                    y * x * one_minus_c + z * s,
+                    c + y * y * one_minus_c,
+                    y * z * one_minus_c - x * s,
+                ],
+                [
+                    z * x * one_minus_c - y * s,
+                    z * y * one_minus_c + x * s,
+                    c + z * z * one_minus_c,
+                ],
+            ]
+        )
+
+        nominal_robot, nominal_solver, nominal_task = build_solver(acceleration_limited=False)
+        nominal_robot.update_configuration(q)
+        target = nominal_robot.get_frame_pose("panda_hand").homogeneous()
+        target[:3, 3] += translation_offset
+        target[:3, :3] = rotation_delta @ target[:3, :3]
+
+        options = eik.PositionStepOptions()
+        options.dt = nominal_solver.dt
+        options.max_steps = 3
+        options.position_gain = 1.0
+        options.orientation_gain = 1.0
+        options.primary_solve_mode = eik.TaskSolveMode.MIN_ERROR
+        nominal_result = nominal_solver.solve_position_step(
+            q, [eik.TaskTarget("ee", target)], options
+        )
+        assert nominal_result.status == eik.SolverStatus.SUCCESS
+        nominal_velocity = (np.asarray(nominal_result.q_solution) - q) / options.dt
+
+        acceleration_step = 2.0 * options.dt * 1.01
+        componentwise_velocity = np.clip(nominal_velocity, -acceleration_step, acceleration_step)
+        componentwise_q = q + options.dt * componentwise_velocity
+
+        metric_robot, metric_solver, metric_task = build_solver(acceleration_limited=True)
+        metric_robot.update_configuration(q)
+        metric_task.set_target_pose(target[:3, 3], target[:3, :3])
+        metric_task.update(metric_robot)
+        metric_task.set_target_velocity(np.asarray(metric_task.get_jacobian()) @ nominal_velocity)
+        metric_result = metric_solver.solve_velocity(q, apply_limits=True)
+        metric_task.clear_target_velocity()
+        assert metric_result.status == eik.SolverStatus.SUCCESS
+        metric_q = q + options.dt * np.asarray(metric_result.joint_velocities)
+
+        def task_block_merits(robot, task, candidate_q):
+            robot.update_configuration(candidate_q)
+            task.set_target_pose(target[:3, 3], target[:3, :3])
+            task.update(robot)
+            error = np.asarray(task.get_error())
+            return float(np.linalg.norm(error[:3])), float(np.linalg.norm(error[3:]))
+
+        componentwise_merits = task_block_merits(nominal_robot, nominal_task, componentwise_q)
+        metric_merits = task_block_merits(metric_robot, metric_task, metric_q)
+        assert componentwise_merits[0] + 1e-7 < metric_merits[0]
+        assert componentwise_merits[1] + 1e-7 < metric_merits[1]
+
+        step_robot, step_solver, _ = build_solver(acceleration_limited=True)
+        step_result = step_solver.solve_position_step(q, [eik.TaskTarget("ee", target)], options)
+        assert step_result.status == eik.SolverStatus.SUCCESS
+        np.testing.assert_allclose(
+            np.asarray(step_result.q_solution), componentwise_q, rtol=0.0, atol=1e-9
+        )
+
     def test_position_step_accepts_caller_applied_velocity_reference(self, panda_setup):
         """A caller can synchronize acceleration state to the velocity it applied."""
         robot, solver = panda_setup

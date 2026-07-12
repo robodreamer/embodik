@@ -212,25 +212,48 @@ static bool is_scale_family_mode(TaskSolveMode mode) {
          mode == TaskSolveMode::kScaleElastic;
 }
 
-static double commanded_frame_merit(
+static std::array<double, 2> commanded_frame_block_merits(
+    const Eigen::VectorXd &error, TaskType task_type, double position_gain,
+    double orientation_gain) {
+  if (error.size() == 3) {
+    const bool orientation_only = task_type == TaskType::FRAME_ORIENTATION;
+    return orientation_only
+               ? std::array<double, 2>{
+                     0.0, orientation_gain > 0.0 ? error.head<3>().norm() : 0.0}
+               : std::array<double, 2>{
+                     position_gain > 0.0 ? error.head<3>().norm() : 0.0, 0.0};
+  }
+  if (error.size() < 6) {
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    return {nan, nan};
+  }
+  return {position_gain > 0.0 ? error.head<3>().norm() : 0.0,
+          orientation_gain > 0.0 ? error.tail<3>().norm() : 0.0};
+}
+
+static bool all_frame_task_blocks_commanded(
     const Eigen::VectorXd &error, TaskType task_type, double position_gain,
     double orientation_gain) {
   if (error.size() == 3) {
     const bool orientation_only = task_type == TaskType::FRAME_ORIENTATION;
     const double gain = orientation_only ? orientation_gain : position_gain;
-    return gain > 0.0 ? error.head<3>().norm() : 0.0;
+    return gain > 0.0 &&
+           error.head<3>().squaredNorm() > kCollisionEscapeNormEps;
   }
   if (error.size() < 6) {
-    return std::numeric_limits<double>::quiet_NaN();
+    return false;
   }
-  double merit = 0.0;
-  if (position_gain > 0.0) {
-    merit += error.head<3>().norm();
-  }
-  if (orientation_gain > 0.0) {
-    merit += error.tail<3>().norm();
-  }
-  return merit;
+  return position_gain > 0.0 && orientation_gain > 0.0 &&
+         error.head<3>().squaredNorm() > kCollisionEscapeNormEps &&
+         error.tail<3>().squaredNorm() > kCollisionEscapeNormEps;
+}
+
+static double commanded_frame_merit(
+    const Eigen::VectorXd &error, TaskType task_type, double position_gain,
+    double orientation_gain) {
+  const auto block_merits = commanded_frame_block_merits(
+      error, task_type, position_gain, orientation_gain);
+  return block_merits[0] + block_merits[1];
 }
 
 template <typename Derived>
@@ -5879,6 +5902,30 @@ KinematicsSolver::apply_position_step_task_metric_projection(
   return projected;
 }
 
+std::optional<Eigen::VectorXd>
+KinematicsSolver::evaluate_position_step_componentwise_outer_candidate(
+    const Eigen::VectorXd &current_q,
+    const Eigen::VectorXd &previous_applied_velocity,
+    const PositionStepOptions &options, double outer_dt,
+    const Eigen::VectorXd &terminal_q) {
+  if (!acceleration_limits_enabled_ || terminal_q.size() != robot_->nq()) {
+    return std::nullopt;
+  }
+
+  const PositionStepMutableStateSnapshot snapshot =
+      capture_position_step_mutable_state();
+  Eigen::VectorXd candidate = terminal_q;
+  const bool applied = apply_position_step_outer_acceleration_limit(
+      current_q, previous_applied_velocity, options, outer_dt, candidate);
+  restore_position_step_mutable_state(snapshot);
+  robot_->update_configuration(terminal_q);
+  if (!applied || candidate.size() != robot_->nq() ||
+      !candidate.allFinite()) {
+    return std::nullopt;
+  }
+  return candidate;
+}
+
 bool KinematicsSolver::apply_position_step_outer_acceleration_limit(
     const Eigen::VectorXd &current_q,
     const Eigen::VectorXd &previous_applied_velocity,
@@ -10581,9 +10628,15 @@ PositionIKResult KinematicsSolver::solve_position_step(
   }
 
   if (position_step_target_geometry_moved_) {
+    const auto componentwise_candidate =
+        evaluate_position_step_componentwise_outer_candidate(
+            current_q, previous_applied_velocity, options, step_dt, q);
     robot_->update_configuration(current_q);
     frame_task->update(*robot_);
     const Eigen::VectorXd &current_error = frame_task->getError();
+    const bool all_task_blocks_commanded = all_frame_task_blocks_commanded(
+        current_error, frame_task->getType(), options.position_gain,
+        options.orientation_gain);
     if (current_error.size() == 3) {
       const bool is_orientation_only =
           frame_task->getType() == TaskType::FRAME_ORIENTATION;
@@ -10610,6 +10663,36 @@ PositionIKResult KinematicsSolver::solve_position_step(
         projected_result.has_value()) {
       last_vel_result = std::move(*projected_result);
       have_vel_result = true;
+      if (componentwise_candidate.has_value() && all_task_blocks_commanded) {
+        const auto block_merits_at = [&](const Eigen::VectorXd &candidate_q) {
+          robot_->update_configuration(candidate_q);
+          frame_task->update(*robot_);
+          return commanded_frame_block_merits(
+              frame_task->getError(), frame_task->getType(),
+              options.position_gain, options.orientation_gain);
+        };
+        const auto projected_merits = block_merits_at(q);
+        const auto componentwise_merits =
+            block_merits_at(*componentwise_candidate);
+        const double projected_total =
+            projected_merits[0] + projected_merits[1];
+        const double componentwise_total =
+            componentwise_merits[0] + componentwise_merits[1];
+        const bool blocks_non_worsening =
+            std::isfinite(projected_merits[0]) &&
+            std::isfinite(projected_merits[1]) &&
+            std::isfinite(componentwise_merits[0]) &&
+            std::isfinite(componentwise_merits[1]) &&
+            componentwise_merits[0] <= projected_merits[0] + 1e-9 &&
+            componentwise_merits[1] <= projected_merits[1] + 1e-9;
+        if (blocks_non_worsening &&
+            componentwise_total + 1e-9 < projected_total) {
+          q = *componentwise_candidate;
+          last_vel_result.joint_velocities =
+              pinocchio::difference(robot_->model(), current_q, q) / step_dt;
+        }
+        robot_->update_configuration(q);
+      }
     }
   } else if (acceleration_limits_enabled_ &&
              first_tick_velocity.size() == robot_->nv() &&
@@ -11852,12 +11935,26 @@ PositionIKResult KinematicsSolver::solve_position_step(
   }
 
   if (position_step_target_geometry_moved_) {
+    const auto componentwise_candidate =
+        evaluate_position_step_componentwise_outer_candidate(
+            current_q, previous_applied_velocity, options, step_dt, q);
     robot_->update_configuration(current_q);
+    bool all_target_blocks_commanded = true;
     for (size_t i = 0; i < n_targets; ++i) {
       const auto &target = targets[i];
       const auto &rt = resolved[i];
       rt.task->update(*robot_);
       const Eigen::VectorXd &current_error = rt.task->getError();
+      TaskType command_task_type = TaskType::FRAME_POSE;
+      if (rt.kind == PoseTaskKind::kFrame) {
+        command_task_type =
+            static_cast<const FrameTask *>(rt.task.get())->getType();
+      }
+      all_target_blocks_commanded =
+          all_target_blocks_commanded &&
+          all_frame_task_blocks_commanded(
+              current_error, command_task_type, target.position_gain,
+              target.orientation_gain);
       if (current_error.size() == 3) {
         bool is_orientation_only = false;
         if (rt.kind == PoseTaskKind::kFrame) {
@@ -11889,6 +11986,59 @@ PositionIKResult KinematicsSolver::solve_position_step(
         projected_result.has_value()) {
       last_vel_result = std::move(*projected_result);
       have_vel_result = true;
+      if (componentwise_candidate.has_value() &&
+          all_target_blocks_commanded) {
+        const auto target_block_merits_at =
+            [&](const Eigen::VectorXd &candidate_q) {
+          robot_->update_configuration(candidate_q);
+          std::vector<std::array<double, 2>> merits;
+          merits.reserve(resolved.size());
+          for (std::size_t index = 0; index < resolved.size(); ++index) {
+            const auto &resolved_target = resolved[index];
+            resolved_target.task->update(*robot_);
+            TaskType merit_task_type = TaskType::FRAME_POSE;
+            if (resolved_target.kind == PoseTaskKind::kFrame) {
+              merit_task_type =
+                  static_cast<const FrameTask *>(resolved_target.task.get())
+                      ->getType();
+            }
+            merits.push_back(commanded_frame_block_merits(
+                resolved_target.task->getError(), merit_task_type,
+                targets[index].position_gain,
+                targets[index].orientation_gain));
+          }
+          return merits;
+        };
+        const auto projected_merits = target_block_merits_at(q);
+        const auto componentwise_merits =
+            target_block_merits_at(*componentwise_candidate);
+        double projected_total = 0.0;
+        double componentwise_total = 0.0;
+        bool all_targets_non_worsening =
+            projected_merits.size() == componentwise_merits.size();
+        for (std::size_t index = 0;
+             all_targets_non_worsening && index < projected_merits.size();
+             ++index) {
+          for (int block = 0; block < 2; ++block) {
+            all_targets_non_worsening =
+                all_targets_non_worsening &&
+                std::isfinite(projected_merits[index][block]) &&
+                std::isfinite(componentwise_merits[index][block]) &&
+                componentwise_merits[index][block] <=
+                    projected_merits[index][block] + 1e-9;
+            projected_total += projected_merits[index][block];
+            componentwise_total += componentwise_merits[index][block];
+          }
+        }
+        if (all_targets_non_worsening && std::isfinite(projected_total) &&
+            std::isfinite(componentwise_total) &&
+            componentwise_total + 1e-9 < projected_total) {
+          q = *componentwise_candidate;
+          last_vel_result.joint_velocities =
+              pinocchio::difference(robot_->model(), current_q, q) / step_dt;
+        }
+        robot_->update_configuration(q);
+      }
     }
   } else if (acceleration_limits_enabled_ &&
              first_tick_velocity.size() == robot_->nv() &&
