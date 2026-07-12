@@ -442,6 +442,13 @@ public:
     void setTargetConfiguration(const Eigen::VectorXd& q_target);
 
     /**
+     * @brief Update a moving regularization reference without declaring a new
+     * posture command.
+     * @param q_reference Reference joint configuration
+     */
+    void setReferenceConfiguration(const Eigen::VectorXd& q_reference);
+
+    /**
      * @brief Set target values for controlled joints only
      * @param target_values Values for controlled joints (size must match controlled_joint_indices)
      */

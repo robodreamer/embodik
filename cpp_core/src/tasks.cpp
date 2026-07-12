@@ -426,6 +426,14 @@ void PostureTask::setTargetConfiguration(const Eigen::VectorXd &q_target) {
   }
 }
 
+void PostureTask::setReferenceConfiguration(
+    const Eigen::VectorXd &q_reference) {
+  if (q_reference.size() != model_->nq()) {
+    throw std::invalid_argument("Reference configuration size mismatch");
+  }
+  q_target_ = q_reference;
+}
+
 void PostureTask::setControlledJointTargets(
     const Eigen::VectorXd &target_values) {
   if (target_values.size() !=

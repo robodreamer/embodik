@@ -834,6 +834,51 @@ def test_changed_secondary_posture_target_reopens_satisfied_primary_hold(tmp_pat
     assert result.position_step_hold_active is False
 
 
+def test_moving_posture_reference_does_not_restart_stationary_dwell(tmp_path: Path) -> None:
+    robot = eik.RobotModel(str(_write_decoupled_xy_stage_urdf(tmp_path)), floating_base=False)
+    q = np.zeros(robot.nq, dtype=float)
+    robot.update_configuration(q)
+
+    solver = eik.KinematicsSolver(robot)
+    solver.dt = 0.02
+    solver.enable_position_limits(True)
+    solver.enable_velocity_limits(True)
+
+    primary = solver.add_frame_task("held_x", "tool", eik.TaskType.FRAME_POSITION)
+    primary.priority = 0
+    primary.weight = 1.0
+    primary.solve_mode = eik.TaskSolveMode.MIN_ERROR
+    primary.set_position_mask(np.array([1.0, 0.0, 0.0], dtype=float))
+
+    posture = solver.add_posture_task("moving_reference_y", [1])
+    posture.priority = 1
+    posture.weight = 1.0
+    posture.solve_mode = eik.TaskSolveMode.MIN_ERROR
+
+    target_pose = _pose_matrix(robot, "tool")
+    options = eik.PositionStepOptions()
+    options.max_steps = 1
+    options.dt = 0.02
+    options.position_gain = 10.0
+    options.orientation_gain = 0.0
+    options.primary_solve_mode = eik.TaskSolveMode.MIN_ERROR
+
+    for tick in range(30):
+        reference = q.copy()
+        reference[0] = 0.001 * tick
+        reference[1] = 0.5
+        posture.set_reference_configuration(reference)
+        result = solver.solve_position_step(q, target_pose, "held_x", options)
+        q = np.asarray(result.q_solution, dtype=float)
+
+    assert result.position_step_hold_active is True
+
+    posture.set_controlled_joint_targets(np.array([-0.5], dtype=float))
+    resumed = solver.solve_position_step(q, target_pose, "held_x", options)
+    assert resumed.position_step_hold_active is False
+    assert np.asarray(resumed.q_solution, dtype=float)[1] <= q[1] - 1e-3
+
+
 @pytest.mark.parametrize("secondary_kind", ("posture", "frame"))
 def test_secondary_direct_velocity_reopens_satisfied_primary_hold(
     tmp_path: Path,

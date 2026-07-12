@@ -113,6 +113,12 @@ merit hold. Samples produced inside a collision margin remain part of the contin
 preserving productive tangential sliding without allowing repeated contact-bound cycling to
 masquerade as recovery.
 
+Adapters that recenter a nullspace posture anchor after each accepted step should use
+`PostureTask.set_reference_configuration()`. It updates the regularization reference without
+declaring a new command on every tick. Use `set_target_configuration()` or
+`set_controlled_joint_targets()` for commanded posture changes; those setters restart the
+continuity window so useful motion resumes immediately.
+
 ## Adaptive integration timestep
 
 Large marker jumps need larger effective steps; near the target, small steps prevent overshoot.

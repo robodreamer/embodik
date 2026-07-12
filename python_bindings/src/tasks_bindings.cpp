@@ -172,6 +172,10 @@ void bind_tasks(nb::module_ &m) {
            "Create a posture regularization task for specific joints")
       .def("set_target_configuration", &PostureTask::setTargetConfiguration,
            nb::arg("q_target"), "Set target joint configuration")
+      .def("set_reference_configuration",
+           &PostureTask::setReferenceConfiguration, nb::arg("q_reference"),
+           "Update a moving regularization reference without declaring a new "
+           "posture command")
       .def("set_controlled_joint_targets",
            &PostureTask::setControlledJointTargets, nb::arg("target_values"),
            "Set target values for controlled joints only")
