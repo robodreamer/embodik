@@ -10,6 +10,7 @@
 #include <cmath>
 #include <iostream>
 #include <limits>
+#include <numeric>
 #include <sstream>
 #include <string>
 #include <pinocchio/algorithm/geometry.hpp>
@@ -1474,6 +1475,47 @@ static ClassifiedOutcome classify_position_outcome(
 }
 } // namespace
 
+bool KinematicsSolver::position_step_target_geometry_changed(
+    const PositionStepTargetSignature &signature) const {
+  if (!last_position_step_target_signature_.has_value()) {
+    return true;
+  }
+  const auto &previous = *last_position_step_target_signature_;
+  if (previous.task_names != signature.task_names) {
+    return true;
+  }
+
+  const bool use_reference_geometry =
+      !previous.reference_target_poses.empty() &&
+      !signature.reference_target_poses.empty();
+  const auto &before = use_reference_geometry
+                           ? previous.reference_target_poses
+                           : previous.target_poses;
+  const auto &after = use_reference_geometry
+                          ? signature.reference_target_poses
+                          : signature.target_poses;
+  if (before.size() != after.size()) {
+    return true;
+  }
+  for (std::size_t index = 0; index < after.size(); ++index) {
+    const double translation_delta =
+        (before[index].block<3, 1>(0, 3) -
+         after[index].block<3, 1>(0, 3))
+            .norm();
+    const Eigen::Matrix3d rotation_delta =
+        before[index].block<3, 3>(0, 0).transpose() *
+        after[index].block<3, 3>(0, 0);
+    const double rotation_angle = pinocchio::log3(rotation_delta).norm();
+    if (!std::isfinite(translation_delta) ||
+        !std::isfinite(rotation_angle) ||
+        translation_delta > kStationaryTargetTranslationTolerance ||
+        rotation_angle > kStationaryTargetRotationTolerance) {
+      return true;
+    }
+  }
+  return false;
+}
+
 bool KinematicsSolver::update_position_step_target_signature(
     PositionStepTargetSignature signature) {
   const bool signature_is_finite =
@@ -2022,7 +2064,8 @@ VelocitySolverResult KinematicsSolver::retry_auto_task_layout_as_split_if_needed
     const Eigen::VectorXd &q, VelocitySolverResult result,
     const std::vector<int> &velocity_lock_indices,
     const std::optional<TorsoPoseConstraintOptions> &torso_constraint,
-    const std::optional<double> &step_validation_dt) {
+    const std::optional<double> &step_validation_dt,
+    bool apply_position_step_acceleration_limits) {
   const bool merged_succeeded = result.status == SolverStatus::kSuccess;
   const bool merged_binds =
       auto_layout_binding_score_ >
@@ -2045,6 +2088,8 @@ VelocitySolverResult KinematicsSolver::retry_auto_task_layout_as_split_if_needed
   pending_step_torso_constraint_ = torso_constraint;
   pending_step_validation_dt_ = step_validation_dt;
   pending_reuse_current_kinematics_ = true;
+  pending_position_step_acceleration_limits_ =
+      apply_position_step_acceleration_limits;
   VelocitySolverResult retry = solve_velocity(q, true);
   const char *reason =
       merged_succeeded ? "binding merged solve" : "non-success merged solve";
@@ -2721,6 +2766,7 @@ void KinematicsSolver::configure_collision_constraint(
     collision_stuck_counters_.clear();
     collision_stuck_last_distances_.clear();
     collision_pair_distance_floor_.clear();
+    post_step_collision_distance_cache_.clear();
     collision_cache_frozen_indices_.clear();
   }
   if (sphere_broadphase_enabled_ && !sphere_broadphase_.is_built()) {
@@ -2950,6 +2996,22 @@ KinematicsSolver::get_post_step_rejection_pair_indices() const {
 std::optional<double>
 KinematicsSolver::evaluate_post_step_collision_distance(
     const Eigen::VectorXd &q) {
+  const PositionStepMutableStateSnapshot snapshot =
+      capture_position_step_mutable_state();
+  try {
+    const auto distance =
+        evaluate_post_step_collision_distance_mutating(q);
+    restore_position_step_mutable_state(snapshot);
+    return distance;
+  } catch (...) {
+    restore_position_step_mutable_state(snapshot);
+    throw;
+  }
+}
+
+std::optional<double>
+KinematicsSolver::evaluate_post_step_collision_distance_mutating(
+    const Eigen::VectorXd &q) {
   // Tier 1: Early-exit gate.
   // If the constraint computation already found all pairs well above the
   // penetration threshold, a single bounded integration step cannot create
@@ -2962,15 +3024,26 @@ KinematicsSolver::evaluate_post_step_collision_distance(
     return last_constraint_min_distance_;
   }
 
-  // Tier 2: Targeted scan of known-close pairs.
-  // Only check pairs the constraint computation already identified as close
-  // (active constraints + cached candidates).
+  // Tier 2: evaluate every active pair's effective recovery margin once, then
+  // derive the scalar minimum from those same distance results. This avoids a
+  // targeted exact scan followed immediately by a duplicate recovery scan.
+  const auto recovery_margins =
+      evaluate_post_step_collision_recovery_margins(q);
+  if (!recovery_margins.empty()) {
+    const auto current_distance =
+        evaluate_post_step_collision_distance_from_current_results();
+    if (current_distance.has_value()) {
+      return current_distance;
+    }
+  }
+
+  // Tier 3: Targeted fallback when recovery margins are unavailable.
   auto targeted_pairs = get_post_step_rejection_pair_indices();
   if (!targeted_pairs.empty()) {
     return evaluate_min_collision_distance_targeted(q, targeted_pairs);
   }
 
-  // Tier 3: Full scan fallback (no constraint data available).
+  // Tier 4: Full scan fallback (no constraint data available).
   return evaluate_min_collision_distance(q);
 }
 
@@ -2997,24 +3070,225 @@ KinematicsSolver::evaluate_post_step_collision_recovery_margins(
   pinocchio::updateGeometryPlacements(robot_->model(), robot_->data(),
                                       *collision_model, *collision_data);
 
-  std::vector<double> margins(
-      collision_model->collisionPairs.size(),
-      std::numeric_limits<double>::quiet_NaN());
-  for (std::size_t pair_index = 0;
-       pair_index < collision_model->collisionPairs.size(); ++pair_index) {
-    if (!collision_allowed_pair_mask_.empty() &&
-        pair_index < collision_allowed_pair_mask_.size() &&
-        !collision_allowed_pair_mask_[pair_index]) {
-      continue;
+  const std::size_t pair_count = collision_model->collisionPairs.size();
+  const auto &pairs = collision_model->collisionPairs;
+  const auto &oMi = robot_->data().oMi;
+  std::vector<std::uint8_t> enabled_pair_mask(pair_count, 0);
+  for (std::size_t pair_index = 0; pair_index < pair_count; ++pair_index) {
+    const bool allowed =
+        collision_allowed_pair_mask_.empty() ||
+        pair_index >= collision_allowed_pair_mask_.size() ||
+        collision_allowed_pair_mask_[pair_index];
+    const bool active = collision_data->activeCollisionPairs.empty() ||
+                        collision_data->activeCollisionPairs[pair_index];
+    enabled_pair_mask[pair_index] = allowed && active ? 1 : 0;
+  }
+
+  std::vector<double> signed_distance_lower_bounds;
+  for (const auto &entry_ptr : post_step_collision_distance_cache_) {
+    const auto &entry = *entry_ptr;
+    if (entry.q.size() == current_q.size() &&
+        (entry.q.array() == current_q.array()).all() &&
+        entry.enabled_pair_mask == enabled_pair_mask &&
+        entry.certified_signed_distance_lower_bounds.size() == pair_count) {
+      signed_distance_lower_bounds =
+          entry.certified_signed_distance_lower_bounds;
+      break;
     }
-    if (!collision_data->activeCollisionPairs.empty() &&
-        !collision_data->activeCollisionPairs[pair_index]) {
+  }
+
+  if (signed_distance_lower_bounds.empty()) {
+    signed_distance_lower_bounds.assign(
+        pair_count, std::numeric_limits<double>::quiet_NaN());
+    const PostStepCollisionDistanceCertificate *nearest_certificate = nullptr;
+    double nearest_certificate_distance =
+        std::numeric_limits<double>::infinity();
+    for (const auto &entry_ptr : post_step_collision_distance_cache_) {
+      const auto &entry = *entry_ptr;
+      if (entry.enabled_pair_mask == enabled_pair_mask &&
+          entry.certified_signed_distance_lower_bounds.size() == pair_count &&
+          entry.joint_translations.size() == oMi.size() &&
+          entry.joint_rotations.size() == oMi.size()) {
+        const Eigen::VectorXd delta =
+            pinocchio::difference(robot_->model(), entry.q, current_q);
+        const double distance = delta.allFinite()
+                                    ? delta.squaredNorm()
+                                    : std::numeric_limits<double>::infinity();
+        if (distance < nearest_certificate_distance) {
+          nearest_certificate = &entry;
+          nearest_certificate_distance = distance;
+        }
+      }
+    }
+
+    for (std::size_t pair_index = 0; pair_index < pair_count; ++pair_index) {
+      if (!enabled_pair_mask[pair_index]) {
+        continue;
+      }
+
+      const auto &pair = pairs[pair_index];
+      const auto &name_a =
+          collision_model->geometryObjects[pair.first].name;
+      const auto &name_b =
+          collision_model->geometryObjects[pair.second].name;
+      const std::string pair_key = canonical_pair_key(name_a, name_b);
+      double effective_min_distance = collision_constraint_->min_distance;
+      const auto override_iter =
+          per_pair_min_distance_overrides_.find(pair_key);
+      if (override_iter != per_pair_min_distance_overrides_.end()) {
+        effective_min_distance = override_iter->second;
+      }
+
+      double recovery_target = effective_min_distance;
+      if (non_worsening_collision_floor_enabled_) {
+        const auto floor_iter = collision_pair_distance_floor_.find(pair_key);
+        if (floor_iter != collision_pair_distance_floor_.end()) {
+          recovery_target =
+              std::min(floor_iter->second, effective_min_distance);
+        }
+      }
+      if (!acceleration_limits_enabled_ && position_step_call_depth_ > 0 &&
+          pair_index < position_step_collision_command_floor_distances_.size() &&
+          std::isfinite(
+              position_step_collision_command_floor_distances_[pair_index])) {
+        recovery_target = std::max(
+            recovery_target,
+            position_step_collision_command_floor_distances_[pair_index] -
+                kCollisionTolerance);
+      }
+
+      const double required_safe_distance =
+          std::max(
+              {collision_constraint_->min_distance,
+               effective_min_distance + collision_repulsion_deadband_,
+               recovery_target + kCollisionTolerance}) +
+          sphere_broadphase_.safety_margin;
+
+      double broadphase_lower_bound =
+          -std::numeric_limits<double>::infinity();
+      if (sphere_broadphase_enabled_ && sphere_broadphase_.is_built()) {
+        const auto joint_a =
+            collision_model->geometryObjects[pair.first].parentJoint;
+        const auto joint_b =
+            collision_model->geometryObjects[pair.second].parentJoint;
+        if (joint_a < static_cast<pinocchio::JointIndex>(oMi.size()) &&
+            joint_b < static_cast<pinocchio::JointIndex>(oMi.size())) {
+          broadphase_lower_bound = sphere_broadphase_.compute_pair_lower_bound(
+              pair.first, pair.second, oMi[joint_a].translation(),
+              oMi[joint_a].rotation(), oMi[joint_b].translation(),
+              oMi[joint_b].rotation());
+        }
+      }
+
+      double motion_lower_bound =
+          -std::numeric_limits<double>::infinity();
+      if (sphere_broadphase_enabled_ && sphere_broadphase_.is_built() &&
+          pair.first < sphere_broadphase_.size() &&
+          pair.second < sphere_broadphase_.size()) {
+        const auto joint_a =
+            collision_model->geometryObjects[pair.first].parentJoint;
+        const auto joint_b =
+            collision_model->geometryObjects[pair.second].parentJoint;
+        if (joint_a < static_cast<pinocchio::JointIndex>(oMi.size()) &&
+            joint_b < static_cast<pinocchio::JointIndex>(oMi.size())) {
+          const auto geometry_motion_bound =
+              [&](const PostStepCollisionDistanceCertificate &entry,
+                  std::size_t geometry_index,
+                  pinocchio::JointIndex joint_index) {
+                const Eigen::Vector3d translation_delta =
+                    oMi[joint_index].translation() -
+                    entry.joint_translations[joint_index];
+                const Eigen::Matrix3d rotation_delta =
+                    entry.joint_rotations[joint_index].transpose() *
+                    oMi[joint_index].rotation();
+                const double cosine = std::clamp(
+                    (rotation_delta.trace() - 1.0) * 0.5, -1.0, 1.0);
+                const double rotation_chord =
+                    std::sqrt(2.0 * std::max(0.0, 1.0 - cosine));
+                return translation_delta.norm() +
+                       sphere_broadphase_.sphere(geometry_index).motion_radius *
+                           rotation_chord;
+              };
+
+          if (nearest_certificate != nullptr) {
+            const double cached_lower_bound =
+                nearest_certificate
+                    ->certified_signed_distance_lower_bounds[pair_index];
+            if (std::isfinite(cached_lower_bound)) {
+              motion_lower_bound =
+                  cached_lower_bound -
+                  geometry_motion_bound(*nearest_certificate, pair.first,
+                                        joint_a) -
+                  geometry_motion_bound(*nearest_certificate, pair.second,
+                                        joint_b);
+            }
+          }
+        }
+      }
+
+      const bool broadphase_certified =
+          std::isfinite(broadphase_lower_bound) &&
+          broadphase_lower_bound > required_safe_distance;
+      const bool motion_bound_certified =
+          std::isfinite(motion_lower_bound) &&
+          motion_lower_bound > required_safe_distance;
+      if (broadphase_certified || motion_bound_certified) {
+        signed_distance_lower_bounds[pair_index] =
+            std::max(broadphase_lower_bound, motion_lower_bound);
+        if (motion_bound_certified && !broadphase_certified) {
+          last_post_step_collision_motion_bound_culled_pairs_++;
+        }
+        if (non_worsening_collision_floor_enabled_ &&
+            collision_pair_distance_floor_.find(pair_key) ==
+                collision_pair_distance_floor_.end()) {
+          collision_pair_distance_floor_.emplace(pair_key,
+                                                 effective_min_distance);
+        }
+        continue;
+      }
+
+      last_post_step_collision_exact_distance_queries_++;
+      pinocchio::computeDistance(*collision_model, *collision_data, pair_index);
+      signed_distance_lower_bounds[pair_index] =
+          collision_data->distanceResults[pair_index].min_distance;
+    }
+
+    PostStepCollisionDistanceCertificate certificate;
+    certificate.q = current_q;
+    certificate.enabled_pair_mask = enabled_pair_mask;
+    certificate.certified_signed_distance_lower_bounds =
+        signed_distance_lower_bounds;
+    certificate.joint_translations.reserve(oMi.size());
+    certificate.joint_rotations.reserve(oMi.size());
+    for (const auto &joint_placement : oMi) {
+      certificate.joint_translations.push_back(joint_placement.translation());
+      certificate.joint_rotations.push_back(joint_placement.rotation());
+    }
+    if (post_step_collision_distance_cache_.size() >=
+        kPostStepCollisionCacheCapacity) {
+      post_step_collision_distance_cache_.erase(
+          post_step_collision_distance_cache_.begin());
+    }
+    post_step_collision_distance_cache_.push_back(
+        std::make_shared<const PostStepCollisionDistanceCertificate>(
+            std::move(certificate)));
+  }
+  for (std::size_t pair_index = 0; pair_index < pair_count; ++pair_index) {
+    if (enabled_pair_mask[pair_index] &&
+        std::isfinite(signed_distance_lower_bounds[pair_index])) {
+      collision_data->distanceResults[pair_index].min_distance =
+          signed_distance_lower_bounds[pair_index];
+    }
+  }
+
+  std::vector<double> margins(
+      pair_count, std::numeric_limits<double>::quiet_NaN());
+  for (std::size_t pair_index = 0; pair_index < pair_count; ++pair_index) {
+    if (!enabled_pair_mask[pair_index]) {
       continue;
     }
 
-    pinocchio::computeDistance(*collision_model, *collision_data, pair_index);
-    const double signed_distance =
-        collision_data->distanceResults[pair_index].min_distance;
+    const double signed_distance = signed_distance_lower_bounds[pair_index];
     if (!std::isfinite(signed_distance)) {
       continue;
     }
@@ -3065,6 +3339,53 @@ KinematicsSolver::evaluate_post_step_collision_recovery_margins(
 #else
   (void)current_q;
   return {};
+#endif
+}
+
+std::optional<double>
+KinematicsSolver::evaluate_post_step_collision_distance_from_current_results() {
+#ifdef PINOCCHIO_WITH_HPP_FCL
+  auto *collision_model = robot_->collision_model();
+  auto *collision_data = robot_->collision_data();
+  if (collision_model == nullptr || collision_data == nullptr) {
+    return std::nullopt;
+  }
+
+  const auto minimum_for_pairs =
+      [&](const std::vector<std::size_t> &pair_indices)
+      -> std::optional<double> {
+    double minimum_distance = std::numeric_limits<double>::infinity();
+    bool found = false;
+    for (const std::size_t pair_index : pair_indices) {
+      if (pair_index >= collision_model->collisionPairs.size()) {
+        continue;
+      }
+      if (!collision_data->activeCollisionPairs.empty() &&
+          !collision_data->activeCollisionPairs[pair_index]) {
+        continue;
+      }
+      const double distance =
+          collision_data->distanceResults[pair_index].min_distance;
+      if (!std::isfinite(distance)) {
+        continue;
+      }
+      minimum_distance = std::min(minimum_distance, distance);
+      found = true;
+    }
+    return found ? std::optional<double>(minimum_distance) : std::nullopt;
+  };
+
+  const std::vector<std::size_t> targeted_pairs =
+      get_post_step_rejection_pair_indices();
+  if (!targeted_pairs.empty()) {
+    return minimum_for_pairs(targeted_pairs);
+  }
+
+  std::vector<std::size_t> all_pairs(collision_model->collisionPairs.size());
+  std::iota(all_pairs.begin(), all_pairs.end(), std::size_t{0});
+  return minimum_for_pairs(all_pairs);
+#else
+  return std::nullopt;
 #endif
 }
 
@@ -3201,6 +3522,7 @@ bool KinematicsSolver::set_collision_min_distance(double min_distance) {
   } else {
     collision_constraint_->constraint_activation_margin = 0.0;
   }
+  post_step_collision_distance_cache_.clear();
   return true;
 }
 
@@ -3339,6 +3661,9 @@ CollisionTuningMode KinematicsSolver::get_collision_tuning_mode() const {
 
 void KinematicsSolver::enable_sphere_broadphase(bool enable) {
 #ifdef PINOCCHIO_WITH_HPP_FCL
+  if (sphere_broadphase_enabled_ != enable) {
+    post_step_collision_distance_cache_.clear();
+  }
   sphere_broadphase_enabled_ = enable;
   if (enable && !sphere_broadphase_.is_built() && robot_->has_collision_geometry()) {
     sphere_broadphase_.build(*robot_->collision_model());
@@ -3367,6 +3692,7 @@ void KinematicsSolver::clear_collision_constraint() {
   collision_pair_last_rel_translation_norm_.clear();
   collision_pair_last_rel_rotation_.clear();
   collision_pair_distance_floor_.clear();
+  post_step_collision_distance_cache_.clear();
   collision_cache_frozen_indices_.clear();
   collision_pair_cache_has_full_scan_ = false;
   collision_pair_cache_steps_since_refresh_ = 0;
@@ -3427,6 +3753,7 @@ void KinematicsSolver::set_collision_pair_min_distance(const std::string &link_a
       }
     }
   }
+  post_step_collision_distance_cache_.clear();
 }
 
 void KinematicsSolver::clear_collision_pair_min_distance(const std::string &link_a,
@@ -3459,6 +3786,7 @@ void KinematicsSolver::clear_collision_pair_min_distance(const std::string &link
       per_pair_deferred_overrides_.erase(key);
     }
   }
+  post_step_collision_distance_cache_.clear();
 }
 
 std::vector<std::pair<std::string, double>>
@@ -4523,13 +4851,19 @@ KinematicsSolver::compute_collision_constraint() {
                     sphere_broadphase_.safety_margin
               : std::numeric_limits<double>::infinity();
 
-      const double sphere_lb = sphere_broadphase_.compute_pair_lower_bound(
-          pair.first, pair.second,
-          transform_a.translation(), transform_a.rotation(),
-          transform_b.translation(), transform_b.rotation());
-      if (std::isfinite(sphere_lb) && sphere_lb > candidate_cutoff) {
-        last_collision_sphere_culled_pairs_++;
-        bound_culled = true;
+      const auto joint_a_id = object_a.parentJoint;
+      const auto joint_b_id = object_b.parentJoint;
+      const auto &oMi = robot_->data().oMi;
+      if (joint_a_id < static_cast<pinocchio::JointIndex>(oMi.size()) &&
+          joint_b_id < static_cast<pinocchio::JointIndex>(oMi.size())) {
+        const double sphere_lb = sphere_broadphase_.compute_pair_lower_bound(
+            pair.first, pair.second, oMi[joint_a_id].translation(),
+            oMi[joint_a_id].rotation(), oMi[joint_b_id].translation(),
+            oMi[joint_b_id].rotation());
+        if (std::isfinite(sphere_lb) && sphere_lb > candidate_cutoff) {
+          last_collision_sphere_culled_pairs_++;
+          bound_culled = true;
+        }
       }
     }
     if (bound_culled) {
@@ -4537,16 +4871,9 @@ KinematicsSolver::compute_collision_constraint() {
       continue;
     }
 
-    // When evaluating a small cached subset WITHOUT a time budget, enable
-    // nearest points on the initial query to avoid a costly re-query later
-    // for constraint pairs.  Skip this when budget is active — the extra
-    // cost would exhaust the budget and trigger safety fallbacks.
-    if (use_cached_candidate_subset && !budget_enabled &&
-        !nearest_points_all_pairs &&
-        idx < collision_data->distanceRequests.size() &&
-        !collision_data->distanceRequests[idx].enable_nearest_points) {
-      collision_data->distanceRequests[idx].enable_nearest_points = true;
-    }
+    // Rank candidates with distance-only queries. Nearest points are refined
+    // below only for the globally closest debug pair and selected QP rows.
+    // Cached subsets can contain dozens of candidates on dense robot models.
     last_collision_exact_distance_queries_++;
     pinocchio::computeDistance(*collision_model, *collision_data, idx);
 
@@ -4664,6 +4991,7 @@ KinematicsSolver::compute_collision_constraint() {
               signed_distance >= deferred->second) {
             per_pair_min_distance_overrides_[pair_key] = deferred->second;
             per_pair_deferred_overrides_.erase(deferred);
+            post_step_collision_distance_cache_.clear();
           }
         }
         if (!per_pair_min_distance_overrides_.empty()) {
@@ -5350,6 +5678,72 @@ void KinematicsSolver::apply_position_step_primary_task_options(
   }
 }
 
+std::optional<VelocitySolverResult>
+KinematicsSolver::apply_position_step_task_metric_projection(
+    const Eigen::VectorXd &current_q, double outer_dt,
+    const std::vector<int> &velocity_lock_indices,
+    const std::optional<TorsoPoseConstraintOptions> &torso_constraint,
+    Eigen::VectorXd &q_candidate) {
+  if (!acceleration_limits_enabled_ || current_q.size() != robot_->nq() ||
+      q_candidate.size() != robot_->nq()) {
+    return std::nullopt;
+  }
+
+  const Eigen::VectorXd predictive_delta =
+      pinocchio::difference(robot_->model(), current_q, q_candidate);
+  if (!predictive_delta.allFinite() ||
+      predictive_delta.squaredNorm() <= kCollisionEscapeNormEps) {
+    return std::nullopt;
+  }
+
+  const double dt_safe = std::max(outer_dt, 1e-9);
+  const Eigen::VectorXd predictive_velocity = predictive_delta / dt_safe;
+  robot_->update_configuration(current_q);
+
+  bool have_task_objective = false;
+  for (auto &task : tasks_) {
+    if (!task || !task->isActive()) {
+      continue;
+    }
+    task->update(*robot_);
+    const Eigen::MatrixXd jacobian = task->getJacobian();
+    if (jacobian.cols() != robot_->nv() || jacobian.rows() <= 0) {
+      continue;
+    }
+    task->setPositionStepTargetVelocity(jacobian * predictive_velocity);
+    have_task_objective = true;
+  }
+  if (!have_task_objective) {
+    return std::nullopt;
+  }
+
+  pending_velocity_lock_indices_ = velocity_lock_indices;
+  pending_step_torso_constraint_ = torso_constraint;
+  pending_step_validation_dt_ = dt_safe;
+  pending_reuse_current_kinematics_ = true;
+  pending_position_step_acceleration_limits_ = true;
+  VelocitySolverResult projected = solve_velocity(current_q, true);
+  projected = retry_auto_task_layout_as_split_if_needed(
+      current_q, std::move(projected), velocity_lock_indices,
+      torso_constraint, dt_safe, true);
+  if (projected.joint_velocities.size() != robot_->nv() ||
+      !projected.joint_velocities.allFinite()) {
+    robot_->update_configuration(q_candidate);
+    return projected;
+  }
+
+  q_candidate = pinocchio::integrate(
+      robot_->model(), current_q, dt_safe * projected.joint_velocities);
+  if (use_position_limits_) {
+    auto [q_min, q_max] = robot_->get_joint_limits();
+    project_scalar_configuration_to_true_joint_limits(
+        q_candidate, q_min, q_max, velocity_to_config_index_cache(),
+        robot_->nv());
+  }
+  robot_->update_configuration(q_candidate);
+  return projected;
+}
+
 bool KinematicsSolver::apply_position_step_outer_acceleration_limit(
     const Eigen::VectorXd &current_q,
     const Eigen::VectorXd &previous_applied_velocity,
@@ -5588,20 +5982,20 @@ bool KinematicsSolver::apply_position_step_outer_acceleration_limit(
 
   if (collision_constraint_.has_value() && collision_constraint_->enabled) {
     robot_->update_configuration(current_q);
-    const auto current_distance =
-        evaluate_post_step_collision_distance(current_q);
     const auto current_recovery_margins =
         evaluate_post_step_collision_recovery_margins(current_q);
+    const auto current_distance =
+        evaluate_post_step_collision_distance_from_current_results();
     const double nominal_floor = collision_constraint_->min_distance;
 
-      const auto collision_acceptable =
+    const auto collision_acceptable =
         [&](const Eigen::VectorXd &candidate,
             double recovery_margin_threshold) {
       robot_->update_configuration(candidate);
-      const auto candidate_distance =
-          evaluate_post_step_collision_distance(candidate);
       const auto candidate_recovery_margins =
           evaluate_post_step_collision_recovery_margins(candidate);
+      const auto candidate_distance =
+          evaluate_post_step_collision_distance_from_current_results();
       if (!collision_recovery_margins_acceptable(
               current_recovery_margins, candidate_recovery_margins,
               recovery_margin_threshold)) {
@@ -6028,29 +6422,23 @@ bool KinematicsSolver::apply_position_step_outer_acceleration_limit(
             braking_q.allFinite() && braking_velocity.allFinite();
         if ((full_braking_rollout_acceptable || have_safe_braking_step) &&
             collision_acceptable(braking_q, 0.0)) {
-          Eigen::VectorXd best_velocity = braking_velocity;
-          Eigen::VectorXd best_q = std::move(braking_q);
-          double safe_fraction = 0.0;
-          double unsafe_fraction = 1.0;
-          for (int iteration = 0; iteration < 10; ++iteration) {
-            const double fraction =
-                0.5 * (safe_fraction + unsafe_fraction);
-            const Eigen::VectorXd trial_velocity =
-                braking_velocity +
-                fraction * (limited_velocity - braking_velocity);
-            Eigen::VectorXd trial_q =
-                configuration_for_velocity(current_q, trial_velocity);
-            if (candidate_and_braking_rollout_acceptable(trial_q,
-                                                          trial_velocity)) {
-              safe_fraction = fraction;
-              best_velocity = trial_velocity;
-              best_q = std::move(trial_q);
-            } else {
-              unsafe_fraction = fraction;
-            }
+          // Preserve useful task motion with one fully validated midpoint. The
+          // previous ten-round search repeated an entire braking rollout at
+          // every probe, which could exceed a 20 ms WBC tick on dense models.
+          // The braking command remains the certified fallback when the
+          // midpoint cannot itself stop without worsening collision margins.
+          const Eigen::VectorXd midpoint_velocity =
+              0.5 * (braking_velocity + limited_velocity);
+          Eigen::VectorXd midpoint_q =
+              configuration_for_velocity(current_q, midpoint_velocity);
+          if (candidate_and_braking_rollout_acceptable(midpoint_q,
+                                                        midpoint_velocity)) {
+            limited_velocity = midpoint_velocity;
+            limited_q = std::move(midpoint_q);
+          } else {
+            limited_velocity = std::move(braking_velocity);
+            limited_q = std::move(braking_q);
           }
-          limited_velocity = std::move(best_velocity);
-          limited_q = std::move(best_q);
           accepted_backoff = true;
         }
       }
@@ -6297,6 +6685,12 @@ KinematicsSolver::capture_position_step_mutable_state() const {
   snapshot.last_collision_constraint_result =
       last_collision_constraint_result_;
   snapshot.last_collision_constraint_q = last_collision_constraint_q_;
+  snapshot.post_step_collision_distance_cache =
+      post_step_collision_distance_cache_;
+  snapshot.last_post_step_collision_exact_distance_queries =
+      last_post_step_collision_exact_distance_queries_;
+  snapshot.last_post_step_collision_motion_bound_culled_pairs =
+      last_post_step_collision_motion_bound_culled_pairs_;
   snapshot.last_collision_sphere_culled_pairs =
       last_collision_sphere_culled_pairs_;
   snapshot.last_solution_dq_norm = last_solution_dq_norm_;
@@ -6394,6 +6788,12 @@ void KinematicsSolver::restore_position_step_mutable_state(
   last_collision_constraint_result_ =
       snapshot.last_collision_constraint_result;
   last_collision_constraint_q_ = snapshot.last_collision_constraint_q;
+  post_step_collision_distance_cache_ =
+      snapshot.post_step_collision_distance_cache;
+  last_post_step_collision_exact_distance_queries_ =
+      snapshot.last_post_step_collision_exact_distance_queries;
+  last_post_step_collision_motion_bound_culled_pairs_ =
+      snapshot.last_post_step_collision_motion_bound_culled_pairs;
   last_collision_sphere_culled_pairs_ =
       snapshot.last_collision_sphere_culled_pairs;
   last_solution_dq_norm_ = snapshot.last_solution_dq_norm;
@@ -6682,6 +7082,7 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
         solver->pending_step_torso_constraint_.reset();
         solver->pending_reuse_current_kinematics_ = false;
         solver->pending_step_validation_dt_.reset();
+        solver->pending_position_step_acceleration_limits_ = false;
       }
     }
   } clear_pending_locks{this};
@@ -7636,7 +8037,9 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
   // velocity and the configured acceleration limits.
   // A deadband of 1% of the acceleration step prevents oscillation when
   // the velocity is small and the acceleration limit is tight.
-  if (acceleration_limits_enabled_ && position_step_call_depth_ == 0 &&
+  if (acceleration_limits_enabled_ &&
+      (position_step_call_depth_ == 0 ||
+       pending_position_step_acceleration_limits_) &&
       previous_dq_.size() == robot_->nv() &&
       acceleration_limits_.size() == robot_->nv()) {
     const int nv = robot_->nv();
@@ -9055,11 +9458,11 @@ PositionIKResult KinematicsSolver::solve_position(
       // recovery margin below enforces every pair's effective floor.
       const double violation_threshold = collision_constraint_->min_distance;
       const auto pre_dist_debug =
-          evaluate_post_step_collision_distance(q_pre_step);
+          evaluate_post_step_collision_distance_mutating(q_pre_step);
       const auto pre_recovery_margins =
           evaluate_post_step_collision_recovery_margins(q_pre_step);
       const auto post_dist_debug =
-          evaluate_post_step_collision_distance(q_current);
+          evaluate_post_step_collision_distance_mutating(q_current);
       const auto post_recovery_margins =
           evaluate_post_step_collision_recovery_margins(q_current);
       const double pre_dist =
@@ -9169,6 +9572,10 @@ PositionIKResult KinematicsSolver::solve_position_step(
   }
 
   const bool outermost_position_step_call = position_step_call_depth_ == 0;
+  if (outermost_position_step_call) {
+    last_post_step_collision_exact_distance_queries_ = 0;
+    last_post_step_collision_motion_bound_culled_pairs_ = 0;
+  }
   const bool owns_position_step_continuity =
       outermost_position_step_call ||
       (suppress_preferred_lock_step_retry_ &&
@@ -9215,6 +9622,8 @@ PositionIKResult KinematicsSolver::solve_position_step(
               explicit_target_task_names.end());
     }
     append_position_step_option_signature(signature.gains, options);
+    position_step_target_geometry_moved_ =
+        position_step_target_geometry_changed(signature);
     if (update_position_step_target_signature(std::move(signature))) {
       capture_position_step_collision_command_floor(current_q);
     }
@@ -9398,6 +9807,7 @@ PositionIKResult KinematicsSolver::solve_position_step(
 
   VelocitySolverResult last_vel_result;
   bool have_vel_result = false;
+  Eigen::VectorXd first_tick_velocity;
   const int steps = std::max(1, options.max_steps);
   int steps_used = 0;
   Eigen::VectorXd vel(6);
@@ -9484,10 +9894,15 @@ PositionIKResult KinematicsSolver::solve_position_step(
     pending_step_torso_constraint_ = step_torso_constraint;
     pending_step_validation_dt_ = step_dt_eff;
     pending_reuse_current_kinematics_ = true;
+    const bool apply_setpoint_acceleration_limits =
+        acceleration_limits_enabled_ && !position_step_target_geometry_moved_ &&
+        step == 0;
+    pending_position_step_acceleration_limits_ =
+        apply_setpoint_acceleration_limits;
     VelocitySolverResult vel_out = solve_velocity(q, true);
     vel_out = retry_auto_task_layout_as_split_if_needed(
         q, std::move(vel_out), step_locked_indices, step_torso_constraint,
-        step_dt_eff);
+        step_dt_eff, apply_setpoint_acceleration_limits);
     have_vel_result = true;
     last_vel_result = std::move(vel_out);
     ++steps_used;
@@ -9538,6 +9953,11 @@ PositionIKResult KinematicsSolver::solve_position_step(
           last_vel_result.joint_velocities, q, q_min, q_max,
           velocity_to_config_index, step_dt_eff, robot_->nv());
     }
+    if (step == 0 &&
+        last_vel_result.joint_velocities.size() == robot_->nv() &&
+        last_vel_result.joint_velocities.allFinite()) {
+      first_tick_velocity = last_vel_result.joint_velocities;
+    }
     q = pinocchio::integrate(robot_->model(), q,
                              step_dt_eff * last_vel_result.joint_velocities);
     if (use_position_limits_) {
@@ -9557,58 +9977,13 @@ PositionIKResult KinematicsSolver::solve_position_step(
     const bool step_moved =
         (q - q_pre_step).squaredNorm() > kCollisionEscapeNormEps;
 
-    // Broadphase-expanded evaluator: when adaptive_dt used a non-trivial scale,
-    // the integration may bring previously-far pairs into collision.  The normal
-    // targeted evaluator only checks cached pairs (pre-step candidates) and has a
-    // Tier-1 early exit that returns pre-step distance without inspecting q_post.
-    // This helper expands the candidate set using sphere-broadphase AABB bounds at
-    // q_eval (cheap), then runs exact GJK only on the survivors + existing cache.
-    // Cost: O(n_allowed_pairs) AABB checks + O(survivors+cached) GJK calls.
-    // With sphere broadphase enabled (BALANCED mode): sub-ms, similar to targeted.
-    // Without sphere broadphase: equivalent to full scan (fallback).
+    // Adaptive steps need all active pairs reconsidered at q_eval. The recovery
+    // evaluator already performs that broadphase expansion and leaves a scalar
+    // distance result behind, so reuse it instead of issuing a second scan.
     auto eval_broadphase_expanded = [&](const Eigen::VectorXd &q_eval)
         -> std::optional<double> {
-      // Start from the existing targeted set (cached pre-step candidates).
-      auto expanded = get_post_step_rejection_pair_indices();
-      std::unordered_set<std::size_t> in_set(expanded.begin(), expanded.end());
-
-      const auto *geom_model = robot_->collision_model();
-      if (geom_model) {
-        const auto &pairs = geom_model->collisionPairs;
-        const auto &oMf = robot_->data().oMf;  // populated by update_configuration
-        const double cutoff =
-            collision_constraint_.has_value()
-                ? collision_constraint_->min_distance +
-                      collision_pair_cache_distance_margin_ +
-                      (sphere_broadphase_enabled_ ? sphere_broadphase_.safety_margin : 0.0)
-                : std::numeric_limits<double>::infinity();
-
-        for (std::size_t pi = 0; pi < pairs.size(); ++pi) {
-          if (in_set.count(pi)) continue;  // already included
-          if (!collision_allowed_pair_mask_.empty() &&
-              pi < collision_allowed_pair_mask_.size() &&
-              !collision_allowed_pair_mask_[pi]) continue;  // excluded
-
-          if (sphere_broadphase_enabled_ && sphere_broadphase_.is_built()) {
-            // Fast AABB-sphere lower bound: skip if definitely far enough.
-            const auto &cp = pairs[pi];
-            const auto fa = geom_model->geometryObjects[cp.first].parentFrame;
-            const auto fb = geom_model->geometryObjects[cp.second].parentFrame;
-            if (fa < static_cast<pinocchio::FrameIndex>(oMf.size()) &&
-                fb < static_cast<pinocchio::FrameIndex>(oMf.size())) {
-              const double sphere_lb = sphere_broadphase_.compute_pair_lower_bound(
-                  cp.first, cp.second,
-                  oMf[fa].translation(), oMf[fa].rotation(),
-                  oMf[fb].translation(), oMf[fb].rotation());
-              if (std::isfinite(sphere_lb) && sphere_lb > cutoff) continue;
-            }
-          }
-          // Pair survived broadphase (or no broadphase): add for exact GJK.
-          expanded.push_back(pi);
-          in_set.insert(pi);
-        }
-      }
-      return evaluate_min_collision_distance_targeted(q_eval, expanded);
+      evaluate_post_step_collision_recovery_margins(q_eval);
+      return evaluate_post_step_collision_distance_from_current_results();
     };
 
     // Post-solve collision rejection (same logic as multi-target overload).
@@ -9618,13 +9993,13 @@ PositionIKResult KinematicsSolver::solve_position_step(
       // recovery margin below enforces every pair's effective floor.
       const double violation_threshold = collision_constraint_->min_distance;
       const auto pre_dist_debug =
-          evaluate_post_step_collision_distance(q_pre_step);
+          evaluate_post_step_collision_distance_mutating(q_pre_step);
       const auto pre_recovery_margins =
           evaluate_post_step_collision_recovery_margins(q_pre_step);
       std::optional<double> post_dist_debug =
           adaptive_step_large
           ? eval_broadphase_expanded(q)
-          : evaluate_post_step_collision_distance(q);
+          : evaluate_post_step_collision_distance_mutating(q);
       const auto post_recovery_margins =
           evaluate_post_step_collision_recovery_margins(q);
       const double pre_dist =
@@ -9704,7 +10079,7 @@ PositionIKResult KinematicsSolver::solve_position_step(
             auto backoff_dist_debug =
                 adaptive_step_large
                 ? eval_broadphase_expanded(q_backoff)
-                : evaluate_post_step_collision_distance(q_backoff);
+                : evaluate_post_step_collision_distance_mutating(q_backoff);
             const auto backoff_recovery_margins =
                 evaluate_post_step_collision_recovery_margins(q_backoff);
             const bool backoff_recovery_acceptable =
@@ -9861,7 +10236,8 @@ PositionIKResult KinematicsSolver::solve_position_step(
                 }
               }
               robot_->update_configuration(q_candidate);
-              auto esc_dist = evaluate_post_step_collision_distance(q_candidate);
+              auto esc_dist =
+                  evaluate_post_step_collision_distance_mutating(q_candidate);
               if (esc_dist.has_value() && std::isfinite(*esc_dist) &&
                   *esc_dist > min_dist) {
                 q = q_candidate;
@@ -9921,7 +10297,8 @@ PositionIKResult KinematicsSolver::solve_position_step(
             }
           }
           robot_->update_configuration(q_candidate);
-          auto esc_dist = evaluate_post_step_collision_distance(q_candidate);
+          auto esc_dist =
+              evaluate_post_step_collision_distance_mutating(q_candidate);
           if (esc_dist.has_value() && std::isfinite(*esc_dist) &&
               *esc_dist > global_min_dist) {
             q = q_candidate;
@@ -10022,9 +10399,10 @@ PositionIKResult KinematicsSolver::solve_position_step(
             q_candidate[j] = std::min(q_candidate[j], q_max[j]);
           }
         }
-        auto curr_dist = evaluate_post_step_collision_distance(q);
+        auto curr_dist = evaluate_post_step_collision_distance_mutating(q);
         robot_->update_configuration(q_candidate);
-        auto cand_dist = evaluate_post_step_collision_distance(q_candidate);
+        auto cand_dist =
+            evaluate_post_step_collision_distance_mutating(q_candidate);
         const double desat_safe_threshold =
             (collision_constraint_.has_value() && collision_constraint_->enabled)
             ? collision_constraint_->min_distance
@@ -10057,6 +10435,27 @@ PositionIKResult KinematicsSolver::solve_position_step(
           });
       retry_result.has_value()) {
     return retry_result.value();
+  }
+
+  if (position_step_target_geometry_moved_) {
+    if (auto projected_result = apply_position_step_task_metric_projection(
+            current_q, step_dt, step_locked_indices, step_torso_constraint, q);
+        projected_result.has_value()) {
+      last_vel_result = std::move(*projected_result);
+      have_vel_result = true;
+    }
+  } else if (acceleration_limits_enabled_ &&
+             first_tick_velocity.size() == robot_->nv() &&
+             pinocchio::difference(robot_->model(), current_q, q)
+                     .squaredNorm() > kCollisionEscapeNormEps) {
+    q = pinocchio::integrate(robot_->model(), current_q,
+                             step_dt * first_tick_velocity);
+    if (use_position_limits_) {
+      auto [q_min, q_max] = robot_->get_joint_limits();
+      project_scalar_configuration_to_true_joint_limits(
+          q, q_min, q_max, velocity_to_config_index, robot_->nv());
+    }
+    robot_->update_configuration(q);
   }
 
   for (auto &task : tasks_) {
@@ -10297,6 +10696,10 @@ PositionIKResult KinematicsSolver::solve_position_step(
   }
 
   const bool outermost_position_step_call = position_step_call_depth_ == 0;
+  if (outermost_position_step_call) {
+    last_post_step_collision_exact_distance_queries_ = 0;
+    last_post_step_collision_motion_bound_culled_pairs_ = 0;
+  }
   const bool owns_position_step_continuity =
       outermost_position_step_call ||
       (suppress_preferred_lock_step_retry_ &&
@@ -10357,6 +10760,8 @@ PositionIKResult KinematicsSolver::solve_position_step(
               explicit_target_task_names.end());
     }
     append_position_step_option_signature(signature.gains, options);
+    position_step_target_geometry_moved_ =
+        position_step_target_geometry_changed(signature);
     if (update_position_step_target_signature(std::move(signature))) {
       capture_position_step_collision_command_floor(current_q);
     }
@@ -10561,6 +10966,7 @@ PositionIKResult KinematicsSolver::solve_position_step(
 
   VelocitySolverResult last_vel_result;
   bool have_vel_result = false;
+  Eigen::VectorXd first_tick_velocity;
   const int steps = std::max(1, options.max_steps);
   int steps_used = 0;
   Eigen::Matrix<double, 6, 1> vel;
@@ -10723,10 +11129,15 @@ PositionIKResult KinematicsSolver::solve_position_step(
     pending_step_torso_constraint_ = step_torso_constraint;
     pending_step_validation_dt_ = step_dt_eff;
     pending_reuse_current_kinematics_ = true;
+    const bool apply_setpoint_acceleration_limits =
+        acceleration_limits_enabled_ && !position_step_target_geometry_moved_ &&
+        step == 0;
+    pending_position_step_acceleration_limits_ =
+        apply_setpoint_acceleration_limits;
     VelocitySolverResult vel_out = solve_velocity(q, true);
     vel_out = retry_auto_task_layout_as_split_if_needed(
         q, std::move(vel_out), step_locked_indices, step_torso_constraint,
-        step_dt_eff);
+        step_dt_eff, apply_setpoint_acceleration_limits);
     const bool allow_backtrack =
         options.stall_recovery && vel_out.status != SolverStatus::kSuccess &&
         (vel_out.status == SolverStatus::kInfeasible ||
@@ -10744,6 +11155,8 @@ PositionIKResult KinematicsSolver::solve_position_step(
       pending_step_torso_constraint_ = step_torso_constraint;
       pending_step_validation_dt_ = step_dt_eff;
       pending_reuse_current_kinematics_ = true;
+      pending_position_step_acceleration_limits_ =
+          apply_setpoint_acceleration_limits;
       VelocitySolverResult retry = solve_velocity(q, true);
       if (retry.status == SolverStatus::kSuccess) {
         vel_out = std::move(retry);
@@ -10795,6 +11208,11 @@ PositionIKResult KinematicsSolver::solve_position_step(
           last_vel_result.joint_velocities, q, q_min, q_max,
           velocity_to_config_index, step_dt_eff, robot_->nv());
     }
+    if (step == 0 &&
+        last_vel_result.joint_velocities.size() == robot_->nv() &&
+        last_vel_result.joint_velocities.allFinite()) {
+      first_tick_velocity = last_vel_result.joint_velocities;
+    }
     q = pinocchio::integrate(robot_->model(), q,
                              step_dt_eff * last_vel_result.joint_velocities);
     if (use_position_limits_) {
@@ -10816,48 +11234,8 @@ PositionIKResult KinematicsSolver::solve_position_step(
 
     auto eval_broadphase_expanded = [&](const Eigen::VectorXd &q_eval)
         -> std::optional<double> {
-      auto expanded = get_post_step_rejection_pair_indices();
-      std::unordered_set<std::size_t> in_set(expanded.begin(), expanded.end());
-
-      const auto *geom_model = robot_->collision_model();
-      if (geom_model) {
-        const auto &pairs = geom_model->collisionPairs;
-        const auto &oMf = robot_->data().oMf;
-        const double cutoff =
-            collision_constraint_.has_value()
-                ? collision_constraint_->min_distance +
-                      collision_pair_cache_distance_margin_ +
-                      (sphere_broadphase_enabled_
-                           ? sphere_broadphase_.safety_margin
-                           : 0.0)
-                : std::numeric_limits<double>::infinity();
-
-        for (std::size_t pi = 0; pi < pairs.size(); ++pi) {
-          if (in_set.count(pi)) continue;
-          if (!collision_allowed_pair_mask_.empty() &&
-              pi < collision_allowed_pair_mask_.size() &&
-              !collision_allowed_pair_mask_[pi]) continue;
-
-          if (sphere_broadphase_enabled_ && sphere_broadphase_.is_built()) {
-            const auto &cp = pairs[pi];
-            const auto fa = geom_model->geometryObjects[cp.first].parentFrame;
-            const auto fb = geom_model->geometryObjects[cp.second].parentFrame;
-            if (fa < static_cast<pinocchio::FrameIndex>(oMf.size()) &&
-                fb < static_cast<pinocchio::FrameIndex>(oMf.size())) {
-              const double sphere_lb =
-                  sphere_broadphase_.compute_pair_lower_bound(
-                      cp.first, cp.second, oMf[fa].translation(),
-                      oMf[fa].rotation(), oMf[fb].translation(),
-                      oMf[fb].rotation());
-              if (std::isfinite(sphere_lb) && sphere_lb > cutoff) continue;
-            }
-          }
-
-          expanded.push_back(pi);
-          in_set.insert(pi);
-        }
-      }
-      return evaluate_min_collision_distance_targeted(q_eval, expanded);
+      evaluate_post_step_collision_recovery_margins(q_eval);
+      return evaluate_post_step_collision_distance_from_current_results();
     };
 
     // Post-solve collision rejection: use min_distance as the violation
@@ -10868,12 +11246,12 @@ PositionIKResult KinematicsSolver::solve_position_step(
       // recovery margin below enforces every pair's effective floor.
       const double violation_threshold = collision_constraint_->min_distance;
       const auto pre_dist_debug =
-          evaluate_post_step_collision_distance(q_pre_step);
+          evaluate_post_step_collision_distance_mutating(q_pre_step);
       const auto pre_recovery_margins =
           evaluate_post_step_collision_recovery_margins(q_pre_step);
       auto post_dist_debug =
           adaptive_step_large ? eval_broadphase_expanded(q)
-                              : evaluate_post_step_collision_distance(q);
+                              : evaluate_post_step_collision_distance_mutating(q);
       const auto post_recovery_margins =
           evaluate_post_step_collision_recovery_margins(q);
       const double pre_dist =
@@ -10946,7 +11324,7 @@ PositionIKResult KinematicsSolver::solve_position_step(
             auto backoff_dist_debug =
                 adaptive_step_large
                     ? eval_broadphase_expanded(q_backoff)
-                    : evaluate_post_step_collision_distance(q_backoff);
+                    : evaluate_post_step_collision_distance_mutating(q_backoff);
             const auto backoff_recovery_margins =
                 evaluate_post_step_collision_recovery_margins(q_backoff);
             const bool backoff_recovery_acceptable =
@@ -11105,7 +11483,8 @@ PositionIKResult KinematicsSolver::solve_position_step(
                 }
               }
               robot_->update_configuration(q_candidate);
-              auto esc_dist = evaluate_post_step_collision_distance(q_candidate);
+              auto esc_dist =
+                  evaluate_post_step_collision_distance_mutating(q_candidate);
               if (esc_dist.has_value() && std::isfinite(*esc_dist) &&
                   *esc_dist > min_dist) {
                 q = q_candidate;
@@ -11168,7 +11547,8 @@ PositionIKResult KinematicsSolver::solve_position_step(
             }
           }
           robot_->update_configuration(q_candidate);
-          auto esc_dist = evaluate_post_step_collision_distance(q_candidate);
+          auto esc_dist =
+              evaluate_post_step_collision_distance_mutating(q_candidate);
           if (esc_dist.has_value() && std::isfinite(*esc_dist) &&
               *esc_dist > global_min_dist) {
             q = q_candidate;
@@ -11269,9 +11649,10 @@ PositionIKResult KinematicsSolver::solve_position_step(
             q_candidate[j] = std::min(q_candidate[j], q_max[j]);
           }
         }
-        auto curr_dist = evaluate_post_step_collision_distance(q);
+        auto curr_dist = evaluate_post_step_collision_distance_mutating(q);
         robot_->update_configuration(q_candidate);
-        auto cand_dist = evaluate_post_step_collision_distance(q_candidate);
+        auto cand_dist =
+            evaluate_post_step_collision_distance_mutating(q_candidate);
         const double desat_safe_threshold_mt =
             (collision_constraint_.has_value() && collision_constraint_->enabled)
             ? collision_constraint_->min_distance
@@ -11301,6 +11682,27 @@ PositionIKResult KinematicsSolver::solve_position_step(
           [&]() { return solve_position_step(current_q, targets, options); });
       retry_result.has_value()) {
     return retry_result.value();
+  }
+
+  if (position_step_target_geometry_moved_) {
+    if (auto projected_result = apply_position_step_task_metric_projection(
+            current_q, step_dt, step_locked_indices, step_torso_constraint, q);
+        projected_result.has_value()) {
+      last_vel_result = std::move(*projected_result);
+      have_vel_result = true;
+    }
+  } else if (acceleration_limits_enabled_ &&
+             first_tick_velocity.size() == robot_->nv() &&
+             pinocchio::difference(robot_->model(), current_q, q)
+                     .squaredNorm() > kCollisionEscapeNormEps) {
+    q = pinocchio::integrate(robot_->model(), current_q,
+                             step_dt * first_tick_velocity);
+    if (use_position_limits_) {
+      auto [q_min, q_max] = robot_->get_joint_limits();
+      project_scalar_configuration_to_true_joint_limits(
+          q, q_min, q_max, velocity_to_config_index, robot_->nv());
+    }
+    robot_->update_configuration(q);
   }
 
   std::unordered_set<Task *> resolved_tasks;

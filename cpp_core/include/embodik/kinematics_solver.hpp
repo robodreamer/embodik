@@ -1140,6 +1140,20 @@ public:
   std::optional<double> evaluate_post_step_collision_distance(
       const Eigen::VectorXd &q);
 
+  /** @brief Exact distance queries issued by the latest outer position step. */
+  std::uint64_t get_last_post_step_collision_exact_distance_queries() const {
+    return last_post_step_collision_exact_distance_queries_;
+  }
+
+  /**
+   * @brief Post-step pair checks certified from cached distance and rigid-body
+   * motion bounds during the latest outer position step.
+   */
+  std::uint64_t
+  get_last_post_step_collision_motion_bound_culled_pairs() const {
+    return last_post_step_collision_motion_bound_culled_pairs_;
+  }
+
   /**
    * @brief Check per-pair override violations at q.
    *
@@ -1225,7 +1239,8 @@ private:
       const Eigen::VectorXd &q, VelocitySolverResult result,
       const std::vector<int> &velocity_lock_indices,
       const std::optional<TorsoPoseConstraintOptions> &torso_constraint,
-      const std::optional<double> &step_validation_dt);
+      const std::optional<double> &step_validation_dt,
+      bool apply_position_step_acceleration_limits = false);
   void update_auto_task_layout_feedback(const VelocitySolverResult &result);
   TaskLayout current_auto_task_layout_ = TaskLayout::kMerged;
   int auto_layout_below_low_count_ = 0;
@@ -1295,6 +1310,10 @@ private:
   /// One-shot integration dt used by solve_position_step so solve_velocity()
   /// can validate fallback candidates against the actual accepted step length.
   std::optional<double> pending_step_validation_dt_;
+  /// One-shot request for the first physical position-step solve to include the
+  /// caller-visible acceleration corridor. Later inner refinements are only
+  /// predictive and must not consume another physical acceleration interval.
+  bool pending_position_step_acceleration_limits_ = false;
   /// Guards against recursive MIN_ERROR step retry in solve_position_step.
   bool suppress_min_error_step_retry_ = false;
   /// Guards against recursive preferred-lock candidate retry in solve_position_step.
@@ -1307,6 +1326,7 @@ private:
     std::int64_t command_revision = -1;
   };
   std::optional<PositionStepTargetSignature> last_position_step_target_signature_;
+  bool position_step_target_geometry_moved_ = true;
   std::vector<double> position_step_collision_command_floor_distances_;
   int position_step_call_depth_ = 0;
   std::optional<double> position_step_merit_window_anchor_;
@@ -1320,6 +1340,8 @@ private:
   bool position_step_stationary_guard_can_reopen_ = true;
   bool update_position_step_target_signature(
       PositionStepTargetSignature signature);
+  bool position_step_target_geometry_changed(
+      const PositionStepTargetSignature &signature) const;
   void capture_position_step_collision_command_floor(
       const Eigen::VectorXd &current_q);
   Eigen::Matrix4d canonicalize_position_step_signature_pose(
@@ -1355,6 +1377,13 @@ private:
 
   void apply_position_step_primary_task_options(const PositionStepOptions &options,
                                                 Task *task);
+
+  std::optional<VelocitySolverResult>
+  apply_position_step_task_metric_projection(
+      const Eigen::VectorXd &current_q, double outer_dt,
+      const std::vector<int> &velocity_lock_indices,
+      const std::optional<TorsoPoseConstraintOptions> &torso_constraint,
+      Eigen::VectorXd &q_candidate);
 
   bool apply_position_step_outer_acceleration_limit(
       const Eigen::VectorXd &current_q,
@@ -1652,6 +1681,20 @@ private:
   // Cached constraint result for lazy reuse when configuration change is small.
   std::optional<CollisionConstraintResult> last_collision_constraint_result_;
   Eigen::VectorXd last_collision_constraint_q_;
+  struct PostStepCollisionDistanceCertificate {
+    Eigen::VectorXd q;
+    std::vector<std::uint8_t> enabled_pair_mask;
+    /// Exact signed distances for close pairs and conservative lower bounds for
+    /// pairs whose enclosing spheres certify that every active floor is safe.
+    std::vector<double> certified_signed_distance_lower_bounds;
+    std::vector<Eigen::Vector3d> joint_translations;
+    std::vector<Eigen::Matrix3d> joint_rotations;
+  };
+  static constexpr std::size_t kPostStepCollisionCacheCapacity = 16;
+  std::vector<std::shared_ptr<const PostStepCollisionDistanceCertificate>>
+      post_step_collision_distance_cache_;
+  std::uint64_t last_post_step_collision_exact_distance_queries_ = 0;
+  std::uint64_t last_post_step_collision_motion_bound_culled_pairs_ = 0;
   CollisionTuningMode collision_tuning_mode_ = CollisionTuningMode::kBalanced;
   SphereBroadphase sphere_broadphase_;
   bool sphere_broadphase_enabled_ = true;
@@ -1669,6 +1712,10 @@ private:
   std::vector<std::size_t> get_post_step_rejection_pair_indices() const;
   std::vector<double> evaluate_post_step_collision_recovery_margins(
       const Eigen::VectorXd &current_q);
+  std::optional<double> evaluate_post_step_collision_distance_mutating(
+      const Eigen::VectorXd &q);
+  std::optional<double>
+  evaluate_post_step_collision_distance_from_current_results();
   std::optional<CollisionConstraintResult> compute_collision_constraint();
 
   struct PositionStepMutableStateSnapshot {
@@ -1731,6 +1778,10 @@ private:
     bool last_constraint_was_full_scan = false;
     std::optional<CollisionConstraintResult> last_collision_constraint_result;
     Eigen::VectorXd last_collision_constraint_q;
+    std::vector<std::shared_ptr<const PostStepCollisionDistanceCertificate>>
+        post_step_collision_distance_cache;
+    std::uint64_t last_post_step_collision_exact_distance_queries = 0;
+    std::uint64_t last_post_step_collision_motion_bound_culled_pairs = 0;
     std::uint64_t last_collision_sphere_culled_pairs = 0;
     double last_solution_dq_norm = 0.0;
     std::unordered_map<std::size_t, int> collision_stuck_counters;

@@ -768,6 +768,18 @@ void bind_kinematics_solver(nb::module_ &m) {
            "checks. Prefers cached / targeted collision data before falling "
            "back to a global scan.")
 
+      .def("get_last_post_step_collision_exact_distance_queries",
+           &KinematicsSolver::
+               get_last_post_step_collision_exact_distance_queries,
+           "Return exact post-step collision queries from the latest outer "
+           "position step.")
+
+      .def("get_last_post_step_collision_motion_bound_culled_pairs",
+           &KinematicsSolver::
+               get_last_post_step_collision_motion_bound_culled_pairs,
+           "Return post-step pair checks certified by cached rigid-body "
+           "motion bounds in the latest outer position step.")
+
       .def("evaluate_min_collision_distance",
            &KinematicsSolver::evaluate_min_collision_distance,
            nb::arg("current_q") = Eigen::VectorXd(),

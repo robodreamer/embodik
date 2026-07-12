@@ -10,8 +10,12 @@
 namespace embodik {
 
 struct BoundingSphere {
-  Eigen::Vector3d center;  // offset from parent frame origin
+  Eigen::Vector3d center;  // offset from parent joint origin
   double radius;
+  Eigen::Vector3d box_center;
+  Eigen::Matrix3d box_rotation;
+  Eigen::Vector3d box_half_extents;
+  double motion_radius;
 };
 
 class SphereBroadphase {
