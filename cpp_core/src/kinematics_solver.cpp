@@ -4542,6 +4542,12 @@ KinematicsSolver::get_active_collision_pairs() const {
 std::optional<KinematicsSolver::CollisionConstraintResult>
 KinematicsSolver::compute_collision_constraint() {
 #ifdef PINOCCHIO_WITH_HPP_FCL
+  const bool acceleration_braking_lookahead_active =
+      acceleration_limits_enabled_ && position_step_call_depth_ > 0 &&
+      previous_dq_.size() == robot_->nv() && previous_dq_.allFinite() &&
+      acceleration_limits_.size() == robot_->nv() &&
+      acceleration_limits_.allFinite() &&
+      previous_dq_.cwiseAbs().maxCoeff() > constraint_tolerance_;
   // Lazy reuse: when configuration change is small and we have a safe margin,
   // reuse the previous constraint result.  The constraint Jacobian and bounds
   // remain approximately valid for small dq, and the safety margin absorbs
@@ -4553,6 +4559,7 @@ KinematicsSolver::compute_collision_constraint() {
     const bool constraint_active_for_reuse =
         collision_constraint_.has_value() && collision_constraint_->enabled;
     if (constraint_active_for_reuse && collision_pair_cache_enabled_ &&
+        !acceleration_braking_lookahead_active &&
         last_collision_constraint_result_.has_value() &&
         last_collision_constraint_q_.size() == robot_->nq() &&
         std::isfinite(last_constraint_min_distance_) &&
@@ -4628,6 +4635,7 @@ KinematicsSolver::compute_collision_constraint() {
               .squaredNorm() <= kFastPathMaxDqSqNorm;
 
   if (constraint_active && collision_pair_cache_enabled_ &&
+      !acceleration_braking_lookahead_active &&
       collision_pair_cache_has_full_scan_ && robot_q_stable &&
       !last_collision_budget_exhausted_ &&
       std::isfinite(last_constraint_min_distance_) &&
@@ -4652,6 +4660,67 @@ KinematicsSolver::compute_collision_constraint() {
   pinocchio::updateGeometryPlacements(robot_->model(), robot_->data(),
                                       *collision_model, *collision_data);
   const auto &pairs = collision_model->collisionPairs;
+
+  struct BrakingPlacementSample {
+    std::vector<Eigen::Vector3d> joint_translations;
+    std::vector<Eigen::Matrix3d> joint_rotations;
+  };
+  std::vector<BrakingPlacementSample> braking_placement_samples;
+  bool braking_lookahead_certified = !acceleration_braking_lookahead_active;
+  if (acceleration_braking_lookahead_active &&
+      sphere_broadphase_enabled_ && sphere_broadphase_.is_built()) {
+    int braking_steps = 0;
+    braking_lookahead_certified = true;
+    for (int index = 0; index < robot_->nv(); ++index) {
+      const double acceleration_step = acceleration_limits_[index] * dt_;
+      const double deadband = acceleration_step * 0.01;
+      const double step = acceleration_step + deadband;
+      if (step <= constraint_tolerance_) {
+        if (std::abs(previous_dq_[index]) > constraint_tolerance_) {
+          braking_lookahead_certified = false;
+          break;
+        }
+        continue;
+      }
+      braking_steps = std::max(
+          braking_steps,
+          static_cast<int>(
+              std::ceil(std::abs(previous_dq_[index]) / step - 1e-12)));
+    }
+
+    if (braking_lookahead_certified && braking_steps > 0) {
+      Eigen::VectorXd rollout_q = robot_->get_current_configuration();
+      Eigen::VectorXd rollout_velocity = previous_dq_;
+      pinocchio::Data rollout_data(robot_->model());
+      braking_placement_samples.reserve(braking_steps);
+      for (int step_index = 0; step_index < braking_steps; ++step_index) {
+        for (int index = 0; index < robot_->nv(); ++index) {
+          const double acceleration_step = acceleration_limits_[index] * dt_;
+          const double deadband = acceleration_step * 0.01;
+          const double step = acceleration_step + deadband;
+          if (rollout_velocity[index] > step) {
+            rollout_velocity[index] -= step;
+          } else if (rollout_velocity[index] < -step) {
+            rollout_velocity[index] += step;
+          } else {
+            rollout_velocity[index] = 0.0;
+          }
+        }
+        rollout_q = pinocchio::integrate(
+            robot_->model(), rollout_q, dt_ * rollout_velocity);
+        pinocchio::forwardKinematics(robot_->model(), rollout_data, rollout_q);
+
+        BrakingPlacementSample sample;
+        sample.joint_translations.reserve(rollout_data.oMi.size());
+        sample.joint_rotations.reserve(rollout_data.oMi.size());
+        for (const auto &joint_placement : rollout_data.oMi) {
+          sample.joint_translations.push_back(joint_placement.translation());
+          sample.joint_rotations.push_back(joint_placement.rotation());
+        }
+        braking_placement_samples.push_back(std::move(sample));
+      }
+    }
+  }
 
   double best_distance_debug = std::numeric_limits<double>::infinity();
   std::optional<std::size_t> best_index_debug;
@@ -4807,6 +4876,38 @@ KinematicsSolver::compute_collision_constraint() {
     const Eigen::Matrix3d rel_rotation =
         transform_a.rotation().transpose() * transform_b.rotation();
 
+    const auto braking_path_clears_cutoff = [&](double cutoff) {
+      if (!acceleration_braking_lookahead_active) {
+        return true;
+      }
+      if (!braking_lookahead_certified ||
+          !sphere_broadphase_enabled_ || !sphere_broadphase_.is_built()) {
+        return false;
+      }
+      const auto joint_a_id = object_a.parentJoint;
+      const auto joint_b_id = object_b.parentJoint;
+      for (const auto &sample : braking_placement_samples) {
+        if (joint_a_id >= static_cast<pinocchio::JointIndex>(
+                              sample.joint_translations.size()) ||
+            joint_b_id >= static_cast<pinocchio::JointIndex>(
+                              sample.joint_translations.size())) {
+          return false;
+        }
+        const double braking_lower_bound =
+            sphere_broadphase_.compute_pair_lower_bound(
+                pair.first, pair.second,
+                sample.joint_translations[joint_a_id],
+                sample.joint_rotations[joint_a_id],
+                sample.joint_translations[joint_b_id],
+                sample.joint_rotations[joint_b_id]);
+        if (!std::isfinite(braking_lower_bound) ||
+            braking_lower_bound <= cutoff) {
+          return false;
+        }
+      }
+      return true;
+    };
+
     bool bound_culled = false;
     if (constraint_active && use_cached_candidate_subset &&
         idx < collision_pair_bound_valid_.size() &&
@@ -4835,7 +4936,9 @@ KinematicsSolver::compute_collision_constraint() {
               ? collision_constraint_->min_distance +
                     collision_pair_cache_distance_margin_
               : std::numeric_limits<double>::infinity();
-      if (std::isfinite(lower_bound) && lower_bound > candidate_cutoff) {
+      if (std::isfinite(lower_bound) && lower_bound > candidate_cutoff &&
+          braking_path_clears_cutoff(
+              candidate_cutoff + sphere_broadphase_.safety_margin)) {
         bound_culled = true;
       }
     }
@@ -4860,7 +4963,8 @@ KinematicsSolver::compute_collision_constraint() {
             pair.first, pair.second, oMi[joint_a_id].translation(),
             oMi[joint_a_id].rotation(), oMi[joint_b_id].translation(),
             oMi[joint_b_id].rotation());
-        if (std::isfinite(sphere_lb) && sphere_lb > candidate_cutoff) {
+        if (std::isfinite(sphere_lb) && sphere_lb > candidate_cutoff &&
+            braking_path_clears_cutoff(candidate_cutoff)) {
           last_collision_sphere_culled_pairs_++;
           bound_culled = true;
         }
@@ -6422,23 +6526,31 @@ bool KinematicsSolver::apply_position_step_outer_acceleration_limit(
             braking_q.allFinite() && braking_velocity.allFinite();
         if ((full_braking_rollout_acceptable || have_safe_braking_step) &&
             collision_acceptable(braking_q, 0.0)) {
-          // Preserve useful task motion with one fully validated midpoint. The
-          // previous ten-round search repeated an entire braking rollout at
-          // every probe, which could exceed a 20 ms WBC tick on dense models.
-          // The braking command remains the certified fallback when the
-          // midpoint cannot itself stop without worsening collision margins.
-          const Eigen::VectorXd midpoint_velocity =
-              0.5 * (braking_velocity + limited_velocity);
-          Eigen::VectorXd midpoint_q =
-              configuration_for_velocity(current_q, midpoint_velocity);
-          if (candidate_and_braking_rollout_acceptable(midpoint_q,
-                                                        midpoint_velocity)) {
-            limited_velocity = midpoint_velocity;
-            limited_q = std::move(midpoint_q);
-          } else {
-            limited_velocity = std::move(braking_velocity);
-            limited_q = std::move(braking_q);
+          Eigen::VectorXd best_velocity = braking_velocity;
+          Eigen::VectorXd best_q = std::move(braking_q);
+          double safe_fraction = 0.0;
+          double unsafe_fraction = 1.0;
+          // Three probes retain useful task motion to 12.5% resolution while
+          // bounding the repeated braking-rollout work inside a WBC tick.
+          for (int iteration = 0; iteration < 3; ++iteration) {
+            const double fraction =
+                0.5 * (safe_fraction + unsafe_fraction);
+            const Eigen::VectorXd trial_velocity =
+                braking_velocity +
+                fraction * (limited_velocity - braking_velocity);
+            Eigen::VectorXd trial_q =
+                configuration_for_velocity(current_q, trial_velocity);
+            if (candidate_and_braking_rollout_acceptable(trial_q,
+                                                          trial_velocity)) {
+              safe_fraction = fraction;
+              best_velocity = trial_velocity;
+              best_q = std::move(trial_q);
+            } else {
+              unsafe_fraction = fraction;
+            }
           }
+          limited_velocity = std::move(best_velocity);
+          limited_q = std::move(best_q);
           accepted_backoff = true;
         }
       }

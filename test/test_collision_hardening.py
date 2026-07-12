@@ -421,7 +421,16 @@ class TestNonWorseningCollisionFloor:
             previous_velocity = applied_velocity
             q = q_next
 
-    def test_collision_viability_is_preserved_across_acceleration_limited_steps(self, tmp_path):
+    @pytest.mark.parametrize(
+        ("sphere_broadphase_enabled", "pair_cache_enabled"),
+        ((True, True), (False, True), (True, False), (False, False)),
+    )
+    def test_collision_viability_is_preserved_across_acceleration_limited_steps(
+        self,
+        tmp_path,
+        sphere_broadphase_enabled,
+        pair_cache_enabled,
+    ):
         dt = 0.02
         acceleration_limit = 10.0
         min_distance = 0.02
@@ -433,6 +442,8 @@ class TestNonWorseningCollisionFloor:
         solver.set_damping(0.01)
         solver.enable_position_limits(True)
         solver.enable_velocity_limits(True)
+        solver.enable_sphere_broadphase(sphere_broadphase_enabled)
+        solver.enable_collision_pair_cache(pair_cache_enabled)
         solver.configure_collision_constraint(min_distance=min_distance, max_constraints=1)
         solver.set_acceleration_limits(np.array([acceleration_limit], dtype=float))
         solver.enable_acceleration_limits(True)
@@ -471,7 +482,7 @@ class TestNonWorseningCollisionFloor:
         initial_clearance = solver.evaluate_min_collision_distance(q) - min_distance
         assert sampled_stopping_distance(-previous_velocity[0]) <= initial_clearance
 
-        for _ in range(10):
+        for step_index in range(10):
             solver.set_previous_joint_velocities(previous_velocity)
             result = solver.solve_position_step(q, target, "moving_task", options)
             q_next = np.asarray(result.q_solution, dtype=float)
@@ -497,6 +508,28 @@ class TestNonWorseningCollisionFloor:
                 collision_distance,
                 result.status,
             )
+
+            if step_index == 0:
+                assert result.status == embodik.SolverStatus.SUCCESS
+                braking_velocity = previous_velocity[0] + acceleration_limit * dt
+                certified_productive_velocity = braking_velocity - 0.5 * acceleration_limit * dt
+                certified_remaining_clearance = (
+                    initial_clearance + certified_productive_velocity * dt
+                )
+                certified_next_approach_speed = max(
+                    0.0,
+                    -certified_productive_velocity - acceleration_limit * dt,
+                )
+                assert (
+                    sampled_stopping_distance(certified_next_approach_speed)
+                    <= certified_remaining_clearance
+                )
+                assert applied_velocity[0] <= certified_productive_velocity + 1e-6, (
+                    "viability backoff discarded a collision-safe, target-directed command",
+                    previous_velocity,
+                    applied_velocity,
+                    certified_productive_velocity,
+                )
 
             previous_velocity = applied_velocity
             q = q_next
