@@ -5993,7 +5993,7 @@ KinematicsSolver::apply_position_step_task_metric_projection(
 }
 
 std::optional<Eigen::VectorXd>
-KinematicsSolver::evaluate_position_step_componentwise_outer_candidate(
+KinematicsSolver::estimate_position_step_componentwise_outer_candidate(
     const Eigen::VectorXd &current_q,
     const Eigen::VectorXd &previous_applied_velocity,
     const PositionStepOptions &options, double outer_dt,
@@ -6002,12 +6002,17 @@ KinematicsSolver::evaluate_position_step_componentwise_outer_candidate(
     return std::nullopt;
   }
 
-  const PositionStepMutableStateSnapshot snapshot =
-      capture_position_step_mutable_state();
+  const bool collision_was_enabled =
+      collision_constraint_.has_value() && collision_constraint_->enabled;
+  if (collision_was_enabled) {
+    collision_constraint_->enabled = false;
+  }
   Eigen::VectorXd candidate = terminal_q;
   const bool applied = apply_position_step_outer_acceleration_limit(
       current_q, previous_applied_velocity, options, outer_dt, candidate);
-  restore_position_step_mutable_state(snapshot);
+  if (collision_was_enabled) {
+    collision_constraint_->enabled = true;
+  }
   robot_->update_configuration(terminal_q);
   if (!applied || candidate.size() != robot_->nq() ||
       !candidate.allFinite()) {
@@ -10100,6 +10105,7 @@ PositionIKResult KinematicsSolver::solve_position_step(
   bool collision_violated_flag = false;
   bool recovery_inside_collision_margin = false;
   bool configuration_step_limited = false;
+  bool outer_acceleration_limit_applied = false;
 
   for (int step = 0; step < steps; ++step) {
     frame_task->update(*robot_);
@@ -10719,9 +10725,7 @@ PositionIKResult KinematicsSolver::solve_position_step(
   }
 
   if (position_step_target_geometry_moved_) {
-    const auto componentwise_candidate =
-        evaluate_position_step_componentwise_outer_candidate(
-            current_q, previous_applied_velocity, options, step_dt, q);
+    const Eigen::VectorXd terminal_q = q;
     robot_->update_configuration(current_q);
     frame_task->update(*robot_);
     const Eigen::VectorXd &current_error = frame_task->getError();
@@ -10751,6 +10755,12 @@ PositionIKResult KinematicsSolver::solve_position_step(
                                         options.max_angular_speed);
       frame_task->setPositionStepTargetVelocity(vel);
     }
+    const auto componentwise_candidate =
+        all_task_blocks_commanded && use_terminal_prediction
+            ? estimate_position_step_componentwise_outer_candidate(
+                  current_q, previous_applied_velocity, options, step_dt,
+                  terminal_q)
+            : std::nullopt;
     if (auto projected_result = apply_position_step_task_metric_projection(
             current_q, step_dt, first_tick_velocity, step_locked_indices,
             step_torso_constraint, q);
@@ -10767,22 +10777,33 @@ PositionIKResult KinematicsSolver::solve_position_step(
               options.position_gain, options.orientation_gain);
         };
         const auto projected_merits = block_merits_at(q);
-        const auto componentwise_merits =
-            block_merits_at(*componentwise_candidate);
-        const double projected_total =
-            projected_merits[0] + projected_merits[1];
-        const double componentwise_total =
-            componentwise_merits[0] + componentwise_merits[1];
-        const bool blocks_non_worsening =
-            std::isfinite(projected_merits[0]) &&
-            std::isfinite(projected_merits[1]) &&
-            std::isfinite(componentwise_merits[0]) &&
-            std::isfinite(componentwise_merits[1]) &&
-            componentwise_merits[0] <= projected_merits[0] + 1e-9 &&
-            componentwise_merits[1] <= projected_merits[1] + 1e-9;
-        if (blocks_non_worsening &&
-            componentwise_total + 1e-9 < projected_total) {
-          q = *componentwise_candidate;
+        const auto candidate_is_preferred =
+            [&](const Eigen::VectorXd &candidate_q) {
+          const auto candidate_merits = block_merits_at(candidate_q);
+          const double projected_total =
+              projected_merits[0] + projected_merits[1];
+          const double candidate_total =
+              candidate_merits[0] + candidate_merits[1];
+          return std::isfinite(projected_merits[0]) &&
+                 std::isfinite(projected_merits[1]) &&
+                 std::isfinite(candidate_merits[0]) &&
+                 std::isfinite(candidate_merits[1]) &&
+                 candidate_merits[0] <= projected_merits[0] + 1e-9 &&
+                 candidate_merits[1] <= projected_merits[1] + 1e-9 &&
+                 candidate_total + 1e-9 < projected_total;
+        };
+        if (candidate_is_preferred(*componentwise_candidate)) {
+          Eigen::VectorXd safe_componentwise_candidate =
+              *componentwise_candidate;
+          apply_position_step_outer_acceleration_limit(
+              current_q, previous_applied_velocity, options, step_dt,
+              safe_componentwise_candidate);
+          if (candidate_is_preferred(safe_componentwise_candidate)) {
+            q = std::move(safe_componentwise_candidate);
+            outer_acceleration_limit_applied = true;
+          }
+        }
+        if (outer_acceleration_limit_applied) {
           last_vel_result.joint_velocities =
               pinocchio::difference(robot_->model(), current_q, q) / step_dt;
         }
@@ -10818,8 +10839,10 @@ PositionIKResult KinematicsSolver::solve_position_step(
   if (final_configuration_limited) {
     robot_->update_configuration(q);
   }
-  apply_position_step_outer_acceleration_limit(
-      current_q, previous_applied_velocity, options, step_dt, q);
+  if (!outer_acceleration_limit_applied || final_configuration_limited) {
+    apply_position_step_outer_acceleration_limit(
+        current_q, previous_applied_velocity, options, step_dt, q);
+  }
 
   result.q_solution = q;
   result.achieved_pose = robot_->get_frame_pose(frame_task->getFrameName());
@@ -11326,6 +11349,7 @@ PositionIKResult KinematicsSolver::solve_position_step(
   bool collision_violated_flag_mts = false;  // multi-target solve_position_step
   bool recovery_inside_collision_margin = false;
   bool configuration_step_limited = false;
+  bool outer_acceleration_limit_applied = false;
 
   for (int step = 0; step < steps; ++step) {
     double combined_error = 0.0;
@@ -12031,9 +12055,7 @@ PositionIKResult KinematicsSolver::solve_position_step(
   }
 
   if (position_step_target_geometry_moved_) {
-    const auto componentwise_candidate =
-        evaluate_position_step_componentwise_outer_candidate(
-            current_q, previous_applied_velocity, options, step_dt, q);
+    const Eigen::VectorXd terminal_q = q;
     robot_->update_configuration(current_q);
     bool all_target_blocks_commanded = true;
     bool all_targets_use_terminal_prediction = true;
@@ -12082,6 +12104,12 @@ PositionIKResult KinematicsSolver::solve_position_step(
         rt.task->setPositionStepTargetVelocity(vel);
       }
     }
+    const auto componentwise_candidate =
+        all_target_blocks_commanded && all_targets_use_terminal_prediction
+            ? estimate_position_step_componentwise_outer_candidate(
+                  current_q, previous_applied_velocity, options, step_dt,
+                  terminal_q)
+            : std::nullopt;
     if (auto projected_result = apply_position_step_task_metric_projection(
             current_q, step_dt, first_tick_velocity, step_locked_indices,
             step_torso_constraint, q);
@@ -12113,30 +12141,44 @@ PositionIKResult KinematicsSolver::solve_position_step(
           return merits;
         };
         const auto projected_merits = target_block_merits_at(q);
-        const auto componentwise_merits =
-            target_block_merits_at(*componentwise_candidate);
-        double projected_total = 0.0;
-        double componentwise_total = 0.0;
-        bool all_targets_non_worsening =
-            projected_merits.size() == componentwise_merits.size();
-        for (std::size_t index = 0;
-             all_targets_non_worsening && index < projected_merits.size();
-             ++index) {
-          for (int block = 0; block < 2; ++block) {
-            all_targets_non_worsening =
-                all_targets_non_worsening &&
-                std::isfinite(projected_merits[index][block]) &&
-                std::isfinite(componentwise_merits[index][block]) &&
-                componentwise_merits[index][block] <=
-                    projected_merits[index][block] + 1e-9;
-            projected_total += projected_merits[index][block];
-            componentwise_total += componentwise_merits[index][block];
+        const auto candidate_is_preferred =
+            [&](const Eigen::VectorXd &candidate_q) {
+          const auto candidate_merits = target_block_merits_at(candidate_q);
+          double projected_total = 0.0;
+          double candidate_total = 0.0;
+          bool all_targets_non_worsening =
+              projected_merits.size() == candidate_merits.size();
+          for (std::size_t index = 0;
+               all_targets_non_worsening && index < projected_merits.size();
+               ++index) {
+            for (int block = 0; block < 2; ++block) {
+              all_targets_non_worsening =
+                  all_targets_non_worsening &&
+                  std::isfinite(projected_merits[index][block]) &&
+                  std::isfinite(candidate_merits[index][block]) &&
+                  candidate_merits[index][block] <=
+                      projected_merits[index][block] + 1e-9;
+              projected_total += projected_merits[index][block];
+              candidate_total += candidate_merits[index][block];
+            }
+          }
+          return all_targets_non_worsening &&
+                 std::isfinite(projected_total) &&
+                 std::isfinite(candidate_total) &&
+                 candidate_total + 1e-9 < projected_total;
+        };
+        if (candidate_is_preferred(*componentwise_candidate)) {
+          Eigen::VectorXd safe_componentwise_candidate =
+              *componentwise_candidate;
+          apply_position_step_outer_acceleration_limit(
+              current_q, previous_applied_velocity, options, step_dt,
+              safe_componentwise_candidate);
+          if (candidate_is_preferred(safe_componentwise_candidate)) {
+            q = std::move(safe_componentwise_candidate);
+            outer_acceleration_limit_applied = true;
           }
         }
-        if (all_targets_non_worsening && std::isfinite(projected_total) &&
-            std::isfinite(componentwise_total) &&
-            componentwise_total + 1e-9 < projected_total) {
-          q = *componentwise_candidate;
+        if (outer_acceleration_limit_applied) {
           last_vel_result.joint_velocities =
               pinocchio::difference(robot_->model(), current_q, q) / step_dt;
         }
@@ -12178,8 +12220,10 @@ PositionIKResult KinematicsSolver::solve_position_step(
   if (final_configuration_limited) {
     robot_->update_configuration(q);
   }
-  apply_position_step_outer_acceleration_limit(
-      current_q, previous_applied_velocity, options, step_dt, q);
+  if (!outer_acceleration_limit_applied || final_configuration_limited) {
+    apply_position_step_outer_acceleration_limit(
+        current_q, previous_applied_velocity, options, step_dt, q);
+  }
 
   result.q_solution = q;
   result.iterations_used = steps_used;
