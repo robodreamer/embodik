@@ -5808,6 +5808,7 @@ void KinematicsSolver::apply_position_step_primary_task_options(
 std::optional<VelocitySolverResult>
 KinematicsSolver::apply_position_step_task_metric_projection(
     const Eigen::VectorXd &current_q, double outer_dt,
+    const Eigen::VectorXd &first_tick_velocity,
     const std::vector<int> &velocity_lock_indices,
     const std::optional<TorsoPoseConstraintOptions> &torso_constraint,
     Eigen::VectorXd &q_candidate) {
@@ -5818,13 +5819,24 @@ KinematicsSolver::apply_position_step_task_metric_projection(
 
   const Eigen::VectorXd predictive_delta =
       pinocchio::difference(robot_->model(), current_q, q_candidate);
-  if (!predictive_delta.allFinite() ||
-      predictive_delta.squaredNorm() <= kCollisionEscapeNormEps) {
+  const bool have_terminal_prediction =
+      predictive_delta.allFinite() &&
+      predictive_delta.squaredNorm() > kCollisionEscapeNormEps;
+  const bool have_first_tick_prediction =
+      first_tick_velocity.size() == robot_->nv() &&
+      first_tick_velocity.allFinite() &&
+      first_tick_velocity.squaredNorm() > kCollisionEscapeNormEps;
+  if (!have_terminal_prediction && !have_first_tick_prediction) {
     return std::nullopt;
   }
 
   const double dt_safe = std::max(outer_dt, 1e-9);
-  const Eigen::VectorXd predictive_velocity = predictive_delta / dt_safe;
+  const Eigen::VectorXd terminal_predictive_velocity =
+      have_terminal_prediction ? predictive_delta / dt_safe
+                               : first_tick_velocity;
+  const Eigen::VectorXd first_tick_predictive_velocity =
+      have_first_tick_prediction ? first_tick_velocity
+                                 : terminal_predictive_velocity;
   robot_->update_configuration(current_q);
 
   bool have_task_objective = false;
@@ -5841,9 +5853,12 @@ KinematicsSolver::apply_position_step_task_metric_projection(
       continue;
     }
 
-    const Eigen::VectorXd predictive_task_velocity =
-        jacobian * predictive_velocity;
-    if (!predictive_task_velocity.allFinite()) {
+    const Eigen::VectorXd terminal_task_velocity =
+        jacobian * terminal_predictive_velocity;
+    const Eigen::VectorXd first_tick_task_velocity =
+        jacobian * first_tick_predictive_velocity;
+    if (!terminal_task_velocity.allFinite() ||
+        !first_tick_task_velocity.allFinite()) {
       continue;
     }
     Eigen::VectorXd projected_velocity =
@@ -5858,14 +5873,16 @@ KinematicsSolver::apply_position_step_task_metric_projection(
           commanded_velocity.tail<3>().squaredNorm() >
           kCollisionEscapeNormEps;
       if (has_linear_command) {
-        projected_velocity.head<3>() = predictive_task_velocity.head<3>();
-      }
-      if (has_linear_command || has_angular_command) {
-        projected_velocity.tail<3>() = predictive_task_velocity.tail<3>();
+        projected_velocity.head<3>() = terminal_task_velocity.head<3>();
+        projected_velocity.tail<3>() = terminal_task_velocity.tail<3>();
+      } else if (has_angular_command) {
+        projected_velocity.tail<3>() = first_tick_task_velocity.tail<3>();
       }
     } else {
       if (commanded_velocity.squaredNorm() > kCollisionEscapeNormEps) {
-        projected_velocity = predictive_task_velocity;
+        projected_velocity = task->getType() == TaskType::FRAME_ORIENTATION
+                                 ? first_tick_task_velocity
+                                 : terminal_task_velocity;
       }
     }
     task->setPositionStepTargetVelocity(projected_velocity);
@@ -10659,7 +10676,8 @@ PositionIKResult KinematicsSolver::solve_position_step(
       frame_task->setPositionStepTargetVelocity(vel);
     }
     if (auto projected_result = apply_position_step_task_metric_projection(
-            current_q, step_dt, step_locked_indices, step_torso_constraint, q);
+            current_q, step_dt, first_tick_velocity, step_locked_indices,
+            step_torso_constraint, q);
         projected_result.has_value()) {
       last_vel_result = std::move(*projected_result);
       have_vel_result = true;
@@ -11982,7 +12000,8 @@ PositionIKResult KinematicsSolver::solve_position_step(
       }
     }
     if (auto projected_result = apply_position_step_task_metric_projection(
-            current_q, step_dt, step_locked_indices, step_torso_constraint, q);
+            current_q, step_dt, first_tick_velocity, step_locked_indices,
+            step_torso_constraint, q);
         projected_result.has_value()) {
       last_vel_result = std::move(*projected_result);
       have_vel_result = true;

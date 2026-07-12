@@ -319,11 +319,14 @@ class TestAccelerationConstraints:
         options.orientation_gain = orientation_gain
         options.primary_solve_mode = eik.TaskSolveMode.MIN_ERROR
 
+        predictor_steps = 1 if np.linalg.norm(translation_offset) <= 1e-12 else 3
+        options.max_steps = predictor_steps
         nominal_result = nominal_solver.solve_position_step(
             q, [eik.TaskTarget("ee", target)], options
         )
         assert nominal_result.status == eik.SolverStatus.SUCCESS
         nominal_velocity = (np.asarray(nominal_result.q_solution) - q) / options.dt
+        options.max_steps = 3
 
         direct_robot, direct_solver, direct_task = build_solver(acceleration_limited=True)
         direct_task.solve_mode = eik.TaskSolveMode.MIN_ERROR
