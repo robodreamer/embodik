@@ -1292,6 +1292,9 @@ private:
   bool position_step_stationary_guard_can_reopen_ = true;
   void update_position_step_target_signature(
       PositionStepTargetSignature signature);
+  Eigen::Matrix4d canonicalize_position_step_signature_pose(
+      const std::string &task_name, const Eigen::Matrix4d &target_pose,
+      const std::optional<pinocchio::SE3> &reference_pose) const;
   void reset_position_step_continuity_state();
   void reset_position_step_merit_window();
   bool should_hold_position_step_for_continuity(

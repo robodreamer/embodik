@@ -307,6 +307,11 @@ struct PositionStepOptions {
   /// regardless of solve mode or max_steps. This bounds the outer control tick
   /// while preserving the caller's selected hierarchy/fallback semantics.
   double max_configuration_step_norm = 0.0;
+  /// Optional frame used only when comparing successive targets for stationary
+  /// continuity. World-frame pose tasks are expressed in this frame before
+  /// target-change detection; relative-frame tasks are already invariant and
+  /// remain unchanged. This does not alter the target passed to IK.
+  std::string continuity_reference_frame;
   // Optional torso orientation task and torso pose bounds. Bounds are enforced
   // in solve_position_step via additional inequality rows, consistent with
   // solve_position semantics.

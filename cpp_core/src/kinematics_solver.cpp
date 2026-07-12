@@ -1506,6 +1506,27 @@ void KinematicsSolver::update_position_step_target_signature(
   last_position_step_target_signature_ = std::move(signature);
 }
 
+Eigen::Matrix4d KinematicsSolver::canonicalize_position_step_signature_pose(
+    const std::string &task_name, const Eigen::Matrix4d &target_pose,
+    const std::optional<pinocchio::SE3> &reference_pose) const {
+  if (!reference_pose.has_value()) {
+    return target_pose;
+  }
+  const auto task_iter = task_map_.find(task_name);
+  if (task_iter != task_map_.end() &&
+      std::dynamic_pointer_cast<RelativeFrameTask>(task_iter->second)) {
+    return target_pose;
+  }
+
+  const pinocchio::SE3 world_target(target_pose.block<3, 3>(0, 0),
+                                    target_pose.block<3, 1>(0, 3));
+  const pinocchio::SE3 local_target = reference_pose->inverse() * world_target;
+  Eigen::Matrix4d canonical_pose = Eigen::Matrix4d::Identity();
+  canonical_pose.block<3, 3>(0, 0) = local_target.rotation();
+  canonical_pose.block<3, 1>(0, 3) = local_target.translation();
+  return canonical_pose;
+}
+
 void KinematicsSolver::reset_position_step_continuity_state() {
   last_position_step_target_signature_.reset();
   reset_position_step_merit_window();
@@ -8157,11 +8178,26 @@ PositionIKResult KinematicsSolver::solve_position_step(
        position_step_call_depth_ == 1) ||
       (suppress_min_error_step_retry_ && position_step_call_depth_ <= 2);
   ScopedPositionStepCallDepth position_step_depth(position_step_call_depth_);
+  std::optional<pinocchio::SE3> continuity_reference_pose;
+  if (!options.continuity_reference_frame.empty()) {
+    if (!robot_->has_frame(options.continuity_reference_frame)) {
+      result.status = SolverStatus::kInvalidInput;
+      result.status_message =
+          "continuity_reference_frame not found in robot model";
+      return result;
+    }
+    robot_->update_configuration(current_q);
+    continuity_reference_pose =
+        robot_->get_frame_pose(options.continuity_reference_frame);
+  }
   if (outermost_position_step_call) {
     PositionStepTargetSignature signature;
     signature.task_names.push_back(frame_task_name);
-    signature.target_poses.push_back(target_pose);
+    signature.target_poses.push_back(canonicalize_position_step_signature_pose(
+        frame_task_name, target_pose, continuity_reference_pose));
     signature.gains = {options.position_gain, options.orientation_gain};
+    signature.task_names.push_back("#continuity:" +
+                                   options.continuity_reference_frame);
     signature.task_names.push_back("#torso:" +
                                    options.torso_constraint.frame_name);
     for (const auto &task : tasks_) {
@@ -9233,18 +9269,35 @@ PositionIKResult KinematicsSolver::solve_position_step(
        position_step_call_depth_ == 1) ||
       (suppress_min_error_step_retry_ && position_step_call_depth_ <= 2);
   ScopedPositionStepCallDepth position_step_depth(position_step_call_depth_);
+  std::optional<pinocchio::SE3> continuity_reference_pose;
+  if (!options.continuity_reference_frame.empty()) {
+    if (!robot_->has_frame(options.continuity_reference_frame)) {
+      result.status = SolverStatus::kInvalidInput;
+      result.status_message =
+          "continuity_reference_frame not found in robot model";
+      return result;
+    }
+    robot_->update_configuration(current_q);
+    continuity_reference_pose =
+        robot_->get_frame_pose(options.continuity_reference_frame);
+  }
   if (outermost_position_step_call) {
     PositionStepTargetSignature signature;
     for (const auto &target : targets) {
       signature.task_names.push_back(target.task_name);
-      signature.target_poses.push_back(target.target_pose);
+      signature.target_poses.push_back(canonicalize_position_step_signature_pose(
+          target.task_name, target.target_pose, continuity_reference_pose));
       signature.gains.push_back(target.position_gain);
       signature.gains.push_back(target.orientation_gain);
       if (target.has_secondary_target_pose) {
         signature.task_names.push_back(target.task_name + "#secondary");
-        signature.target_poses.push_back(target.secondary_target_pose);
+        signature.target_poses.push_back(canonicalize_position_step_signature_pose(
+            target.task_name, target.secondary_target_pose,
+            continuity_reference_pose));
       }
     }
+    signature.task_names.push_back("#continuity:" +
+                                   options.continuity_reference_frame);
     signature.task_names.push_back("#torso:" +
                                    options.torso_constraint.frame_name);
     for (const auto &task : tasks_) {

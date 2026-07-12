@@ -718,6 +718,76 @@ def test_stationary_guard_does_not_reopen_after_weak_reversal_window() -> None:
     assert np.linalg.norm(np.asarray(resumed.q_solution, dtype=float) - q) > 1e-6
 
 
+def test_continuity_reference_frame_ignores_base_motion_but_reopens_for_local_target_change(
+    tmp_path: Path,
+) -> None:
+    robot = eik.RobotModel(str(_write_decoupled_xy_stage_urdf(tmp_path)), floating_base=False)
+    q = np.zeros(robot.nq, dtype=float)
+    robot.update_configuration(q)
+
+    solver = eik.KinematicsSolver(robot)
+    solver.dt = 0.02
+    solver.enable_position_limits(True)
+    solver.enable_velocity_limits(True)
+    task = solver.add_frame_task("stationary_target", "tool", eik.TaskType.FRAME_POSITION)
+    task.priority = 0
+    task.weight = 1.0
+    task.solve_mode = eik.TaskSolveMode.MIN_ERROR
+    task.set_position_mask(np.array([1.0, 0.0, 0.0], dtype=float))
+    posture = solver.add_posture_task("secondary_y", [1])
+    posture.priority = 1
+    posture.weight = 1.0
+    posture.solve_mode = eik.TaskSolveMode.MIN_ERROR
+    posture.set_controlled_joint_targets(np.array([0.5], dtype=float))
+
+    options = eik.PositionStepOptions()
+    options.max_steps = 1
+    options.dt = 0.02
+    options.position_gain = 10.0
+    options.orientation_gain = 0.0
+    options.primary_solve_mode = eik.TaskSolveMode.MIN_ERROR
+    options.continuity_reference_frame = "x_stage"
+
+    def target_in_reference(x_position: float) -> np.ndarray:
+        robot.update_configuration(q)
+        reference_pose = _pose_matrix(robot, "x_stage")
+        target_pose = reference_pose.copy()
+        target_pose[0, 3] += x_position
+        return target_pose
+
+    for _ in range(30):
+        result = solver.solve_position_step(
+            q,
+            target_in_reference(0.0),
+            "stationary_target",
+            options,
+        )
+        q = np.asarray(result.q_solution, dtype=float)
+    assert result.position_step_hold_active is True
+
+    q = q.copy()
+    q[0] += 0.05
+    same_local_target = target_in_reference(0.0)
+    moved_reference_result = solver.solve_position_step(
+        q,
+        same_local_target,
+        "stationary_target",
+        options,
+    )
+    assert moved_reference_result.position_step_hold_active is True
+    np.testing.assert_allclose(moved_reference_result.q_solution, q, rtol=0.0, atol=1e-12)
+
+    changed_local_target = target_in_reference(0.1)
+    resumed = solver.solve_position_step(
+        q,
+        changed_local_target,
+        "stationary_target",
+        options,
+    )
+    assert resumed.position_step_hold_active is False
+    assert np.linalg.norm(np.asarray(resumed.q_solution, dtype=float) - q) > 1e-6
+
+
 def test_changed_secondary_posture_target_reopens_satisfied_primary_hold(tmp_path: Path) -> None:
     robot = eik.RobotModel(str(_write_decoupled_xy_stage_urdf(tmp_path)), floating_base=False)
     q = np.zeros(robot.nq, dtype=float)
