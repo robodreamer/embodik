@@ -5801,7 +5801,6 @@ KinematicsSolver::apply_position_step_task_metric_projection(
   }
 
   const double dt_safe = std::max(outer_dt, 1e-9);
-  const Eigen::VectorXd predictive_velocity = predictive_delta / dt_safe;
   robot_->update_configuration(current_q);
 
   bool have_task_objective = false;
@@ -5809,13 +5808,8 @@ KinematicsSolver::apply_position_step_task_metric_projection(
     if (!task || !task->isActive()) {
       continue;
     }
-    task->update(*robot_);
-    const Eigen::MatrixXd jacobian = task->getJacobian();
-    if (jacobian.cols() != robot_->nv() || jacobian.rows() <= 0) {
-      continue;
-    }
-    task->setPositionStepTargetVelocity(jacobian * predictive_velocity);
     have_task_objective = true;
+    break;
   }
   if (!have_task_objective) {
     return std::nullopt;
@@ -10550,6 +10544,30 @@ PositionIKResult KinematicsSolver::solve_position_step(
   }
 
   if (position_step_target_geometry_moved_) {
+    robot_->update_configuration(current_q);
+    frame_task->update(*robot_);
+    const Eigen::VectorXd &current_error = frame_task->getError();
+    if (current_error.size() == 3) {
+      const bool is_orientation_only =
+          frame_task->getType() == TaskType::FRAME_ORIENTATION;
+      Eigen::VectorXd current_velocity =
+          (is_orientation_only ? options.orientation_gain
+                               : options.position_gain) *
+          current_error.head<3>();
+      const double speed_limit = is_orientation_only
+                                     ? options.max_angular_speed
+                                     : options.max_linear_speed;
+      if (speed_limit > 0.0 && current_velocity.norm() > speed_limit) {
+        current_velocity *= speed_limit / current_velocity.norm();
+      }
+      frame_task->setPositionStepTargetVelocity(current_velocity);
+    } else if (current_error.size() >= 6) {
+      vel.head<3>() = options.position_gain * current_error.head<3>();
+      vel.tail<3>() = options.orientation_gain * current_error.tail<3>();
+      clamp_spatial_velocity_components(vel, options.max_linear_speed,
+                                        options.max_angular_speed);
+      frame_task->setPositionStepTargetVelocity(vel);
+    }
     if (auto projected_result = apply_position_step_task_metric_projection(
             current_q, step_dt, step_locked_indices, step_torso_constraint, q);
         projected_result.has_value()) {
@@ -11797,6 +11815,38 @@ PositionIKResult KinematicsSolver::solve_position_step(
   }
 
   if (position_step_target_geometry_moved_) {
+    robot_->update_configuration(current_q);
+    for (size_t i = 0; i < n_targets; ++i) {
+      const auto &target = targets[i];
+      const auto &rt = resolved[i];
+      rt.task->update(*robot_);
+      const Eigen::VectorXd &current_error = rt.task->getError();
+      if (current_error.size() == 3) {
+        bool is_orientation_only = false;
+        if (rt.kind == PoseTaskKind::kFrame) {
+          const auto *ft = static_cast<const FrameTask *>(rt.task.get());
+          is_orientation_only =
+              ft->getType() == TaskType::FRAME_ORIENTATION;
+        }
+        Eigen::VectorXd current_velocity =
+            (is_orientation_only ? target.orientation_gain
+                                 : target.position_gain) *
+            current_error.head<3>();
+        const double speed_limit = is_orientation_only
+                                       ? options.max_angular_speed
+                                       : options.max_linear_speed;
+        if (speed_limit > 0.0 && current_velocity.norm() > speed_limit) {
+          current_velocity *= speed_limit / current_velocity.norm();
+        }
+        rt.task->setPositionStepTargetVelocity(current_velocity);
+      } else if (current_error.size() >= 6) {
+        vel.head<3>() = target.position_gain * current_error.head<3>();
+        vel.tail<3>() = target.orientation_gain * current_error.tail<3>();
+        clamp_spatial_velocity_components(vel, options.max_linear_speed,
+                                          options.max_angular_speed);
+        rt.task->setPositionStepTargetVelocity(vel);
+      }
+    }
     if (auto projected_result = apply_position_step_task_metric_projection(
             current_q, step_dt, step_locked_indices, step_torso_constraint, q);
         projected_result.has_value()) {

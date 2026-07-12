@@ -264,8 +264,8 @@ class TestAccelerationConstraints:
         assert np.max(np.abs(one_step_velocity)) <= 2.0 * one_step_options.dt * 1.02
         assert np.max(np.abs(multistep_velocity)) <= 2.0 * multistep_options.dt * 1.02
 
-    def test_multistep_position_projects_predictive_command_in_task_space(self):
-        """The physical command should preserve the predictive task motion."""
+    def test_multistep_position_preserves_current_task_objective(self):
+        """Inner prediction must not redefine the caller-visible task command."""
         pytest.importorskip("robot_descriptions.panda_description")
         from robot_descriptions.panda_description import URDF_PATH
 
@@ -286,9 +286,9 @@ class TestAccelerationConstraints:
 
         q = PANDA_HOME.copy()
         q[-2:] = 0.02
-        nominal_robot, nominal_solver, _ = build_solver(acceleration_limited=False)
-        nominal_robot.update_configuration(q)
-        target = nominal_robot.get_frame_pose("panda_hand").homogeneous()
+        target_robot, _, _ = build_solver(acceleration_limited=False)
+        target_robot.update_configuration(q)
+        target = target_robot.get_frame_pose("panda_hand").homogeneous()
         target[:3, 3] += np.array([0.20, 0.12, 0.08])
         angle = 0.35
         rotation_delta = np.array(
@@ -303,24 +303,23 @@ class TestAccelerationConstraints:
         position_gain = 10.0
         orientation_gain = 10.0
         options = eik.PositionStepOptions()
-        options.dt = nominal_solver.dt
+        options.dt = 0.02
         options.max_steps = 3
         options.position_gain = position_gain
         options.orientation_gain = orientation_gain
-        nominal_result = nominal_solver.solve_position_step(
-            q, [eik.TaskTarget("ee", target)], options
-        )
-        assert nominal_result.status == eik.SolverStatus.SUCCESS
-        nominal_velocity = (np.asarray(nominal_result.q_solution) - q) / options.dt
 
         direct_robot, direct_solver, direct_task = build_solver(acceleration_limited=True)
         direct_robot.update_configuration(q)
         direct_task.set_target_pose(target[:3, 3], target[:3, :3])
         direct_task.update(direct_robot)
-        predictive_task_velocity = (
-            np.asarray(direct_task.get_jacobian(), dtype=float) @ nominal_velocity
+        current_error = np.asarray(direct_task.get_error(), dtype=float)
+        current_task_velocity = np.concatenate(
+            (
+                position_gain * current_error[:3],
+                orientation_gain * current_error[3:],
+            )
         )
-        direct_task.set_target_velocity(predictive_task_velocity)
+        direct_task.set_target_velocity(current_task_velocity)
         direct_result = direct_solver.solve_velocity(q, apply_limits=True)
         direct_task.clear_target_velocity()
         assert direct_result.status == eik.SolverStatus.SUCCESS
