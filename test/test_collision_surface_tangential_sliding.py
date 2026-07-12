@@ -11,6 +11,10 @@ import pytest
 import embodik as eik
 
 _CONTACT_SEED = np.array([1.72537396, -1.69513454, 0.28872274, 0.0], dtype=float)
+_COMMAND_EPOCH_CONTACT_SEED = np.array(
+    [0.7848904730053934, 1.4182186491678923, -0.8543876987413632, 0.0],
+    dtype=float,
+)
 
 
 @dataclass(frozen=True)
@@ -337,6 +341,68 @@ def test_axis_aligned_violated_margin_slides_without_weighted_fallback(tmp_path)
     assert float(np.dot(final_position - entry_position, tangent)) >= 0.02
     assert min(clearances) >= entry_clearance - 1e-6
     assert clearances[-1] >= entry_clearance + 0.0002 - 1e-6
+
+
+def test_changed_tangent_target_preserves_recovered_command_epoch_clearance(tmp_path):
+    robot = eik.RobotModel(str(_write_contact_arm_urdf(tmp_path)), floating_base=False)
+    q = _COMMAND_EPOCH_CONTACT_SEED.copy()
+    robot.update_configuration(q)
+
+    solver = eik.KinematicsSolver(robot)
+    solver.dt = 0.02
+    solver.enable_position_limits(True)
+    solver.enable_velocity_limits(True)
+
+    debug = solver.evaluate_collision_debug(q)
+    assert debug is not None
+    nearest_delta = np.asarray(debug.point_b_world) - np.asarray(debug.point_a_world)
+    normal = nearest_delta / np.linalg.norm(nearest_delta)
+    tangent = np.array([-normal[1], normal[0], 0.0], dtype=float)
+    tangent /= np.linalg.norm(tangent)
+    entry_clearance = float(debug.distance)
+    entry_position = np.asarray(robot.get_frame_pose("tool").translation, dtype=float)
+
+    task = solver.add_frame_task("tool_position", "tool", eik.TaskType.FRAME_POSITION)
+    task.priority = 0
+    task.weight = 1.0
+    task.solve_mode = eik.TaskSolveMode.SCALE
+    solver.configure_collision_constraint(
+        min_distance=entry_clearance - 0.002,
+        include_pairs=list(robot.get_collision_pair_names()),
+        max_constraints=1,
+    )
+    solver.set_proximity_gated_collision_activation_enabled(False)
+
+    options = eik.PositionStepOptions()
+    options.max_steps = 4
+    options.dt = 0.02
+    options.position_gain = 10.0
+    options.orientation_gain = 0.0
+    options.primary_solve_mode = eik.TaskSolveMode.SCALE
+
+    hold_pose = np.eye(4, dtype=float)
+    hold_pose[:3, 3] = entry_position
+    hold_result = solver.solve_position_step(q, hold_pose, "tool_position", options)
+    q = np.asarray(hold_result.q_solution, dtype=float)
+    robot.update_configuration(q)
+
+    tangent_pose = np.eye(4, dtype=float)
+    tangent_pose[:3, 3] = entry_position + 0.08 * tangent
+    clearances: list[float] = []
+    progress: list[float] = []
+    for _ in range(10):
+        result = solver.solve_position_step(q, tangent_pose, "tool_position", options)
+        q = np.asarray(result.q_solution, dtype=float)
+        robot.update_configuration(q)
+        clearance = solver.evaluate_min_collision_distance(q)
+        assert clearance is not None
+        clearances.append(float(clearance))
+        position = np.asarray(robot.get_frame_pose("tool").translation, dtype=float)
+        progress.append(float(np.dot(position - entry_position, tangent)))
+
+    assert progress[0] > 1e-4
+    assert progress[-1] >= 0.06
+    assert min(clearances) >= entry_clearance - 1e-4
 
 
 def test_stationary_continuity_preserves_collision_rejection_diagnostics(tmp_path):

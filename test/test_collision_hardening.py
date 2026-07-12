@@ -334,6 +334,39 @@ class TestPerPairMinDistanceOverride:
 class TestNonWorseningCollisionFloor:
     """The structural floor is a minimum recovery target, not a ceiling."""
 
+    def test_strict_floor_critical_pairs_are_not_dropped_by_nominal_row_budget(self, tmp_path):
+        robot = embodik.RobotModel(str(_write_two_floor_critical_pairs_urdf(tmp_path)))
+        solver = embodik.KinematicsSolver(robot)
+        solver.dt = 0.1
+        solver.set_damping(0.01)
+        solver.configure_collision_constraint(min_distance=0.07, max_constraints=1)
+        solver.set_proximity_gated_collision_activation_enabled(False)
+        solver.enable_collision_pair_cache(False)
+        solver.enable_sphere_broadphase(False)
+
+        task = solver.add_frame_task("moving_task", "moving")
+        task.priority = 0
+        task.weight = 1.0
+
+        q = np.array([0.0], dtype=float)
+        robot.update_configuration(q)
+        pose = robot.get_frame_pose("moving")
+        task.set_target_pose(
+            np.asarray(pose.translation, dtype=float),
+            np.asarray(pose.rotation, dtype=float),
+        )
+
+        solver.solve_velocity(q, apply_limits=True)
+        active_pairs = [
+            {row.object_a, row.object_b}
+            for row in solver.get_last_collision_debug_list()
+            if "moving" in row.object_a or "moving" in row.object_b
+        ]
+
+        assert len(active_pairs) == 2, solver.get_active_collision_pairs()
+        assert any(any("left_obstacle" in name for name in pair) for pair in active_pairs)
+        assert any(any("right_obstacle" in name for name in pair) for pair in active_pairs)
+
     def test_floor_critical_pairs_are_not_dropped_by_nominal_row_budget(self, tmp_path):
         robot = embodik.RobotModel(str(_write_two_floor_critical_pairs_urdf(tmp_path)))
         solver = embodik.KinematicsSolver(robot)

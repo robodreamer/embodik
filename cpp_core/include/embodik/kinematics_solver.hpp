@@ -1280,6 +1280,7 @@ private:
     std::vector<double> gains;
   };
   std::optional<PositionStepTargetSignature> last_position_step_target_signature_;
+  std::vector<double> position_step_collision_command_floor_distances_;
   int position_step_call_depth_ = 0;
   std::optional<double> position_step_merit_window_anchor_;
   double position_step_merit_window_motion_ = 0.0;
@@ -1290,8 +1291,10 @@ private:
   int position_step_merit_window_error_increases_ = 0;
   bool position_step_stationary_guard_active_ = false;
   bool position_step_stationary_guard_can_reopen_ = true;
-  void update_position_step_target_signature(
+  bool update_position_step_target_signature(
       PositionStepTargetSignature signature);
+  void capture_position_step_collision_command_floor(
+      const Eigen::VectorXd &current_q);
   Eigen::Matrix4d canonicalize_position_step_signature_pose(
       const std::string &task_name, const Eigen::Matrix4d &target_pose,
       const std::optional<pinocchio::SE3> &reference_pose) const;
@@ -1661,6 +1664,7 @@ private:
     std::unordered_map<std::string, double> per_pair_min_distance_overrides;
     std::unordered_map<std::string, double> per_pair_deferred_overrides;
     std::unordered_map<std::string, double> collision_pair_distance_floor;
+    std::vector<double> position_step_collision_command_floor_distances;
     std::vector<int> collision_cache_frozen_indices;
     std::optional<CollisionDebugInfo> last_collision_debug;
     std::vector<CollisionDebugInfo> last_collision_debug_list;

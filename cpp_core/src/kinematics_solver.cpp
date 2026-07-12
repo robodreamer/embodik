@@ -1451,7 +1451,7 @@ static ClassifiedOutcome classify_position_outcome(
 }
 } // namespace
 
-void KinematicsSolver::update_position_step_target_signature(
+bool KinematicsSolver::update_position_step_target_signature(
     PositionStepTargetSignature signature) {
   const bool signature_is_finite =
       std::all_of(signature.target_poses.begin(), signature.target_poses.end(),
@@ -1460,15 +1460,15 @@ void KinematicsSolver::update_position_step_target_signature(
                   [](double value) { return std::isfinite(value); });
   if (!signature_is_finite) {
     reset_position_step_continuity_state();
-    return;
+    return false;
   }
+  bool existing_target_geometry_changed = false;
   if (last_position_step_target_signature_.has_value()) {
     const auto &previous = *last_position_step_target_signature_;
-    bool matches = previous.task_names == signature.task_names &&
-                   previous.target_poses.size() ==
-                       signature.target_poses.size() &&
-                   previous.gains.size() == signature.gains.size();
-    if (matches) {
+    bool target_geometry_matches =
+        previous.task_names == signature.task_names &&
+        previous.target_poses.size() == signature.target_poses.size();
+    if (target_geometry_matches) {
       for (std::size_t index = 0; index < signature.target_poses.size();
            ++index) {
         const Eigen::Matrix4d &before = previous.target_poses[index];
@@ -1483,11 +1483,13 @@ void KinematicsSolver::update_position_step_target_signature(
             !std::isfinite(rotation_angle) ||
             translation_delta > kStationaryTargetTranslationTolerance ||
             rotation_angle > kStationaryTargetRotationTolerance) {
-          matches = false;
+          target_geometry_matches = false;
           break;
         }
       }
     }
+    bool matches = target_geometry_matches &&
+                   previous.gains.size() == signature.gains.size();
     if (matches) {
       for (std::size_t index = 0; index < signature.gains.size(); ++index) {
         if (std::abs(previous.gains[index] - signature.gains[index]) >
@@ -1499,11 +1501,14 @@ void KinematicsSolver::update_position_step_target_signature(
     }
     if (!matches) {
       reset_position_step_merit_window();
+      existing_target_geometry_changed = !target_geometry_matches;
     }
   } else {
     reset_position_step_merit_window();
+    position_step_collision_command_floor_distances_.clear();
   }
   last_position_step_target_signature_ = std::move(signature);
+  return existing_target_geometry_changed;
 }
 
 Eigen::Matrix4d KinematicsSolver::canonicalize_position_step_signature_pose(
@@ -1529,6 +1534,7 @@ Eigen::Matrix4d KinematicsSolver::canonicalize_position_step_signature_pose(
 
 void KinematicsSolver::reset_position_step_continuity_state() {
   last_position_step_target_signature_.reset();
+  position_step_collision_command_floor_distances_.clear();
   reset_position_step_merit_window();
 }
 
@@ -2983,6 +2989,15 @@ KinematicsSolver::evaluate_post_step_collision_recovery_margins(
       recovery_target =
           std::min(floor_iter->second, effective_min_distance);
     }
+    if (position_step_call_depth_ > 0 &&
+        pair_index < position_step_collision_command_floor_distances_.size() &&
+        std::isfinite(
+            position_step_collision_command_floor_distances_[pair_index])) {
+      recovery_target = std::max(
+          recovery_target,
+          position_step_collision_command_floor_distances_[pair_index] -
+              kCollisionTolerance);
+    }
 
     margins[pair_index] = signed_distance - recovery_target;
   }
@@ -2991,6 +3006,62 @@ KinematicsSolver::evaluate_post_step_collision_recovery_margins(
 #else
   (void)current_q;
   return {};
+#endif
+}
+
+void KinematicsSolver::capture_position_step_collision_command_floor(
+    const Eigen::VectorXd &current_q) {
+  position_step_collision_command_floor_distances_.clear();
+#ifdef PINOCCHIO_WITH_HPP_FCL
+  if (!collision_constraint_.has_value() ||
+      !collision_constraint_->enabled) {
+    return;
+  }
+  const std::vector<double> current_margins =
+      evaluate_post_step_collision_recovery_margins(current_q);
+  const auto *collision_model = robot_->collision_model();
+  if (collision_model == nullptr || current_margins.empty()) {
+    return;
+  }
+
+  position_step_collision_command_floor_distances_.assign(
+      current_margins.size(), std::numeric_limits<double>::quiet_NaN());
+  for (std::size_t pair_index = 0; pair_index < current_margins.size();
+       ++pair_index) {
+    const double margin = current_margins[pair_index];
+    if (!std::isfinite(margin) ||
+        pair_index >= collision_model->collisionPairs.size()) {
+      continue;
+    }
+
+    const auto &pair = collision_model->collisionPairs[pair_index];
+    const auto &name_a = collision_model->geometryObjects[pair.first].name;
+    const auto &name_b = collision_model->geometryObjects[pair.second].name;
+    const std::string pair_key = canonical_pair_key(name_a, name_b);
+    double effective_min_distance = collision_constraint_->min_distance;
+    const auto override_iter =
+        per_pair_min_distance_overrides_.find(pair_key);
+    if (override_iter != per_pair_min_distance_overrides_.end()) {
+      effective_min_distance = override_iter->second;
+    }
+    double recovery_target = effective_min_distance;
+    if (non_worsening_collision_floor_enabled_) {
+      const auto floor_iter = collision_pair_distance_floor_.find(pair_key);
+      if (floor_iter != collision_pair_distance_floor_.end()) {
+        recovery_target =
+            std::min(floor_iter->second, effective_min_distance);
+      }
+    }
+    const double nominal_margin =
+        margin + recovery_target - effective_min_distance;
+    if (nominal_margin >= -kCollisionTolerance &&
+        nominal_margin <= kCollisionRepulsionDeadband) {
+      position_step_collision_command_floor_distances_[pair_index] =
+          margin + recovery_target;
+    }
+  }
+#else
+  (void)current_q;
 #endif
 }
 
@@ -4544,6 +4615,16 @@ KinematicsSolver::compute_collision_constraint() {
           recovery_target =
               std::min(floor->second, effective_min_distance);
         }
+        if (position_step_call_depth_ > 0 &&
+            pair_idx <
+                position_step_collision_command_floor_distances_.size() &&
+            std::isfinite(
+                position_step_collision_command_floor_distances_[pair_idx])) {
+          recovery_target = std::max(
+              recovery_target,
+              position_step_collision_command_floor_distances_[pair_idx] -
+                  kCollisionTolerance);
+        }
         if (effective_min_distance_out != nullptr) {
           *effective_min_distance_out = effective_min_distance;
         }
@@ -4558,13 +4639,21 @@ KinematicsSolver::compute_collision_constraint() {
   // pair-switch hysteresis as a selection-only guard band; this does not alter
   // the continuous velocity-damper bounds.
   const double recovery_selection_margin = kCollisionPairSwitchHysteresis;
+  const bool proximity_gating_active =
+      config.constraint_activation_enabled &&
+      config.constraint_activation_margin > 0.0;
   std::unordered_set<std::size_t> mandatory_pair_indices;
   for (const auto &[distance, pair_idx] : selectable_candidates) {
     double recovery_target = config.min_distance;
     collision_recovery_distances_for_pair(
         pair_idx, distance, nullptr, &recovery_target);
-    if (distance < 0.0 ||
-        (non_worsening_collision_floor_enabled_ &&
+    const bool command_floor_active =
+        position_step_call_depth_ > 0 &&
+        pair_idx < position_step_collision_command_floor_distances_.size() &&
+        std::isfinite(
+            position_step_collision_command_floor_distances_[pair_idx]);
+    if ((!proximity_gating_active && distance < recovery_target) ||
+        ((non_worsening_collision_floor_enabled_ || command_floor_active) &&
          distance <= recovery_target + recovery_selection_margin)) {
       mandatory_pair_indices.insert(pair_idx);
     }
@@ -5278,6 +5367,8 @@ KinematicsSolver::capture_position_step_mutable_state() const {
   snapshot.per_pair_min_distance_overrides = per_pair_min_distance_overrides_;
   snapshot.per_pair_deferred_overrides = per_pair_deferred_overrides_;
   snapshot.collision_pair_distance_floor = collision_pair_distance_floor_;
+  snapshot.position_step_collision_command_floor_distances =
+      position_step_collision_command_floor_distances_;
   snapshot.collision_cache_frozen_indices = collision_cache_frozen_indices_;
   snapshot.last_collision_debug = last_collision_debug_;
   snapshot.last_collision_debug_list = last_collision_debug_list_;
@@ -5371,6 +5462,8 @@ void KinematicsSolver::restore_position_step_mutable_state(
       snapshot.per_pair_min_distance_overrides;
   per_pair_deferred_overrides_ = snapshot.per_pair_deferred_overrides;
   collision_pair_distance_floor_ = snapshot.collision_pair_distance_floor;
+  position_step_collision_command_floor_distances_ =
+      snapshot.position_step_collision_command_floor_distances;
   collision_cache_frozen_indices_ = snapshot.collision_cache_frozen_indices;
   last_collision_debug_ = snapshot.last_collision_debug;
   last_collision_debug_list_ = snapshot.last_collision_debug_list;
@@ -8208,7 +8301,9 @@ PositionIKResult KinematicsSolver::solve_position_step(
       append_task_policy_signature(signature.gains, *task);
     }
     append_position_step_option_signature(signature.gains, options);
-    update_position_step_target_signature(std::move(signature));
+    if (update_position_step_target_signature(std::move(signature))) {
+      capture_position_step_collision_command_floor(current_q);
+    }
   }
 
   if (!options.preferred_locked_joint_indices.empty() &&
@@ -9308,7 +9403,9 @@ PositionIKResult KinematicsSolver::solve_position_step(
       append_task_policy_signature(signature.gains, *task);
     }
     append_position_step_option_signature(signature.gains, options);
-    update_position_step_target_signature(std::move(signature));
+    if (update_position_step_target_signature(std::move(signature))) {
+      capture_position_step_collision_command_floor(current_q);
+    }
   }
 
   if (!options.preferred_locked_joint_indices.empty() &&
