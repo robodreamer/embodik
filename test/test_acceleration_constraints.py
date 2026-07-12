@@ -481,6 +481,98 @@ class TestAccelerationConstraints:
             np.asarray(step_result.q_solution), componentwise_q, rtol=0.0, atol=1e-9
         )
 
+    def test_streaming_rotation_target_keeps_first_tick_projection(self):
+        """Incidental position error must not reclassify a rotation command."""
+        pytest.importorskip("robot_descriptions.panda_description")
+        from robot_descriptions.panda_description import URDF_PATH
+
+        def build_solver(*, acceleration_limited: bool):
+            robot = eik.RobotModel(URDF_PATH, floating_base=False)
+            solver = eik.KinematicsSolver(robot)
+            solver.dt = 0.02
+            solver.set_damping(0.05)
+            solver.enable_position_limits(True)
+            solver.enable_velocity_limits(True)
+            if acceleration_limited:
+                solver.set_acceleration_limits(np.full(robot.nv, 100.0))
+                solver.enable_acceleration_limits(True)
+            task = solver.add_frame_task("ee", "panda_hand", eik.TaskType.FRAME_POSE)
+            task.solve_mode = eik.TaskSolveMode.MIN_ERROR
+            return robot, solver, task
+
+        q0 = PANDA_HOME.copy()
+        q0[-2:] = 0.02
+        target_robot, _, _ = build_solver(acceleration_limited=False)
+        target_robot.update_configuration(q0)
+        base_target = target_robot.get_frame_pose("panda_hand").homogeneous()
+
+        def rotated_target(angle):
+            target = base_target.copy()
+            rotation_delta = np.array(
+                [
+                    [np.cos(angle), 0.0, np.sin(angle)],
+                    [0.0, 1.0, 0.0],
+                    [-np.sin(angle), 0.0, np.cos(angle)],
+                ]
+            )
+            target[:3, :3] = rotation_delta @ target[:3, :3]
+            return target
+
+        options = eik.PositionStepOptions()
+        options.dt = 0.02
+        options.max_steps = 3
+        options.position_gain = 1.0
+        options.orientation_gain = 1.0
+        options.primary_solve_mode = eik.TaskSolveMode.MIN_ERROR
+
+        step_robot, step_solver, step_task = build_solver(acceleration_limited=True)
+        first_target = rotated_target(0.20)
+        first_result = step_solver.solve_position_step(
+            q0, [eik.TaskTarget("ee", first_target)], options
+        )
+        assert first_result.status == eik.SolverStatus.SUCCESS
+        q1 = np.asarray(first_result.q_solution)
+        previous_velocity = (q1 - q0) / options.dt
+
+        second_target = rotated_target(0.35)
+        step_robot.update_configuration(q1)
+        step_task.set_target_pose(second_target[:3, 3], second_target[:3, :3])
+        step_task.update(step_robot)
+        assert np.linalg.norm(np.asarray(step_task.get_error())[:3]) > 1e-8
+
+        nominal_robot, nominal_solver, _ = build_solver(acceleration_limited=False)
+        options.max_steps = 1
+        nominal_result = nominal_solver.solve_position_step(
+            q1, [eik.TaskTarget("ee", second_target)], options
+        )
+        assert nominal_result.status == eik.SolverStatus.SUCCESS
+        first_tick_velocity = (np.asarray(nominal_result.q_solution) - q1) / options.dt
+        options.max_steps = 3
+
+        direct_robot, direct_solver, direct_task = build_solver(acceleration_limited=True)
+        direct_solver.set_previous_joint_velocities(previous_velocity)
+        direct_robot.update_configuration(q1)
+        direct_task.set_target_pose(second_target[:3, 3], second_target[:3, :3])
+        direct_task.update(direct_robot)
+        direct_task.set_target_velocity(
+            np.asarray(direct_task.get_jacobian()) @ first_tick_velocity
+        )
+        direct_result = direct_solver.solve_velocity(q1, apply_limits=True)
+        direct_task.clear_target_velocity()
+        assert direct_result.status == eik.SolverStatus.SUCCESS
+
+        second_result = step_solver.solve_position_step(
+            q1, [eik.TaskTarget("ee", second_target)], options
+        )
+        assert second_result.status == eik.SolverStatus.SUCCESS
+        applied_velocity = (np.asarray(second_result.q_solution) - q1) / options.dt
+        np.testing.assert_allclose(
+            applied_velocity,
+            np.asarray(direct_result.joint_velocities),
+            rtol=1e-6,
+            atol=1e-8,
+        )
+
     def test_position_step_accepts_caller_applied_velocity_reference(self, panda_setup):
         """A caller can synchronize acceleration state to the velocity it applied."""
         robot, solver = panda_setup

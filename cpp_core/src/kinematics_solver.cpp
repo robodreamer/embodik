@@ -1539,6 +1539,75 @@ bool KinematicsSolver::position_step_target_geometry_changed(
   return false;
 }
 
+void KinematicsSolver::update_position_step_target_motion_blocks(
+    const PositionStepTargetSignature &signature) {
+  position_step_target_motion_blocks_.clear();
+  if (!last_position_step_target_signature_.has_value()) {
+    return;
+  }
+
+  const auto &previous = *last_position_step_target_signature_;
+  if (previous.task_names != signature.task_names) {
+    return;
+  }
+  const bool use_reference_geometry =
+      !previous.reference_target_poses.empty() &&
+      previous.reference_target_poses.size() ==
+          signature.reference_target_poses.size();
+  const auto &before = use_reference_geometry
+                           ? previous.reference_target_poses
+                           : previous.target_poses;
+  const auto &after = use_reference_geometry
+                          ? signature.reference_target_poses
+                          : signature.target_poses;
+  if (before.size() != after.size() ||
+      after.size() > signature.task_names.size()) {
+    return;
+  }
+
+  constexpr char kSecondarySuffix[] = "#secondary";
+  constexpr std::size_t kSecondarySuffixLength = sizeof(kSecondarySuffix) - 1;
+  for (std::size_t index = 0; index < after.size(); ++index) {
+    std::string task_name = signature.task_names[index];
+    if (task_name.size() >= kSecondarySuffixLength &&
+        task_name.compare(task_name.size() - kSecondarySuffixLength,
+                          kSecondarySuffixLength, kSecondarySuffix) == 0) {
+      task_name.resize(task_name.size() - kSecondarySuffixLength);
+    }
+
+    const double translation_delta =
+        (before[index].block<3, 1>(0, 3) -
+         after[index].block<3, 1>(0, 3))
+            .norm();
+    const Eigen::Matrix3d rotation_delta =
+        before[index].block<3, 3>(0, 0).transpose() *
+        after[index].block<3, 3>(0, 0);
+    const double rotation_angle = pinocchio::log3(rotation_delta).norm();
+    auto &motion_blocks = position_step_target_motion_blocks_[task_name];
+    motion_blocks[0] =
+        motion_blocks[0] || !std::isfinite(translation_delta) ||
+        translation_delta > kStationaryTargetTranslationTolerance;
+    motion_blocks[1] = motion_blocks[1] || !std::isfinite(rotation_angle) ||
+                       rotation_angle > kStationaryTargetRotationTolerance;
+  }
+}
+
+bool KinematicsSolver::position_step_task_uses_terminal_prediction(
+    const Task &task, const Eigen::VectorXd &current_error) const {
+  if (task.getType() == TaskType::FRAME_ORIENTATION) {
+    return false;
+  }
+  const auto motion_iter =
+      position_step_target_motion_blocks_.find(task.getName());
+  if (motion_iter != position_step_target_motion_blocks_.end()) {
+    return motion_iter->second[0];
+  }
+  if (task.getType() == TaskType::FRAME_POSE && current_error.size() >= 6) {
+    return current_error.head<3>().squaredNorm() > kCollisionEscapeNormEps;
+  }
+  return true;
+}
+
 bool KinematicsSolver::update_position_step_target_signature(
     PositionStepTargetSignature signature) {
   const bool signature_is_finite =
@@ -1649,6 +1718,7 @@ Eigen::Matrix4d KinematicsSolver::canonicalize_position_step_signature_pose(
 
 void KinematicsSolver::reset_position_step_continuity_state() {
   last_position_step_target_signature_.reset();
+  position_step_target_motion_blocks_.clear();
   position_step_collision_command_floor_distances_.clear();
   reset_position_step_merit_window();
 }
@@ -5863,6 +5933,11 @@ KinematicsSolver::apply_position_step_task_metric_projection(
     }
     Eigen::VectorXd projected_velocity =
         Eigen::VectorXd::Zero(commanded_velocity.size());
+    const bool use_terminal_prediction =
+        position_step_task_uses_terminal_prediction(*task, task->getError());
+    const Eigen::VectorXd &selected_task_velocity =
+        use_terminal_prediction ? terminal_task_velocity
+                                : first_tick_task_velocity;
 
     if (task->getType() == TaskType::FRAME_POSE &&
         commanded_velocity.size() == 6) {
@@ -5873,16 +5948,14 @@ KinematicsSolver::apply_position_step_task_metric_projection(
           commanded_velocity.tail<3>().squaredNorm() >
           kCollisionEscapeNormEps;
       if (has_linear_command) {
-        projected_velocity.head<3>() = terminal_task_velocity.head<3>();
-        projected_velocity.tail<3>() = terminal_task_velocity.tail<3>();
-      } else if (has_angular_command) {
-        projected_velocity.tail<3>() = first_tick_task_velocity.tail<3>();
+        projected_velocity.head<3>() = selected_task_velocity.head<3>();
+      }
+      if (has_linear_command || has_angular_command) {
+        projected_velocity.tail<3>() = selected_task_velocity.tail<3>();
       }
     } else {
       if (commanded_velocity.squaredNorm() > kCollisionEscapeNormEps) {
-        projected_velocity = task->getType() == TaskType::FRAME_ORIENTATION
-                                 ? first_tick_task_velocity
-                                 : terminal_task_velocity;
+        projected_velocity = selected_task_velocity;
       }
     }
     task->setPositionStepTargetVelocity(projected_velocity);
@@ -9829,6 +9902,7 @@ PositionIKResult KinematicsSolver::solve_position_step(
               explicit_target_task_names.end());
     }
     append_position_step_option_signature(signature.gains, options);
+    update_position_step_target_motion_blocks(signature);
     position_step_target_geometry_moved_ =
         position_step_target_geometry_changed(signature);
     if (update_position_step_target_signature(std::move(signature))) {
@@ -10654,6 +10728,8 @@ PositionIKResult KinematicsSolver::solve_position_step(
     const bool all_task_blocks_commanded = all_frame_task_blocks_commanded(
         current_error, frame_task->getType(), options.position_gain,
         options.orientation_gain);
+    const bool use_terminal_prediction =
+        position_step_task_uses_terminal_prediction(*frame_task, current_error);
     if (current_error.size() == 3) {
       const bool is_orientation_only =
           frame_task->getType() == TaskType::FRAME_ORIENTATION;
@@ -10681,7 +10757,8 @@ PositionIKResult KinematicsSolver::solve_position_step(
         projected_result.has_value()) {
       last_vel_result = std::move(*projected_result);
       have_vel_result = true;
-      if (componentwise_candidate.has_value() && all_task_blocks_commanded) {
+      if (componentwise_candidate.has_value() && all_task_blocks_commanded &&
+          use_terminal_prediction) {
         const auto block_merits_at = [&](const Eigen::VectorXd &candidate_q) {
           robot_->update_configuration(candidate_q);
           frame_task->update(*robot_);
@@ -11028,6 +11105,7 @@ PositionIKResult KinematicsSolver::solve_position_step(
               explicit_target_task_names.end());
     }
     append_position_step_option_signature(signature.gains, options);
+    update_position_step_target_motion_blocks(signature);
     position_step_target_geometry_moved_ =
         position_step_target_geometry_changed(signature);
     if (update_position_step_target_signature(std::move(signature))) {
@@ -11958,6 +12036,7 @@ PositionIKResult KinematicsSolver::solve_position_step(
             current_q, previous_applied_velocity, options, step_dt, q);
     robot_->update_configuration(current_q);
     bool all_target_blocks_commanded = true;
+    bool all_targets_use_terminal_prediction = true;
     for (size_t i = 0; i < n_targets; ++i) {
       const auto &target = targets[i];
       const auto &rt = resolved[i];
@@ -11973,6 +12052,10 @@ PositionIKResult KinematicsSolver::solve_position_step(
           all_frame_task_blocks_commanded(
               current_error, command_task_type, target.position_gain,
               target.orientation_gain);
+      all_targets_use_terminal_prediction =
+          all_targets_use_terminal_prediction &&
+          position_step_task_uses_terminal_prediction(*rt.task,
+                                                       current_error);
       if (current_error.size() == 3) {
         bool is_orientation_only = false;
         if (rt.kind == PoseTaskKind::kFrame) {
@@ -12006,7 +12089,8 @@ PositionIKResult KinematicsSolver::solve_position_step(
       last_vel_result = std::move(*projected_result);
       have_vel_result = true;
       if (componentwise_candidate.has_value() &&
-          all_target_blocks_commanded) {
+          all_target_blocks_commanded &&
+          all_targets_use_terminal_prediction) {
         const auto target_block_merits_at =
             [&](const Eigen::VectorXd &candidate_q) {
           robot_->update_configuration(candidate_q);
