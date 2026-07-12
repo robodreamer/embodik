@@ -718,6 +718,108 @@ def test_stationary_guard_does_not_reopen_after_weak_reversal_window() -> None:
     assert np.linalg.norm(np.asarray(resumed.q_solution, dtype=float) - q) > 1e-6
 
 
+@pytest.mark.parametrize("multi_target", (False, True), ids=("single", "vector"))
+def test_satisfied_stationary_target_latches_explicit_zero_output(multi_target: bool) -> None:
+    config = resolve_robot_configuration("panda")
+    robot = config["robot"]
+    frame_name = str(config["target_link"])
+    q = np.asarray(config["default_configuration"], dtype=float).copy()
+    robot.update_configuration(q)
+
+    target_pose = _pose_matrix(robot, frame_name)
+    solver = eik.KinematicsSolver(robot)
+    solver.dt = 0.02
+    solver.enable_position_limits(True)
+    solver.enable_velocity_limits(True)
+    task = solver.add_frame_task("satisfied_target", frame_name, eik.TaskType.FRAME_POSITION)
+    task.solve_mode = eik.TaskSolveMode.MIN_ERROR
+
+    options = eik.PositionStepOptions()
+    options.max_steps = 1
+    options.dt = solver.dt
+    options.position_gain = 10.0
+    options.orientation_gain = 0.0
+    options.primary_solve_mode = eik.TaskSolveMode.MIN_ERROR
+    options.continuity_command_revision = 1
+
+    results = []
+    diagnostics = []
+    for _ in range(45):
+        q_before = q.copy()
+        if multi_target:
+            result = solver.solve_position_step(
+                q,
+                [
+                    eik.TaskTarget(
+                        "satisfied_target",
+                        target_pose,
+                        options.position_gain,
+                        options.orientation_gain,
+                    )
+                ],
+                options,
+            )
+        else:
+            result = solver.solve_position_step(q, target_pose, "satisfied_target", options)
+        q = np.asarray(result.q_solution, dtype=float)
+        robot.update_configuration(q)
+        results.append(result)
+        diagnostics.append(
+            (
+                result.status,
+                result.status_message,
+                float(np.linalg.norm(q - q_before)),
+                float(result.position_error),
+                float(result.orientation_error),
+                int(result.collision_rejection_count),
+                int(result.stall_escape_count),
+            )
+        )
+
+    assert results[-1].position_step_hold_active is True, diagnostics[-5:]
+    np.testing.assert_allclose(results[-1].joint_velocities, 0.0, rtol=0.0, atol=1e-12)
+    np.testing.assert_allclose(results[-1].q_solution, q, rtol=0.0, atol=1e-12)
+
+
+def test_exhausted_stationary_target_keeps_hold_latched_when_nominal_output_is_zero(
+    tmp_path: Path,
+) -> None:
+    robot = eik.RobotModel(str(_write_decoupled_xy_stage_urdf(tmp_path)), floating_base=False)
+    q = np.zeros(robot.nq, dtype=float)
+    robot.update_configuration(q)
+
+    target_pose = _pose_matrix(robot, "tool")
+    target_pose[0, 3] += 0.5
+    solver = eik.KinematicsSolver(robot)
+    solver.dt = 0.02
+    solver.enable_position_limits(True)
+    solver.enable_velocity_limits(True)
+    task = solver.add_frame_task("exhausted_target", "tool", eik.TaskType.FRAME_POSITION)
+    task.solve_mode = eik.TaskSolveMode.MIN_ERROR
+    task.set_position_mask(np.array([1.0, 0.0, 0.0], dtype=float))
+
+    options = eik.PositionStepOptions()
+    options.max_steps = 1
+    options.dt = solver.dt
+    options.position_gain = 10.0
+    options.orientation_gain = 0.0
+    options.primary_solve_mode = eik.TaskSolveMode.MIN_ERROR
+    options.locked_joint_indices = list(range(robot.nv))
+
+    results = []
+    for _ in range(45):
+        result = solver.solve_position_step(q, target_pose, "exhausted_target", options)
+        q = np.asarray(result.q_solution, dtype=float)
+        robot.update_configuration(q)
+        results.append(result)
+
+    assert any(result.position_step_hold_active for result in results)
+    assert all(result.position_step_hold_active for result in results[-10:])
+    for result in results[-10:]:
+        np.testing.assert_allclose(result.q_solution, q, rtol=0.0, atol=1e-12)
+        np.testing.assert_allclose(result.joint_velocities, 0.0, rtol=0.0, atol=1e-12)
+
+
 def test_continuity_reference_frame_ignores_base_motion_but_reopens_for_local_target_change(
     tmp_path: Path,
 ) -> None:

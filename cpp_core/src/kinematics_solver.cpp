@@ -69,9 +69,6 @@ constexpr double kCollisionBoundSafetyMargin = 5e-3; // meters
 // Post-step rejection: safe margin above penetration threshold for early-exit.
 constexpr double kPostStepSafeMargin = 0.01; // 1cm
 constexpr double kPositionStepBacktrackGainScale = 0.1;
-// Adaptive dt proximity cap: assumed max EE approach speed when options.max_linear_speed
-// is not set. Used to bound how large a dt_eff can safely be near a collision boundary.
-constexpr double kAdaptiveDtFallbackMaxEESpeed = 1.0; // m/s
 // Lazy constraint reuse: skip recomputation when dq is tiny and distance is safe.
 constexpr double kLazyReuseMaxDqSqNorm = 1e-6;  // ~0.001 rad change
 constexpr double kLazyReuseMinDistMargin = 0.005; // 5mm safety margin
@@ -488,8 +485,8 @@ static bool collision_recovery_margins_are_safe(
 
 static double compute_adaptive_position_step_dt(
     const PositionStepOptions &options, double step_dt, double position_error,
-    bool collision_constraint_enabled, double collision_min_distance,
-    double last_constraint_min_distance) {
+    bool collision_constraint_enabled,
+    double last_constraint_min_recovery_margin) {
   if (!options.adaptive_dt ||
       options.adaptive_dt_reference_distance <= 1e-9 ||
       options.adaptive_dt_max_scale <= 1.0 ||
@@ -502,18 +499,12 @@ static double compute_adaptive_position_step_dt(
   scale = std::max(scale, 1.0);
 
   if (collision_constraint_enabled &&
-      std::isfinite(last_constraint_min_distance)) {
-    const double clearance =
-        last_constraint_min_distance - collision_min_distance;
-    if (clearance <= 0.0) {
-      scale = 1.0;
-    } else {
-      const double max_ee_vel =
-          (options.max_linear_speed > 0.0) ? options.max_linear_speed
-                                           : kAdaptiveDtFallbackMaxEESpeed;
-      const double max_safe_scale = clearance / (step_dt * max_ee_vel);
-      scale = std::min(scale, std::max(max_safe_scale, 1.0));
-    }
+      std::isfinite(last_constraint_min_recovery_margin) &&
+      last_constraint_min_recovery_margin < -kCollisionTolerance) {
+    // During a true recovery-floor violation, keep the nominal integration
+    // horizon. At and above the floor, directional QP rows and exact post-step
+    // validation constrain normal approach without throttling tangential motion.
+    scale = 1.0;
   }
 
   return step_dt * scale;
@@ -1655,17 +1646,19 @@ bool KinematicsSolver::should_hold_position_step_for_continuity(
 
   if (position_step_stationary_guard_active_) {
     if (!position_step_stationary_guard_can_reopen_) {
-      return configuration_step_norm > kPositionStepMeritMotionThreshold;
+      return true;
     }
     const bool hold_candidate = should_hold_non_improving_position_step(
         result, current_q, initial_merit, final_merit,
         configuration_step_norm, collision_violated);
-    if (!hold_candidate &&
-        has_sufficient_position_step_merit_reduction(
-            initial_merit, final_merit, configuration_step_norm)) {
+    const bool made_sufficient_progress =
+        !hold_candidate && has_sufficient_position_step_merit_reduction(
+                               initial_merit, final_merit,
+                               configuration_step_norm);
+    if (made_sufficient_progress) {
       reset_position_step_merit_window();
     }
-    return hold_candidate;
+    return !made_sufficient_progress;
   }
 
   const int required_window_samples =
@@ -1714,9 +1707,7 @@ bool KinematicsSolver::should_hold_position_step_for_continuity(
   const bool window_was_productive =
       !target_is_satisfied && !window_was_oscillatory &&
       window_has_required_progress;
-  if (window_was_productive ||
-      position_step_merit_window_motion_ <=
-          kPositionStepMeritMotionThreshold) {
+  if (window_was_productive) {
     position_step_merit_window_anchor_ = final_merit;
     position_step_merit_window_motion_ = 0.0;
     position_step_merit_window_samples_ = 0;
@@ -2078,11 +2069,10 @@ void KinematicsSolver::update_auto_task_layout_feedback(
 
   double collision_binding = 0.0;
   if (collision_constraint_.has_value() && collision_constraint_->enabled &&
-      std::isfinite(last_constraint_min_distance_)) {
+      std::isfinite(last_constraint_min_recovery_margin_)) {
     const double margin =
         std::max(collision_constraint_->constraint_activation_margin, 1e-9);
-    const double clearance =
-        last_constraint_min_distance_ - collision_constraint_->min_distance;
+    const double clearance = last_constraint_min_recovery_margin_;
     collision_binding = clip01(1.0 - clearance / margin);
   }
 
@@ -2695,6 +2685,8 @@ void KinematicsSolver::configure_collision_constraint(
     last_collision_sphere_culled_pairs_ = 0;
     last_collision_budget_exhausted_ = false;
     last_constraint_min_distance_ = std::numeric_limits<double>::infinity();
+    last_constraint_min_recovery_margin_ =
+        std::numeric_limits<double>::infinity();
     last_constraint_was_full_scan_ = false;
     last_collision_constraint_result_.reset();
     last_collision_constraint_q_ = Eigen::VectorXd();
@@ -3348,6 +3340,12 @@ void KinematicsSolver::clear_collision_constraint() {
   last_collision_bound_culled_pairs_ = 0;
   last_collision_sphere_culled_pairs_ = 0;
   last_collision_budget_exhausted_ = false;
+  last_constraint_min_distance_ = std::numeric_limits<double>::infinity();
+  last_constraint_min_recovery_margin_ =
+      std::numeric_limits<double>::infinity();
+  last_constraint_was_full_scan_ = false;
+  last_collision_constraint_result_.reset();
+  last_collision_constraint_q_ = Eigen::VectorXd();
   collision_stuck_counters_.clear();
   collision_stuck_last_distances_.clear();
 }
@@ -4226,6 +4224,8 @@ KinematicsSolver::compute_collision_constraint() {
   last_collision_bound_culled_pairs_ = 0;
   last_collision_sphere_culled_pairs_ = 0;
   last_collision_budget_exhausted_ = false;
+  last_constraint_min_recovery_margin_ =
+      std::numeric_limits<double>::infinity();
   last_collision_debug_.reset();
   last_collision_debug_list_.clear();
   if (!robot_->has_collision_geometry()) {
@@ -4886,11 +4886,16 @@ KinematicsSolver::compute_collision_constraint() {
   // Per-pair velocity-damper bound computation (with continuous recovery ramp).
   auto compute_bounds_for_pair = [&](std::size_t pair_idx,
                                      double signed_distance,
-                                     bool *stuck_out) -> std::pair<double, double> {
+                                     bool *stuck_out,
+                                     double *recovery_margin_out)
+      -> std::pair<double, double> {
     double effective_min_distance = config.min_distance;
     double recovery_target = config.min_distance;
     collision_recovery_distances_for_pair(
         pair_idx, signed_distance, &effective_min_distance, &recovery_target);
+    if (recovery_margin_out != nullptr) {
+      *recovery_margin_out = signed_distance - recovery_target;
+    }
 
     // Detect stuck: non-penetrating but significantly inside min_distance for
     // multiple consecutive cycles AND the previous dq was near-zero.
@@ -5022,8 +5027,13 @@ KinematicsSolver::compute_collision_constraint() {
         (rotation_to_x * jacobian_a).row(0) +
         (rotation_from_negative * jacobian_b).row(0);
 
-    const auto [lb, ub] =
-        compute_bounds_for_pair(pair_idx, signed_distance, nullptr);
+    double recovery_margin = std::numeric_limits<double>::infinity();
+    const auto [lb, ub] = compute_bounds_for_pair(
+        pair_idx, signed_distance, nullptr, &recovery_margin);
+    if (std::isfinite(recovery_margin)) {
+      last_constraint_min_recovery_margin_ =
+          std::min(last_constraint_min_recovery_margin_, recovery_margin);
+    }
     result.lower_bounds(row) = lb;
     result.upper_bounds(row) = ub;
 
@@ -5433,6 +5443,8 @@ KinematicsSolver::capture_position_step_mutable_state() const {
       last_collision_bound_culled_pairs_;
   snapshot.last_collision_budget_exhausted = last_collision_budget_exhausted_;
   snapshot.last_constraint_min_distance = last_constraint_min_distance_;
+  snapshot.last_constraint_min_recovery_margin =
+      last_constraint_min_recovery_margin_;
   snapshot.last_constraint_was_full_scan = last_constraint_was_full_scan_;
   snapshot.last_collision_constraint_result =
       last_collision_constraint_result_;
@@ -5528,6 +5540,8 @@ void KinematicsSolver::restore_position_step_mutable_state(
       snapshot.last_collision_bound_culled_pairs;
   last_collision_budget_exhausted_ = snapshot.last_collision_budget_exhausted;
   last_constraint_min_distance_ = snapshot.last_constraint_min_distance;
+  last_constraint_min_recovery_margin_ =
+      snapshot.last_constraint_min_recovery_margin;
   last_constraint_was_full_scan_ = snapshot.last_constraint_was_full_scan;
   last_collision_constraint_result_ =
       snapshot.last_collision_constraint_result;
@@ -8614,9 +8628,7 @@ PositionIKResult KinematicsSolver::solve_position_step(
     const double step_dt_eff = compute_adaptive_position_step_dt(
         options, step_dt, error.head<3>().norm(),
         collision_constraint_.has_value() && collision_constraint_->enabled,
-        collision_constraint_.has_value() ? collision_constraint_->min_distance
-                                          : 0.0,
-        last_constraint_min_distance_);
+        last_constraint_min_recovery_margin_);
     pending_velocity_lock_indices_ = step_locked_indices;
     pending_step_torso_constraint_ = step_torso_constraint;
     pending_step_validation_dt_ = step_dt_eff;
@@ -9828,9 +9840,7 @@ PositionIKResult KinematicsSolver::solve_position_step(
     const double step_dt_eff = compute_adaptive_position_step_dt(
         options, step_dt, max_position_error,
         collision_constraint_.has_value() && collision_constraint_->enabled,
-        collision_constraint_.has_value() ? collision_constraint_->min_distance
-                                          : 0.0,
-        last_constraint_min_distance_);
+        last_constraint_min_recovery_margin_);
     pending_velocity_lock_indices_ = step_locked_indices;
     pending_step_torso_constraint_ = step_torso_constraint;
     pending_step_validation_dt_ = step_dt_eff;

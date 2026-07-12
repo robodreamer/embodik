@@ -1606,6 +1606,11 @@ private:
   // Post-step rejection fast path: minimum signed distance from the most
   // recent compute_collision_constraint() call and whether it was a full scan.
   double last_constraint_min_distance_ = std::numeric_limits<double>::infinity();
+  // Minimum signed clearance relative to the effective per-pair recovery
+  // target represented by the active collision rows. Unlike the raw distance,
+  // this honors structural/non-worsening floors and per-pair overrides.
+  double last_constraint_min_recovery_margin_ =
+      std::numeric_limits<double>::infinity();
   bool last_constraint_was_full_scan_ = false;
   // Cached constraint result for lazy reuse when configuration change is small.
   std::optional<CollisionConstraintResult> last_collision_constraint_result_;
@@ -1683,6 +1688,8 @@ private:
     std::uint64_t last_collision_bound_culled_pairs = 0;
     bool last_collision_budget_exhausted = false;
     double last_constraint_min_distance =
+        std::numeric_limits<double>::infinity();
+    double last_constraint_min_recovery_margin =
         std::numeric_limits<double>::infinity();
     bool last_constraint_was_full_scan = false;
     std::optional<CollisionConstraintResult> last_collision_constraint_result;

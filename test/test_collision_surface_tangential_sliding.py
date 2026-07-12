@@ -343,6 +343,77 @@ def test_axis_aligned_violated_margin_slides_without_weighted_fallback(tmp_path)
     assert clearances[-1] >= entry_clearance + 0.0002 - 1e-6
 
 
+@pytest.mark.parametrize(
+    ("entry_x", "expected_recovery_clearance_m"),
+    ((-0.006, 0.004), (-0.01, 0.0)),
+    ids=("above_floor", "at_floor"),
+)
+def test_adaptive_position_step_uses_effective_recovery_clearance_for_tangent_motion(
+    tmp_path,
+    entry_x,
+    expected_recovery_clearance_m,
+):
+    robot = eik.RobotModel(str(_write_axis_aligned_contact_urdf(tmp_path)), floating_base=False)
+    q = np.array([entry_x, 0.0], dtype=float)
+    robot.update_configuration(q)
+
+    solver = eik.KinematicsSolver(robot)
+    solver.dt = 0.02
+    _disable_weighted_fallback(solver)
+    solver.enable_position_limits(True)
+    solver.enable_velocity_limits(True)
+    solver.set_non_worsening_collision_floor_enabled(True)
+    structural_floor_m = 0.01
+    nominal_margin_m = 0.07
+    solver.set_collision_structural_floor(structural_floor_m)
+    solver.configure_collision_constraint(
+        min_distance=nominal_margin_m,
+        include_pairs=list(robot.get_collision_pair_names()),
+        max_constraints=1,
+    )
+    solver.set_proximity_gated_collision_activation_enabled(False)
+
+    task = solver.add_frame_task("adaptive_tangent", "tool", eik.TaskType.FRAME_POSITION)
+    task.solve_mode = eik.TaskSolveMode.MIN_ERROR
+    entry_position = np.asarray(robot.get_frame_pose("tool").translation, dtype=float)
+    task.set_target_position(entry_position)
+    solver.solve_velocity(q, apply_limits=True)
+
+    target_pose = np.eye(4, dtype=float)
+    tangent_offset_m = 0.08
+    target_pose[:3, 3] = entry_position + np.array([0.0, tangent_offset_m, 0.0], dtype=float)
+    options = eik.PositionStepOptions()
+    options.max_steps = 1
+    options.dt = solver.dt
+    options.position_gain = 10.0
+    options.orientation_gain = 0.0
+    options.max_linear_speed = 0.5
+    options.adaptive_dt = True
+    options.adaptive_dt_max_scale = 10.0
+    options.adaptive_dt_reference_distance = 0.02
+    options.primary_solve_mode = eik.TaskSolveMode.MIN_ERROR
+    options.continuity_command_revision = 1
+
+    entry_clearance = float(solver.evaluate_collision_debug(q).distance)
+    result = solver.solve_position_step(q, target_pose, "adaptive_tangent", options)
+    q_next = np.asarray(result.q_solution, dtype=float)
+    robot.update_configuration(q_next)
+    final_position = np.asarray(robot.get_frame_pose("tool").translation, dtype=float)
+    final_clearance = float(solver.evaluate_collision_debug(q_next).distance)
+
+    tangent_progress_m = float(final_position[1] - entry_position[1])
+    recovery_clearance_m = entry_clearance - structural_floor_m
+    assert recovery_clearance_m == pytest.approx(expected_recovery_clearance_m, abs=1e-6)
+    expected_scale = min(
+        tangent_offset_m / options.adaptive_dt_reference_distance,
+        options.adaptive_dt_max_scale,
+    )
+    expected_progress_m = options.dt * options.max_linear_speed * expected_scale
+    assert tangent_progress_m >= 0.98 * expected_progress_m
+    assert tangent_progress_m <= expected_progress_m + 1e-6
+    assert final_clearance >= entry_clearance - 1e-6
+
+
 def test_changed_tangent_target_preserves_recovered_command_epoch_clearance(tmp_path):
     robot = eik.RobotModel(str(_write_contact_arm_urdf(tmp_path)), floating_base=False)
     q = _COMMAND_EPOCH_CONTACT_SEED.copy()
