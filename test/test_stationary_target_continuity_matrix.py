@@ -765,17 +765,29 @@ def test_continuity_reference_frame_ignores_base_motion_but_reopens_for_local_ta
         q = np.asarray(result.q_solution, dtype=float)
     assert result.position_step_hold_active is True
 
-    q = q.copy()
-    q[0] += 0.05
-    same_local_target = target_in_reference(0.0)
-    moved_reference_result = solver.solve_position_step(
-        q,
-        same_local_target,
-        "stationary_target",
-        options,
-    )
-    assert moved_reference_result.position_step_hold_active is True
-    np.testing.assert_allclose(moved_reference_result.q_solution, q, rtol=0.0, atol=1e-12)
+    last_world_target = target_in_reference(0.0)
+    for _ in range(3):
+        q = q.copy()
+        q[0] += 0.05
+        unchanged_world_result = solver.solve_position_step(
+            q,
+            last_world_target,
+            "stationary_target",
+            options,
+        )
+        assert unchanged_world_result.position_step_hold_active is True
+        np.testing.assert_allclose(unchanged_world_result.q_solution, q, rtol=0.0, atol=1e-12)
+
+        same_local_target = target_in_reference(0.0)
+        moved_reference_result = solver.solve_position_step(
+            q,
+            same_local_target,
+            "stationary_target",
+            options,
+        )
+        assert moved_reference_result.position_step_hold_active is True
+        np.testing.assert_allclose(moved_reference_result.q_solution, q, rtol=0.0, atol=1e-12)
+        last_world_target = same_local_target
 
     changed_local_target = target_in_reference(0.1)
     resumed = solver.solve_position_step(
@@ -786,6 +798,152 @@ def test_continuity_reference_frame_ignores_base_motion_but_reopens_for_local_ta
     )
     assert resumed.position_step_hold_active is False
     assert np.linalg.norm(np.asarray(resumed.q_solution, dtype=float) - q) > 1e-6
+
+
+def test_explicit_command_revision_owns_derived_target_continuity(tmp_path: Path) -> None:
+    robot = eik.RobotModel(str(_write_decoupled_xy_stage_urdf(tmp_path)), floating_base=False)
+    q = np.zeros(robot.nq, dtype=float)
+    robot.update_configuration(q)
+
+    solver = eik.KinematicsSolver(robot)
+    solver.dt = 0.02
+    solver.enable_position_limits(True)
+    solver.enable_velocity_limits(True)
+    primary = solver.add_frame_task("stationary_target", "tool", eik.TaskType.FRAME_POSITION)
+    primary.priority = 0
+    primary.weight = 1.0
+    primary.solve_mode = eik.TaskSolveMode.MIN_ERROR
+    primary.set_position_mask(np.array([1.0, 0.0, 0.0], dtype=float))
+    posture = solver.add_posture_task("secondary_y", [1])
+    posture.priority = 1
+    posture.weight = 1.0
+    posture.solve_mode = eik.TaskSolveMode.MIN_ERROR
+    posture.set_controlled_joint_targets(np.array([0.5], dtype=float))
+
+    target_pose = _pose_matrix(robot, "tool")
+    options = eik.PositionStepOptions()
+    options.max_steps = 1
+    options.dt = 0.02
+    options.position_gain = 10.0
+    options.orientation_gain = 0.0
+    options.primary_solve_mode = eik.TaskSolveMode.MIN_ERROR
+    options.continuity_command_revision = 7
+
+    for _ in range(40):
+        result = solver.solve_position_step(q, target_pose, "stationary_target", options)
+        q = np.asarray(result.q_solution, dtype=float)
+    assert result.position_step_hold_active is True
+
+    rederived_target = target_pose.copy()
+    rederived_target[0, 3] += 0.1
+    same_command = solver.solve_position_step(q, rederived_target, "stationary_target", options)
+    assert same_command.position_step_hold_active is True
+    np.testing.assert_allclose(same_command.q_solution, q, rtol=0.0, atol=1e-12)
+
+    options.continuity_command_revision += 1
+    changed_command = solver.solve_position_step(q, rederived_target, "stationary_target", options)
+    assert changed_command.position_step_hold_active is False
+    assert np.asarray(changed_command.q_solution, dtype=float)[0] > q[0] + 1e-3
+
+
+def test_explicit_stationary_command_holds_after_strong_progress_is_exhausted() -> None:
+    config = resolve_robot_configuration("panda")
+    robot = config["robot"]
+    frame_name = str(config["target_link"])
+    q = np.asarray(config["default_configuration"], dtype=float).copy()
+    robot.update_configuration(q)
+    initial_q = q.copy()
+
+    solver = eik.KinematicsSolver(robot)
+    solver.dt = 0.02
+    solver.enable_position_limits(True)
+    solver.enable_velocity_limits(True)
+    runtime = eik.SolverRuntimeConfig()
+    runtime.weighted_fallback_enabled = False
+    runtime.enable_auto_task_layout = False
+    solver.configure_runtime(runtime)
+    task = solver.add_frame_task("stationary_target", frame_name, eik.TaskType.FRAME_POSITION)
+    task.priority = 0
+    task.weight = 1.0
+    task.solve_mode = eik.TaskSolveMode.MIN_ERROR
+    posture = solver.add_posture_task("posture")
+    posture.priority = 1
+    posture.weight = 1.0
+    posture.set_target_configuration(q.copy())
+
+    target = _pose_matrix(robot, frame_name)
+    target[:3, 3] += np.array(
+        [0.4085631038838717, 0.15351205821980615, 0.34275597724618384],
+        dtype=float,
+    )
+    options = eik.PositionStepOptions()
+    options.max_steps = 1
+    options.dt = 0.02
+    options.position_gain = 10.0
+    options.orientation_gain = 0.0
+    options.primary_solve_mode = eik.TaskSolveMode.MIN_ERROR
+    options.max_configuration_step_norm = 0.08
+    options.continuity_command_revision = 11
+
+    first_hold_step: int | None = None
+    held_q: np.ndarray | None = None
+    for step in range(220):
+        result = solver.solve_position_step(q, target, "stationary_target", options)
+        q = np.asarray(result.q_solution, dtype=float)
+        if result.position_step_hold_active and first_hold_step is None:
+            first_hold_step = step
+            held_q = q.copy()
+        if held_q is not None:
+            np.testing.assert_allclose(q, held_q, rtol=0.0, atol=1e-12)
+
+    assert first_hold_step is not None
+    assert first_hold_step <= 150, first_hold_step
+    assert held_q is not None
+    assert np.linalg.norm(robot.difference(initial_q, held_q)) > 0.05
+
+
+def test_explicit_stationary_reachable_command_reaches_physical_tolerance_before_holding() -> None:
+    config = resolve_robot_configuration("panda")
+    robot = config["robot"]
+    frame_name = str(config["target_link"])
+    q = np.asarray(config["default_configuration"], dtype=float).copy()
+    initial_q = q.copy()
+    goal_q = q.copy()
+    goal_q[int(robot.get_joint_config_index("panda_joint2"))] += 0.2
+    robot.update_configuration(goal_q)
+    target = _pose_matrix(robot, frame_name)
+    robot.update_configuration(q)
+
+    solver = eik.KinematicsSolver(robot)
+    solver.dt = 0.02
+    solver.enable_position_limits(True)
+    solver.enable_velocity_limits(True)
+    task = solver.add_frame_task("reachable_target", frame_name, eik.TaskType.FRAME_POSITION)
+    task.priority = 0
+    task.weight = 1.0
+    task.solve_mode = eik.TaskSolveMode.MIN_ERROR
+    options = eik.PositionStepOptions()
+    options.max_steps = 1
+    options.dt = 0.02
+    options.position_gain = 10.0
+    options.orientation_gain = 0.0
+    options.primary_solve_mode = eik.TaskSolveMode.MIN_ERROR
+    options.max_configuration_step_norm = 0.08
+    options.continuity_command_revision = 12
+
+    first_hold_error: float | None = None
+    for _ in range(180):
+        result = solver.solve_position_step(q, target, "reachable_target", options)
+        q = np.asarray(result.q_solution, dtype=float)
+        robot.update_configuration(q)
+        error = float(np.linalg.norm(target[:3, 3] - _pose_matrix(robot, frame_name)[:3, 3]))
+        if result.position_step_hold_active and first_hold_error is None:
+            first_hold_error = error
+
+    final_error = float(np.linalg.norm(target[:3, 3] - _pose_matrix(robot, frame_name)[:3, 3]))
+    assert final_error <= 2e-3
+    assert first_hold_error is None or first_hold_error <= 2e-3
+    assert np.linalg.norm(robot.difference(initial_q, q)) > 0.05
 
 
 def test_changed_secondary_posture_target_reopens_satisfied_primary_hold(tmp_path: Path) -> None:
@@ -832,6 +990,53 @@ def test_changed_secondary_posture_target_reopens_satisfied_primary_hold(tmp_pat
     assert q_next[0] == pytest.approx(q[0], abs=1e-9)
     assert "held satisfied stationary target" not in result.status_message
     assert result.position_step_hold_active is False
+
+
+def test_changed_secondary_frame_target_reopens_satisfied_primary_hold(tmp_path: Path) -> None:
+    robot = eik.RobotModel(str(_write_decoupled_xy_stage_urdf(tmp_path)), floating_base=False)
+    q = np.zeros(robot.nq, dtype=float)
+    robot.update_configuration(q)
+
+    solver = eik.KinematicsSolver(robot)
+    solver.dt = 0.02
+    solver.enable_position_limits(True)
+    solver.enable_velocity_limits(True)
+
+    primary = solver.add_frame_task("held_x", "tool", eik.TaskType.FRAME_POSITION)
+    primary.priority = 0
+    primary.weight = 1.0
+    primary.solve_mode = eik.TaskSolveMode.MIN_ERROR
+    primary.set_position_mask(np.array([1.0, 0.0, 0.0], dtype=float))
+
+    secondary = solver.add_frame_task("secondary_y", "tool", eik.TaskType.FRAME_POSITION)
+    secondary.priority = 1
+    secondary.weight = 1.0
+    secondary.solve_mode = eik.TaskSolveMode.MIN_ERROR
+    secondary.set_position_mask(np.array([0.0, 1.0, 0.0], dtype=float))
+    secondary_target = _pose_matrix(robot, "tool")[:3, 3]
+    secondary_target[1] += 0.5
+    secondary.set_target_position(secondary_target)
+
+    target_pose = _pose_matrix(robot, "tool")
+    options = eik.PositionStepOptions()
+    options.max_steps = 1
+    options.dt = 0.02
+    options.position_gain = 10.0
+    options.orientation_gain = 0.0
+    options.primary_solve_mode = eik.TaskSolveMode.MIN_ERROR
+
+    for _ in range(40):
+        result = solver.solve_position_step(q, target_pose, "held_x", options)
+        q = np.asarray(result.q_solution, dtype=float)
+    assert result.position_step_hold_active is True
+
+    changed_secondary_target = secondary_target.copy()
+    changed_secondary_target[1] = -0.5
+    secondary.set_target_position(changed_secondary_target)
+    resumed = solver.solve_position_step(q, target_pose, "held_x", options)
+
+    assert resumed.position_step_hold_active is False
+    assert np.asarray(resumed.q_solution, dtype=float)[1] < q[1] - 1e-3
 
 
 def test_moving_posture_reference_does_not_restart_stationary_dwell(tmp_path: Path) -> None:

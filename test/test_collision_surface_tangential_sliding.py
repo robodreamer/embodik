@@ -379,6 +379,7 @@ def test_changed_tangent_target_preserves_recovered_command_epoch_clearance(tmp_
     options.position_gain = 10.0
     options.orientation_gain = 0.0
     options.primary_solve_mode = eik.TaskSolveMode.SCALE
+    options.continuity_command_revision = 1
 
     hold_pose = np.eye(4, dtype=float)
     hold_pose[:3, 3] = entry_position
@@ -388,6 +389,7 @@ def test_changed_tangent_target_preserves_recovered_command_epoch_clearance(tmp_
 
     tangent_pose = np.eye(4, dtype=float)
     tangent_pose[:3, 3] = entry_position + 0.08 * tangent
+    options.continuity_command_revision = 2
     clearances: list[float] = []
     progress: list[float] = []
     for _ in range(10):
@@ -436,6 +438,7 @@ def test_stationary_continuity_preserves_collision_rejection_diagnostics(tmp_pat
     options.position_gain = 10.0
     options.orientation_gain = 0.0
     options.primary_solve_mode = eik.TaskSolveMode.MIN_ERROR
+    options.continuity_command_revision = 1
 
     q_entry = q.copy()
     rejection_counts: list[int] = []
@@ -507,6 +510,7 @@ def test_stationary_collision_bound_target_settles_after_sliding(tmp_path, solve
     options.primary_solve_mode = solve_mode
     options.primary_allow_min_error_fallback = False
     options.max_configuration_step_norm = 0.08
+    options.continuity_command_revision = 1
 
     q_trace = [q.copy()]
     tangent_progress: list[float] = []

@@ -177,9 +177,13 @@ public:
     bool getUsedMinErrorFallback() const { return used_min_error_fallback_; }
     void setUsedMinErrorFallback(bool used) { used_min_error_fallback_ = used; }
     std::uint64_t getContinuityRevision() const { return continuity_revision_; }
+    std::uint64_t getContinuityTargetRevision() const {
+        return continuity_target_revision_;
+    }
 
 protected:
     void markContinuityStateChanged() { ++continuity_revision_; }
+    void markContinuityTargetChanged() { ++continuity_target_revision_; }
 
     std::string name_;
     int priority_;
@@ -192,6 +196,7 @@ protected:
     mutable std::optional<Eigen::VectorXd> target_velocity_;  // Direct velocity specification
     std::vector<int> excluded_joint_indices_;  // Velocity space indices to exclude from Jacobian
     std::uint64_t continuity_revision_ = 0;
+    std::uint64_t continuity_target_revision_ = 0;
 
 private:
     friend class KinematicsSolver;

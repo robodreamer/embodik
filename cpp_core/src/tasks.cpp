@@ -64,7 +64,7 @@ FrameTask::FrameTask(const std::string &name, std::shared_ptr<RobotModel> model,
 void FrameTask::setTargetPosition(const Eigen::Vector3d &position) {
   if (!target_position_.has_value() ||
       !target_position_->isApprox(position, 0.0)) {
-    markContinuityStateChanged();
+    markContinuityTargetChanged();
   }
   target_position_ = position;
   invalidateCache();
@@ -73,7 +73,7 @@ void FrameTask::setTargetPosition(const Eigen::Vector3d &position) {
 void FrameTask::setTargetOrientation(const Eigen::Matrix3d &rotation) {
   if (!target_orientation_.has_value() ||
       !target_orientation_->isApprox(rotation, 0.0)) {
-    markContinuityStateChanged();
+    markContinuityTargetChanged();
   }
   target_orientation_ = rotation;
   invalidateCache();
@@ -85,7 +85,7 @@ void FrameTask::setTargetPose(const Eigen::Vector3d &position,
       !target_position_->isApprox(position, 0.0) ||
       !target_orientation_.has_value() ||
       !target_orientation_->isApprox(rotation, 0.0)) {
-    markContinuityStateChanged();
+    markContinuityTargetChanged();
   }
   target_position_ = position;
   target_orientation_ = rotation;
@@ -1320,7 +1320,7 @@ void RelativeFrameTask::setTargetPose(const Eigen::Vector3d &position,
       !target_position_->isApprox(position, 0.0) ||
       !target_orientation_.has_value() ||
       !target_orientation_->isApprox(rotation, 0.0)) {
-    markContinuityStateChanged();
+    markContinuityTargetChanged();
   }
   target_position_ = position;
   target_orientation_ = rotation;
@@ -1331,7 +1331,7 @@ void RelativeFrameTask::captureCurrentAsTarget() {
       !target_position_->isApprox(current_rel_position_, 0.0) ||
       !target_orientation_.has_value() ||
       !target_orientation_->isApprox(current_rel_orientation_, 0.0)) {
-    markContinuityStateChanged();
+    markContinuityTargetChanged();
   }
   target_position_ = current_rel_position_;
   target_orientation_ = current_rel_orientation_;
@@ -1417,7 +1417,7 @@ void AbsoluteFrameTask::setTargetPose(const Eigen::Vector3d &position,
       !target_position_->isApprox(position, 0.0) ||
       !target_orientation_.has_value() ||
       !target_orientation_->isApprox(rotation, 0.0)) {
-    markContinuityStateChanged();
+    markContinuityTargetChanged();
   }
   target_position_ = position;
   target_orientation_ = rotation;

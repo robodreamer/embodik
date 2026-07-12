@@ -428,6 +428,11 @@ NB_MODULE(_embodik_impl, m) {
               &eik::PositionStepOptions::continuity_reference_frame,
               "Optional frame used to compare targets for stationary "
               "continuity without changing the IK target")
+      .def_rw("continuity_command_revision",
+              &eik::PositionStepOptions::continuity_command_revision,
+              "Optional caller-owned command revision; values >= 0 override "
+              "pose-derived continuity identity and must change with the "
+              "source command (default -1 disables the override)")
       .def_rw("torso_constraint", &eik::PositionStepOptions::torso_constraint,
               "Optional torso orientation task and torso pose bounds for step IK")
       .def_rw("excluded_joint_indices",

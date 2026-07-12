@@ -106,6 +106,9 @@ batch parallelization notes, and measured Speed vs Precise timings.
 - `primary_solve_mode` — mirrors registered EE task solve mode for the primary band
 - `primary_allow_min_error_fallback` — when `True`, retry a stalled SCALE/SCALE_ELASTIC
   primary solve once with MIN_ERROR before accepting freeze
+- `continuity_command_revision` — optional caller-owned source-command identity; keep a
+  non-negative value stable across derived-frame re-expression and increment it when the source
+  command changes (`-1` keeps automatic pose-based detection)
 
 See `docs/examples/collision_aware_ik.md` for collision-floor, adaptive dt, elastic band, and
 fallback interaction with `configure_collision_constraint()`.

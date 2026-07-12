@@ -113,6 +113,15 @@ merit hold. Samples produced inside a collision margin remain part of the contin
 preserving productive tangential sliding without allowing repeated contact-bound cycling to
 masquerade as recovery.
 
+When an adapter re-expresses one source command into changing world-frame poses, set
+`PositionStepOptions.continuity_command_revision` to a non-negative caller-owned revision. Keep
+the value unchanged while the source command is unchanged, and increment it when target geometry
+or ownership changes. With this explicit identity, derived pose changes do not restart the
+continuity window. Once strong nonlinear progress is exhausted, the hold remains latched until the
+revision, task policy, or task graph changes. This avoids low-rate self-motion from repeatedly
+re-derived targets while preserving one-tick command recovery. The default value `-1` retains
+automatic pose-based identity and its reversible low-progress hold.
+
 Adapters that recenter a nullspace posture anchor after each accepted step should use
 `PostureTask.set_reference_configuration()`. It updates the regularization reference without
 declaring a new command on every tick. Use `set_target_configuration()` or

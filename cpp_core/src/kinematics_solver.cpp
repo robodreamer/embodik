@@ -290,14 +290,18 @@ static void append_position_step_option_signature(
 }
 
 static void append_task_policy_signature(std::vector<double> &signature,
-                                         const Task &task) {
+                                         const Task &task,
+                                         bool include_target_revision) {
   signature.insert(signature.end(),
                    {static_cast<double>(task.getType()),
                     static_cast<double>(task.getPriority()), task.getWeight(),
                     task.isActive() ? 1.0 : 0.0,
                     static_cast<double>(task.getSolveMode()),
                     task.getAllowMinErrorFallback() ? 1.0 : 0.0,
-                    static_cast<double>(task.getContinuityRevision())});
+                    static_cast<double>(task.getContinuityRevision()),
+                    include_target_revision
+                        ? static_cast<double>(task.getContinuityTargetRevision())
+                        : 0.0});
   append_index_signature(signature, task.get_excluded_joint_indices());
 }
 
@@ -1456,6 +1460,9 @@ bool KinematicsSolver::update_position_step_target_signature(
   const bool signature_is_finite =
       std::all_of(signature.target_poses.begin(), signature.target_poses.end(),
                   [](const Eigen::Matrix4d &pose) { return pose.allFinite(); }) &&
+      std::all_of(signature.reference_target_poses.begin(),
+                  signature.reference_target_poses.end(),
+                  [](const Eigen::Matrix4d &pose) { return pose.allFinite(); }) &&
       std::all_of(signature.gains.begin(), signature.gains.end(),
                   [](double value) { return std::isfinite(value); });
   if (!signature_is_finite) {
@@ -1465,29 +1472,49 @@ bool KinematicsSolver::update_position_step_target_signature(
   bool existing_target_geometry_changed = false;
   if (last_position_step_target_signature_.has_value()) {
     const auto &previous = *last_position_step_target_signature_;
-    bool target_geometry_matches =
+    const bool target_topology_matches =
         previous.task_names == signature.task_names &&
-        previous.target_poses.size() == signature.target_poses.size();
-    if (target_geometry_matches) {
-      for (std::size_t index = 0; index < signature.target_poses.size();
-           ++index) {
-        const Eigen::Matrix4d &before = previous.target_poses[index];
-        const Eigen::Matrix4d &after = signature.target_poses[index];
+        previous.target_poses.size() == signature.target_poses.size() &&
+        previous.reference_target_poses.size() ==
+            signature.reference_target_poses.size();
+    const auto poses_match = [](const std::vector<Eigen::Matrix4d> &before,
+                                const std::vector<Eigen::Matrix4d> &after) {
+      for (std::size_t index = 0; index < after.size(); ++index) {
         const double translation_delta =
-            (before.block<3, 1>(0, 3) - after.block<3, 1>(0, 3)).norm();
+            (before[index].block<3, 1>(0, 3) -
+             after[index].block<3, 1>(0, 3))
+                .norm();
         const Eigen::Matrix3d rotation_delta =
-            before.block<3, 3>(0, 0).transpose() *
-            after.block<3, 3>(0, 0);
+            before[index].block<3, 3>(0, 0).transpose() *
+            after[index].block<3, 3>(0, 0);
         const double rotation_angle = pinocchio::log3(rotation_delta).norm();
         if (!std::isfinite(translation_delta) ||
             !std::isfinite(rotation_angle) ||
             translation_delta > kStationaryTargetTranslationTolerance ||
             rotation_angle > kStationaryTargetRotationTolerance) {
-          target_geometry_matches = false;
-          break;
+          return false;
         }
       }
-    }
+      return true;
+    };
+    const bool world_target_geometry_matches =
+        target_topology_matches &&
+        poses_match(previous.target_poses, signature.target_poses);
+    const bool reference_target_geometry_matches =
+        target_topology_matches && !signature.reference_target_poses.empty() &&
+        poses_match(previous.reference_target_poses,
+                    signature.reference_target_poses);
+    const bool explicit_command_revision_enabled =
+        previous.command_revision >= 0 || signature.command_revision >= 0;
+    const bool command_revision_matches =
+        previous.command_revision >= 0 && signature.command_revision >= 0 &&
+        previous.command_revision == signature.command_revision;
+    const bool target_geometry_matches =
+        target_topology_matches &&
+        (explicit_command_revision_enabled
+             ? command_revision_matches
+             : (world_target_geometry_matches ||
+                reference_target_geometry_matches));
     bool matches = target_geometry_matches &&
                    previous.gains.size() == signature.gains.size();
     if (matches) {
@@ -1502,6 +1529,10 @@ bool KinematicsSolver::update_position_step_target_signature(
     if (!matches) {
       reset_position_step_merit_window();
       existing_target_geometry_changed = !target_geometry_matches;
+    }
+    if (!explicit_command_revision_enabled && world_target_geometry_matches &&
+        !reference_target_geometry_matches) {
+      signature.reference_target_poses = previous.reference_target_poses;
     }
   } else {
     reset_position_step_merit_window();
@@ -1668,14 +1699,21 @@ bool KinematicsSolver::should_hold_position_step_for_continuity(
       window_has_repeated_dominant_target_increases ||
       (window_has_repeated_direction_reversals &&
        !window_has_strong_net_progress);
+  const bool caller_owns_command_identity =
+      last_position_step_target_signature_.has_value() &&
+      last_position_step_target_signature_->command_revision >= 0;
+  const bool window_has_required_progress =
+      caller_owns_command_identity
+          ? window_has_strong_net_progress
+          : has_sufficient_position_step_merit_reduction(
+                *position_step_merit_window_anchor_, final_merit,
+                position_step_merit_window_motion_,
+                kPositionStepMinErrorReductionPerConfiguration,
+                kStationaryMinErrorReductionPerCall *
+                    static_cast<double>(position_step_merit_window_samples_));
   const bool window_was_productive =
       !target_is_satisfied && !window_was_oscillatory &&
-      has_sufficient_position_step_merit_reduction(
-          *position_step_merit_window_anchor_, final_merit,
-          position_step_merit_window_motion_,
-          kPositionStepMinErrorReductionPerConfiguration,
-          kStationaryMinErrorReductionPerCall *
-              static_cast<double>(position_step_merit_window_samples_));
+      window_has_required_progress;
   if (window_was_productive ||
       position_step_merit_window_motion_ <=
           kPositionStepMeritMotionThreshold) {
@@ -1691,7 +1729,8 @@ bool KinematicsSolver::should_hold_position_step_for_continuity(
 
   position_step_stationary_guard_active_ = true;
   position_step_stationary_guard_can_reopen_ =
-      !target_is_satisfied && !window_was_oscillatory;
+      !caller_owns_command_identity && !target_is_satisfied &&
+      !window_was_oscillatory;
   position_step_merit_window_anchor_ = initial_merit;
   position_step_merit_window_motion_ = 0.0;
   position_step_merit_window_samples_ = 0;
@@ -8285,9 +8324,16 @@ PositionIKResult KinematicsSolver::solve_position_step(
   }
   if (outermost_position_step_call) {
     PositionStepTargetSignature signature;
+    signature.command_revision = options.continuity_command_revision;
+    const std::unordered_set<std::string> explicit_target_task_names = {
+        frame_task_name};
     signature.task_names.push_back(frame_task_name);
-    signature.target_poses.push_back(canonicalize_position_step_signature_pose(
-        frame_task_name, target_pose, continuity_reference_pose));
+    signature.target_poses.push_back(target_pose);
+    if (continuity_reference_pose.has_value()) {
+      signature.reference_target_poses.push_back(
+          canonicalize_position_step_signature_pose(
+              frame_task_name, target_pose, continuity_reference_pose));
+    }
     signature.gains = {options.position_gain, options.orientation_gain};
     signature.task_names.push_back("#continuity:" +
                                    options.continuity_reference_frame);
@@ -8298,7 +8344,10 @@ PositionIKResult KinematicsSolver::solve_position_step(
         continue;
       }
       signature.task_names.push_back("#policy:" + task->getName());
-      append_task_policy_signature(signature.gains, *task);
+      append_task_policy_signature(
+          signature.gains, *task,
+          explicit_target_task_names.find(task->getName()) ==
+              explicit_target_task_names.end());
     }
     append_position_step_option_signature(signature.gains, options);
     if (update_position_step_target_signature(std::move(signature))) {
@@ -9378,17 +9427,29 @@ PositionIKResult KinematicsSolver::solve_position_step(
   }
   if (outermost_position_step_call) {
     PositionStepTargetSignature signature;
+    signature.command_revision = options.continuity_command_revision;
+    std::unordered_set<std::string> explicit_target_task_names;
     for (const auto &target : targets) {
+      explicit_target_task_names.insert(target.task_name);
       signature.task_names.push_back(target.task_name);
-      signature.target_poses.push_back(canonicalize_position_step_signature_pose(
-          target.task_name, target.target_pose, continuity_reference_pose));
+      signature.target_poses.push_back(target.target_pose);
+      if (continuity_reference_pose.has_value()) {
+        signature.reference_target_poses.push_back(
+            canonicalize_position_step_signature_pose(
+                target.task_name, target.target_pose,
+                continuity_reference_pose));
+      }
       signature.gains.push_back(target.position_gain);
       signature.gains.push_back(target.orientation_gain);
       if (target.has_secondary_target_pose) {
         signature.task_names.push_back(target.task_name + "#secondary");
-        signature.target_poses.push_back(canonicalize_position_step_signature_pose(
-            target.task_name, target.secondary_target_pose,
-            continuity_reference_pose));
+        signature.target_poses.push_back(target.secondary_target_pose);
+        if (continuity_reference_pose.has_value()) {
+          signature.reference_target_poses.push_back(
+              canonicalize_position_step_signature_pose(
+                  target.task_name, target.secondary_target_pose,
+                  continuity_reference_pose));
+        }
       }
     }
     signature.task_names.push_back("#continuity:" +
@@ -9400,7 +9461,10 @@ PositionIKResult KinematicsSolver::solve_position_step(
         continue;
       }
       signature.task_names.push_back("#policy:" + task->getName());
-      append_task_policy_signature(signature.gains, *task);
+      append_task_policy_signature(
+          signature.gains, *task,
+          explicit_target_task_names.find(task->getName()) ==
+              explicit_target_task_names.end());
     }
     append_position_step_option_signature(signature.gains, options);
     if (update_position_step_target_signature(std::move(signature))) {

@@ -1277,7 +1277,9 @@ private:
   struct PositionStepTargetSignature {
     std::vector<std::string> task_names;
     std::vector<Eigen::Matrix4d> target_poses;
+    std::vector<Eigen::Matrix4d> reference_target_poses;
     std::vector<double> gains;
+    std::int64_t command_revision = -1;
   };
   std::optional<PositionStepTargetSignature> last_position_step_target_signature_;
   std::vector<double> position_step_collision_command_floor_distances_;

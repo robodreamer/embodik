@@ -312,6 +312,13 @@ struct PositionStepOptions {
   /// target-change detection; relative-frame tasks are already invariant and
   /// remain unchanged. This does not alter the target passed to IK.
   std::string continuity_reference_frame;
+  /// Optional caller-owned command identity for stationary continuity.
+  /// Values >= 0 override pose-derived target-change detection: the caller
+  /// must increment the revision whenever the source command changes. This is
+  /// useful when world-frame targets are re-derived from a moving or
+  /// asynchronously sampled reference frame. The default -1 keeps automatic
+  /// geometry-based detection.
+  std::int64_t continuity_command_revision = -1;
   // Optional torso orientation task and torso pose bounds. Bounds are enforced
   // in solve_position_step via additional inequality rows, consistent with
   // solve_position semantics.
