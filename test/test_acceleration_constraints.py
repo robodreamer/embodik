@@ -265,11 +265,17 @@ class TestAccelerationConstraints:
         assert np.max(np.abs(multistep_velocity)) <= 2.0 * multistep_options.dt * 1.02
 
     @pytest.mark.parametrize(
-        "translation_offset",
-        (np.array([0.20, 0.12, 0.08]), np.zeros(3)),
-        ids=("full-pose", "orientation-only"),
+        ("translation_offset", "rotation_angle"),
+        (
+            (np.array([0.20, 0.12, 0.08]), 0.35),
+            (np.zeros(3), 0.35),
+            (np.array([0.20, 0.12, 0.08]), 0.0),
+        ),
+        ids=("full-pose", "orientation-only", "translation-only"),
     )
-    def test_multistep_position_masks_uncommanded_predictive_blocks(self, translation_offset):
+    def test_multistep_position_masks_uncommanded_predictive_blocks(
+        self, translation_offset, rotation_angle
+    ):
         """Prediction stays feasible without activating an uncommanded pose block."""
         pytest.importorskip("robot_descriptions.panda_description")
         from robot_descriptions.panda_description import URDF_PATH
@@ -282,7 +288,7 @@ class TestAccelerationConstraints:
             solver.enable_position_limits(True)
             solver.enable_velocity_limits(True)
             if acceleration_limited:
-                solver.set_acceleration_limits(np.full(robot.nv, 2.0))
+                solver.set_acceleration_limits(np.full(robot.nv, 100.0))
                 solver.enable_acceleration_limits(True)
             task = solver.add_frame_task("ee", "panda_hand", eik.TaskType.FRAME_POSE)
             task.priority = 0
@@ -295,12 +301,11 @@ class TestAccelerationConstraints:
         target_robot.update_configuration(q)
         target = target_robot.get_frame_pose("panda_hand").homogeneous()
         target[:3, 3] += translation_offset
-        angle = 0.35
         rotation_delta = np.array(
             [
-                [np.cos(angle), 0.0, np.sin(angle)],
+                [np.cos(rotation_angle), 0.0, np.sin(rotation_angle)],
                 [0.0, 1.0, 0.0],
-                [-np.sin(angle), 0.0, np.cos(angle)],
+                [-np.sin(rotation_angle), 0.0, np.cos(rotation_angle)],
             ]
         )
         target[:3, :3] = rotation_delta @ target[:3, :3]
@@ -337,12 +342,12 @@ class TestAccelerationConstraints:
         )
 
         projected_task_velocity = np.zeros(6, dtype=float)
-        for block in (slice(0, 3), slice(3, 6)):
-            commanded = current_task_velocity[block]
-            commanded_norm_sq = float(commanded @ commanded)
-            if commanded_norm_sq <= 1e-12:
-                continue
-            projected_task_velocity[block] = predictive_task_velocity[block]
+        linear_commanded = float(current_task_velocity[:3] @ current_task_velocity[:3]) > 1e-12
+        angular_commanded = float(current_task_velocity[3:] @ current_task_velocity[3:]) > 1e-12
+        if linear_commanded:
+            projected_task_velocity[:3] = predictive_task_velocity[:3]
+        if linear_commanded or angular_commanded:
+            projected_task_velocity[3:] = predictive_task_velocity[3:]
 
         direct_task.set_target_velocity(projected_task_velocity)
         direct_result = direct_solver.solve_velocity(q, apply_limits=True)

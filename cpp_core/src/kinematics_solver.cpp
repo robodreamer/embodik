@@ -5828,12 +5828,16 @@ KinematicsSolver::apply_position_step_task_metric_projection(
 
     if (task->getType() == TaskType::FRAME_POSE &&
         commanded_velocity.size() == 6) {
-      if (commanded_velocity.head<3>().squaredNorm() >
-          kCollisionEscapeNormEps) {
+      const bool has_linear_command =
+          commanded_velocity.head<3>().squaredNorm() >
+          kCollisionEscapeNormEps;
+      const bool has_angular_command =
+          commanded_velocity.tail<3>().squaredNorm() >
+          kCollisionEscapeNormEps;
+      if (has_linear_command) {
         projected_velocity.head<3>() = predictive_task_velocity.head<3>();
       }
-      if (commanded_velocity.tail<3>().squaredNorm() >
-          kCollisionEscapeNormEps) {
+      if (has_linear_command || has_angular_command) {
         projected_velocity.tail<3>() = predictive_task_velocity.tail<3>();
       }
     } else {
