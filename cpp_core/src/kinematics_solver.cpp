@@ -5801,6 +5801,7 @@ KinematicsSolver::apply_position_step_task_metric_projection(
   }
 
   const double dt_safe = std::max(outer_dt, 1e-9);
+  const Eigen::VectorXd predictive_velocity = predictive_delta / dt_safe;
   robot_->update_configuration(current_q);
 
   bool have_task_objective = false;
@@ -5808,8 +5809,50 @@ KinematicsSolver::apply_position_step_task_metric_projection(
     if (!task || !task->isActive()) {
       continue;
     }
+
+    task->update(*robot_);
+    const Eigen::MatrixXd jacobian = task->getJacobian();
+    const Eigen::VectorXd commanded_velocity = task->getVelocity();
+    if (jacobian.cols() != robot_->nv() || jacobian.rows() <= 0 ||
+        commanded_velocity.size() != jacobian.rows()) {
+      continue;
+    }
+
+    const Eigen::VectorXd predictive_task_velocity =
+        jacobian * predictive_velocity;
+    Eigen::VectorXd projected_velocity =
+        Eigen::VectorXd::Zero(commanded_velocity.size());
+    const auto command_axis_scale = [&](int start, int size) {
+      const auto commanded = commanded_velocity.segment(start, size);
+      const double commanded_norm_sq = commanded.squaredNorm();
+      if (commanded_norm_sq <= kCollisionEscapeNormEps) {
+        return 0.0;
+      }
+
+      const double predictive_scale =
+          predictive_task_velocity.segment(start, size).dot(commanded) /
+          commanded_norm_sq;
+      return std::isfinite(predictive_scale) ? std::abs(predictive_scale)
+                                             : 0.0;
+    };
+
+    if (task->getType() == TaskType::FRAME_POSE &&
+        commanded_velocity.size() == 6) {
+      const double linear_scale = command_axis_scale(0, 3);
+      const double angular_scale = command_axis_scale(3, 3);
+      const double normalization =
+          std::max({1.0, linear_scale, angular_scale});
+      projected_velocity.head<3>() =
+          (linear_scale / normalization) * commanded_velocity.head<3>();
+      projected_velocity.tail<3>() =
+          (angular_scale / normalization) * commanded_velocity.tail<3>();
+    } else {
+      const double scale = command_axis_scale(0, commanded_velocity.size());
+      projected_velocity =
+          (scale / std::max(1.0, scale)) * commanded_velocity;
+    }
+    task->setPositionStepTargetVelocity(projected_velocity);
     have_task_objective = true;
-    break;
   }
   if (!have_task_objective) {
     return std::nullopt;
