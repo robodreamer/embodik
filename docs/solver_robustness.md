@@ -122,6 +122,14 @@ revision, task policy, or task graph changes. This avoids low-rate self-motion f
 re-derived targets while preserving one-tick command recovery. The default value `-1` retains
 automatic pose-based identity and its reversible low-progress hold.
 
+Adapters that add their own outer-loop velocity or acceleration continuity must preserve this
+hold contract after the native solve. If the source command is unchanged and the accepted
+position-step output is a hold, publish the unchanged configuration and zero applied velocity until
+the command identity changes. If an adapter synthesizes an equivalent app-owned hold from repeated
+stationary residual or reversal motion, latch that app-owned hold on the same command identity too.
+Otherwise an outer-loop filter can reintroduce low-rate self-motion even though the IK target is
+stationary.
+
 Adapters that recenter a nullspace posture anchor after each accepted step should use
 `PostureTask.set_reference_configuration()`. It updates the regularization reference without
 declaring a new command on every tick. Use `set_target_configuration()` or
