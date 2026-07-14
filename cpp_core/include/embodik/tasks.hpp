@@ -557,6 +557,13 @@ public:
      */
     void setRegularization(double regularization);
 
+    /**
+     * @brief Penalize normalized proximity to scalar joint limits.
+     *
+     * A zero penalty preserves the frame-only manipulability objective.
+     */
+    void setJointLimitPenalty(double penalty, double epsilon = 0.04);
+
     void set_excluded_joint_indices(
         const std::vector<int>& excluded_indices) override;
     void clear_excluded_joint_indices() override;
@@ -572,6 +579,8 @@ public:
     TaskType getFrameTaskType() const { return frame_task_type_; }
     double getScore() const { return score_; }
     double getRegularization() const { return regularization_; }
+    double getJointLimitPenalty() const { return joint_limit_penalty_; }
+    double getJointLimitEpsilon() const { return joint_limit_epsilon_; }
     const std::vector<int>& getControlledJointIndices() const {
         return controlled_joint_indices_;
     }
@@ -582,13 +591,17 @@ private:
     TaskType frame_task_type_;
     std::vector<int> controlled_joint_indices_;
     double regularization_ = 1e-6;
+    double joint_limit_penalty_ = 0.0;
+    double joint_limit_epsilon_ = 0.04;
     double score_ = 0.0;
     Eigen::VectorXd bounded_gradient_;
     Eigen::MatrixXd jacobian_;
+    std::vector<int> velocity_to_config_index_;
 
     std::vector<int> taskVelocityIndices() const;
     std::vector<int> metricVelocityIndices() const;
     Eigen::MatrixXd selectTaskRows(const Eigen::MatrixXd& spatial) const;
+    void rebuildVelocityToConfigIndex();
     void updateJacobian();
 };
 

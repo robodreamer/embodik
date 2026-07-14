@@ -94,3 +94,44 @@ def test_manipulability_task_rejects_nonpositive_regularization() -> None:
         task.set_regularization(0.0)
     with pytest.raises(ValueError):
         task.set_regularization(float("nan"))
+    with pytest.raises(ValueError):
+        task.set_joint_limit_penalty(-1.0)
+    with pytest.raises(ValueError):
+        task.set_joint_limit_penalty(float("nan"))
+    with pytest.raises(ValueError):
+        task.set_joint_limit_penalty(0.0, 0.0)
+
+
+def test_joint_limit_aware_manipulability_moves_inward_near_limit() -> None:
+    config = resolve_robot_configuration("panda")
+    robot = config["robot"]
+    frame_name = str(config["target_link"])
+    controlled_indices = _panda_arm_velocity_indices(robot)
+    config_index = int(robot.get_joint_config_index("panda_joint5"))
+    velocity_index = int(robot.get_joint_velocity_index("panda_joint5"))
+    task = eik.ManipulabilityTask(
+        "conditioning",
+        robot,
+        frame_name,
+        eik.TaskType.FRAME_POSITION,
+    )
+    task.set_controlled_joint_indices(controlled_indices)
+    task.set_regularization(0.03)
+    task.set_joint_limit_penalty(0.002)
+
+    lower, upper = (np.asarray(value, dtype=float) for value in robot.get_joint_limits())
+    q = np.asarray(robot.neutral_configuration(), dtype=float)
+    row = controlled_indices.index(velocity_index)
+
+    q[config_index] = lower[config_index] + 1e-5
+    robot.update_configuration(q)
+    task.update(robot)
+    lower_gradient = float(np.asarray(task.get_error(), dtype=float)[row])
+
+    q[config_index] = upper[config_index] - 1e-5
+    robot.update_configuration(q)
+    task.update(robot)
+    upper_gradient = float(np.asarray(task.get_error(), dtype=float)[row])
+
+    assert lower_gradient > 0.0
+    assert upper_gradient < 0.0

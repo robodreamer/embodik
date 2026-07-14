@@ -40,6 +40,7 @@ conditioning.weight = 10.0
 conditioning.solve_mode = embodik.TaskSolveMode.MIN_ERROR
 conditioning.set_controlled_joint_indices(arm_velocity_indices)
 conditioning.set_regularization(0.03)
+conditioning.set_joint_limit_penalty(0.002, epsilon=0.04)
 ```
 
 The regularization keeps the score and gradient finite at singular
@@ -54,6 +55,13 @@ the primary concern. Use `FRAME_POSE` only when improving the combined linear
 and angular Jacobian is intentional; on a limited-range arm, its rotational
 gradient can otherwise consume nullspace motion without improving position
 tracking.
+
+The optional joint-limit penalty augments the same bounded conditioning vector
+with the descent direction of EmbodiK's normalized joint-limit distance metric.
+It is evaluated only for controlled scalar joints, so it can preserve arm
+conditioning without introducing a separate task that competes at another
+hierarchy level. The penalty defaults to `0`, preserving the frame-only metric;
+`epsilon` regularizes the normalized distance close to either hard limit.
 
 ### JointLimitAvoidanceTask
 

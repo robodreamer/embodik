@@ -206,10 +206,18 @@ void bind_tasks(nb::module_ &m) {
       .def("set_regularization", &ManipulabilityTask::setRegularization,
            nb::arg("regularization"),
            "Set the positive log-determinant regularization epsilon")
+      .def("set_joint_limit_penalty",
+           &ManipulabilityTask::setJointLimitPenalty, nb::arg("penalty"),
+           nb::arg("epsilon") = 0.04,
+           "Penalize normalized proximity to controlled scalar joint limits")
       .def_prop_ro("frame_name", &ManipulabilityTask::getFrameName)
       .def_prop_ro("frame_task_type", &ManipulabilityTask::getFrameTaskType)
       .def_prop_ro("score", &ManipulabilityTask::getScore)
       .def_prop_ro("regularization", &ManipulabilityTask::getRegularization)
+      .def_prop_ro("joint_limit_penalty",
+                   &ManipulabilityTask::getJointLimitPenalty)
+      .def_prop_ro("joint_limit_epsilon",
+                   &ManipulabilityTask::getJointLimitEpsilon)
       .def_prop_ro("controlled_joint_indices",
                    &ManipulabilityTask::getControlledJointIndices);
 

@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <embodik/dual_arm_ects.hpp>
+#include <embodik/pose_metrics.hpp>
 #include <embodik/robot_model.hpp>
 #include <embodik/tasks.hpp>
 #include <iostream>
@@ -675,6 +676,7 @@ ManipulabilityTask::ManipulabilityTask(const std::string &name,
   }
 
   bounded_gradient_ = Eigen::VectorXd::Zero(model_->nv());
+  rebuildVelocityToConfigIndex();
   updateJacobian();
 }
 
@@ -701,6 +703,20 @@ void ManipulabilityTask::setRegularization(double regularization) {
   }
   if (regularization_ != regularization) {
     regularization_ = regularization;
+    markContinuityStateChanged();
+  }
+}
+
+void ManipulabilityTask::setJointLimitPenalty(double penalty, double epsilon) {
+  if (penalty < 0.0 || !std::isfinite(penalty)) {
+    throw std::invalid_argument("Joint-limit penalty must be finite and >= 0");
+  }
+  if (epsilon <= 0.0 || !std::isfinite(epsilon)) {
+    throw std::invalid_argument("Joint-limit epsilon must be finite and > 0");
+  }
+  if (joint_limit_penalty_ != penalty || joint_limit_epsilon_ != epsilon) {
+    joint_limit_penalty_ = penalty;
+    joint_limit_epsilon_ = epsilon;
     markContinuityStateChanged();
   }
 }
@@ -739,6 +755,22 @@ std::vector<int> ManipulabilityTask::metricVelocityIndices() const {
     }
   }
   return indices;
+}
+
+void ManipulabilityTask::rebuildVelocityToConfigIndex() {
+  velocity_to_config_index_.assign(model_->nv(), -1);
+  for (const auto &joint_name : model_->get_joint_names()) {
+    const int velocity_index = model_->get_joint_velocity_index(joint_name);
+    const int velocity_size = model_->get_joint_velocity_size(joint_name);
+    const int config_index = model_->get_joint_config_index(joint_name);
+    const int config_size = model_->get_joint_config_size(joint_name);
+    if (velocity_size != 1 || config_size != 1 || velocity_index < 0 ||
+        config_index < 0 || velocity_index >= model_->nv() ||
+        config_index >= model_->nq()) {
+      continue;
+    }
+    velocity_to_config_index_[velocity_index] = config_index;
+  }
 }
 
 Eigen::MatrixXd
@@ -827,6 +859,31 @@ void ManipulabilityTask::update(const RobotModel &model) {
       score_ = 0.5 * log_det;
     }
 
+    Eigen::VectorXd joint_limit_gradient = Eigen::VectorXd::Zero(model.nq());
+    if (joint_limit_penalty_ > 0.0) {
+      const auto [lower, upper] = model.get_joint_limits();
+      const Eigen::VectorXd &q = model.get_current_configuration();
+      const auto [per_joint_cost, unused_aggregate] =
+          joint_limit_distance(q, lower, upper, joint_limit_epsilon_);
+      (void)unused_aggregate;
+      joint_limit_gradient = joint_limit_distance_gradient(
+          q, lower, upper, joint_limit_epsilon_);
+
+      double controlled_cost = 0.0;
+      for (int velocity_index : metric_indices) {
+        if (velocity_index < 0 ||
+            velocity_index >=
+                static_cast<int>(velocity_to_config_index_.size())) {
+          continue;
+        }
+        const int config_index = velocity_to_config_index_[velocity_index];
+        if (config_index >= 0 && config_index < per_joint_cost.size()) {
+          controlled_cost += per_joint_cost[config_index];
+        }
+      }
+      score_ -= joint_limit_penalty_ * controlled_cost;
+    }
+
     const auto &frame = pin_model.frames[frame_id];
     const pinocchio::JointIndex joint_id = frame.parentJoint;
     const pinocchio::SE3 frame_placement = frame.placement;
@@ -859,6 +916,14 @@ void ManipulabilityTask::update(const RobotModel &model) {
 
       raw_gradient(static_cast<Eigen::Index>(row)) =
           (A_inv_J * H_i.transpose()).trace();
+      if (joint_limit_penalty_ > 0.0 && v_idx >= 0 &&
+          v_idx < static_cast<int>(velocity_to_config_index_.size())) {
+        const int config_index = velocity_to_config_index_[v_idx];
+        if (config_index >= 0 && config_index < joint_limit_gradient.size()) {
+          raw_gradient(static_cast<Eigen::Index>(row)) +=
+              joint_limit_penalty_ * joint_limit_gradient[config_index];
+        }
+      }
     }
 
     if (!raw_gradient.allFinite()) {
