@@ -56,12 +56,15 @@ and angular Jacobian is intentional; on a limited-range arm, its rotational
 gradient can otherwise consume nullspace motion without improving position
 tracking.
 
-The optional joint-limit penalty augments the same bounded conditioning vector
-with the descent direction of EmbodiK's normalized joint-limit distance metric.
-It is evaluated only for controlled scalar joints, so it can preserve arm
-conditioning without introducing a separate task that competes at another
-hierarchy level. The penalty defaults to `0`, preserving the frame-only metric;
-`epsilon` regularizes the normalized distance close to either hard limit.
+The optional joint-limit penalty uses the descent direction of EmbodiK's
+normalized joint-limit distance metric. Before adding that inward direction,
+EmbodiK projects away any component of the frame-manipulability gradient that
+would worsen the limit metric to first order. The remaining tangential
+manipulability component can still improve conditioning without trading away
+hard-limit recovery. The projection is evaluated only for controlled scalar
+joints and does not add another hierarchy level. The penalty defaults to `0`,
+preserving the frame-only metric; `epsilon` regularizes the normalized distance
+close to either hard limit.
 
 ### JointLimitAvoidanceTask
 

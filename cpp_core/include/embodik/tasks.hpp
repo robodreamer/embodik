@@ -560,6 +560,11 @@ public:
     /**
      * @brief Penalize normalized proximity to scalar joint limits.
      *
+     * The frame-manipulability gradient is first projected onto the
+     * first-order non-worsening half-space of the joint-limit metric, then the
+     * inward penalty is applied. This prevents the two objectives from trading
+     * away hard-limit recovery when their gradients oppose each other.
+     *
      * A zero penalty preserves the frame-only manipulability objective.
      */
     void setJointLimitPenalty(double penalty, double epsilon = 0.04);

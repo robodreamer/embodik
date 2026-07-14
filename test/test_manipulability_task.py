@@ -27,6 +27,14 @@ def _panda_arm_velocity_indices(robot: eik.RobotModel) -> list[int]:
     ]
 
 
+def _panda_arm_config_indices(robot: eik.RobotModel) -> list[int]:
+    return [
+        int(robot.get_joint_config_index(name))
+        for name in robot.get_joint_names()
+        if name.startswith("panda_joint")
+    ]
+
+
 def test_manipulability_gradient_matches_finite_difference() -> None:
     config = resolve_robot_configuration("panda")
     robot = config["robot"]
@@ -135,3 +143,54 @@ def test_joint_limit_aware_manipulability_moves_inward_near_limit() -> None:
 
     assert lower_gradient > 0.0
     assert upper_gradient < 0.0
+
+
+def test_joint_limit_aware_manipulability_does_not_trade_away_limit_distance() -> None:
+    config = resolve_robot_configuration("panda")
+    robot = config["robot"]
+    controlled_indices = _panda_arm_velocity_indices(robot)
+    config_indices = _panda_arm_config_indices(robot)
+    task = eik.ManipulabilityTask(
+        "conditioning",
+        robot,
+        str(config["target_link"]),
+        eik.TaskType.FRAME_POSITION,
+    )
+    task.set_controlled_joint_indices(controlled_indices)
+    task.set_regularization(0.03)
+
+    q = np.array(
+        [
+            0.033001725625,
+            -0.509618685124,
+            -2.727151753011,
+            -1.706703998913,
+            0.321117397083,
+            2.368536371246,
+            -0.807538834925,
+            0.0,
+            0.0,
+        ],
+        dtype=float,
+    )
+    lower, upper = (np.asarray(value, dtype=float) for value in robot.get_joint_limits())
+    limit_descent_all = np.asarray(
+        eik.joint_limit_distance_gradient(q, lower, upper, 0.04),
+        dtype=float,
+    )
+    limit_descent = limit_descent_all[config_indices]
+
+    robot.update_configuration(q)
+    task.update(robot)
+    raw_manipulability_direction = np.asarray(task.get_error(), dtype=float)
+    conflict_cosine = float(
+        np.dot(raw_manipulability_direction, limit_descent)
+        / (np.linalg.norm(raw_manipulability_direction) * np.linalg.norm(limit_descent))
+    )
+    assert conflict_cosine < -0.95
+
+    task.set_joint_limit_penalty(0.002, 0.04)
+    task.update(robot)
+    combined_direction = np.asarray(task.get_error(), dtype=float)
+
+    assert float(np.dot(combined_direction, limit_descent)) > 0.0

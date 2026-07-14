@@ -895,6 +895,7 @@ void ManipulabilityTask::update(const RobotModel &model) {
         frame_placement.inverse().toActionMatrix();
 
     Eigen::VectorXd raw_gradient = Eigen::VectorXd::Zero(task_indices.size());
+    Eigen::VectorXd limit_descent = Eigen::VectorXd::Zero(task_indices.size());
     for (size_t row = 0; row < task_indices.size(); ++row) {
       const int v_idx = task_indices[row];
       const bool excluded =
@@ -920,10 +921,22 @@ void ManipulabilityTask::update(const RobotModel &model) {
           v_idx < static_cast<int>(velocity_to_config_index_.size())) {
         const int config_index = velocity_to_config_index_[v_idx];
         if (config_index >= 0 && config_index < joint_limit_gradient.size()) {
-          raw_gradient(static_cast<Eigen::Index>(row)) +=
-              joint_limit_penalty_ * joint_limit_gradient[config_index];
+          limit_descent(static_cast<Eigen::Index>(row)) =
+              joint_limit_gradient[config_index];
         }
       }
+    }
+
+    if (joint_limit_penalty_ > 0.0 && limit_descent.allFinite()) {
+      const double limit_norm_sq = limit_descent.squaredNorm();
+      if (limit_norm_sq > 1e-18) {
+        const double conflict = raw_gradient.dot(limit_descent);
+        if (std::isfinite(conflict) && conflict < 0.0) {
+          raw_gradient.noalias() -=
+              (conflict / limit_norm_sq) * limit_descent;
+        }
+      }
+      raw_gradient.noalias() += joint_limit_penalty_ * limit_descent;
     }
 
     if (!raw_gradient.allFinite()) {
