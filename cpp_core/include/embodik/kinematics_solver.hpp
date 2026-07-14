@@ -1347,8 +1347,7 @@ private:
   bool position_step_target_geometry_changed(
       const PositionStepTargetSignature &signature) const;
   double position_step_task_terminal_prediction_weight(
-      const Task &task, const Eigen::VectorXd &current_error,
-      double outer_dt) const;
+      const Task &task, const Eigen::VectorXd &current_error) const;
   void capture_position_step_collision_command_floor(
       const Eigen::VectorXd &current_q);
   Eigen::Matrix4d canonicalize_position_step_signature_pose(

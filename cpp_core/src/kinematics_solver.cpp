@@ -92,6 +92,11 @@ constexpr double kStationaryDirectionChangeMotionThreshold = 1e-4;
 constexpr int kStationaryMaxDirectionReversals = 0;
 constexpr double kStationaryTargetTranslationTolerance = 1e-9;
 constexpr double kStationaryTargetRotationTolerance = 1e-9;
+// Target deltas below one micrometer are not a distinct physical command for
+// this velocity-level solver. Transition predictor ownership smoothly across
+// that numerical-resolution band instead of turning target noise into a mode
+// switch, while preserving the established moving-target path above it.
+constexpr double kTargetTranslationPredictionTransition = 1e-6;
 constexpr double kStationaryTargetGainTolerance = 1e-12;
 constexpr int kStationaryTargetDwellCalls = 20;
 
@@ -1599,8 +1604,7 @@ void KinematicsSolver::update_position_step_target_motion_blocks(
 }
 
 double KinematicsSolver::position_step_task_terminal_prediction_weight(
-    const Task &task, const Eigen::VectorXd &current_error,
-    double outer_dt) const {
+    const Task &task, const Eigen::VectorXd &current_error) const {
   if (task.getType() == TaskType::FRAME_ORIENTATION) {
     return 0.0;
   }
@@ -1614,28 +1618,18 @@ double KinematicsSolver::position_step_task_terminal_prediction_weight(
     if (target_translation_step <= 0.0) {
       return 0.0;
     }
-
-    const Eigen::VectorXd commanded_velocity = task.getVelocity();
-    const bool has_linear_command =
-        (task.getType() == TaskType::FRAME_POSITION &&
-         commanded_velocity.size() >= 3) ||
-        (task.getType() == TaskType::FRAME_POSE &&
-         commanded_velocity.size() >= 6);
-    if (!has_linear_command) {
+    if (target_translation_step <= kStationaryTargetTranslationTolerance) {
       return 0.0;
     }
-    // Weight terminal prediction by the share of the next task-space step
-    // introduced by target motion, so predictor handoff is continuous.
-    const double correction_step =
-        std::max(outer_dt, 0.0) * commanded_velocity.head<3>().norm();
-    if (!std::isfinite(correction_step)) {
+    if (target_translation_step >=
+        kTargetTranslationPredictionTransition) {
       return 1.0;
     }
-    const double total_step = target_translation_step + correction_step;
-    if (total_step <= std::numeric_limits<double>::epsilon()) {
-      return 0.0;
-    }
-    return std::clamp(target_translation_step / total_step, 0.0, 1.0);
+    const double normalized =
+        (target_translation_step - kStationaryTargetTranslationTolerance) /
+        (kTargetTranslationPredictionTransition -
+         kStationaryTargetTranslationTolerance);
+    return normalized * normalized * (3.0 - 2.0 * normalized);
   }
   if (task.getType() == TaskType::FRAME_POSE && current_error.size() >= 6) {
     return current_error.head<3>().squaredNorm() > kCollisionEscapeNormEps
@@ -5971,8 +5965,7 @@ KinematicsSolver::apply_position_step_task_metric_projection(
     Eigen::VectorXd projected_velocity =
         Eigen::VectorXd::Zero(commanded_velocity.size());
     const double terminal_prediction_weight =
-        position_step_task_terminal_prediction_weight(
-            *task, task->getError(), dt_safe);
+        position_step_task_terminal_prediction_weight(*task, task->getError());
     const Eigen::VectorXd selected_task_velocity =
         first_tick_task_velocity +
         terminal_prediction_weight *
@@ -10793,8 +10786,8 @@ PositionIKResult KinematicsSolver::solve_position_step(
       frame_task->setPositionStepTargetVelocity(vel);
     }
     const double terminal_prediction_weight =
-        position_step_task_terminal_prediction_weight(
-            *frame_task, current_error, step_dt);
+        position_step_task_terminal_prediction_weight(*frame_task,
+                                                      current_error);
     const auto componentwise_candidate =
         all_task_blocks_commanded && terminal_prediction_weight > 0.0
             ? estimate_position_step_componentwise_outer_candidate(
@@ -12153,7 +12146,7 @@ PositionIKResult KinematicsSolver::solve_position_step(
       componentwise_prediction_weight =
           std::min(componentwise_prediction_weight,
                    position_step_task_terminal_prediction_weight(
-                       *rt.task, current_error, step_dt));
+                       *rt.task, current_error));
     }
     const auto componentwise_candidate =
         all_target_blocks_commanded && componentwise_prediction_weight > 0.0
