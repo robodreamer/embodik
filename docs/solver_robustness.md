@@ -45,6 +45,7 @@ solver.configure_runtime(cfg)
 | `weighted_fallback_enabled` | **on** | After a non-success prioritized solve, may accept a **constrained weighted** MIN_ERROR candidate that still satisfies collision, limits, CoM, etc. |
 | `enable_auto_task_layout` | off in raw solver; **on in examples** | Toggles **merged 6D pose** vs **split position + orientation** tasks when binding score says one layout fits better |
 | `adaptive_dt` | off | When stamped into `PositionStepOptions`, scales integration `dt` with position error |
+| `joint_limit_non_worsening_enabled` | off | Inside `joint_limit_non_worsening_margin`, prevents finite scalar joint-limit slack from decreasing while retaining inward and tangent motion |
 | `weighted_advisor_enabled` | off | Computes weighted candidate every step for diagnostics without changing authoritative output |
 
 Prioritized SNS remains authoritative on **success**. Fallback and layout switches happen at
@@ -72,6 +73,33 @@ candidate is feasible, it can replace the failed prioritized step (`recovery_sta
 `WEIGHTED_FALLBACK` in diagnostics).
 
 Disable only for strict-priority A/B benchmarks — not for production teleop.
+
+### Active joint-limit non-worsening
+
+Enable `joint_limit_non_worsening_enabled` when a limited-ROM robot must not
+spend its remaining joint-limit margin to follow an infeasible Cartesian
+direction:
+
+```python
+cfg = solver.runtime_config()
+cfg.joint_limit_non_worsening_enabled = True
+cfg.joint_limit_non_worsening_margin = 0.02  # joint coordinates; default 0.04
+solver.configure_runtime(cfg)
+```
+
+The policy requires position limits to be enabled. For each finite scalar joint
+inside the activation margin, the solver adds an inward/tangent velocity
+half-space. An outward `SCALE` objective is first represented by its closest
+achievable Cartesian tangent objective; exact task motion through the task
+nullspace is retained when feasible. The same hard half-space then constrains
+`MIN_ERROR`, posture, manipulability, and other lower-priority objectives, so a
+secondary task cannot reintroduce the removed outward motion.
+
+The policy is default-off because the useful activation width depends on robot
+range of motion and control rate. It does not replace hard position limits, and
+it does not relax collision, CoM, contact, velocity, or acceleration
+constraints. Non-finite or non-positive margins are rejected when the policy is
+enabled.
 
 ## Task solve modes
 

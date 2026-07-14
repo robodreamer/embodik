@@ -522,6 +522,11 @@ struct SolverRuntimeConfig {
   double adaptive_dt_max_scale = 5.0;
   /// Default PositionStepOptions::adaptive_dt_reference_distance value.
   double adaptive_dt_reference_distance = 0.05;
+  /// Enforce first-order non-worsening of scalar joint-limit slack once a
+  /// finite limit enters joint_limit_non_worsening_margin. Default off.
+  bool joint_limit_non_worsening_enabled = false;
+  /// Activation distance from either finite scalar joint limit.
+  double joint_limit_non_worsening_margin = 0.04;
   /// Enable read-only constrained weighted-advisor diagnostics. When true, each
   /// velocity solve also computes a weighted stacked MIN_ERROR candidate under
   /// the same hard constraints. The prioritized SNS output remains

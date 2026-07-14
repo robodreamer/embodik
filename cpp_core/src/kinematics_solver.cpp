@@ -113,6 +113,7 @@ constexpr double kTorsoBoundSlackEpsRot = 1e-3;   // ~0.057 deg
 constexpr double kUnboundedConstraintLimit = 1e10;
 // Elastic band: margin (rad) within which a joint is considered "at limit".
 constexpr double kElasticAtLimitMargin = 1e-3; // 1 mrad
+constexpr double kPositionLimitMarginEpsilon = 1e-4;
 
 struct HalfspaceBoundResult {
   Eigen::VectorXd lower;
@@ -645,12 +646,15 @@ static void project_task_jacobians_away_from_violated_rows(
   }
 }
 
-static bool project_collision_objectives_into_tangent_space(
+static bool project_objectives_into_constraint_tangent_space(
     std::vector<Eigen::VectorXd> &task_goals,
     std::vector<Eigen::MatrixXd> &task_jacobians,
     const std::vector<bool> &project_objective,
     const Eigen::MatrixXd &constraint_jacobian,
     const Eigen::VectorXd &constraint_lower_bounds, double tolerance,
+    const std::vector<bool> &prefer_exact_feasibility_rows,
+    double exact_feasibility_singularity_threshold,
+    bool use_closest_achievable_goal,
     std::vector<Eigen::VectorXd> *weighted_goals,
     std::vector<Eigen::MatrixXd> *weighted_jacobians) {
   if (constraint_jacobian.rows() != constraint_lower_bounds.size()) {
@@ -683,22 +687,106 @@ static bool project_collision_objectives_into_tangent_space(
       continue;
     }
 
+    bool has_violated_row = false;
+    bool prefer_exact_feasibility =
+        prefer_exact_feasibility_rows.size() ==
+        static_cast<std::size_t>(constraint_jacobian.rows());
+    for (int row = 0; row < constraint_jacobian.rows(); ++row) {
+      if (constraint_jacobian.row(row).dot(desired_velocity) <
+          constraint_lower_bounds(row) - feasibility_tolerance) {
+        has_violated_row = true;
+        prefer_exact_feasibility =
+            prefer_exact_feasibility &&
+            prefer_exact_feasibility_rows[static_cast<std::size_t>(row)];
+      }
+    }
+    if (!has_violated_row) {
+      continue;
+    }
+    if (std::isfinite(exact_feasibility_singularity_threshold) &&
+        exact_feasibility_singularity_threshold > 0.0) {
+      const Eigen::VectorXd singular_values =
+          Eigen::JacobiSVD<Eigen::MatrixXd>(original_jacobian)
+              .singularValues();
+      if (singular_values.size() > 0) {
+        const double normalized_minimum =
+            singular_values(singular_values.size() - 1) /
+            std::max(singular_values(0), 1e-12);
+        prefer_exact_feasibility =
+            prefer_exact_feasibility ||
+            normalized_minimum <= exact_feasibility_singularity_threshold;
+      }
+    }
+
+    // At the sampled-data boundary, a minimum-norm task velocity can point out
+    // of a hard half-space even when an equivalent Cartesian velocity exists
+    // in the task nullspace. Prefer that exact inward/tangent realization
+    // before removing any task component. Interior activation rows instead
+    // preserve their current margin through the tangent objective. The hard
+    // rows still constrain all lower-priority objectives.
+    if (prefer_exact_feasibility) {
+      Eigen::VectorXd feasible_desired_velocity = desired_velocity;
+      const Eigen::MatrixXd task_nullspace =
+          Eigen::MatrixXd::Identity(original_jacobian.cols(),
+                                    original_jacobian.cols()) -
+          objective_inverse * original_jacobian;
+      const int correction_iterations =
+          std::max(1, 4 * static_cast<int>(constraint_jacobian.rows()));
+      for (int iteration = 0; iteration < correction_iterations; ++iteration) {
+        int most_violated_row = -1;
+        double largest_deficit = feasibility_tolerance;
+        for (int row = 0; row < constraint_jacobian.rows(); ++row) {
+          const double deficit = constraint_lower_bounds(row) -
+                                 constraint_jacobian.row(row).dot(
+                                     feasible_desired_velocity);
+          if (deficit > largest_deficit) {
+            most_violated_row = row;
+            largest_deficit = deficit;
+          }
+        }
+        if (most_violated_row < 0) {
+          break;
+        }
+        const Eigen::RowVectorXd correction_direction =
+            constraint_jacobian.row(most_violated_row) * task_nullspace;
+        const double correction_norm_squared =
+            correction_direction.squaredNorm();
+        if (correction_norm_squared <= 1e-12) {
+          break;
+        }
+        feasible_desired_velocity.noalias() +=
+            correction_direction.transpose() *
+            (largest_deficit / correction_norm_squared);
+      }
+      bool exact_goal_is_feasible = true;
+      for (int row = 0; row < constraint_jacobian.rows(); ++row) {
+        if (constraint_jacobian.row(row).dot(feasible_desired_velocity) <
+            constraint_lower_bounds(row) - feasibility_tolerance) {
+          exact_goal_is_feasible = false;
+          break;
+        }
+      }
+      if (exact_goal_is_feasible) {
+        continue;
+      }
+    }
+
     Eigen::MatrixXd tangent_projector = Eigen::MatrixXd::Identity(
         original_jacobian.cols(), original_jacobian.cols());
     bool projection_required = false;
     for (int row = 0; row < constraint_jacobian.rows(); ++row) {
-      const Eigen::RowVectorXd collision_row = constraint_jacobian.row(row);
-      if (collision_row.squaredNorm() <= 1e-12) {
+      const Eigen::RowVectorXd constraint_row = constraint_jacobian.row(row);
+      if (constraint_row.squaredNorm() <= 1e-12) {
         continue;
       }
-      const double desired_separation = collision_row.dot(desired_velocity);
+      const double desired_separation = constraint_row.dot(desired_velocity);
       if (desired_separation >=
           constraint_lower_bounds(row) - feasibility_tolerance) {
         continue;
       }
 
       const Eigen::RowVectorXd remaining_normal =
-          collision_row * tangent_projector;
+          constraint_row * tangent_projector;
       const double remaining_norm_squared = remaining_normal.squaredNorm();
       if (remaining_norm_squared <= 1e-12) {
         continue;
@@ -718,8 +806,17 @@ static bool project_collision_objectives_into_tangent_space(
     // Jacobian so no removed task row can force the scale to collapse.
     const Eigen::MatrixXd projected_jacobian =
         original_jacobian * tangent_projector;
-    const Eigen::VectorXd projected_goal =
-        projected_jacobian * desired_velocity;
+    Eigen::VectorXd projected_goal;
+    if (use_closest_achievable_goal) {
+      Eigen::MatrixXd projected_inverse;
+      detail::ComputeGeneralizedInverse(projected_jacobian,
+                                        feasibility_tolerance,
+                                        &projected_inverse);
+      projected_goal =
+          projected_jacobian * projected_inverse * original_goal;
+    } else {
+      projected_goal = projected_jacobian * desired_velocity;
+    }
 
     // SNS compares the rank remaining after constraint saturation with the
     // objective row count. Remove dependent projected rows so that count is the
@@ -740,14 +837,14 @@ static bool project_collision_objectives_into_tangent_space(
            singular_values(rank) > rank_threshold) {
       ++rank;
     }
-    if (!projection_applied && weighted_goals != nullptr &&
-        weighted_jacobians != nullptr) {
+    if (weighted_goals != nullptr && weighted_jacobians != nullptr &&
+        weighted_jacobians->empty()) {
       *weighted_goals = task_goals;
       *weighted_jacobians = task_jacobians;
     }
     if (weighted_jacobians != nullptr && !weighted_jacobians->empty()) {
       // Weighted MIN_ERROR keeps the original residual but cannot use the
-      // unsafe collision-normal direction. It does not need strict row-rank
+      // infeasible constraint-normal direction. It does not need strict row-rank
       // compression because dependent rows remain valid soft residuals.
       (*weighted_jacobians)[task_idx] = projected_jacobian;
     }
@@ -766,7 +863,103 @@ struct ConstraintBlock {
   Eigen::MatrixXd jacobian;
   Eigen::VectorXd lower_bounds;
   Eigen::VectorXd upper_bounds;
+  std::vector<bool> prefer_exact_feasibility_rows;
 };
+
+static std::optional<ConstraintBlock>
+build_joint_limit_non_worsening_rows(
+    const RobotModel &robot,
+    const std::vector<int> &velocity_to_config_index,
+    const std::unordered_set<int> &excluded_indices,
+    double activation_margin, std::vector<int> &lower_modes,
+    std::vector<int> &upper_modes) {
+  if (!std::isfinite(activation_margin) || activation_margin <= 0.0) {
+    return std::nullopt;
+  }
+
+  const auto [q_lower, q_upper] = robot.get_joint_limits();
+  const Eigen::VectorXd q = robot.get_current_configuration();
+  const int nv = robot.nv();
+  if (lower_modes.size() != static_cast<std::size_t>(nv)) {
+    lower_modes.assign(static_cast<std::size_t>(nv), 0);
+  }
+  if (upper_modes.size() != static_cast<std::size_t>(nv)) {
+    upper_modes.assign(static_cast<std::size_t>(nv), 0);
+  }
+  const int floating_base_offset = robot.is_floating_base() ? 6 : 0;
+  struct ActiveLimitRow {
+    int velocity_index;
+    double sign;
+    bool at_sampled_data_boundary;
+  };
+  std::vector<ActiveLimitRow> active_rows;
+  active_rows.reserve(static_cast<std::size_t>(nv));
+
+  for (int velocity_index = floating_base_offset; velocity_index < nv;
+       ++velocity_index) {
+    if (excluded_indices.find(velocity_index) != excluded_indices.end()) {
+      lower_modes[static_cast<std::size_t>(velocity_index)] = 0;
+      upper_modes[static_cast<std::size_t>(velocity_index)] = 0;
+      continue;
+    }
+    const int config_index =
+        velocity_index < static_cast<int>(velocity_to_config_index.size())
+            ? velocity_to_config_index[velocity_index]
+            : -1;
+    if (config_index < 0 || config_index >= q.size() ||
+        config_index >= q_lower.size() || config_index >= q_upper.size() ||
+        !std::isfinite(q_lower[config_index]) ||
+        !std::isfinite(q_upper[config_index])) {
+      lower_modes[static_cast<std::size_t>(velocity_index)] = 0;
+      upper_modes[static_cast<std::size_t>(velocity_index)] = 0;
+      continue;
+    }
+
+    const double lower_slack = q[config_index] - q_lower[config_index];
+    const double upper_slack = q_upper[config_index] - q[config_index];
+    if (lower_slack <= activation_margin) {
+      int &mode = lower_modes[static_cast<std::size_t>(velocity_index)];
+      if (mode == 0) {
+        mode = lower_slack <= kPositionLimitMarginEpsilon ? 2 : 1;
+      }
+      active_rows.push_back({velocity_index, 1.0,
+                             mode == 2});
+    } else {
+      lower_modes[static_cast<std::size_t>(velocity_index)] = 0;
+    }
+    if (upper_slack <= activation_margin) {
+      int &mode = upper_modes[static_cast<std::size_t>(velocity_index)];
+      if (mode == 0) {
+        mode = upper_slack <= kPositionLimitMarginEpsilon ? 2 : 1;
+      }
+      active_rows.push_back({velocity_index, -1.0,
+                             mode == 2});
+    } else {
+      upper_modes[static_cast<std::size_t>(velocity_index)] = 0;
+    }
+  }
+
+  if (active_rows.empty()) {
+    return std::nullopt;
+  }
+
+  ConstraintBlock result;
+  result.jacobian = Eigen::MatrixXd::Zero(
+      static_cast<int>(active_rows.size()), nv);
+  result.lower_bounds =
+      Eigen::VectorXd::Zero(static_cast<int>(active_rows.size()));
+  result.upper_bounds = Eigen::VectorXd::Constant(
+      static_cast<int>(active_rows.size()), kUnboundedConstraintLimit);
+  result.prefer_exact_feasibility_rows.reserve(active_rows.size());
+  for (int row = 0; row < static_cast<int>(active_rows.size()); ++row) {
+    const auto &[velocity_index, sign, at_sampled_data_boundary] =
+        active_rows[static_cast<std::size_t>(row)];
+    result.jacobian(row, velocity_index) = sign;
+    result.prefer_exact_feasibility_rows.push_back(
+        at_sampled_data_boundary);
+  }
+  return result;
+}
 
 template <typename IntContainer>
 static void zero_excluded_columns(Eigen::MatrixXd &jacobian,
@@ -7682,6 +7875,22 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
     return result;
   }
 
+  std::optional<ConstraintBlock> joint_limit_non_worsening_result =
+      std::nullopt;
+  if (apply_limits && use_position_limits_ &&
+      runtime_config_.joint_limit_non_worsening_enabled) {
+    joint_limit_non_worsening_result = build_joint_limit_non_worsening_rows(
+        *robot_, velocity_to_config_index, excluded_union,
+        runtime_config_.joint_limit_non_worsening_margin,
+        joint_limit_non_worsening_lower_modes_,
+        joint_limit_non_worsening_upper_modes_);
+    if (use_contact_projection &&
+        joint_limit_non_worsening_result.has_value()) {
+      joint_limit_non_worsening_result->jacobian =
+          joint_limit_non_worsening_result->jacobian * contact_P_c;
+    }
+  }
+
   // Collision constraints are expensive when collision geometry exists.
   std::optional<CollisionConstraintResult> collision_constraint_result =
       std::nullopt;
@@ -7708,13 +7917,38 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
         collision_constraint_result->jacobian * contact_P_c;
   }
 
+  // Preserve original soft residuals for weighted diagnostics/fallback while
+  // composing hard-constraint tangent projections on their Jacobians.
+  std::vector<Eigen::VectorXd> constrained_weighted_goals;
+  std::vector<Eigen::MatrixXd> constrained_weighted_jacobians;
+  bool constraint_projection_applied = false;
+  const bool preserve_for_weighted =
+      runtime_config_.weighted_advisor_enabled ||
+      runtime_config_.weighted_fallback_enabled;
+
+  if (joint_limit_non_worsening_result.has_value()) {
+    std::vector<bool> project_limit_tangent_objective;
+    project_limit_tangent_objective.reserve(objective_configs.size());
+    for (const auto &objective : objective_configs) {
+      project_limit_tangent_objective.push_back(
+          objective.solve_mode == TaskSolveMode::kScale);
+    }
+    const auto &limit_rows = *joint_limit_non_worsening_result;
+    constraint_projection_applied =
+        project_objectives_into_constraint_tangent_space(
+            goals, jacobians, project_limit_tangent_objective,
+            limit_rows.jacobian, limit_rows.lower_bounds,
+            constraint_tolerance_, limit_rows.prefer_exact_feasibility_rows,
+            solver_tolerance_, true,
+            preserve_for_weighted ? &constrained_weighted_goals : nullptr,
+            preserve_for_weighted ? &constrained_weighted_jacobians : nullptr);
+  }
+
   // Project task objectives into the collision tangent space whenever their
   // unconstrained velocity would violate an active collision row. The projected
   // goal is recomputed from the achievable tangent velocity, so SCALE does not
   // collapse on an objective component that was intentionally removed. A task
   // that already satisfies the separating lower bound is left unchanged.
-  std::vector<Eigen::VectorXd> collision_weighted_goals;
-  std::vector<Eigen::MatrixXd> collision_weighted_jacobians;
   bool collision_projection_applied = false;
   if (apply_limits && collision_constraint_result.has_value()) {
     const auto &coll = collision_constraint_result.value();
@@ -7741,18 +7975,18 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
             project_elastic_collision_recovery_objective[index];
       }
     }
-    const bool preserve_for_weighted =
-        runtime_config_.weighted_advisor_enabled ||
-        runtime_config_.weighted_fallback_enabled;
     collision_projection_applied =
-        project_collision_objectives_into_tangent_space(
+        project_objectives_into_constraint_tangent_space(
             goals, jacobians, project_collision_tangent_objective,
             coll.jacobian, coll.lower_bounds, constraint_tolerance_,
-            preserve_for_weighted ? &collision_weighted_goals : nullptr,
-            preserve_for_weighted ? &collision_weighted_jacobians : nullptr);
+            {}, 0.0, false,
+            preserve_for_weighted ? &constrained_weighted_goals : nullptr,
+            preserve_for_weighted ? &constrained_weighted_jacobians : nullptr);
+    constraint_projection_applied =
+        constraint_projection_applied || collision_projection_applied;
   }
-  const bool use_collision_weighted_objectives =
-      collision_projection_applied && !collision_weighted_goals.empty();
+  const bool use_constrained_weighted_objectives =
+      constraint_projection_applied && !constrained_weighted_goals.empty();
 
   // CoM support-polygon constraint
   std::optional<ComConstraintResult> com_constraint_result = std::nullopt;
@@ -7782,9 +8016,9 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
     project_task_jacobians_away_from_violated_rows(
         jacobians, com.jacobian, com.violated_rows,
         /*outward_is_positive_projection=*/true);
-    if (use_collision_weighted_objectives) {
+    if (use_constrained_weighted_objectives) {
       project_task_jacobians_away_from_violated_rows(
-          collision_weighted_jacobians, com.jacobian, com.violated_rows,
+          constrained_weighted_jacobians, com.jacobian, com.violated_rows,
           /*outward_is_positive_projection=*/true);
     }
   }
@@ -7814,9 +8048,9 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
     project_task_jacobians_away_from_violated_rows(
         jacobians, rpc.jacobian, rpc.violated_rows,
         /*outward_is_positive_projection=*/true);
-    if (use_collision_weighted_objectives) {
+    if (use_constrained_weighted_objectives) {
       project_task_jacobians_away_from_violated_rows(
-          collision_weighted_jacobians, rpc.jacobian, rpc.violated_rows,
+          constrained_weighted_jacobians, rpc.jacobian, rpc.violated_rows,
           /*outward_is_positive_projection=*/true);
     }
   }
@@ -7853,9 +8087,9 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
     project_task_jacobians_away_from_violated_rows(
         jacobians, tpc.jacobian, tpc.violated_rows,
         /*outward_is_positive_projection=*/true);
-    if (use_collision_weighted_objectives) {
+    if (use_constrained_weighted_objectives) {
       project_task_jacobians_away_from_violated_rows(
-          collision_weighted_jacobians, tpc.jacobian, tpc.violated_rows,
+          constrained_weighted_jacobians, tpc.jacobian, tpc.violated_rows,
           /*outward_is_positive_projection=*/true);
     }
   }
@@ -7878,9 +8112,9 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
     project_task_jacobians_away_from_violated_rows(
         jacobians, tpc.jacobian, tpc.violated_rows,
         /*outward_is_positive_projection=*/true);
-    if (use_collision_weighted_objectives) {
+    if (use_constrained_weighted_objectives) {
       project_task_jacobians_away_from_violated_rows(
-          collision_weighted_jacobians, tpc.jacobian, tpc.violated_rows,
+          constrained_weighted_jacobians, tpc.jacobian, tpc.violated_rows,
           /*outward_is_positive_projection=*/true);
     }
   }
@@ -7934,11 +8168,33 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
   constexpr double kNoPosBound = std::numeric_limits<double>::infinity();
   std::vector<double> dense_pos_lower_sp(nv_sp,  kNoPosBound);
   std::vector<double> dense_pos_upper_sp(nv_sp, -kNoPosBound);
+  std::vector<double> merged_active_lower_sp(nv_sp, kNoPosBound);
+  std::vector<double> merged_active_upper_sp(nv_sp, -kNoPosBound);
+  std::vector<bool> non_worsening_lower_sp(nv_sp, false);
+  std::vector<bool> non_worsening_upper_sp(nv_sp, false);
+  if (!use_contact_projection &&
+      joint_limit_non_worsening_result.has_value()) {
+    const Eigen::MatrixXd &rows =
+        joint_limit_non_worsening_result->jacobian;
+    for (int row = 0; row < rows.rows(); ++row) {
+      for (int column = 0; column < rows.cols(); ++column) {
+        const double coefficient = rows(row, column);
+        if (coefficient > 0.5) {
+          non_worsening_lower_sp[column] = true;
+          break;
+        }
+        if (coefficient < -0.5) {
+          non_worsening_upper_sp[column] = true;
+          break;
+        }
+      }
+    }
+  }
 
   if (apply_limits && use_position_limits_) {
     // 0.1% of vel_limit — preserves borderline near-limit joints.
     constexpr double kPosBoundActiveFraction = 1e-3;
-    constexpr double margin_limit_sp = 1e-4;
+    constexpr double margin_limit_sp = kPositionLimitMarginEpsilon;
     auto [q_min_sp, q_max_sp] = robot_->get_joint_limits();
     Eigen::VectorXd q_cur_sp = robot_->get_current_configuration();
     const auto &vel_limits_sp = robot_->get_velocity_limits();
@@ -8016,7 +8272,9 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
         const double um = q_max_eff_sp[qi] - q_cur_sp[qi] - margin_limit_sp;
         // Cheap check: if both margins exceed max possible displacement in one step,
         // bounds = [-vel_limit, vel_limit] → skip (no tightening needed).
-        if (!is_locked) {
+        const bool enforce_non_worsening =
+            non_worsening_lower_sp[i] || non_worsening_upper_sp[i];
+        if (!is_locked && !enforce_non_worsening) {
           const double pos_room_l = lm / dt_safe;
           const double pos_room_u = um / dt_safe;
           const double accel_room_l = (al > 0.0 && std::isfinite(al))
@@ -8029,7 +8287,20 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
           }
         }
         auto [lo, hi] = calculate_velocity_box_constraint(lm, um, vl, al, dt_);
+        if (non_worsening_lower_sp[i]) {
+          lo = std::max(lo, 0.0);
+        }
+        if (non_worsening_upper_sp[i]) {
+          hi = std::min(hi, 0.0);
+        }
         if (is_locked) { lo = 0.0; hi = 0.0; }
+        if (enforce_non_worsening) {
+          merged_active_lower_sp[i] = lo;
+          merged_active_upper_sp[i] = hi;
+          dense_pos_lower_sp[i] = lo;
+          dense_pos_upper_sp[i] = hi;
+          continue;
+        }
         const double tol = kPosBoundActiveFraction * vl;
         if ((lo > -vl + tol) || (hi < vl - tol) || is_locked) {
           sparse_pos_limits.push_back({i, lo, hi});
@@ -8038,6 +8309,12 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
       }
     }
     num_constraints += static_cast<int>(sparse_pos_limits.size());
+  }
+
+  if (use_contact_projection &&
+      joint_limit_non_worsening_result.has_value()) {
+    num_constraints += static_cast<int>(
+        joint_limit_non_worsening_result->jacobian.rows());
   }
 
   if (collision_constraint_result.has_value()) {
@@ -8101,6 +8378,18 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
     if (idx >= 0 && idx < robot_->nv()) {
       c_lower(constraint_idx + idx) = -kv.second;
       c_upper(constraint_idx + idx) = kv.second;
+    }
+  }
+  for (int idx = 0; idx < robot_->nv(); ++idx) {
+    if (std::isfinite(merged_active_lower_sp[idx])) {
+      c_lower(constraint_idx + idx) =
+          std::max(c_lower(constraint_idx + idx),
+                   merged_active_lower_sp[idx]);
+    }
+    if (std::isfinite(merged_active_upper_sp[idx])) {
+      c_upper(constraint_idx + idx) =
+          std::min(c_upper(constraint_idx + idx),
+                   merged_active_upper_sp[idx]);
     }
   }
   for (int idx : pending_velocity_lock_indices_) {
@@ -8288,6 +8577,15 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
     }  // end if (false) — old dense position-limit block (disabled)
   }
 
+  if (use_contact_projection &&
+      joint_limit_non_worsening_result.has_value()) {
+    constraint_idx = append_constraint_block(
+        C, c_lower, c_upper, constraint_idx, robot_->nv(),
+        joint_limit_non_worsening_result->jacobian,
+        joint_limit_non_worsening_result->lower_bounds,
+        joint_limit_non_worsening_result->upper_bounds);
+  }
+
   if (collision_constraint_result.has_value()) {
     constraint_idx = append_constraint_block(
         C, c_lower, c_upper, constraint_idx, robot_->nv(),
@@ -8405,11 +8703,11 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
   config.regularization_config.regularization_factor = damping_;
 
   WeightedAdvisoryResult advisory;
-  const auto &advisor_goals = use_collision_weighted_objectives
-                                  ? collision_weighted_goals
+  const auto &advisor_goals = use_constrained_weighted_objectives
+                                  ? constrained_weighted_goals
                                   : goals;
-  const auto &advisor_jacobians = use_collision_weighted_objectives
-                                      ? collision_weighted_jacobians
+  const auto &advisor_jacobians = use_constrained_weighted_objectives
+                                      ? constrained_weighted_jacobians
                                       : jacobians;
   auto compute_weighted_advisory = [&]() -> WeightedAdvisoryResult {
     auto weight_at_priority = [&](int priority) -> double {

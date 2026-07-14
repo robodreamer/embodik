@@ -471,6 +471,13 @@ public:
    * supported and authoritative.
    */
   void configure_runtime(const SolverRuntimeConfig &cfg) {
+    if (cfg.joint_limit_non_worsening_enabled &&
+        (!std::isfinite(cfg.joint_limit_non_worsening_margin) ||
+         cfg.joint_limit_non_worsening_margin <= 0.0)) {
+      throw std::invalid_argument(
+          "joint_limit_non_worsening_margin must be finite and > 0 when "
+          "joint_limit_non_worsening_enabled is true");
+    }
     runtime_config_ = cfg;
     damping_ = cfg.damping;
     reset_adaptive_state();
@@ -487,6 +494,8 @@ public:
     advisor_scale_ratio_sum_ = 0.0;
     advisor_scale_epoch_time_s_ = 0.0;
     advisor_scale_sample_count_ = 0;
+    joint_limit_non_worsening_lower_modes_.clear();
+    joint_limit_non_worsening_upper_modes_.clear();
   }
 
   /**
@@ -1279,6 +1288,10 @@ private:
   bool acceleration_limits_enabled_ = false;
   Eigen::VectorXd acceleration_limits_;
   Eigen::VectorXd previous_dq_;
+  // Per-velocity active-set modes: 0 inactive, 1 tangent hold, 2 inward-cone
+  // recovery. Separate sides handle narrow finite ranges without ambiguity.
+  std::vector<int> joint_limit_non_worsening_lower_modes_;
+  std::vector<int> joint_limit_non_worsening_upper_modes_;
 
   // Floating-base bounds (optional)
   std::optional<Eigen::Vector3d> base_position_lower_;

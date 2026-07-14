@@ -631,6 +631,12 @@ NB_MODULE(_embodik_impl, m) {
               &eik::SolverRuntimeConfig::adaptive_dt_max_scale)
       .def_rw("adaptive_dt_reference_distance",
               &eik::SolverRuntimeConfig::adaptive_dt_reference_distance)
+      .def_rw("joint_limit_non_worsening_enabled",
+              &eik::SolverRuntimeConfig::joint_limit_non_worsening_enabled,
+              "Keep active scalar joint-limit slack from decreasing")
+      .def_rw("joint_limit_non_worsening_margin",
+              &eik::SolverRuntimeConfig::joint_limit_non_worsening_margin,
+              "Distance from a finite scalar limit where non-worsening starts")
       .def_rw("weighted_advisor_enabled",
               &eik::SolverRuntimeConfig::weighted_advisor_enabled,
               "Enable constrained weighted-advisor diagnostics without changing "

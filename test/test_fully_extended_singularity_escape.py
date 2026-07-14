@@ -154,6 +154,10 @@ def _run_case(case: SingularityCase) -> dict[str, float | int | list[str]]:
     solver.dt = 0.02
     solver.enable_position_limits(True)
     solver.enable_velocity_limits(True)
+    runtime = eik.SolverRuntimeConfig()
+    runtime.joint_limit_non_worsening_enabled = True
+    runtime.joint_limit_non_worsening_margin = 0.04
+    solver.configure_runtime(runtime)
 
     frame_task = solver.add_frame_task("ee", frame_name, eik.TaskType.FRAME_POSITION)
     frame_task.priority = 0
