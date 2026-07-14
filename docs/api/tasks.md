@@ -48,6 +48,13 @@ task weight is applied. At an exactly symmetric singularity the first-order
 gradient can be zero; use a deterministic nominal `PostureTask` at a lower
 priority to select a bend direction when the robot has that symmetry.
 
+The frame task type selects the Jacobian whose conditioning is optimized. Use
+`FRAME_POSITION` when translational reach and Cartesian position tracking are
+the primary concern. Use `FRAME_POSE` only when improving the combined linear
+and angular Jacobian is intentional; on a limited-range arm, its rotational
+gradient can otherwise consume nullspace motion without improving position
+tracking.
+
 ### JointLimitAvoidanceTask
 
 Move selected scalar joints inward before they become pinned at a hard limit:
