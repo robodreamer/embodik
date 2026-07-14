@@ -1326,7 +1326,7 @@ private:
     std::int64_t command_revision = -1;
   };
   std::optional<PositionStepTargetSignature> last_position_step_target_signature_;
-  std::unordered_map<std::string, std::array<bool, 2>>
+  std::unordered_map<std::string, std::array<double, 2>>
       position_step_target_motion_blocks_;
   bool position_step_target_geometry_moved_ = true;
   std::vector<double> position_step_collision_command_floor_distances_;
@@ -1346,8 +1346,9 @@ private:
       const PositionStepTargetSignature &signature);
   bool position_step_target_geometry_changed(
       const PositionStepTargetSignature &signature) const;
-  bool position_step_task_uses_terminal_prediction(
-      const Task &task, const Eigen::VectorXd &current_error) const;
+  double position_step_task_terminal_prediction_weight(
+      const Task &task, const Eigen::VectorXd &current_error,
+      double outer_dt) const;
   void capture_position_step_collision_command_floor(
       const Eigen::VectorXd &current_q);
   Eigen::Matrix4d canonicalize_position_step_signature_pose(

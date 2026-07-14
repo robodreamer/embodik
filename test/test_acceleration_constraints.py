@@ -481,6 +481,97 @@ class TestAccelerationConstraints:
             np.asarray(step_result.q_solution), componentwise_q, rtol=0.0, atol=1e-9
         )
 
+    def test_moving_pose_projection_is_continuous_across_negligible_translation(self):
+        """Nanometer target noise must not switch to a distant joint velocity."""
+        pytest.importorskip("robot_descriptions.panda_description")
+        from robot_descriptions.panda_description import URDF_PATH
+
+        q0 = np.array(
+            [
+                -0.17136382,
+                -0.78512805,
+                -0.20969206,
+                -2.17748321,
+                0.05088892,
+                1.60011931,
+                0.95083846,
+                0.02,
+                0.02,
+            ]
+        )
+        translation_offset = np.array([-0.05516292, 0.0813279, -0.04271275])
+        axis = np.array([-0.75289164, 0.03292882, 0.51645381])
+        axis /= np.linalg.norm(axis)
+
+        def rotation_delta(angle):
+            x, y, z = axis
+            c = np.cos(angle)
+            s = np.sin(angle)
+            one_minus_c = 1.0 - c
+            return np.array(
+                [
+                    [
+                        c + x * x * one_minus_c,
+                        x * y * one_minus_c - z * s,
+                        x * z * one_minus_c + y * s,
+                    ],
+                    [
+                        y * x * one_minus_c + z * s,
+                        c + y * y * one_minus_c,
+                        y * z * one_minus_c - x * s,
+                    ],
+                    [
+                        z * x * one_minus_c - y * s,
+                        z * y * one_minus_c + x * s,
+                        c + z * z * one_minus_c,
+                    ],
+                ]
+            )
+
+        options = eik.PositionStepOptions()
+        options.dt = 0.02
+        options.max_steps = 3
+        options.position_gain = 1.0
+        options.orientation_gain = 1.0
+        options.primary_solve_mode = eik.TaskSolveMode.MIN_ERROR
+
+        def second_tick_velocity(translation_noise):
+            robot = eik.RobotModel(URDF_PATH, floating_base=False)
+            solver = eik.KinematicsSolver(robot)
+            solver.dt = options.dt
+            solver.set_damping(0.05)
+            solver.enable_position_limits(True)
+            solver.enable_velocity_limits(True)
+            solver.set_acceleration_limits(np.full(robot.nv, 2.0))
+            solver.enable_acceleration_limits(True)
+            task = solver.add_frame_task("ee", "panda_hand", eik.TaskType.FRAME_POSE)
+            task.solve_mode = eik.TaskSolveMode.MIN_ERROR
+
+            robot.update_configuration(q0)
+            base_target = robot.get_frame_pose("panda_hand").homogeneous()
+            first_target = base_target.copy()
+            first_target[:3, 3] += translation_offset
+            first_target[:3, :3] = rotation_delta(0.55) @ first_target[:3, :3]
+            first_result = solver.solve_position_step(
+                q0, [eik.TaskTarget("ee", first_target)], options
+            )
+            assert first_result.status == eik.SolverStatus.SUCCESS
+
+            q1 = np.asarray(first_result.q_solution)
+            second_target = base_target.copy()
+            second_target[:3, 3] += translation_offset + np.array([translation_noise, 0.0, 0.0])
+            second_target[:3, :3] = rotation_delta(0.7206624117090492) @ second_target[:3, :3]
+            second_result = solver.solve_position_step(
+                q1, [eik.TaskTarget("ee", second_target)], options
+            )
+            assert second_result.status == eik.SolverStatus.SUCCESS
+            return (np.asarray(second_result.q_solution) - q1) / options.dt
+
+        exact_velocity = second_tick_velocity(0.0)
+        perturbed_velocity = second_tick_velocity(2e-9)
+
+        assert np.linalg.norm(perturbed_velocity - exact_velocity) < 1e-4
+
     def test_streaming_rotation_target_keeps_first_tick_projection(self):
         """Incidental position error must not reclassify a rotation command."""
         pytest.importorskip("robot_descriptions.panda_description")

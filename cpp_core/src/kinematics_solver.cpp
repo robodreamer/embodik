@@ -1583,29 +1583,66 @@ void KinematicsSolver::update_position_step_target_motion_blocks(
         before[index].block<3, 3>(0, 0).transpose() *
         after[index].block<3, 3>(0, 0);
     const double rotation_angle = pinocchio::log3(rotation_delta).norm();
-    auto &motion_blocks = position_step_target_motion_blocks_[task_name];
+    auto [motion_iter, inserted] = position_step_target_motion_blocks_.try_emplace(
+        task_name, std::array<double, 2>{0.0, 0.0});
+    (void)inserted;
+    auto &motion_blocks = motion_iter->second;
     motion_blocks[0] =
-        motion_blocks[0] || !std::isfinite(translation_delta) ||
-        translation_delta > kStationaryTargetTranslationTolerance;
-    motion_blocks[1] = motion_blocks[1] || !std::isfinite(rotation_angle) ||
-                       rotation_angle > kStationaryTargetRotationTolerance;
+        !std::isfinite(translation_delta)
+            ? std::numeric_limits<double>::infinity()
+            : std::max(motion_blocks[0], translation_delta);
+    motion_blocks[1] =
+        !std::isfinite(rotation_angle)
+            ? std::numeric_limits<double>::infinity()
+            : std::max(motion_blocks[1], rotation_angle);
   }
 }
 
-bool KinematicsSolver::position_step_task_uses_terminal_prediction(
-    const Task &task, const Eigen::VectorXd &current_error) const {
+double KinematicsSolver::position_step_task_terminal_prediction_weight(
+    const Task &task, const Eigen::VectorXd &current_error,
+    double outer_dt) const {
   if (task.getType() == TaskType::FRAME_ORIENTATION) {
-    return false;
+    return 0.0;
   }
   const auto motion_iter =
       position_step_target_motion_blocks_.find(task.getName());
   if (motion_iter != position_step_target_motion_blocks_.end()) {
-    return motion_iter->second[0];
+    const double target_translation_step = motion_iter->second[0];
+    if (!std::isfinite(target_translation_step)) {
+      return 1.0;
+    }
+    if (target_translation_step <= 0.0) {
+      return 0.0;
+    }
+
+    const Eigen::VectorXd commanded_velocity = task.getVelocity();
+    const bool has_linear_command =
+        (task.getType() == TaskType::FRAME_POSITION &&
+         commanded_velocity.size() >= 3) ||
+        (task.getType() == TaskType::FRAME_POSE &&
+         commanded_velocity.size() >= 6);
+    if (!has_linear_command) {
+      return 0.0;
+    }
+    // Weight terminal prediction by the share of the next task-space step
+    // introduced by target motion, so predictor handoff is continuous.
+    const double correction_step =
+        std::max(outer_dt, 0.0) * commanded_velocity.head<3>().norm();
+    if (!std::isfinite(correction_step)) {
+      return 1.0;
+    }
+    const double total_step = target_translation_step + correction_step;
+    if (total_step <= std::numeric_limits<double>::epsilon()) {
+      return 0.0;
+    }
+    return std::clamp(target_translation_step / total_step, 0.0, 1.0);
   }
   if (task.getType() == TaskType::FRAME_POSE && current_error.size() >= 6) {
-    return current_error.head<3>().squaredNorm() > kCollisionEscapeNormEps;
+    return current_error.head<3>().squaredNorm() > kCollisionEscapeNormEps
+               ? 1.0
+               : 0.0;
   }
-  return true;
+  return 1.0;
 }
 
 bool KinematicsSolver::update_position_step_target_signature(
@@ -5933,11 +5970,13 @@ KinematicsSolver::apply_position_step_task_metric_projection(
     }
     Eigen::VectorXd projected_velocity =
         Eigen::VectorXd::Zero(commanded_velocity.size());
-    const bool use_terminal_prediction =
-        position_step_task_uses_terminal_prediction(*task, task->getError());
-    const Eigen::VectorXd &selected_task_velocity =
-        use_terminal_prediction ? terminal_task_velocity
-                                : first_tick_task_velocity;
+    const double terminal_prediction_weight =
+        position_step_task_terminal_prediction_weight(
+            *task, task->getError(), dt_safe);
+    const Eigen::VectorXd selected_task_velocity =
+        first_tick_task_velocity +
+        terminal_prediction_weight *
+            (terminal_task_velocity - first_tick_task_velocity);
 
     if (task->getType() == TaskType::FRAME_POSE &&
         commanded_velocity.size() == 6) {
@@ -10732,8 +10771,6 @@ PositionIKResult KinematicsSolver::solve_position_step(
     const bool all_task_blocks_commanded = all_frame_task_blocks_commanded(
         current_error, frame_task->getType(), options.position_gain,
         options.orientation_gain);
-    const bool use_terminal_prediction =
-        position_step_task_uses_terminal_prediction(*frame_task, current_error);
     if (current_error.size() == 3) {
       const bool is_orientation_only =
           frame_task->getType() == TaskType::FRAME_ORIENTATION;
@@ -10755,8 +10792,11 @@ PositionIKResult KinematicsSolver::solve_position_step(
                                         options.max_angular_speed);
       frame_task->setPositionStepTargetVelocity(vel);
     }
+    const double terminal_prediction_weight =
+        position_step_task_terminal_prediction_weight(
+            *frame_task, current_error, step_dt);
     const auto componentwise_candidate =
-        all_task_blocks_commanded && use_terminal_prediction
+        all_task_blocks_commanded && terminal_prediction_weight > 0.0
             ? estimate_position_step_componentwise_outer_candidate(
                   current_q, previous_applied_velocity, options, step_dt,
                   terminal_q)
@@ -10768,7 +10808,8 @@ PositionIKResult KinematicsSolver::solve_position_step(
       last_vel_result = std::move(*projected_result);
       have_vel_result = true;
       if (componentwise_candidate.has_value() && all_task_blocks_commanded &&
-          use_terminal_prediction) {
+          terminal_prediction_weight > 0.0) {
+        const Eigen::VectorXd projected_q = q;
         const auto block_merits_at = [&](const Eigen::VectorXd &candidate_q) {
           robot_->update_configuration(candidate_q);
           frame_task->update(*robot_);
@@ -10792,9 +10833,19 @@ PositionIKResult KinematicsSolver::solve_position_step(
                  candidate_merits[1] <= projected_merits[1] + 1e-9 &&
                  candidate_total + 1e-9 < projected_total;
         };
-        if (candidate_is_preferred(*componentwise_candidate)) {
-          Eigen::VectorXd safe_componentwise_candidate =
-              *componentwise_candidate;
+        Eigen::VectorXd safe_componentwise_candidate =
+            *componentwise_candidate;
+        if (terminal_prediction_weight < 1.0) {
+          const Eigen::VectorXd projected_delta = pinocchio::difference(
+              robot_->model(), current_q, projected_q);
+          const Eigen::VectorXd componentwise_delta = pinocchio::difference(
+              robot_->model(), current_q, safe_componentwise_candidate);
+          safe_componentwise_candidate = pinocchio::integrate(
+              robot_->model(), current_q,
+              projected_delta + terminal_prediction_weight *
+                                    (componentwise_delta - projected_delta));
+        }
+        if (candidate_is_preferred(safe_componentwise_candidate)) {
           apply_position_step_outer_acceleration_limit(
               current_q, previous_applied_velocity, options, step_dt,
               safe_componentwise_candidate);
@@ -12058,7 +12109,7 @@ PositionIKResult KinematicsSolver::solve_position_step(
     const Eigen::VectorXd terminal_q = q;
     robot_->update_configuration(current_q);
     bool all_target_blocks_commanded = true;
-    bool all_targets_use_terminal_prediction = true;
+    double componentwise_prediction_weight = 1.0;
     for (size_t i = 0; i < n_targets; ++i) {
       const auto &target = targets[i];
       const auto &rt = resolved[i];
@@ -12074,10 +12125,6 @@ PositionIKResult KinematicsSolver::solve_position_step(
           all_frame_task_blocks_commanded(
               current_error, command_task_type, target.position_gain,
               target.orientation_gain);
-      all_targets_use_terminal_prediction =
-          all_targets_use_terminal_prediction &&
-          position_step_task_uses_terminal_prediction(*rt.task,
-                                                       current_error);
       if (current_error.size() == 3) {
         bool is_orientation_only = false;
         if (rt.kind == PoseTaskKind::kFrame) {
@@ -12103,9 +12150,13 @@ PositionIKResult KinematicsSolver::solve_position_step(
                                           options.max_angular_speed);
         rt.task->setPositionStepTargetVelocity(vel);
       }
+      componentwise_prediction_weight =
+          std::min(componentwise_prediction_weight,
+                   position_step_task_terminal_prediction_weight(
+                       *rt.task, current_error, step_dt));
     }
     const auto componentwise_candidate =
-        all_target_blocks_commanded && all_targets_use_terminal_prediction
+        all_target_blocks_commanded && componentwise_prediction_weight > 0.0
             ? estimate_position_step_componentwise_outer_candidate(
                   current_q, previous_applied_velocity, options, step_dt,
                   terminal_q)
@@ -12118,7 +12169,8 @@ PositionIKResult KinematicsSolver::solve_position_step(
       have_vel_result = true;
       if (componentwise_candidate.has_value() &&
           all_target_blocks_commanded &&
-          all_targets_use_terminal_prediction) {
+          componentwise_prediction_weight > 0.0) {
+        const Eigen::VectorXd projected_q = q;
         const auto target_block_merits_at =
             [&](const Eigen::VectorXd &candidate_q) {
           robot_->update_configuration(candidate_q);
@@ -12167,9 +12219,19 @@ PositionIKResult KinematicsSolver::solve_position_step(
                  std::isfinite(candidate_total) &&
                  candidate_total + 1e-9 < projected_total;
         };
-        if (candidate_is_preferred(*componentwise_candidate)) {
-          Eigen::VectorXd safe_componentwise_candidate =
-              *componentwise_candidate;
+        Eigen::VectorXd safe_componentwise_candidate =
+            *componentwise_candidate;
+        if (componentwise_prediction_weight < 1.0) {
+          const Eigen::VectorXd projected_delta = pinocchio::difference(
+              robot_->model(), current_q, projected_q);
+          const Eigen::VectorXd componentwise_delta = pinocchio::difference(
+              robot_->model(), current_q, safe_componentwise_candidate);
+          safe_componentwise_candidate = pinocchio::integrate(
+              robot_->model(), current_q,
+              projected_delta + componentwise_prediction_weight *
+                                    (componentwise_delta - projected_delta));
+        }
+        if (candidate_is_preferred(safe_componentwise_candidate)) {
           apply_position_step_outer_acceleration_limit(
               current_q, previous_applied_velocity, options, step_dt,
               safe_componentwise_candidate);
