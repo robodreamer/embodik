@@ -354,3 +354,88 @@ def test_fully_extended_arm_escapes_and_returns_without_reset(
     assert metrics["return_switch_step_norm"] <= 0.08 + 1e-9, failure_context
     if case.limit_joint is not None:
         assert metrics["tick6_limit_exit_rad"] >= 1e-3, failure_context
+
+
+@pytest.mark.benchmark
+def test_boundary_recovery_mode_refreshes_after_external_state_resync() -> None:
+    case = CASES[0]
+    config = resolve_robot_configuration(case.preset)
+    robot = config["robot"]
+    frame_name = str(config["target_link"])
+    lower, upper = (np.asarray(value, dtype=float) for value in robot.get_joint_limits())
+    boundary_q = _seed_configuration(case, robot, upper)
+    limit_index = int(robot.get_joint_config_index(case.limit_joint))
+
+    interior_q = boundary_q.copy()
+    interior_q[limit_index] -= 0.01
+    robot.update_configuration(interior_q)
+
+    solver = eik.KinematicsSolver(robot)
+    solver.dt = 0.02
+    solver.enable_position_limits(True)
+    solver.enable_velocity_limits(True)
+    runtime = eik.SolverRuntimeConfig()
+    runtime.joint_limit_non_worsening_enabled = True
+    runtime.joint_limit_non_worsening_margin = 0.04
+    solver.configure_runtime(runtime)
+
+    frame_task = solver.add_frame_task("ee", frame_name, eik.TaskType.FRAME_POSITION)
+    frame_task.priority = 0
+    frame_task.weight = 1.0
+    frame_task.solve_mode = eik.TaskSolveMode.SCALE
+    frame_task.allow_min_error_fallback = False
+    interior_position = _frame_position(robot, frame_name)
+    frame_task.set_target_pose(interior_position, np.eye(3))
+    prime = solver.solve_velocity(interior_q, apply_limits=True)
+    assert prime.status == eik.SolverStatus.SUCCESS
+
+    robot.update_configuration(boundary_q)
+    base_position = _frame_position(robot, case.base_frame)
+    start_position = _frame_position(robot, frame_name)
+    start_reach = float(np.linalg.norm(start_position - base_position))
+    radial_direction = (start_position - base_position) / start_reach
+    target = np.eye(4, dtype=float)
+    target[:3, 3] = start_position - 0.10 * radial_direction
+
+    conditioning = solver.add_manipulability_task(
+        "conditioning", frame_name, eik.TaskType.FRAME_POSITION
+    )
+    conditioning.priority = 1
+    conditioning.weight = 10.0
+    conditioning.solve_mode = eik.TaskSolveMode.MIN_ERROR
+    conditioning.allow_min_error_fallback = False
+    conditioning.set_controlled_joint_indices(
+        [
+            int(robot.get_joint_velocity_index(name))
+            for name in robot.get_joint_names()
+            if name.startswith(case.arm_joint_prefix)
+        ]
+    )
+    conditioning.set_regularization(0.03)
+
+    options = eik.PositionStepOptions()
+    options.max_steps = 1
+    options.dt = solver.dt
+    options.position_gain = 10.0
+    options.orientation_gain = 0.0
+    options.primary_solve_mode = eik.TaskSolveMode.SCALE
+    options.primary_allow_min_error_fallback = False
+    options.max_configuration_step_norm = 0.08
+
+    initial_sigma, _ = _position_condition(robot, frame_name)
+    initial_error = float(np.linalg.norm(target[:3, 3] - start_position))
+    q = boundary_q.copy()
+    for _ in range(6):
+        result = solver.solve_position_step(q, target, "ee", options)
+        assert result.status != eik.SolverStatus.NUMERICAL_ERROR
+        q = np.asarray(result.q_solution, dtype=float)
+        robot.update_configuration(q)
+
+    final_sigma, _ = _position_condition(robot, frame_name)
+    final_error = float(np.linalg.norm(target[:3, 3] - _frame_position(robot, frame_name)))
+    final_limit_exit = float(upper[limit_index] - q[limit_index])
+
+    assert float(np.min(np.minimum(q - lower, upper - q))) >= -1e-8
+    assert final_limit_exit >= 1e-3
+    assert initial_error - final_error >= case.min_tick6_error_reduction
+    assert final_sigma >= initial_sigma + case.min_tick6_sigma_improvement

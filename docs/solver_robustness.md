@@ -89,17 +89,22 @@ solver.configure_runtime(cfg)
 
 The policy requires position limits to be enabled. For each finite scalar joint
 inside the activation margin, the solver adds an inward/tangent velocity
-half-space. An outward `SCALE` objective is first represented by its closest
-achievable Cartesian tangent objective; exact task motion through the task
-nullspace is retained when feasible. The same hard half-space then constrains
-`MIN_ERROR`, posture, manipulability, and other lower-priority objectives, so a
-secondary task cannot reintroduce the removed outward motion.
+half-space. When acceleration limits are enabled, a sampled-data stopping bound
+starts limiting outward speed before the margin so the command reaches the
+half-space continuously. An outward `SCALE` objective is first represented by
+its closest achievable Cartesian tangent objective; exact task motion through
+the task nullspace is retained when feasible. The same hard interval then
+constrains `MIN_ERROR`, posture, manipulability, and other lower-priority
+objectives, so a secondary task cannot reintroduce the removed outward motion.
 
 The policy is default-off because the useful activation width depends on robot
-range of motion and control rate. It does not replace hard position limits, and
-it does not relax collision, CoM, contact, velocity, or acceleration
-constraints. Non-finite or non-positive margins are rejected when the policy is
-enabled.
+range of motion and control rate. It does not replace hard position limits or
+relax collision, CoM, contact, or velocity constraints. Normal integrated motion
+remains inside the configured acceleration corridor through sampled braking. If
+an external state synchronization makes remembered acceleration history
+incompatible with the active limit interval, the limit interval takes
+precedence for that solve. Non-finite or non-positive margins are rejected when
+the policy is enabled.
 
 ## Task solve modes
 

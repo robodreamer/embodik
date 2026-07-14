@@ -871,7 +871,9 @@ build_joint_limit_non_worsening_rows(
     const RobotModel &robot,
     const std::vector<int> &velocity_to_config_index,
     const std::unordered_set<int> &excluded_indices,
-    double activation_margin, std::vector<int> &lower_modes,
+    double activation_margin, bool acceleration_limits_enabled,
+    const Eigen::VectorXd &acceleration_limits, double dt,
+    std::vector<int> &lower_modes,
     std::vector<int> &upper_modes) {
   if (!std::isfinite(activation_margin) || activation_margin <= 0.0) {
     return std::nullopt;
@@ -879,6 +881,7 @@ build_joint_limit_non_worsening_rows(
 
   const auto [q_lower, q_upper] = robot.get_joint_limits();
   const Eigen::VectorXd q = robot.get_current_configuration();
+  const Eigen::VectorXd velocity_limits = robot.get_velocity_limits();
   const int nv = robot.nv();
   if (lower_modes.size() != static_cast<std::size_t>(nv)) {
     lower_modes.assign(static_cast<std::size_t>(nv), 0);
@@ -891,6 +894,7 @@ build_joint_limit_non_worsening_rows(
     int velocity_index;
     double sign;
     bool at_sampled_data_boundary;
+    double outward_speed_limit;
   };
   std::vector<ActiveLimitRow> active_rows;
   active_rows.reserve(static_cast<std::size_t>(nv));
@@ -917,23 +921,54 @@ build_joint_limit_non_worsening_rows(
 
     const double lower_slack = q[config_index] - q_lower[config_index];
     const double upper_slack = q_upper[config_index] - q[config_index];
-    if (lower_slack <= activation_margin) {
+    const auto outward_speed_limit = [&](double slack) -> std::optional<double> {
+      if (slack <= activation_margin) {
+        return 0.0;
+      }
+      if (!acceleration_limits_enabled ||
+          velocity_index >= acceleration_limits.size() ||
+          velocity_index >= velocity_limits.size() ||
+          !std::isfinite(acceleration_limits[velocity_index]) ||
+          acceleration_limits[velocity_index] <= 0.0 ||
+          !std::isfinite(velocity_limits[velocity_index]) ||
+          velocity_limits[velocity_index] <= 0.0) {
+        return std::nullopt;
+      }
+      const double stopping_limit = discrete_stopping_velocity_limit(
+          slack - activation_margin, acceleration_limits[velocity_index], dt);
+      if (stopping_limit >= velocity_limits[velocity_index] - 1e-12) {
+        return std::nullopt;
+      }
+      return stopping_limit;
+    };
+
+    const std::optional<double> lower_outward_limit =
+        outward_speed_limit(lower_slack);
+    if (lower_outward_limit.has_value()) {
       int &mode = lower_modes[static_cast<std::size_t>(velocity_index)];
-      if (mode == 0) {
+      if (lower_slack > activation_margin) {
+        mode = 0;
+      } else if (mode == 0 ||
+                 lower_slack <= kPositionLimitMarginEpsilon) {
         mode = lower_slack <= kPositionLimitMarginEpsilon ? 2 : 1;
       }
       active_rows.push_back({velocity_index, 1.0,
-                             mode == 2});
+                             mode == 2, *lower_outward_limit});
     } else {
       lower_modes[static_cast<std::size_t>(velocity_index)] = 0;
     }
-    if (upper_slack <= activation_margin) {
+    const std::optional<double> upper_outward_limit =
+        outward_speed_limit(upper_slack);
+    if (upper_outward_limit.has_value()) {
       int &mode = upper_modes[static_cast<std::size_t>(velocity_index)];
-      if (mode == 0) {
+      if (upper_slack > activation_margin) {
+        mode = 0;
+      } else if (mode == 0 ||
+                 upper_slack <= kPositionLimitMarginEpsilon) {
         mode = upper_slack <= kPositionLimitMarginEpsilon ? 2 : 1;
       }
       active_rows.push_back({velocity_index, -1.0,
-                             mode == 2});
+                             mode == 2, *upper_outward_limit});
     } else {
       upper_modes[static_cast<std::size_t>(velocity_index)] = 0;
     }
@@ -952,9 +987,11 @@ build_joint_limit_non_worsening_rows(
       static_cast<int>(active_rows.size()), kUnboundedConstraintLimit);
   result.prefer_exact_feasibility_rows.reserve(active_rows.size());
   for (int row = 0; row < static_cast<int>(active_rows.size()); ++row) {
-    const auto &[velocity_index, sign, at_sampled_data_boundary] =
+    const auto &[velocity_index, sign, at_sampled_data_boundary,
+                 outward_speed_limit] =
         active_rows[static_cast<std::size_t>(row)];
     result.jacobian(row, velocity_index) = sign;
+    result.lower_bounds(row) = -outward_speed_limit;
     result.prefer_exact_feasibility_rows.push_back(
         at_sampled_data_boundary);
   }
@@ -7882,6 +7919,7 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
     joint_limit_non_worsening_result = build_joint_limit_non_worsening_rows(
         *robot_, velocity_to_config_index, excluded_union,
         runtime_config_.joint_limit_non_worsening_margin,
+        acceleration_limits_enabled_, acceleration_limits_, dt_,
         joint_limit_non_worsening_lower_modes_,
         joint_limit_non_worsening_upper_modes_);
     if (use_contact_projection &&
@@ -8170,8 +8208,10 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
   std::vector<double> dense_pos_upper_sp(nv_sp, -kNoPosBound);
   std::vector<double> merged_active_lower_sp(nv_sp, kNoPosBound);
   std::vector<double> merged_active_upper_sp(nv_sp, -kNoPosBound);
-  std::vector<bool> non_worsening_lower_sp(nv_sp, false);
-  std::vector<bool> non_worsening_upper_sp(nv_sp, false);
+  std::vector<double> non_worsening_lower_sp(
+      nv_sp, -kUnboundedConstraintLimit);
+  std::vector<double> non_worsening_upper_sp(
+      nv_sp, kUnboundedConstraintLimit);
   if (!use_contact_projection &&
       joint_limit_non_worsening_result.has_value()) {
     const Eigen::MatrixXd &rows =
@@ -8180,11 +8220,17 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
       for (int column = 0; column < rows.cols(); ++column) {
         const double coefficient = rows(row, column);
         if (coefficient > 0.5) {
-          non_worsening_lower_sp[column] = true;
+          non_worsening_lower_sp[column] = std::max(
+              non_worsening_lower_sp[column],
+              joint_limit_non_worsening_result->lower_bounds[row] /
+                  coefficient);
           break;
         }
         if (coefficient < -0.5) {
-          non_worsening_upper_sp[column] = true;
+          non_worsening_upper_sp[column] = std::min(
+              non_worsening_upper_sp[column],
+              joint_limit_non_worsening_result->lower_bounds[row] /
+                  coefficient);
           break;
         }
       }
@@ -8273,7 +8319,8 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
         // Cheap check: if both margins exceed max possible displacement in one step,
         // bounds = [-vel_limit, vel_limit] → skip (no tightening needed).
         const bool enforce_non_worsening =
-            non_worsening_lower_sp[i] || non_worsening_upper_sp[i];
+            non_worsening_lower_sp[i] > -kUnboundedConstraintLimit ||
+            non_worsening_upper_sp[i] < kUnboundedConstraintLimit;
         if (!is_locked && !enforce_non_worsening) {
           const double pos_room_l = lm / dt_safe;
           const double pos_room_u = um / dt_safe;
@@ -8287,14 +8334,11 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
           }
         }
         auto [lo, hi] = calculate_velocity_box_constraint(lm, um, vl, al, dt_);
-        if (non_worsening_lower_sp[i]) {
-          lo = std::max(lo, 0.0);
-        }
-        if (non_worsening_upper_sp[i]) {
-          hi = std::min(hi, 0.0);
-        }
+        lo = std::max(lo, non_worsening_lower_sp[i]);
+        hi = std::min(hi, non_worsening_upper_sp[i]);
         if (is_locked) { lo = 0.0; hi = 0.0; }
         if (enforce_non_worsening) {
+          sparse_pos_limits.push_back({i, lo, hi});
           merged_active_lower_sp[i] = lo;
           merged_active_upper_sp[i] = hi;
           dense_pos_lower_sp[i] = lo;
@@ -8652,11 +8696,17 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
   // velocity and the configured acceleration limits.
   // A deadband of 1% of the acceleration step prevents oscillation when
   // the velocity is small and the acceleration limit is tight.
-  if (acceleration_limits_enabled_ &&
+  const bool acceleration_corridor_active =
+      acceleration_limits_enabled_ &&
       (position_step_call_depth_ == 0 ||
        pending_position_step_acceleration_limits_) &&
       previous_dq_.size() == robot_->nv() &&
-      acceleration_limits_.size() == robot_->nv()) {
+      acceleration_limits_.size() == robot_->nv();
+  const Eigen::VectorXd velocity_lower_before_acceleration =
+      c_lower.head(robot_->nv());
+  const Eigen::VectorXd velocity_upper_before_acceleration =
+      c_upper.head(robot_->nv());
+  if (acceleration_corridor_active) {
     const int nv = robot_->nv();
     for (int i = 0; i < nv; ++i) {
       const double accel_step = acceleration_limits_[i] * dt_;
@@ -8665,6 +8715,56 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
       double a_ub = previous_dq_[i] + accel_step + deadband;
       c_lower[i] = std::max(c_lower[i], a_lb);
       c_upper[i] = std::min(c_upper[i], a_ub);
+    }
+  }
+
+  // The active-limit viability interval is a hard safety invariant. If an
+  // externally synchronized state leaves stale acceleration history outside
+  // that interval, select the nearest safe boundary instead of letting the
+  // generic interval sanitizer move the command back toward the limit.
+  if (acceleration_corridor_active && !use_contact_projection &&
+      joint_limit_non_worsening_result.has_value() &&
+      previous_dq_.size() == robot_->nv()) {
+    for (int i = 0; i < robot_->nv(); ++i) {
+      if (!std::isfinite(merged_active_lower_sp[i]) ||
+          !std::isfinite(merged_active_upper_sp[i]) ||
+          c_lower[i] <= c_upper[i]) {
+        continue;
+      }
+      const double safe_velocity = std::clamp(
+          previous_dq_[i], merged_active_lower_sp[i],
+          merged_active_upper_sp[i]);
+      c_lower[i] = safe_velocity;
+      c_upper[i] = safe_velocity;
+    }
+  }
+
+  // Contact projection turns a scalar joint-limit row into a coupled row. If
+  // stale acceleration history makes that row unreachable, restore the
+  // pre-acceleration velocity interval only for its participating joints. The
+  // projected contact row and active limit remain hard in the backend solve.
+  if (acceleration_corridor_active && use_contact_projection &&
+      joint_limit_non_worsening_result.has_value()) {
+    const auto &active_limits = *joint_limit_non_worsening_result;
+    for (int row = 0; row < active_limits.jacobian.rows(); ++row) {
+      double maximum_value = 0.0;
+      for (int column = 0; column < active_limits.jacobian.cols(); ++column) {
+        const double coefficient = active_limits.jacobian(row, column);
+        maximum_value += coefficient >= 0.0
+                             ? coefficient * c_upper[column]
+                             : coefficient * c_lower[column];
+      }
+      if (maximum_value >=
+          active_limits.lower_bounds[row] - constraint_tolerance_) {
+        continue;
+      }
+      for (int column = 0; column < active_limits.jacobian.cols(); ++column) {
+        if (std::abs(active_limits.jacobian(row, column)) <= 1e-12) {
+          continue;
+        }
+        c_lower[column] = velocity_lower_before_acceleration[column];
+        c_upper[column] = velocity_upper_before_acceleration[column];
+      }
     }
   }
 

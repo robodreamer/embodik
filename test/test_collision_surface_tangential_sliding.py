@@ -623,3 +623,69 @@ def test_stationary_collision_bound_target_settles_after_sliding(tmp_path, solve
     assert int(np.sum(np.diff(progress_tail) < -1e-4)) <= 1
     assert float(np.linalg.norm(acceleration, axis=1).max(initial=0.0)) <= 2.5
     assert float(np.linalg.norm(jerk, axis=1).max(initial=0.0)) <= 250.0
+
+
+@pytest.mark.benchmark
+def test_collision_sliding_stays_inside_active_joint_limit_cone(tmp_path):
+    robot = eik.RobotModel(str(_write_axis_aligned_contact_urdf(tmp_path)), floating_base=False)
+    q = np.array([-0.015, 0.0], dtype=float)
+    robot.update_configuration(q)
+    lower, _ = (np.asarray(value, dtype=float) for value in robot.get_joint_limits())
+    entry_limit_slack = float(q[0] - lower[0])
+
+    solver = eik.KinematicsSolver(robot)
+    solver.dt = 0.02
+    solver.enable_position_limits(True)
+    solver.enable_velocity_limits(True)
+    runtime = solver.runtime_config()
+    runtime.weighted_fallback_enabled = False
+    runtime.joint_limit_non_worsening_enabled = True
+    runtime.joint_limit_non_worsening_margin = 0.04
+    solver.configure_runtime(runtime)
+
+    debug = solver.evaluate_collision_debug(q)
+    assert debug is not None
+    nearest_delta = np.asarray(debug.point_b_world) - np.asarray(debug.point_a_world)
+    normal = nearest_delta / np.linalg.norm(nearest_delta)
+    tangent = np.array([-normal[1], normal[0], 0.0], dtype=float)
+    tangent /= np.linalg.norm(tangent)
+    entry_position = np.asarray(robot.get_frame_pose("tool").translation, dtype=float)
+    target_position = entry_position - 0.03 * normal + 0.08 * tangent
+
+    task = solver.add_frame_task("joint_limit_contact", "tool", eik.TaskType.FRAME_POSITION)
+    task.priority = 0
+    task.weight = 1.0
+    task.solve_mode = eik.TaskSolveMode.SCALE
+    task.allow_min_error_fallback = False
+    task.set_target_position(target_position)
+
+    entry_clearance = float(debug.distance)
+    solver.configure_collision_constraint(
+        min_distance=entry_clearance,
+        include_pairs=list(robot.get_collision_pair_names()),
+        max_constraints=1,
+    )
+    solver.set_proximity_gated_collision_activation_enabled(False)
+
+    limit_slacks: list[float] = []
+    clearances: list[float] = []
+    tangent_progress: list[float] = []
+    for _ in range(24):
+        result = solver.solve_velocity(q, apply_limits=True)
+        assert result.status in (
+            eik.SolverStatus.SUCCESS,
+            eik.SolverStatus.NO_PROGRESS,
+        ), result.status_message
+        velocity = np.asarray(result.joint_velocities, dtype=float)
+        q = np.asarray(robot.integrate(q, velocity * solver.dt), dtype=float)
+        robot.update_configuration(q)
+        position = np.asarray(robot.get_frame_pose("tool").translation, dtype=float)
+        clearance = solver.evaluate_min_collision_distance(q)
+        assert clearance is not None
+        limit_slacks.append(float(q[0] - lower[0]))
+        clearances.append(float(clearance))
+        tangent_progress.append(float(np.dot(position - entry_position, tangent)))
+
+    assert min(limit_slacks) >= entry_limit_slack - 1e-10
+    assert min(clearances) >= entry_clearance - 1e-6
+    assert tangent_progress[-1] >= 0.02

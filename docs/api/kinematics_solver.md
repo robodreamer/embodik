@@ -52,8 +52,10 @@ or need to reproduce historical strict-priority behavior. Disable
 `joint_limit_non_worsening_enabled` adds an inward/tangent hard half-space for
 finite scalar joints inside `joint_limit_non_worsening_margin`. It keeps that
 limit slack from decreasing across primary and lower-priority tasks while
-leaving inward and Cartesian tangent progress available. The policy is off by
-default and requires position limits to be enabled.
+leaving inward and Cartesian tangent progress available. With acceleration
+limits enabled, an exact sampled-data stopping envelope brakes outward motion
+before the margin so entry remains continuous. The policy is off by default and
+requires position limits to be enabled.
 
 ## Adaptive dt, elastic band, stall handler
 
