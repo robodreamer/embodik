@@ -81,6 +81,8 @@ constexpr double kSoftInfeasibleMinImprovement = 2e-3;
 constexpr double kSoftInfeasibleRelativeImprovement = 1e-2;
 constexpr double kPositionStepSatisfiedMeritTolerance = 2e-3;
 constexpr double kPositionStepMeritMotionThreshold = 1e-12;
+constexpr int kPositionStepPriorityBacktrackIterations = 12;
+constexpr int kPositionStepPriorityRetryIterations = 8;
 constexpr double kPositionStepMinAbsoluteErrorReduction = 1e-5;
 constexpr double kPositionStepMinErrorReductionPerConfiguration = 2e-3;
 constexpr double kStationaryMinErrorReductionPerCall = 1e-6;
@@ -411,7 +413,9 @@ static bool should_hold_non_improving_position_step(
 
 static bool should_hold_soft_infeasible_position_step(
     const PositionIKResult &result, const Eigen::VectorXd &current_q,
-    double initial_combined_error, bool collision_violated,
+    double initial_combined_error, double final_combined_error,
+    double final_position_error, double final_orientation_error,
+    bool collision_violated,
     bool recovery_inside_collision_margin) {
   const bool primary_scale_collapsed_infeasible =
       result.status == SolverStatus::kInfeasible &&
@@ -445,8 +449,8 @@ static bool should_hold_soft_infeasible_position_step(
   }
 
   const bool large_residual =
-      result.position_error > kSoftInfeasiblePositionErrorThreshold ||
-      result.orientation_error > kSoftInfeasibleOrientationErrorThreshold;
+      final_position_error > kSoftInfeasiblePositionErrorThreshold ||
+      final_orientation_error > kSoftInfeasibleOrientationErrorThreshold;
   if (!large_residual) {
     return false;
   }
@@ -456,8 +460,6 @@ static bool should_hold_soft_infeasible_position_step(
     return false;
   }
 
-  const double final_combined_error =
-      result.position_error + result.orientation_error;
   if (!std::isfinite(initial_combined_error) ||
       !std::isfinite(final_combined_error) ||
       initial_combined_error <= 0.0) {
@@ -11410,7 +11412,10 @@ PositionIKResult KinematicsSolver::solve_position_step(
   }
   if (!held_non_improving_step &&
       should_hold_soft_infeasible_position_step(
-          result, current_q, initial_combined_error, collision_violated_flag,
+          result, current_q, initial_combined_error,
+          result.position_error + result.orientation_error,
+          result.position_error, result.orientation_error,
+          collision_violated_flag,
           recovery_inside_collision_margin)) {
     Eigen::VectorXd braking_q = current_q;
     const bool braking_to_hold = compute_position_step_continuity_brake(
@@ -11731,6 +11736,14 @@ PositionIKResult KinematicsSolver::solve_position_step(
     }
   }
 
+  int highest_active_target_priority = std::numeric_limits<int>::max();
+  for (const auto &rt : resolved) {
+    if (rt.task->isActive()) {
+      highest_active_target_priority =
+          std::min(highest_active_target_priority, rt.task->getPriority());
+    }
+  }
+
   // Enable stall handler if requested. enable_stall_handler is idempotent:
   // repeated calls preserve accumulated stall counters so detection works
   // across successive single-step solve_position_step calls.
@@ -11792,6 +11805,119 @@ PositionIKResult KinematicsSolver::solve_position_step(
   bool recovery_inside_collision_margin = false;
   bool configuration_step_limited = false;
   bool outer_acceleration_limit_applied = false;
+  bool priority_candidate_rejected = false;
+
+  int max_active_target_priority = std::numeric_limits<int>::min();
+  for (const auto &rt : resolved) {
+    if (rt.task->isActive()) {
+      max_active_target_priority =
+          std::max(max_active_target_priority, rt.task->getPriority());
+    }
+  }
+  std::vector<int> protected_target_priorities;
+  for (const auto &rt : resolved) {
+    if (rt.task->isActive() &&
+        rt.task->getPriority() < max_active_target_priority) {
+      protected_target_priorities.push_back(rt.task->getPriority());
+    }
+  }
+  std::sort(protected_target_priorities.begin(),
+            protected_target_priorities.end());
+  protected_target_priorities.erase(
+      std::unique(protected_target_priorities.begin(),
+                  protected_target_priorities.end()),
+      protected_target_priorities.end());
+
+  const auto target_block_merits_at = [&](const Eigen::VectorXd &q_eval) {
+    robot_->update_configuration(q_eval);
+    std::vector<std::array<double, 2>> merits;
+    merits.reserve(resolved.size());
+    for (std::size_t index = 0; index < resolved.size(); ++index) {
+      const auto &resolved_target = resolved[index];
+      resolved_target.task->update(*robot_);
+      TaskType merit_task_type = TaskType::FRAME_POSE;
+      if (resolved_target.kind == PoseTaskKind::kFrame) {
+        merit_task_type =
+            static_cast<const FrameTask *>(resolved_target.task.get())
+                ->getType();
+      }
+      merits.push_back(commanded_frame_block_merits(
+          resolved_target.task->getError(), merit_task_type,
+          targets[index].position_gain, targets[index].orientation_gain));
+    }
+    return merits;
+  };
+
+  const auto priority_candidate_acceptable =
+      [&](const std::vector<std::array<double, 2>> &baseline_merits,
+          const std::vector<std::array<double, 2>> &candidate_merits) {
+        if (baseline_merits.size() != resolved.size() ||
+            candidate_merits.size() != resolved.size()) {
+          return false;
+        }
+        for (int priority : protected_target_priorities) {
+          for (std::size_t index = 0; index < resolved.size(); ++index) {
+            if (!resolved[index].task->isActive() ||
+                resolved[index].task->getPriority() != priority) {
+              continue;
+            }
+            for (int block = 0; block < 2; ++block) {
+              const double baseline = baseline_merits[index][block];
+              const double candidate = candidate_merits[index][block];
+              if (!std::isfinite(baseline) || !std::isfinite(candidate) ||
+                  candidate >
+                      std::max(baseline,
+                               kPositionStepSatisfiedMeritTolerance) +
+                          1e-9) {
+                return false;
+              }
+            }
+          }
+        }
+        return true;
+      };
+
+  const auto position_step_priority_scale =
+      [&](const Eigen::VectorXd &q_before,
+          const Eigen::VectorXd &q_after) {
+        if (protected_target_priorities.empty()) {
+          return 1.0;
+        }
+        const Eigen::VectorXd delta =
+            pinocchio::difference(robot_->model(), q_before, q_after);
+        if (!delta.allFinite() ||
+            delta.squaredNorm() <= kCollisionEscapeNormEps) {
+          robot_->update_configuration(q_after);
+          return 1.0;
+        }
+        const auto baseline_merits = target_block_merits_at(q_before);
+        const auto candidate_merits = target_block_merits_at(q_after);
+        if (priority_candidate_acceptable(baseline_merits,
+                                          candidate_merits)) {
+          robot_->update_configuration(q_after);
+          return 1.0;
+        }
+
+        double accepted_fraction = 0.0;
+        double rejected_fraction = 1.0;
+        for (int iteration = 0;
+             iteration < kPositionStepPriorityBacktrackIterations;
+             ++iteration) {
+          const double fraction =
+              0.5 * (accepted_fraction + rejected_fraction);
+          Eigen::VectorXd candidate_q = pinocchio::integrate(
+              robot_->model(), q_before, fraction * delta);
+          const auto backoff_merits = target_block_merits_at(candidate_q);
+          if (priority_candidate_acceptable(baseline_merits,
+                                            backoff_merits)) {
+            accepted_fraction = fraction;
+          } else {
+            rejected_fraction = fraction;
+          }
+        }
+        robot_->update_configuration(q_after);
+        return accepted_fraction;
+      };
 
   for (int step = 0; step < steps; ++step) {
     double combined_error = 0.0;
@@ -11868,8 +11994,12 @@ PositionIKResult KinematicsSolver::solve_position_step(
           }
         }
         const double task_position_error = error.head<3>().norm();
-        if (i == 0) {
-          primary_combined_error = task_position_error;
+        if (rt.task->isActive() &&
+            rt.task->getPriority() == highest_active_target_priority) {
+          primary_combined_error =
+              std::isfinite(primary_combined_error)
+                  ? std::max(primary_combined_error, task_position_error)
+                  : task_position_error;
         }
         combined_error += task_position_error;
         if (!is_orientation_only) {
@@ -11881,8 +12011,12 @@ PositionIKResult KinematicsSolver::solve_position_step(
         const double task_position_error = error.head<3>().norm();
         const double task_combined_error =
             task_position_error + error.tail<3>().norm();
-        if (i == 0) {
-          primary_combined_error = task_combined_error;
+        if (rt.task->isActive() &&
+            rt.task->getPriority() == highest_active_target_priority) {
+          primary_combined_error =
+              std::isfinite(primary_combined_error)
+                  ? std::max(primary_combined_error, task_combined_error)
+                  : task_combined_error;
         }
         combined_error += task_combined_error;
         max_position_error = std::max(max_position_error, task_position_error);
@@ -11984,61 +12118,124 @@ PositionIKResult KinematicsSolver::solve_position_step(
       break;
     }
 
-    if (!options.integration_zero_velocity_indices.empty() &&
-        last_vel_result.joint_velocities.size() == robot_->nv()) {
-      apply_integration_velocity_mask(
-          last_vel_result.joint_velocities,
-          options.integration_zero_velocity_indices);
-    }
-    if (options.limit_change_from_seed &&
-        last_vel_result.joint_velocities.size() == robot_->nv()) {
-      Eigen::VectorXd corridor_lower = Eigen::VectorXd::Constant(
-          robot_->nv(), -kUnboundedConstraintLimit);
-      Eigen::VectorXd corridor_upper = Eigen::VectorXd::Constant(
-          robot_->nv(), kUnboundedConstraintLimit);
-      tighten_bounds_with_reference_corridor(
-          corridor_lower, corridor_upper, q_reference, q, vel_limits, step_dt,
-          velocity_to_config_index, robot_->nv());
-      clamp_joint_velocity_solution_in_place(last_vel_result.joint_velocities,
-                                             corridor_lower, corridor_upper,
-                                             false, robot_->nv());
-    }
-
     Eigen::VectorXd q_pre_step = q;
     bool step_collision_rejected = false;
     const bool adaptive_step_large = (step_dt_eff > step_dt * 1.01);
-    if (use_position_limits_ &&
-        last_vel_result.joint_velocities.size() == robot_->nv()) {
-      auto [q_min, q_max] = robot_->get_joint_limits();
-      if (elastic_band_config_.enabled &&
-          elastic_band_state_.delta.size() == robot_->nv()) {
-        expand_scalar_joint_limits_for_velocity_delta(
-            q_min, q_max, elastic_band_state_.delta, velocity_to_config_index,
-            robot_->nv());
+    const auto integrate_velocity_candidate =
+        [&](VelocitySolverResult &velocity_result, double integration_dt) {
+          if (!options.integration_zero_velocity_indices.empty() &&
+              velocity_result.joint_velocities.size() == robot_->nv()) {
+            apply_integration_velocity_mask(
+                velocity_result.joint_velocities,
+                options.integration_zero_velocity_indices);
+          }
+          if (options.limit_change_from_seed &&
+              velocity_result.joint_velocities.size() == robot_->nv()) {
+            Eigen::VectorXd corridor_lower = Eigen::VectorXd::Constant(
+                robot_->nv(), -kUnboundedConstraintLimit);
+            Eigen::VectorXd corridor_upper = Eigen::VectorXd::Constant(
+                robot_->nv(), kUnboundedConstraintLimit);
+            tighten_bounds_with_reference_corridor(
+                corridor_lower, corridor_upper, q_reference, q_pre_step,
+                vel_limits, step_dt, velocity_to_config_index, robot_->nv());
+            clamp_joint_velocity_solution_in_place(
+                velocity_result.joint_velocities, corridor_lower,
+                corridor_upper, false, robot_->nv());
+          }
+          if (use_position_limits_ &&
+              velocity_result.joint_velocities.size() == robot_->nv()) {
+            auto [q_min, q_max] = robot_->get_joint_limits();
+            if (elastic_band_config_.enabled &&
+                elastic_band_state_.delta.size() == robot_->nv()) {
+              expand_scalar_joint_limits_for_velocity_delta(
+                  q_min, q_max, elastic_band_state_.delta,
+                  velocity_to_config_index, robot_->nv());
+            }
+            clamp_joint_velocity_to_position_limits_for_integration(
+                velocity_result.joint_velocities, q_pre_step, q_min, q_max,
+                velocity_to_config_index, integration_dt, robot_->nv());
+          }
+          Eigen::VectorXd candidate = pinocchio::integrate(
+              robot_->model(), q_pre_step,
+              integration_dt * velocity_result.joint_velocities);
+          if (use_position_limits_) {
+            auto [q_min_true, q_max_true] = robot_->get_joint_limits();
+            project_scalar_configuration_to_true_joint_limits(
+                candidate, q_min_true, q_max_true, velocity_to_config_index,
+                robot_->nv());
+          }
+          const bool candidate_configuration_limited =
+              clamp_configuration_delta_from_reference(
+                  robot_->model(), q_reference, candidate,
+                  options.max_configuration_step_norm);
+          configuration_step_limited =
+              candidate_configuration_limited || configuration_step_limited;
+          robot_->update_configuration(candidate);
+          return candidate;
+        };
+
+    q = integrate_velocity_candidate(last_vel_result, step_dt_eff);
+    double priority_scale = position_step_priority_scale(q_pre_step, q);
+    if (priority_scale < 1.0) {
+      double retry_dt =
+          step_dt_eff * (priority_scale > 0.0 ? priority_scale : 0.5);
+      bool accepted_priority_retry = false;
+      for (int retry_index = 0;
+           retry_index < kPositionStepPriorityRetryIterations;
+           ++retry_index) {
+        for (std::size_t index = 0; index < resolved.size(); ++index) {
+          resolved[index].task->setPositionStepTargetVelocity(
+              target_velocities[index]);
+        }
+        robot_->update_configuration(q_pre_step);
+        pending_velocity_lock_indices_ = step_locked_indices;
+        pending_step_torso_constraint_ = step_torso_constraint;
+        pending_step_validation_dt_ = retry_dt;
+        pending_reuse_current_kinematics_ = true;
+        pending_position_step_acceleration_limits_ =
+            apply_setpoint_acceleration_limits;
+        VelocitySolverResult retry = solve_velocity(q_pre_step, true);
+        retry = retry_auto_task_layout_as_split_if_needed(
+            q_pre_step, std::move(retry), step_locked_indices,
+            step_torso_constraint, retry_dt,
+            apply_setpoint_acceleration_limits);
+        const bool retry_has_candidate =
+            (retry.status == SolverStatus::kSuccess ||
+             retry.status == SolverStatus::kInfeasible ||
+             retry.status == SolverStatus::kNumericalError) &&
+            retry.joint_velocities.size() == robot_->nv() &&
+            retry.joint_velocities.allFinite();
+        if (!retry_has_candidate) {
+          retry_dt *= 0.5;
+          continue;
+        }
+        Eigen::VectorXd retry_q =
+            integrate_velocity_candidate(retry, retry_dt);
+        const double retry_scale =
+            position_step_priority_scale(q_pre_step, retry_q);
+        if (retry_scale >= 1.0) {
+          last_vel_result = std::move(retry);
+          q = std::move(retry_q);
+          accepted_priority_retry = true;
+          break;
+        }
+        retry_dt *= retry_scale > 0.0 ? retry_scale : 0.5;
       }
-      clamp_joint_velocity_to_position_limits_for_integration(
-          last_vel_result.joint_velocities, q, q_min, q_max,
-          velocity_to_config_index, step_dt_eff, robot_->nv());
+      if (!accepted_priority_retry) {
+        q = q_pre_step;
+        robot_->update_configuration(q);
+        priority_candidate_rejected = true;
+        if (last_vel_result.joint_velocities.size() == robot_->nv()) {
+          last_vel_result.joint_velocities.setZero();
+        }
+        break;
+      }
     }
     if (step == 0 &&
         last_vel_result.joint_velocities.size() == robot_->nv() &&
         last_vel_result.joint_velocities.allFinite()) {
       first_tick_velocity = last_vel_result.joint_velocities;
     }
-    q = pinocchio::integrate(robot_->model(), q,
-                             step_dt_eff * last_vel_result.joint_velocities);
-    if (use_position_limits_) {
-      auto [q_min_true, q_max_true] = robot_->get_joint_limits();
-      project_scalar_configuration_to_true_joint_limits(
-          q, q_min_true, q_max_true, velocity_to_config_index, robot_->nv());
-    }
-    const bool step_configuration_limited =
-        clamp_configuration_delta_from_reference(
-            robot_->model(), q_reference, q,
-            options.max_configuration_step_norm);
-    configuration_step_limited =
-        step_configuration_limited || configuration_step_limited;
-    robot_->update_configuration(q);
 
     // Skip expensive post-step checks when integration produced no motion.
     const bool step_moved =
@@ -12128,7 +12325,7 @@ PositionIKResult KinematicsSolver::solve_position_step(
           }
           bool accepted_backoff = false;
           const Eigen::VectorXd dq_nominal =
-              step_dt_eff * last_vel_result.joint_velocities;
+              pinocchio::difference(robot_->model(), q_pre_step, q);
           for (double frac : kCollisionRejectionBackoffFractions) {
             Eigen::VectorXd q_backoff = pinocchio::integrate(
                 robot_->model(), q_pre_step, frac * dq_nominal);
@@ -12145,7 +12342,8 @@ PositionIKResult KinematicsSolver::solve_position_step(
             if (backoff_dist_debug.has_value() &&
                 std::isfinite(*backoff_dist_debug) &&
                 *backoff_dist_debug >= backoff_threshold &&
-                backoff_recovery_acceptable) {
+                backoff_recovery_acceptable &&
+                position_step_priority_scale(q_pre_step, q_backoff) >= 1.0) {
               q = q_backoff;
               accepted_backoff = true;
               break;
@@ -12558,6 +12756,7 @@ PositionIKResult KinematicsSolver::solve_position_step(
         projected_result.has_value()) {
       last_vel_result = std::move(*projected_result);
       have_vel_result = true;
+      outer_acceleration_limit_applied = true;
       if (componentwise_candidate.has_value() &&
           all_target_blocks_commanded &&
           componentwise_prediction_weight > 0.0) {
@@ -12652,18 +12851,6 @@ PositionIKResult KinematicsSolver::solve_position_step(
     robot_->update_configuration(q);
   }
 
-  std::unordered_set<Task *> resolved_tasks;
-  resolved_tasks.reserve(resolved.size());
-  for (const auto &rt : resolved) {
-    resolved_tasks.insert(rt.task.get());
-    rt.task->clearPositionStepTargetVelocity();
-  }
-  for (auto &task : tasks_) {
-    if (task && resolved_tasks.find(task.get()) == resolved_tasks.end()) {
-      task->clearPositionStepTargetVelocity();
-    }
-  }
-
   const bool final_configuration_limited =
       clamp_configuration_delta_from_reference(
           robot_->model(), q_reference, q,
@@ -12676,6 +12863,83 @@ PositionIKResult KinematicsSolver::solve_position_step(
   if (!outer_acceleration_limit_applied || final_configuration_limited) {
     apply_position_step_outer_acceleration_limit(
         current_q, previous_applied_velocity, options, step_dt, q);
+  }
+  double final_priority_scale = position_step_priority_scale(current_q, q);
+  if (final_priority_scale < 1.0) {
+    const Eigen::VectorXd terminal_delta =
+        pinocchio::difference(robot_->model(), current_q, q);
+    double retry_fraction =
+        final_priority_scale > 0.0 ? final_priority_scale : 0.5;
+    bool accepted_final_priority_retry = false;
+    for (int retry_index = 0;
+         retry_index < kPositionStepPriorityRetryIterations;
+         ++retry_index) {
+      Eigen::VectorXd retry_q = pinocchio::integrate(
+          robot_->model(), current_q, retry_fraction * terminal_delta);
+      auto projected_result = apply_position_step_task_metric_projection(
+          current_q, step_dt, Eigen::VectorXd(), step_locked_indices,
+          step_torso_constraint, retry_q);
+      const bool retry_has_candidate =
+          projected_result.has_value() &&
+          projected_result->joint_velocities.size() == robot_->nv() &&
+          projected_result->joint_velocities.allFinite();
+      if (!retry_has_candidate) {
+        retry_fraction *= 0.5;
+        continue;
+      }
+
+      bool collision_acceptable = true;
+      if (collision_constraint_.has_value() &&
+          collision_constraint_->enabled) {
+        const auto current_dist =
+            evaluate_post_step_collision_distance_mutating(current_q);
+        const auto current_margins =
+            evaluate_post_step_collision_recovery_margins(current_q);
+        const auto retry_dist =
+            evaluate_post_step_collision_distance_mutating(retry_q);
+        const auto retry_margins =
+            evaluate_post_step_collision_recovery_margins(retry_q);
+        collision_acceptable =
+            current_dist.has_value() && retry_dist.has_value() &&
+            std::isfinite(*current_dist) && std::isfinite(*retry_dist) &&
+            collision_recovery_margins_acceptable(
+                current_margins, retry_margins, 0.0) &&
+            ((*current_dist >= collision_constraint_->min_distance)
+                 ? (*retry_dist >= collision_constraint_->min_distance -
+                                      kCollisionTolerance)
+                 : (*retry_dist >=
+                    *current_dist - kCollisionPenetrationWorsenTolerance));
+      }
+      const double retry_priority_scale =
+          position_step_priority_scale(current_q, retry_q);
+      if (collision_acceptable && retry_priority_scale >= 1.0) {
+        q = std::move(retry_q);
+        last_vel_result = std::move(*projected_result);
+        have_vel_result = true;
+        outer_acceleration_limit_applied = true;
+        accepted_final_priority_retry = true;
+        break;
+      }
+      retry_fraction *=
+          retry_priority_scale > 0.0 ? retry_priority_scale : 0.5;
+    }
+    if (!accepted_final_priority_retry) {
+      q = current_q;
+      priority_candidate_rejected = true;
+    }
+    robot_->update_configuration(q);
+  }
+
+  std::unordered_set<Task *> resolved_tasks;
+  resolved_tasks.reserve(resolved.size());
+  for (const auto &rt : resolved) {
+    resolved_tasks.insert(rt.task.get());
+    rt.task->clearPositionStepTargetVelocity();
+  }
+  for (auto &task : tasks_) {
+    if (task && resolved_tasks.find(task.get()) == resolved_tasks.end()) {
+      task->clearPositionStepTargetVelocity();
+    }
   }
 
   result.q_solution = q;
@@ -12768,7 +13032,26 @@ PositionIKResult KinematicsSolver::solve_position_step(
     result.status_message =
         "solve_position_step applied constraint recovery motion";
   }
+  if (priority_candidate_rejected &&
+      result.status != SolverStatus::kInvalidInput &&
+      result.status != SolverStatus::kCollisionViolated) {
+    const bool priority_hold =
+        pinocchio::difference(robot_->model(), current_q, q).squaredNorm() <=
+        kPositionStepMeritMotionThreshold;
+    result.position_step_hold_active = priority_hold;
+    result.status = priority_hold ? SolverStatus::kNoProgress
+                                  : SolverStatus::kSuccess;
+    result.status_message =
+        priority_hold
+            ? "solve_position_step held current configuration because no "
+              "priority-safe candidate passed final constraint validation"
+            : "solve_position_step decelerating before priority-safe hold";
+  }
   double final_commanded_error = 0.0;
+  double final_primary_combined_error =
+      std::numeric_limits<double>::quiet_NaN();
+  double final_primary_position_error = 0.0;
+  double final_primary_orientation_error = 0.0;
   std::vector<double> final_target_merits;
   final_target_merits.reserve(resolved.size());
   for (std::size_t index = 0; index < resolved.size(); ++index) {
@@ -12780,11 +13063,24 @@ PositionIKResult KinematicsSolver::solve_position_step(
                             resolved_target.task.get())
                             ->getType();
     }
-    const double target_merit = commanded_frame_merit(
+    const auto block_merits = commanded_frame_block_merits(
         resolved_target.task->getError(), merit_task_type,
         targets[index].position_gain, targets[index].orientation_gain);
+    const double target_merit = block_merits[0] + block_merits[1];
     final_commanded_error += target_merit;
     final_target_merits.push_back(target_merit);
+    if (resolved_target.task->isActive() &&
+        resolved_target.task->getPriority() ==
+            highest_active_target_priority) {
+      final_primary_combined_error =
+          std::isfinite(final_primary_combined_error)
+              ? std::max(final_primary_combined_error, target_merit)
+              : target_merit;
+      final_primary_position_error =
+          std::max(final_primary_position_error, block_merits[0]);
+      final_primary_orientation_error =
+          std::max(final_primary_orientation_error, block_merits[1]);
+    }
   }
   const double candidate_step_norm =
       result.q_solution.size() == current_q.size()
@@ -12847,9 +13143,11 @@ PositionIKResult KinematicsSolver::solve_position_step(
     sync_position_result_applied_velocity(result, robot_->model(), current_q,
                                           step_dt);
   }
-  if (!held_non_improving_step &&
+  if (!priority_candidate_rejected && !held_non_improving_step &&
       should_hold_soft_infeasible_position_step(
           result, current_q, initial_primary_combined_error,
+          final_primary_combined_error, final_primary_position_error,
+          final_primary_orientation_error,
           collision_violated_flag_mts, recovery_inside_collision_margin)) {
     Eigen::VectorXd braking_q = current_q;
     const bool braking_to_hold = compute_position_step_continuity_brake(

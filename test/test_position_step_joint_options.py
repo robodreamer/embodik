@@ -949,6 +949,36 @@ def test_multi_target_position_step_holds_current_q_on_soft_infeasible_self_moti
         os.unlink(urdf_path)
 
 
+def test_multi_target_soft_infeasible_hold_uses_task_priority_not_target_order():
+    def solve_with_order(*, satisfied_target_first: bool):
+        urdf_path, robot, solver, q, target, opts = _make_soft_infeasible_step_case()
+        tail_task = solver.add_frame_task("tail_hold", "tail", eik.TaskType.FRAME_POSITION)
+        tail_task.priority = 1
+        tail_task.weight = 1.0
+        tail_pose = robot.get_frame_pose("tail")
+        tail_target = np.eye(4, dtype=float)
+        tail_target[:3, :3] = np.asarray(tail_pose.rotation, dtype=float)
+        tail_target[:3, 3] = np.asarray(tail_pose.translation, dtype=float)
+        infeasible = eik.TaskTarget("ee_task", target, opts.position_gain, opts.orientation_gain)
+        satisfied = eik.TaskTarget("tail_hold", tail_target, 1.0, 0.0)
+        targets = [satisfied, infeasible] if satisfied_target_first else [infeasible, satisfied]
+        try:
+            return q, solver.solve_position_step(q, targets, opts)
+        finally:
+            os.unlink(urdf_path)
+
+    q_primary_first, primary_first = solve_with_order(satisfied_target_first=False)
+    q_secondary_first, secondary_first = solve_with_order(satisfied_target_first=True)
+
+    assert primary_first.status == eik.SolverStatus.NO_PROGRESS
+    assert secondary_first.status == primary_first.status
+    assert primary_first.position_step_hold_active is True
+    assert secondary_first.position_step_hold_active is True
+    np.testing.assert_allclose(primary_first.q_solution, q_primary_first, atol=1e-12)
+    np.testing.assert_allclose(secondary_first.q_solution, q_secondary_first, atol=1e-12)
+    np.testing.assert_allclose(primary_first.q_solution, secondary_first.q_solution, atol=1e-12)
+
+
 def test_position_step_min_error_mode_still_applies_motion_when_soft_infeasible():
     urdf_path, _, solver, q, target, opts = _make_soft_infeasible_step_case()
     try:
