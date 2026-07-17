@@ -421,6 +421,14 @@ struct TaskTarget {
   double orientation_gain = 1.0;
   Eigen::Matrix4d secondary_target_pose = Eigen::Matrix4d::Identity();
   bool has_secondary_target_pose = false;
+  /// Admissible position error for acceleration-aware finite-step protection
+  /// of a higher-priority task. Values <= 0 retain the default final-candidate
+  /// guard without adding a viability row.
+  double priority_position_tolerance = -1.0;
+  /// Admissible orientation error for acceleration-aware finite-step
+  /// protection of a higher-priority task. Values <= 0 retain the default
+  /// final-candidate guard without adding a viability row.
+  double priority_orientation_tolerance = -1.0;
 };
 
 // Position IK result

@@ -1242,6 +1242,7 @@ private:
   static double sanitize_advisor_scale(double scale) {
     return (std::isfinite(scale) && scale >= 0.0) ? scale : 1.0;
   }
+  struct PositionStepPriorityConstraintSpec;
   void reset_auto_task_layout_state();
   void select_auto_task_layout();
   VelocitySolverResult retry_auto_task_layout_as_split_if_needed(
@@ -1249,6 +1250,8 @@ private:
       const std::vector<int> &velocity_lock_indices,
       const std::optional<TorsoPoseConstraintOptions> &torso_constraint,
       const std::optional<double> &step_validation_dt,
+      const std::vector<PositionStepPriorityConstraintSpec>
+          &priority_constraints,
       bool apply_position_step_acceleration_limits = false);
   void update_auto_task_layout_feedback(const VelocitySolverResult &result);
   TaskLayout current_auto_task_layout_ = TaskLayout::kMerged;
@@ -1403,6 +1406,8 @@ private:
       const Eigen::VectorXd &first_tick_velocity,
       const std::vector<int> &velocity_lock_indices,
       const std::optional<TorsoPoseConstraintOptions> &torso_constraint,
+      const std::vector<PositionStepPriorityConstraintSpec>
+          &priority_constraints,
       Eigen::VectorXd &q_candidate);
 
   std::optional<Eigen::VectorXd>
@@ -1615,6 +1620,13 @@ private:
     Eigen::ArrayXi violated_rows;
   };
 
+  struct PositionStepPriorityConstraintSpec {
+    std::shared_ptr<Task> task;
+    double position_tolerance = -1.0;
+    double orientation_tolerance = -1.0;
+    double step_dt = 0.0;
+  };
+
   struct TightFramePoseConstraintConfig {
     std::string frame_name;
     pinocchio::SE3 target_pose = pinocchio::SE3::Identity();
@@ -1631,6 +1643,11 @@ private:
   };
 
   std::optional<LinearVelocityConstraintConfig> linear_velocity_constraints_;
+  /// One-shot protected-task viability request from solve_position_step. The
+  /// concrete rows are built in solve_velocity after masks, contact projection,
+  /// and the current kinematics are known.
+  std::vector<PositionStepPriorityConstraintSpec>
+      pending_position_step_priority_constraints_;
   std::vector<TightFramePoseConstraintConfig> tight_frame_pose_constraints_;
   std::vector<TightPointConstraintConfig> tight_point_constraints_;
   std::optional<LinearVelocityConstraintResult>

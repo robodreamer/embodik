@@ -71,6 +71,56 @@ def _pose_matrix(robot: eik.RobotModel, frame_name: str) -> np.ndarray:
     return result
 
 
+def _make_priority_brake_stage(
+    tmp_path: Path,
+) -> tuple[
+    eik.RobotModel,
+    eik.KinematicsSolver,
+    np.ndarray,
+    eik.PositionStepOptions,
+    list[eik.TaskTarget],
+]:
+    robot = eik.RobotModel(str(_write_decoupled_xy_stage_urdf(tmp_path)), floating_base=False)
+    q = np.zeros(robot.nq, dtype=float)
+    robot.update_configuration(q)
+
+    solver = eik.KinematicsSolver(robot)
+    solver.dt = 0.02
+    solver.enable_position_limits(True)
+    solver.enable_velocity_limits(True)
+    solver.set_acceleration_limits(np.full(robot.nv, 0.1, dtype=float))
+    solver.enable_acceleration_limits(True)
+    solver.set_previous_joint_velocities(np.zeros(robot.nv, dtype=float))
+
+    primary = solver.add_frame_task("protected_x", "tool", eik.TaskType.FRAME_POSITION)
+    primary.priority = 0
+    primary.solve_mode = eik.TaskSolveMode.SCALE
+    primary.set_position_mask(np.array([1.0, 0.0, 0.0], dtype=float))
+    secondary = solver.add_frame_task("conflicting_x", "tool", eik.TaskType.FRAME_POSITION)
+    secondary.priority = 1
+    secondary.solve_mode = eik.TaskSolveMode.SCALE
+    secondary.set_position_mask(np.array([1.0, 0.0, 0.0], dtype=float))
+
+    current_pose = _pose_matrix(robot, "tool")
+    protected_pose = current_pose.copy()
+    protected_pose[0, 3] -= 4.9e-3
+    conflicting_pose = current_pose.copy()
+    conflicting_pose[0, 3] += 0.5
+    protected_target = eik.TaskTarget("protected_x", protected_pose, 10.0, 0.0)
+    protected_target.priority_position_tolerance = 5e-3
+    targets = [
+        protected_target,
+        eik.TaskTarget("conflicting_x", conflicting_pose, 10.0, 0.0),
+    ]
+
+    options = eik.PositionStepOptions()
+    options.dt = solver.dt
+    options.max_steps = 1
+    options.primary_solve_mode = eik.TaskSolveMode.SCALE
+    options.continuity_command_revision = 1
+    return robot, solver, q, options, targets
+
+
 def _compute_stationary_metrics(
     *,
     robot: eik.RobotModel,
@@ -1244,3 +1294,90 @@ def test_secondary_direct_velocity_reopens_satisfied_primary_hold(
     assert q_next[1] <= q[1] - 5e-4
     assert q_next[0] == pytest.approx(q[0], abs=1e-9)
     assert "held satisfied stationary target" not in result.status_message
+
+
+def test_rejected_priority_candidate_remains_fail_closed_after_continuity_guard(
+    tmp_path: Path,
+) -> None:
+    robot, solver, q, options, targets = _make_priority_brake_stage(tmp_path)
+
+    for _ in range(60):
+        settled = solver.solve_position_step(q, targets, options)
+        q = np.asarray(settled.q_solution, dtype=float)
+        if settled.position_step_hold_active:
+            break
+    assert settled.position_step_hold_active is True
+
+    solver.set_previous_joint_velocities(np.array([-0.5, 0.0], dtype=float))
+    result = solver.solve_position_step(q, targets, options)
+    q_next = np.asarray(result.q_solution, dtype=float)
+    robot.update_configuration(q_next)
+    protected_task = solver.get_task("protected_x")
+    protected_task.update(robot)
+    protected_error = np.asarray(protected_task.get_error(), dtype=float)
+
+    assert np.allclose(q_next, q, rtol=0.0, atol=1e-12), (
+        result.status,
+        result.status_message,
+        result.position_step_hold_active,
+        q,
+        q_next,
+    )
+    assert np.linalg.norm(protected_error) <= 5e-3
+    assert result.status == eik.SolverStatus.NO_PROGRESS
+    assert result.position_step_hold_active is True
+    assert "no priority-safe candidate" in result.status_message
+
+
+def test_priority_tolerance_change_reopens_latched_continuity_state(
+    tmp_path: Path,
+) -> None:
+    robot = eik.RobotModel(str(_write_decoupled_xy_stage_urdf(tmp_path)), floating_base=False)
+    q = np.array([0.02, 0.0], dtype=float)
+    robot.update_configuration(q)
+    solver = eik.KinematicsSolver(robot)
+    solver.dt = 0.02
+    solver.enable_position_limits(True)
+    solver.enable_velocity_limits(True)
+    solver.set_acceleration_limits(np.full(robot.nv, 100.0, dtype=float))
+    solver.enable_acceleration_limits(True)
+
+    protected = solver.add_frame_task("protected_x", "tool", eik.TaskType.FRAME_POSITION)
+    protected.priority = 0
+    protected.solve_mode = eik.TaskSolveMode.SCALE
+    protected.set_position_mask(np.array([1.0, 0.0, 0.0], dtype=float))
+    lower = solver.add_frame_task("held_x", "tool", eik.TaskType.FRAME_POSITION)
+    lower.priority = 1
+    lower.solve_mode = eik.TaskSolveMode.SCALE
+    lower.set_position_mask(np.array([1.0, 0.0, 0.0], dtype=float))
+
+    protected_pose = _pose_matrix(robot, "tool")
+    protected_pose[0, 3] = 0.0
+    lower_pose = _pose_matrix(robot, "tool")
+    protected_target = eik.TaskTarget("protected_x", protected_pose, 0.0, 0.0)
+    protected_target.priority_position_tolerance = 50e-3
+    targets = [
+        protected_target,
+        eik.TaskTarget("held_x", lower_pose, 10.0, 0.0),
+    ]
+    options = eik.PositionStepOptions()
+    options.dt = solver.dt
+    options.max_steps = 1
+    options.primary_solve_mode = eik.TaskSolveMode.SCALE
+    options.continuity_command_revision = 1
+
+    for _ in range(60):
+        settled = solver.solve_position_step(q, targets, options)
+        q = np.asarray(settled.q_solution, dtype=float)
+        if settled.position_step_hold_active and "stationary target" in settled.status_message:
+            break
+    assert settled.position_step_hold_active is True
+    assert "stationary target" in settled.status_message
+
+    targets[0].priority_position_tolerance = 5e-3
+    reopened = solver.solve_position_step(q, targets, options)
+    q_next = np.asarray(reopened.q_solution, dtype=float)
+
+    assert reopened.position_step_hold_active is False
+    assert "continuity hold" not in reopened.status_message
+    assert q_next[0] < q[0] - 1e-6

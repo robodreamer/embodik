@@ -566,7 +566,19 @@ NB_MODULE(_embodik_impl, m) {
       .def_rw("position_gain", &eik::TaskTarget::position_gain)
       .def_rw("orientation_gain", &eik::TaskTarget::orientation_gain)
       .def_rw("has_secondary_target_pose",
-              &eik::TaskTarget::has_secondary_target_pose);
+              &eik::TaskTarget::has_secondary_target_pose)
+      .def_rw(
+          "priority_position_tolerance",
+          &eik::TaskTarget::priority_position_tolerance,
+          "Admissible protected-task position error for an acceleration-aware "
+          "finite-step viability row; <=0 keeps only the default final "
+          "candidate guard")
+      .def_rw(
+          "priority_orientation_tolerance",
+          &eik::TaskTarget::priority_orientation_tolerance,
+          "Admissible protected-task orientation error for an "
+          "acceleration-aware finite-step viability row; <=0 keeps only the "
+          "default final candidate guard");
 
   nb::class_<eik::SolveDiagnostics>(
       m, "SolveDiagnostics",
