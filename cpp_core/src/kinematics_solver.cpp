@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <exception>
 #include <iostream>
 #include <limits>
 #include <numeric>
@@ -167,6 +168,30 @@ struct ScopedPositionStepCallDepth {
   ~ScopedPositionStepCallDepth() { --depth; }
 
   int &depth;
+};
+
+class ScopedRobotKinematicsRestore {
+ public:
+  explicit ScopedRobotKinematicsRestore(RobotModel &robot)
+      : robot_(robot), q_(robot.get_current_configuration()),
+        v_(robot.get_current_velocity()) {}
+
+  ScopedRobotKinematicsRestore(const ScopedRobotKinematicsRestore &) = delete;
+  ScopedRobotKinematicsRestore &
+  operator=(const ScopedRobotKinematicsRestore &) = delete;
+
+  ~ScopedRobotKinematicsRestore() noexcept {
+    try {
+      robot_.update_kinematics(q_, v_);
+    } catch (...) {
+      std::terminate();
+    }
+  }
+
+ private:
+  RobotModel &robot_;
+  Eigen::VectorXd q_;
+  Eigen::VectorXd v_;
 };
 
 static void sync_position_result_applied_velocity(
@@ -3154,10 +3179,16 @@ KinematicsSolver::evaluate_collision_debug(const Eigen::VectorXd &current_q) {
     return std::nullopt;
   }
 
+  const ScopedRobotKinematicsRestore restore_robot_state(*robot_);
+
   if (current_q.size() > 0) {
     if (current_q.size() != robot_->nq()) {
       throw std::runtime_error(
           "Invalid configuration size for collision evaluation.");
+    }
+    if (!current_q.allFinite()) {
+      throw std::runtime_error(
+          "Collision evaluation configuration must be finite.");
     }
     robot_->update_kinematics(current_q);
   } else {
@@ -3241,10 +3272,16 @@ KinematicsSolver::evaluate_min_collision_distance(const Eigen::VectorXd &current
     return std::nullopt;
   }
 
+  const ScopedRobotKinematicsRestore restore_robot_state(*robot_);
+
   if (current_q.size() > 0) {
     if (current_q.size() != robot_->nq()) {
       throw std::runtime_error(
           "Invalid configuration size for collision evaluation.");
+    }
+    if (!current_q.allFinite()) {
+      throw std::runtime_error(
+          "Collision evaluation configuration must be finite.");
     }
     robot_->update_kinematics(current_q);
   } else {

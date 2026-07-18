@@ -433,6 +433,51 @@ class TestSphereBroadphaseConservativeness:
             rtol=0.0,
         )
 
+    @pytest.mark.parametrize(
+        "query_name",
+        ["evaluate_collision_debug", "evaluate_min_collision_distance"],
+    )
+    def test_public_collision_diagnostic_preserves_robot_state(self, tmp_path, query_name):
+        """Explicit collision probes must not replace the solver warm state."""
+        robot = eik.RobotModel(str(_write_motion_certificate_urdf(tmp_path)))
+        solver = eik.KinematicsSolver(robot)
+
+        warm_q = np.array([-0.01], dtype=float)
+        probe_q = np.array([0.02], dtype=float)
+        robot.update_configuration(warm_q)
+
+        result = getattr(solver, query_name)(probe_q)
+
+        assert result is not None
+        np.testing.assert_allclose(
+            robot.get_current_configuration(),
+            warm_q,
+            atol=0.0,
+            rtol=0.0,
+        )
+
+    @pytest.mark.parametrize(
+        "query_name",
+        ["evaluate_collision_debug", "evaluate_min_collision_distance"],
+    )
+    def test_public_collision_diagnostic_rejects_nonfinite_probe(self, tmp_path, query_name):
+        """Invalid collision probes fail explicitly without corrupting warm state."""
+        robot = eik.RobotModel(str(_write_motion_certificate_urdf(tmp_path)))
+        solver = eik.KinematicsSolver(robot)
+
+        warm_q = np.array([-0.01], dtype=float)
+        robot.update_configuration(warm_q)
+
+        with pytest.raises(RuntimeError, match="finite"):
+            getattr(solver, query_name)(np.array([np.nan], dtype=float))
+
+        np.testing.assert_allclose(
+            robot.get_current_configuration(),
+            warm_q,
+            atol=0.0,
+            rtol=0.0,
+        )
+
     def test_rejected_preferred_lock_restores_post_step_certificates(self, tmp_path):
         """A rejected speculative solve must not affect the fallback cache."""
         urdf_path = _write_motion_certificate_urdf(tmp_path)
