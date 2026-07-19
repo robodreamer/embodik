@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.17] - 2026-07-19
+
+### Added
+
+- Added manipulability and joint-limit avoidance tasks, including C++ and
+  Python APIs, for lower-priority conditioning without overriding commanded
+  Cartesian motion.
+- Added position-step acceleration-reference synchronization and collision
+  validation diagnostics for controllers that hold or post-process solver
+  output.
+
+### Changed
+
+- Kept finite position steps inside velocity, acceleration, active joint-limit,
+  collision, and protected-task constraints while preserving useful progress
+  through nonlinear refinement.
+- Improved collision-row retention and conservative post-step validation so
+  constrained motion can slide tangentially along a contact boundary without
+  sacrificing the configured recovery floor.
+
+### Fixed
+
+- Prevented infeasible or stationary targets from producing residual
+  self-motion after useful progress is exhausted; intentional holds are now
+  reported explicitly to callers.
+- Improved recovery from fully extended, singular, and active joint-limit
+  configurations without requiring a joint-space reset.
+- Preserved primary task and grasp continuity across preferred-lock handoffs,
+  acceleration projection, target changes, and collision-pair switches.
+
 ## [0.20.16] - 2026-06-08
 
 ### Added
