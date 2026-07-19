@@ -660,6 +660,7 @@ def test_rby1_collision_push_release_uses_hardening_policy_without_stall_lock() 
     late_stalled_frames = 0
     moved_frames = 0
     release_moved_frames = 0
+    statuses = []
     for step_idx in range(80):
         right_target = right_push if step_idx < 40 else right_start
         step = robust_solve_position_step(
@@ -674,6 +675,7 @@ def test_rby1_collision_push_release_uses_hardening_policy_without_stall_lock() 
         dq = float(
             np.linalg.norm(np.asarray(step.q_next, dtype=float) - np.asarray(q, dtype=float))
         )
+        statuses.append(step.solver_result.status)
         q = np.asarray(step.q_next, dtype=float)
         robot.update_configuration(q)
         current_min = float(solver.evaluate_collision_debug(q).distance)
@@ -696,6 +698,7 @@ def test_rby1_collision_push_release_uses_hardening_policy_without_stall_lock() 
     assert late_stalled_frames <= 3
     assert moved_frames >= 35
     assert release_moved_frames >= 35
+    assert embodik.SolverStatus.NON_FINITE_INPUT not in statuses
     assert float(solver.evaluate_collision_debug(q).distance) > min_distance_m
 
 

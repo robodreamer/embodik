@@ -351,6 +351,11 @@ inline SolverResult computeMultiObjectiveVelocitySolutionEigen(
   const auto total_constraints = constraint_coefficients.rows();
   const bool enhanced_mode = max_constraint_softening_factors != nullptr;
   const auto num_objectives = objective_jacobians.size();
+  auto fail_non_finite = [&](const char *msg) {
+    SolverResult out = fail(SolverStatus::kNonFiniteInput, msg);
+    out.solution.assign(static_cast<std::size_t>(degrees_of_freedom), 0.0);
+    return out;
+  };
   Eigen::VectorXd softening_factors = Eigen::VectorXd::Ones(total_constraints);
   if (enhanced_mode && max_constraint_softening_factors != nullptr) {
     if (max_constraint_softening_factors->size() != total_constraints) {
@@ -379,6 +384,16 @@ inline SolverResult computeMultiObjectiveVelocitySolutionEigen(
       return fail(SolverStatus::kShapeMismatch,
                   "objective Jacobian dimension mismatch");
     }
+    if (!objective_jacobians[obj_idx].allFinite() ||
+        !objective_targets[obj_idx].allFinite()) {
+      return fail_non_finite(
+          "objective inputs must contain only finite values");
+    }
+  }
+  if (!constraint_coefficients.allFinite() || !min_bounds.allFinite() ||
+      !max_bounds.allFinite()) {
+    return fail_non_finite(
+        "constraint inputs must contain only finite values");
   }
 
   // Track worst-case condition number across all tasks.
@@ -979,8 +994,10 @@ inline SolverResult computeMultiObjectiveVelocitySolutionEigen(
     solver_status = SolverStatus::kNumericalError;
   }
 
-  if (objective_scaling_factors.hasNaN() || velocity_solution.hasNaN()) {
-    solver_status = SolverStatus::kNonFiniteInput;
+  const bool generated_non_finite =
+      !objective_scaling_factors.allFinite() || !velocity_solution.allFinite();
+  if (generated_non_finite) {
+    solver_status = SolverStatus::kNumericalError;
     objective_scaling_factors.setZero();
     velocity_solution.setZero();
   }
@@ -1022,7 +1039,9 @@ inline SolverResult computeMultiObjectiveVelocitySolutionEigen(
       (solver_status == SolverStatus::kSuccess)
           ? ""
           : (solver_status == SolverStatus::kNumericalError
-                 ? "numerical constraint violation beyond epsilon after solve"
+                 ? (generated_non_finite
+                        ? "non-finite values generated in solver state"
+                        : "numerical constraint violation beyond epsilon after solve")
                  : (solver_status == SolverStatus::kNonFiniteInput
                         ? "non-finite values detected in solver state"
                         : "solver failed with input/status error")),

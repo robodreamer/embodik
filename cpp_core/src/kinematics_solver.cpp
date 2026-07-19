@@ -9370,15 +9370,25 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
       break;
     }
   }
-  const bool backend_non_finite_failure =
+  const bool backend_non_finite_input =
       backend_result.status == SolverStatus::kNonFiniteInput ||
       backend_solution_non_finite;
-  if (backend_non_finite_failure) {
+  const bool backend_generated_non_finite =
+      backend_result.status == SolverStatus::kNumericalError &&
+      backend_result.status_message ==
+          "non-finite values generated in solver state";
+  if (backend_non_finite_input) {
     backend_result.status = SolverStatus::kNonFiniteInput;
     backend_result.status_message =
         backend_solution_non_finite
             ? "backend returned non-finite velocity entries; using zero velocity step"
             : "backend produced non-finite internal state; using zero velocity step";
+    backend_result.solution.assign(static_cast<size_t>(robot_->nv()), 0.0);
+    backend_result.final_error = 0.0;
+  } else if (backend_generated_non_finite) {
+    backend_result.status = SolverStatus::kNoProgress;
+    backend_result.status_message =
+        "backend generated non-finite internal state; using zero velocity step";
     backend_result.solution.assign(static_cast<size_t>(robot_->nv()), 0.0);
     backend_result.final_error = 0.0;
   }
