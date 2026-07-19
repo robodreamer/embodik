@@ -201,6 +201,7 @@ def _run_case(case: SingularityCase) -> dict[str, float | int | list[str]]:
     normalized_sigma = [initial_sigma]
     condition_numbers = [initial_condition]
     statuses: list[str] = []
+    stall_escape_counts: list[int] = []
     escape_errors = [float(np.linalg.norm(escape_target[:3, 3] - start_position))]
 
     def step(target: np.ndarray) -> None:
@@ -208,6 +209,7 @@ def _run_case(case: SingularityCase) -> dict[str, float | int | list[str]]:
         solve_inputs.append(q.copy())
         result = solver.solve_position_step(q, target, "ee", options)
         statuses.append(getattr(result.status, "name", str(result.status)))
+        stall_escape_counts.append(int(result.stall_escape_count))
         q_next = np.asarray(result.q_solution, dtype=float)
         assert q_next.shape == q.shape
         assert np.all(np.isfinite(q_next))
@@ -304,6 +306,7 @@ def _run_case(case: SingularityCase) -> dict[str, float | int | list[str]]:
         "no_reset_input_mismatches": int(
             np.count_nonzero(np.any(input_array != q_array[:-1], axis=1))
         ),
+        "stall_escape_count": int(sum(stall_escape_counts)),
         "statuses": sorted(set(statuses)),
     }
 
@@ -338,6 +341,7 @@ def test_fully_extended_arm_escapes_and_returns_without_reset(
     assert metrics["post_settle_peak_jerk"] <= 250.0, failure_context
     assert metrics["return_recovery_lag_steps"] <= 6, failure_context
     assert metrics["no_reset_input_mismatches"] == 0, failure_context
+    assert metrics["stall_escape_count"] == 0, failure_context
 
     assert metrics["tick6_error_reduction_m"] >= case.min_tick6_error_reduction, failure_context
     assert (

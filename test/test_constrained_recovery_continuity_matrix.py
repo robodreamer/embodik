@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Public constrained-ROM recovery analogs for private Alpha WBC rows."""
+"""Constrained-ROM recovery regressions for bounded whole-body IK cases."""
 
 from __future__ import annotations
 
@@ -206,6 +206,7 @@ def _run_recovery_case(
     progress: list[float] = []
     target_progress: list[float] = []
     statuses: list[str] = []
+    stall_escape_counts: list[int] = []
 
     for target in poses:
         opts = eik.PositionStepOptions()
@@ -218,6 +219,7 @@ def _run_recovery_case(
         opts.max_configuration_step_norm = 0.08
         result = solver.solve_position_step(q, target, "target_pose", opts)
         statuses.append(getattr(result.status, "name", str(result.status)))
+        stall_escape_counts.append(int(result.stall_escape_count))
         q = np.asarray(result.q_solution, dtype=float)
         assert q.shape == q_trace[-1].shape
         assert np.all(np.isfinite(q))
@@ -300,6 +302,7 @@ def _run_recovery_case(
         "limit_slack_min": float(np.min(slack)),
         "max_zero_motion_streak": int(max_zero_streak),
         "recovery_lag_steps": int(recovery_lag),
+        "stall_escape_count": int(sum(stall_escape_counts)),
         "statuses": sorted(set(statuses)),
     }
 
@@ -323,6 +326,7 @@ def test_public_constrained_recovery_continuity_matrix(
     assert float(metrics["max_jerk_norm"]) <= 0.24, metrics
     assert int(metrics["max_zero_motion_streak"]) <= 2, metrics
     assert int(metrics["recovery_lag_steps"]) <= 6, metrics
+    assert int(metrics["stall_escape_count"]) == 0, metrics
     assert int(metrics["error_increases"]) <= 2, metrics
     assert int(metrics["backsteps"]) <= scenario.backstep_limit, metrics
 

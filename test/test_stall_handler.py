@@ -1427,7 +1427,7 @@ class TestClampingDoesNotTriggerStallRelaxation:
     the stall handler must NOT misinterpret this as a collision-caused
     stall and relax ``min_distance``.
 
-    Root cause scenario observed on Alpha robot:
+    Root cause scenario observed in a body-clearance configuration:
       1. Arm approaches torso → joints near limits get Jacobian columns
          clamped to zero.
       2. Clamped Jacobian produces INFEASIBLE or SUCCESS with tiny ||dq||.
