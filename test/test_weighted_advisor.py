@@ -172,6 +172,19 @@ def test_weighted_fallback_enabled_by_default_but_lazy_on_success():
     assert math.isnan(result.weighted_advisory_v_norm)
 
 
+@pytest.mark.parametrize("invalid_value", [math.nan, math.inf, -math.inf])
+def test_nonfinite_current_configuration_fails_closed_before_weighted_fallback(invalid_value):
+    _robot, solver, q, _target = _make_split_panda(np.array([0.04, 0.0, 0.0]))
+    invalid_q = q.copy()
+    invalid_q[0] = invalid_value
+
+    result = solver.solve_velocity(invalid_q, apply_limits=True)
+
+    assert result.status == eik.SolverStatus.NON_FINITE_INPUT
+    assert result.weighted_fallback_used is False
+    assert np.array_equal(np.asarray(result.solution, dtype=float), np.zeros(solver.robot.nv))
+
+
 def test_default_weighted_fallback_accepts_useful_panda_limit_solution():
     solver, q, lower, upper = _make_panda_limit_conflict_solver(weighted_fallback=None)
     weighted = solver.solve_velocity(q, apply_limits=True)

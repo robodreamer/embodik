@@ -7710,6 +7710,23 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
   const Eigen::VectorXd q_eval =
       (current_q.size() > 0) ? current_q : robot_->get_current_configuration();
 
+  if (q_eval.size() != robot_->nq()) {
+    result.status = SolverStatus::kInvalidInput;
+    result.status_message =
+        "current configuration size does not match robot nq in solve_velocity";
+    return result;
+  }
+  if (!q_eval.allFinite()) {
+    result.status = SolverStatus::kNonFiniteInput;
+    result.status_message =
+        "current configuration contains non-finite values in solve_velocity";
+    result.solution.assign(static_cast<std::size_t>(robot_->nv()), 0.0);
+    result.joint_velocities = Eigen::VectorXd::Zero(robot_->nv());
+    result.limits_applied = apply_limits;
+    last_solution_dq_norm_ = 0.0;
+    return result;
+  }
+
   // Use provided configuration or robot's current
   if (current_q.size() > 0) {
     if (current_q.size() != robot_->nq()) {
@@ -9346,15 +9363,6 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
     for (int j = 0; j < robot_->nv(); ++j)
       backend_result.solution[j] *= joint_metric_col_scale_(j);
   }
-  if (backend_result.status == SolverStatus::kNonFiniteInput) {
-    // Robust fallback: keep control loop stable by returning a zero-velocity
-    // step instead of propagating a hard non-finite status.
-    backend_result.status = SolverStatus::kNoProgress;
-    backend_result.status_message =
-        "backend produced non-finite internal state; using zero velocity step";
-    backend_result.solution.assign(static_cast<size_t>(robot_->nv()), 0.0);
-    backend_result.final_error = 0.0;
-  }
   bool backend_solution_non_finite = false;
   for (double v : backend_result.solution) {
     if (!std::isfinite(v)) {
@@ -9362,10 +9370,15 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
       break;
     }
   }
-  if (backend_solution_non_finite) {
-    backend_result.status = SolverStatus::kNoProgress;
+  const bool backend_non_finite_failure =
+      backend_result.status == SolverStatus::kNonFiniteInput ||
+      backend_solution_non_finite;
+  if (backend_non_finite_failure) {
+    backend_result.status = SolverStatus::kNonFiniteInput;
     backend_result.status_message =
-        "backend returned non-finite velocity entries; using zero velocity step";
+        backend_solution_non_finite
+            ? "backend returned non-finite velocity entries; using zero velocity step"
+            : "backend produced non-finite internal state; using zero velocity step";
     backend_result.solution.assign(static_cast<size_t>(robot_->nv()), 0.0);
     backend_result.final_error = 0.0;
   }
@@ -9540,7 +9553,9 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
       };
   const bool can_try_weighted_fallback =
       runtime_config_.weighted_fallback_enabled &&
-      classified_velocity.status != SolverStatus::kSuccess && !goals.empty();
+      classified_velocity.status != SolverStatus::kSuccess &&
+      classified_velocity.status != SolverStatus::kNonFiniteInput &&
+      !goals.empty();
   if (can_try_weighted_fallback && !advisory.available) {
     advisory = compute_weighted_advisory();
   }
