@@ -186,6 +186,7 @@ def _run_stationary_unreachable_position_target(
     target_offset: np.ndarray | None = None,
     steps: int = 480,
     settle_steps: int = 120,
+    ramp_steps: int = 0,
 ) -> dict[str, float | int | list[str]]:
     config = resolve_robot_configuration(robot_key)
     robot = config["robot"]
@@ -227,14 +228,19 @@ def _run_stationary_unreachable_position_target(
     errors: list[float] = []
     progress: list[float] = []
     statuses: list[str] = []
-    for _ in range(steps):
+    hold_flags: list[bool] = []
+    for step in range(steps):
+        solve_target_pose = target_pose.copy()
+        if ramp_steps > 0:
+            target_fraction = min(1.0, float(step + 1) / float(ramp_steps))
+            solve_target_pose[:3, 3] = initial_pose[:3, 3] + target_offset * target_fraction
         if multi_target:
             result = solver.solve_position_step(
                 q,
                 [
                     eik.TaskTarget(
                         "stationary_target",
-                        target_pose,
+                        solve_target_pose,
                         options.position_gain,
                         options.orientation_gain,
                     )
@@ -242,18 +248,19 @@ def _run_stationary_unreachable_position_target(
                 options,
             )
         else:
-            result = solver.solve_position_step(q, target_pose, "stationary_target", options)
+            result = solver.solve_position_step(q, solve_target_pose, "stationary_target", options)
         q = np.asarray(result.q_solution, dtype=float)
         assert q.shape == q_trace[-1].shape
         assert np.all(np.isfinite(q))
         robot.update_configuration(q)
         current_pose = _pose_matrix(robot, frame_name)
         q_trace.append(q.copy())
-        errors.append(float(np.linalg.norm(target_pose[:3, 3] - current_pose[:3, 3])))
+        errors.append(float(np.linalg.norm(solve_target_pose[:3, 3] - current_pose[:3, 3])))
         progress.append(float(np.dot(current_pose[:3, 3] - initial_pose[:3, 3], progress_axis)))
         statuses.append(result.status.name)
+        hold_flags.append(bool(result.position_step_hold_active))
 
-    return _compute_stationary_metrics(
+    metrics = _compute_stationary_metrics(
         robot=robot,
         q_trace=q_trace,
         errors=errors,
@@ -262,6 +269,16 @@ def _run_stationary_unreachable_position_target(
         dt=options.dt,
         settle_steps=settle_steps,
     )
+    first_hold_step = hold_flags.index(True) if any(hold_flags) else -1
+    metrics.update(
+        {
+            "position_step_first_hold_step": int(first_hold_step),
+            "position_step_hold_transition_count": int(
+                sum(before != after for before, after in zip(hold_flags, hold_flags[1:]))
+            ),
+        }
+    )
+    return metrics
 
 
 def _assert_stationary_continuity(
@@ -609,6 +626,23 @@ def test_multi_target_min_error_stationary_target_settles_without_self_motion() 
         multi_target=True,
     )
     _assert_stationary_continuity(metrics)
+
+
+def test_single_target_far_ramp_holds_without_post_stop_regression() -> None:
+    ramp_steps = 100
+    metrics = _run_stationary_unreachable_position_target(
+        solve_mode=eik.TaskSolveMode.MIN_ERROR,
+        steps=180,
+        settle_steps=60,
+        ramp_steps=ramp_steps,
+    )
+
+    first_hold = int(metrics["position_step_first_hold_step"])
+    assert ramp_steps <= first_hold <= ramp_steps + 20, metrics
+    assert int(metrics["position_step_hold_transition_count"]) == 1, metrics
+    assert int(metrics["error_increases"]) == 0, metrics
+    assert int(metrics["backsteps"]) == 0, metrics
+    assert float(metrics["configuration_drift"]) <= 1e-9, metrics
 
 
 @pytest.mark.benchmark

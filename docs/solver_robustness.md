@@ -132,6 +132,20 @@ cannot hide the same low-rate drift. Aggregate progress also cannot excuse repea
 the currently worst commanded target. This prevents persistent null-space motion, target trading,
 and limit cycles after a far or constrained target has exhausted useful progress.
 
+For a pure velocity-level position step, the solver also remembers whether the target has actually
+moved since continuity state was initialized. Once that moving target becomes stationary, a
+candidate that worsens any commanded target merit beyond the numerical tolerance is held
+immediately instead of being integrated for the rest of the 20-call dwell. Candidates that keep
+reducing every commanded target merit remain eligible, so workspace-edge convergence and
+singularity recovery do not require an acceleration bound or joint-space reset.
+
+This immediate non-regression check is deliberately disabled when acceleration limits are active,
+where sampled braking governs continuity, and when constraint paths that can require target-error
+tradeoffs are active. Those paths include collision, CoM, relative-pose, torso-pose, user linear,
+tight frame/point, contact projection, and protected-task viability constraints. They continue
+through the windowed continuity and constraint-specific acceptance logic so tangential or coupled
+recovery is not converted into a hard hold.
+
 The hold is mode-agnostic: it applies to `SCALE`, `SCALE_ELASTIC`, and `MIN_ERROR`, including the
 single-target and multi-target APIs. A held target that is already satisfied remains `SUCCESS`;
 an unsatisfied target with no useful nonlinear progress reports `NO_PROGRESS`. In both cases,

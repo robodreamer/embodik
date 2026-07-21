@@ -1345,6 +1345,7 @@ private:
   std::unordered_map<std::string, std::array<double, 2>>
       position_step_target_motion_blocks_;
   bool position_step_target_geometry_moved_ = true;
+  bool position_step_target_motion_observed_ = false;
   std::vector<double> position_step_collision_command_floor_distances_;
   int position_step_call_depth_ = 0;
   std::optional<double> position_step_merit_window_anchor_;
@@ -1377,7 +1378,7 @@ private:
       const std::vector<double> &initial_target_merits,
       const std::vector<double> &final_target_merits,
       double configuration_step_norm, bool owns_position_step_continuity,
-      bool collision_violated);
+      bool collision_violated, bool step_constraint_tradeoff_active);
   std::optional<Eigen::MatrixXd> warm_start_selector_cache_;
   int warm_start_constraint_rows_ = -1;
 

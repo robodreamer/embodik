@@ -998,6 +998,7 @@ def _drive_auto_bimanual_reach_smoothness(
     target_delta: np.ndarray,
     steps: int = 30,
     ramp_target: bool = False,
+    ramp_steps: int | None = None,
 ) -> dict[str, float | int | list[str]]:
     robot, frames, q = _load_reduced_worker_robot()
     solver = embodik.KinematicsSolver(robot)
@@ -1053,9 +1054,18 @@ def _drive_auto_bimanual_reach_smoothness(
     lock_modes: list[str] = []
     preferred_lock_used = 0
     preferred_lock_fallback = 0
+    hold_steps = 0
+    hold_flags: list[bool] = []
 
     for step_idx in range(int(steps)):
-        target_fraction = float(step_idx + 1) / float(max(int(steps), 1)) if ramp_target else 1.0
+        target_fraction = (
+            min(
+                1.0,
+                float(step_idx + 1) / float(max(int(ramp_steps or steps), 1)),
+            )
+            if ramp_target
+            else 1.0
+        )
         left_target = left_target0.copy()
         right_target = right_target0.copy()
         left_target[:3, 3] += delta * target_fraction
@@ -1104,6 +1114,9 @@ def _drive_auto_bimanual_reach_smoothness(
         lock_fallback = bool(getattr(result, "preferred_lock_fallback_used", False))
         preferred_lock_used += int(lock_used)
         preferred_lock_fallback += int(lock_fallback)
+        hold_active = bool(getattr(result, "position_step_hold_active", False))
+        hold_steps += int(hold_active)
+        hold_flags.append(hold_active)
         if lock_used:
             lock_modes.append("used")
         elif lock_fallback:
@@ -1146,6 +1159,8 @@ def _drive_auto_bimanual_reach_smoothness(
     lock_toggle_count = int(
         sum(1 for before, after in zip(lock_modes, lock_modes[1:]) if before != after)
     )
+    first_hold_step = hold_flags.index(True) if any(hold_flags) else -1
+    post_hold_q = q_arr[first_hold_step + 1 :] if first_hold_step >= 0 else q_arr[-1:]
     return {
         "final_error": float(error_arr[-1]),
         "min_error": float(error_arr.min()),
@@ -1165,6 +1180,12 @@ def _drive_auto_bimanual_reach_smoothness(
         "preferred_lock_used_steps": int(preferred_lock_used),
         "preferred_lock_fallback_steps": int(preferred_lock_fallback),
         "preferred_lock_toggle_count": lock_toggle_count,
+        "position_step_hold_steps": int(hold_steps),
+        "position_step_first_hold_step": int(first_hold_step),
+        "position_step_hold_transition_count": int(
+            sum(before != after for before, after in zip(hold_flags, hold_flags[1:]))
+        ),
+        "post_hold_configuration_drift": float(np.linalg.norm(post_hold_q[-1] - post_hold_q[0])),
         "statuses": sorted(set(statuses)),
     }
 
@@ -1214,6 +1235,23 @@ def test_worker_auto_preferred_lock_ramp_limits_boundary_step_spike() -> None:
     assert ramp["max_step_norm"] / max(float(ramp["p95_step_norm"]), 1e-12) <= 1.8, ramp
     assert ramp["max_accel_norm"] <= 0.09, ramp
     assert ramp["max_jerk_norm"] <= 0.16, ramp
+
+
+def test_worker_far_ramp_holds_immediately_when_stationary_target_regresses() -> None:
+    ramp_then_hold = _drive_auto_bimanual_reach_smoothness(
+        target_delta=np.array([0.0, -1.0, 0.0], dtype=float),
+        steps=120,
+        ramp_target=True,
+        ramp_steps=80,
+    )
+
+    first_hold = int(ramp_then_hold["position_step_first_hold_step"])
+    assert 80 <= first_hold <= 85, ramp_then_hold
+    assert ramp_then_hold["position_step_hold_steps"] == 120 - first_hold, ramp_then_hold
+    assert ramp_then_hold["position_step_hold_transition_count"] == 1, ramp_then_hold
+    assert ramp_then_hold["post_hold_configuration_drift"] <= 1e-9, ramp_then_hold
+    assert ramp_then_hold["tail_error_increases"] <= 4, ramp_then_hold
+    assert ramp_then_hold["tail_backsteps"] == 0, ramp_then_hold
 
 
 def _held_arm_drift_when_dragging_other(*, solve_mode, protect_held: bool = False) -> float:

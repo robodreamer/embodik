@@ -102,6 +102,7 @@ constexpr double kStationaryTargetRotationTolerance = 1e-9;
 constexpr double kTargetTranslationPredictionTransition = 1e-6;
 constexpr double kStationaryTargetGainTolerance = 1e-12;
 constexpr int kStationaryTargetDwellCalls = 20;
+constexpr double kStationaryTargetMeritRegressionTolerance = 1e-4;
 
 // Velocity box constraint: minimum fraction of vel_limit when inside limits
 constexpr double kMinBoundFraction = 0.10;
@@ -2007,6 +2008,7 @@ Eigen::Matrix4d KinematicsSolver::canonicalize_position_step_signature_pose(
 void KinematicsSolver::reset_position_step_continuity_state() {
   last_position_step_target_signature_.reset();
   position_step_target_motion_blocks_.clear();
+  position_step_target_motion_observed_ = false;
   position_step_collision_command_floor_distances_.clear();
   reset_position_step_merit_window();
 }
@@ -2029,7 +2031,7 @@ bool KinematicsSolver::should_hold_position_step_for_continuity(
     const std::vector<double> &initial_target_merits,
     const std::vector<double> &final_target_merits,
     double configuration_step_norm, bool owns_position_step_continuity,
-    bool collision_violated) {
+    bool collision_violated, bool step_constraint_tradeoff_active) {
   if (!owns_position_step_continuity) {
     return false;
   }
@@ -2058,6 +2060,45 @@ bool KinematicsSolver::should_hold_position_step_for_continuity(
     }
     reset_position_step_merit_window();
     return false;
+  }
+
+  const bool collision_constraint_active =
+      collision_constraint_.has_value() && collision_constraint_->enabled;
+  const bool com_constraint_active =
+      com_constraint_.has_value() && com_constraint_->enabled;
+  const bool relative_pose_constraint_active =
+      relative_pose_constraint_.has_value() &&
+      relative_pose_constraint_->enabled;
+  const bool other_constraint_tradeoff_active =
+      step_constraint_tradeoff_active ||
+      get_linear_velocity_constraint_rows() > 0 ||
+      !tight_frame_pose_constraints_.empty() ||
+      !tight_point_constraints_.empty() || has_contact_frames();
+  bool stationary_target_regressed = false;
+  if (!acceleration_limits_enabled_ && position_step_target_motion_observed_ &&
+      !position_step_target_geometry_moved_ && !collision_constraint_active &&
+      !com_constraint_active && !relative_pose_constraint_active &&
+      !other_constraint_tradeoff_active) {
+    for (std::size_t i = 0; i < initial_target_merits.size(); ++i) {
+      if (final_target_merits[i] >
+          initial_target_merits[i] +
+              kStationaryTargetMeritRegressionTolerance) {
+        stationary_target_regressed = true;
+        break;
+      }
+    }
+  }
+  if (stationary_target_regressed) {
+    position_step_stationary_guard_active_ = true;
+    position_step_stationary_guard_can_reopen_ = false;
+    position_step_merit_window_anchor_ = initial_merit;
+    position_step_merit_window_motion_ = 0.0;
+    position_step_merit_window_samples_ = 0;
+    position_step_merit_window_last_delta_.reset();
+    position_step_merit_window_direction_reversals_ = 0;
+    position_step_merit_window_last_merits_ = initial_target_merits;
+    position_step_merit_window_error_increases_ = 0;
+    return true;
   }
 
   if (!position_step_merit_window_anchor_.has_value()) {
@@ -10563,6 +10604,8 @@ PositionIKResult KinematicsSolver::solve_position_step(
         robot_->get_frame_pose(options.continuity_reference_frame);
   }
   if (outermost_position_step_call) {
+    const bool had_previous_target_signature =
+        last_position_step_target_signature_.has_value();
     PositionStepTargetSignature signature;
     signature.command_revision = options.continuity_command_revision;
     const std::unordered_set<std::string> explicit_target_task_names = {
@@ -10593,6 +10636,10 @@ PositionIKResult KinematicsSolver::solve_position_step(
     update_position_step_target_motion_blocks(signature);
     position_step_target_geometry_moved_ =
         position_step_target_geometry_changed(signature);
+    position_step_target_motion_observed_ =
+        position_step_target_motion_observed_ ||
+        (had_previous_target_signature &&
+         position_step_target_geometry_moved_);
     if (update_position_step_target_signature(std::move(signature))) {
       capture_position_step_collision_command_floor(current_q);
     }
@@ -11616,7 +11663,7 @@ PositionIKResult KinematicsSolver::solve_position_step(
           result, current_q, initial_commanded_error, final_commanded_error,
           {initial_commanded_error}, {final_commanded_error},
           candidate_step_norm, owns_position_step_continuity,
-          collision_violated_flag);
+          collision_violated_flag, step_torso_constraint.has_value());
   if (held_non_improving_step) {
     const bool target_satisfied =
         initial_commanded_error <= kPositionStepSatisfiedMeritTolerance;
@@ -11785,6 +11832,8 @@ PositionIKResult KinematicsSolver::solve_position_step(
         robot_->get_frame_pose(options.continuity_reference_frame);
   }
   if (outermost_position_step_call) {
+    const bool had_previous_target_signature =
+        last_position_step_target_signature_.has_value();
     PositionStepTargetSignature signature;
     signature.command_revision = options.continuity_command_revision;
     std::unordered_set<std::string> explicit_target_task_names;
@@ -11831,6 +11880,10 @@ PositionIKResult KinematicsSolver::solve_position_step(
     update_position_step_target_motion_blocks(signature);
     position_step_target_geometry_moved_ =
         position_step_target_geometry_changed(signature);
+    position_step_target_motion_observed_ =
+        position_step_target_motion_observed_ ||
+        (had_previous_target_signature &&
+         position_step_target_geometry_moved_);
     if (update_position_step_target_signature(std::move(signature))) {
       capture_position_step_collision_command_floor(current_q);
     }
@@ -13520,7 +13573,9 @@ PositionIKResult KinematicsSolver::solve_position_step(
       should_hold_position_step_for_continuity(
           result, current_q, initial_commanded_error, final_commanded_error,
           initial_target_merits, final_target_merits, candidate_step_norm,
-          owns_position_step_continuity, collision_violated_flag_mts);
+          owns_position_step_continuity, collision_violated_flag_mts,
+          step_torso_constraint.has_value() ||
+              !build_priority_constraint_specs(step_dt).empty());
   if (held_non_improving_step) {
     const bool target_satisfied =
         initial_commanded_error <= kPositionStepSatisfiedMeritTolerance;
