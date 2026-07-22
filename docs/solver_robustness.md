@@ -133,11 +133,13 @@ the currently worst commanded target. This prevents persistent null-space motion
 and limit cycles after a far or constrained target has exhausted useful progress.
 
 For a pure velocity-level position step, the solver also remembers whether the target has actually
-moved since continuity state was initialized. Once that moving target becomes stationary, a
-candidate that worsens any commanded target merit beyond the numerical tolerance is held
-immediately instead of being integrated for the rest of the 20-call dwell. Candidates that keep
-reducing every commanded target merit remain eligible, so workspace-edge convergence and
-singularity recovery do not require an acceleration bound or joint-space reset.
+moved since continuity state was initialized. Once that moving target becomes stationary, the
+solver anchors each commanded target's position and orientation error at that stop boundary. A
+candidate that worsens the anchor's dominant error block beyond the numerical tolerance is held
+immediately instead of being integrated for the rest of the 20-call dwell. The anchor remains fixed
+while the command is stationary. Candidates may still trade smaller error blocks while preserving
+the dominant block and making sufficient net progress over the continuity window, so workspace-edge
+convergence and singularity recovery do not require an acceleration bound or joint-space reset.
 
 This immediate non-regression check is deliberately disabled when acceleration limits are active,
 where sampled braking governs continuity, and when constraint paths that can require target-error

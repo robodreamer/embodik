@@ -628,13 +628,15 @@ def test_multi_target_min_error_stationary_target_settles_without_self_motion() 
     _assert_stationary_continuity(metrics)
 
 
-def test_single_target_far_ramp_holds_without_post_stop_regression() -> None:
+@pytest.mark.parametrize("multi_target", (False, True), ids=("single", "vector"))
+def test_far_ramp_holds_without_post_stop_regression(multi_target: bool) -> None:
     ramp_steps = 100
     metrics = _run_stationary_unreachable_position_target(
         solve_mode=eik.TaskSolveMode.MIN_ERROR,
         steps=180,
         settle_steps=60,
         ramp_steps=ramp_steps,
+        multi_target=multi_target,
     )
 
     first_hold = int(metrics["position_step_first_hold_step"])

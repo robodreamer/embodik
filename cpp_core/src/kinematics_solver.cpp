@@ -1970,6 +1970,7 @@ bool KinematicsSolver::update_position_step_target_signature(
     }
     if (!matches) {
       reset_position_step_merit_window();
+      position_step_stationary_anchor_blocks_.reset();
       existing_target_geometry_changed = !target_geometry_matches;
     }
     if (!explicit_command_revision_enabled && world_target_geometry_matches &&
@@ -1978,6 +1979,7 @@ bool KinematicsSolver::update_position_step_target_signature(
     }
   } else {
     reset_position_step_merit_window();
+    position_step_stationary_anchor_blocks_.reset();
     position_step_collision_command_floor_distances_.clear();
   }
   last_position_step_target_signature_ = std::move(signature);
@@ -2010,6 +2012,7 @@ void KinematicsSolver::reset_position_step_continuity_state() {
   position_step_target_motion_blocks_.clear();
   position_step_target_motion_observed_ = false;
   position_step_collision_command_floor_distances_.clear();
+  position_step_stationary_anchor_blocks_.reset();
   reset_position_step_merit_window();
 }
 
@@ -2030,6 +2033,8 @@ bool KinematicsSolver::should_hold_position_step_for_continuity(
     double initial_merit, double final_merit,
     const std::vector<double> &initial_target_merits,
     const std::vector<double> &final_target_merits,
+    const std::vector<double> &initial_target_block_merits,
+    const std::vector<double> &final_target_block_merits,
     double configuration_step_norm, bool owns_position_step_continuity,
     bool collision_violated, bool step_constraint_tradeoff_active) {
   if (!owns_position_step_continuity) {
@@ -2043,10 +2048,20 @@ bool KinematicsSolver::should_hold_position_step_for_continuity(
       result.collision_rejection_count == 0 && result.stall_escape_count == 0 &&
       result.q_solution.size() == current_q.size() &&
       std::isfinite(initial_merit) && std::isfinite(final_merit) &&
+      !initial_target_merits.empty() &&
       initial_target_merits.size() == final_target_merits.size() &&
+      !initial_target_block_merits.empty() &&
+      initial_target_block_merits.size() ==
+          final_target_block_merits.size() &&
       std::all_of(initial_target_merits.begin(), initial_target_merits.end(),
                   [](double merit) { return std::isfinite(merit); }) &&
       std::all_of(final_target_merits.begin(), final_target_merits.end(),
+                  [](double merit) { return std::isfinite(merit); }) &&
+      std::all_of(initial_target_block_merits.begin(),
+                  initial_target_block_merits.end(),
+                  [](double merit) { return std::isfinite(merit); }) &&
+      std::all_of(final_target_block_merits.begin(),
+                  final_target_block_merits.end(),
                   [](double merit) { return std::isfinite(merit); }) &&
       std::isfinite(configuration_step_norm);
   if (!nominal_candidate) {
@@ -2074,20 +2089,29 @@ bool KinematicsSolver::should_hold_position_step_for_continuity(
       get_linear_velocity_constraint_rows() > 0 ||
       !tight_frame_pose_constraints_.empty() ||
       !tight_point_constraints_.empty() || has_contact_frames();
-  bool stationary_target_regressed = false;
-  if (!acceleration_limits_enabled_ && position_step_target_motion_observed_ &&
+  const bool stationary_unconstrained_velocity_step =
+      !acceleration_limits_enabled_ && position_step_target_motion_observed_ &&
       !position_step_target_geometry_moved_ && !collision_constraint_active &&
       !com_constraint_active && !relative_pose_constraint_active &&
-      !other_constraint_tradeoff_active) {
-    for (std::size_t i = 0; i < initial_target_merits.size(); ++i) {
-      if (final_target_merits[i] >
-          initial_target_merits[i] +
-              kStationaryTargetMeritRegressionTolerance) {
-        stationary_target_regressed = true;
-        break;
-      }
-    }
+      !other_constraint_tradeoff_active;
+  if (stationary_unconstrained_velocity_step &&
+      !position_step_stationary_anchor_blocks_.has_value()) {
+    position_step_stationary_anchor_blocks_ = initial_target_block_merits;
   }
+  const std::vector<double> &stationary_anchor_blocks =
+      position_step_stationary_anchor_blocks_.has_value()
+          ? *position_step_stationary_anchor_blocks_
+          : initial_target_block_merits;
+  const auto dominant_anchor_block = std::max_element(
+      stationary_anchor_blocks.begin(), stationary_anchor_blocks.end());
+  const std::size_t dominant_anchor_block_index =
+      static_cast<std::size_t>(std::distance(
+          stationary_anchor_blocks.begin(), dominant_anchor_block));
+  const bool stationary_target_regressed =
+      stationary_unconstrained_velocity_step &&
+      final_target_block_merits[dominant_anchor_block_index] >
+          *dominant_anchor_block +
+              kStationaryTargetMeritRegressionTolerance;
   if (stationary_target_regressed) {
     position_step_stationary_guard_active_ = true;
     position_step_stationary_guard_can_reopen_ = false;
@@ -7285,6 +7309,8 @@ KinematicsSolver::capture_position_step_mutable_state() const {
   snapshot.previous_dq = previous_dq_;
   snapshot.position_step_merit_window_anchor =
       position_step_merit_window_anchor_;
+  snapshot.position_step_stationary_anchor_blocks =
+      position_step_stationary_anchor_blocks_;
   snapshot.position_step_merit_window_motion =
       position_step_merit_window_motion_;
   snapshot.position_step_merit_window_samples =
@@ -7382,6 +7408,8 @@ void KinematicsSolver::restore_position_step_mutable_state(
   previous_dq_ = snapshot.previous_dq;
   position_step_merit_window_anchor_ =
       snapshot.position_step_merit_window_anchor;
+  position_step_stationary_anchor_blocks_ =
+      snapshot.position_step_stationary_anchor_blocks;
   position_step_merit_window_motion_ =
       snapshot.position_step_merit_window_motion;
   position_step_merit_window_samples_ =
@@ -10830,6 +10858,7 @@ PositionIKResult KinematicsSolver::solve_position_step(
   double prev_combined_error = std::numeric_limits<double>::infinity();
   double initial_combined_error = std::numeric_limits<double>::quiet_NaN();
   double initial_commanded_error = std::numeric_limits<double>::quiet_NaN();
+  std::vector<double> initial_target_block_merits;
   int no_progress_count = 0;
   bool no_progress_exit = false;
   bool collision_violated_flag = false;
@@ -10882,6 +10911,11 @@ PositionIKResult KinematicsSolver::solve_position_step(
       initial_commanded_error = commanded_frame_merit(
           error, frame_task->getType(), options.position_gain,
           options.orientation_gain);
+      const auto block_merits = commanded_frame_block_merits(
+          error, frame_task->getType(), options.position_gain,
+          options.orientation_gain);
+      initial_target_block_merits.assign(block_merits.begin(),
+                                         block_merits.end());
     }
     if (step > 0 && options.no_progress_max_steps > 0 && have_vel_result) {
       const bool low_error_change =
@@ -11652,6 +11686,11 @@ PositionIKResult KinematicsSolver::solve_position_step(
   const double final_commanded_error = commanded_frame_merit(
       final_error, frame_task->getType(), options.position_gain,
       options.orientation_gain);
+  const auto final_block_merits = commanded_frame_block_merits(
+      final_error, frame_task->getType(), options.position_gain,
+      options.orientation_gain);
+  const std::vector<double> final_target_block_merits(
+      final_block_merits.begin(), final_block_merits.end());
   const double candidate_step_norm =
       result.q_solution.size() == current_q.size()
           ? pinocchio::difference(robot_->model(), current_q,
@@ -11662,6 +11701,7 @@ PositionIKResult KinematicsSolver::solve_position_step(
       should_hold_position_step_for_continuity(
           result, current_q, initial_commanded_error, final_commanded_error,
           {initial_commanded_error}, {final_commanded_error},
+          initial_target_block_merits, final_target_block_merits,
           candidate_step_norm, owns_position_step_continuity,
           collision_violated_flag, step_torso_constraint.has_value());
   if (held_non_improving_step) {
@@ -12105,6 +12145,7 @@ PositionIKResult KinematicsSolver::solve_position_step(
       std::numeric_limits<double>::quiet_NaN();
   double initial_commanded_error = std::numeric_limits<double>::quiet_NaN();
   std::vector<double> initial_target_merits;
+  std::vector<double> initial_target_block_merits;
   int no_progress_count = 0;
   bool no_progress_exit = false;
   bool collision_violated_flag_mts = false;  // multi-target solve_position_step
@@ -12276,6 +12317,8 @@ PositionIKResult KinematicsSolver::solve_position_step(
     double commanded_error = 0.0;
     std::vector<double> current_target_merits;
     current_target_merits.reserve(n_targets);
+    std::vector<double> current_target_block_merits;
+    current_target_block_merits.reserve(2 * n_targets);
     double max_position_error = 0.0;
     double primary_combined_error = std::numeric_limits<double>::quiet_NaN();
     std::vector<Eigen::VectorXd> target_velocities(n_targets);
@@ -12316,11 +12359,14 @@ PositionIKResult KinematicsSolver::solve_position_step(
         merit_task_type =
             static_cast<const FrameTask *>(rt.task.get())->getType();
       }
-      const double target_merit = commanded_frame_merit(
+      const auto block_merits = commanded_frame_block_merits(
           error, merit_task_type, target.position_gain,
           target.orientation_gain);
+      const double target_merit = block_merits[0] + block_merits[1];
       commanded_error += target_merit;
       current_target_merits.push_back(target_merit);
+      current_target_block_merits.push_back(block_merits[0]);
+      current_target_block_merits.push_back(block_merits[1]);
       if (error.size() == 3) {
         bool is_orientation_only = false;
         if (rt.kind == PoseTaskKind::kFrame) {
@@ -12394,6 +12440,7 @@ PositionIKResult KinematicsSolver::solve_position_step(
       initial_primary_combined_error = primary_combined_error;
       initial_commanded_error = commanded_error;
       initial_target_merits = current_target_merits;
+      initial_target_block_merits = current_target_block_merits;
     }
     if (step > 0 && options.no_progress_max_steps > 0 && have_vel_result) {
       const bool low_error_change =
@@ -13534,6 +13581,8 @@ PositionIKResult KinematicsSolver::solve_position_step(
   double final_primary_orientation_error = 0.0;
   std::vector<double> final_target_merits;
   final_target_merits.reserve(resolved.size());
+  std::vector<double> final_target_block_merits;
+  final_target_block_merits.reserve(2 * resolved.size());
   for (std::size_t index = 0; index < resolved.size(); ++index) {
     const auto &resolved_target = resolved[index];
     resolved_target.task->update(*robot_);
@@ -13549,6 +13598,8 @@ PositionIKResult KinematicsSolver::solve_position_step(
     const double target_merit = block_merits[0] + block_merits[1];
     final_commanded_error += target_merit;
     final_target_merits.push_back(target_merit);
+    final_target_block_merits.push_back(block_merits[0]);
+    final_target_block_merits.push_back(block_merits[1]);
     if (resolved_target.task->isActive() &&
         resolved_target.task->getPriority() ==
             highest_active_target_priority) {
@@ -13572,7 +13623,9 @@ PositionIKResult KinematicsSolver::solve_position_step(
       !priority_candidate_rejected &&
       should_hold_position_step_for_continuity(
           result, current_q, initial_commanded_error, final_commanded_error,
-          initial_target_merits, final_target_merits, candidate_step_norm,
+          initial_target_merits, final_target_merits,
+          initial_target_block_merits, final_target_block_merits,
+          candidate_step_norm,
           owns_position_step_continuity, collision_violated_flag_mts,
           step_torso_constraint.has_value() ||
               !build_priority_constraint_specs(step_dt).empty());
