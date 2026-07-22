@@ -37,28 +37,8 @@ jobs:
         id: release
         shell: bash
         run: |
-          version="$(
-            python - <<'PY'
-          import pathlib
-          import tomllib
-
-          pyproject = tomllib.loads(pathlib.Path("pyproject.toml").read_text())
-          pixi = tomllib.loads(pathlib.Path("pixi.toml").read_text())
-          package_version = pyproject["project"]["version"]
-          pixi_version = pixi["workspace"]["version"]
-          if package_version != pixi_version:
-              raise SystemExit(
-                  f"version mismatch: pyproject={package_version}, pixi={pixi_version}"
-              )
-          print(package_version)
-          PY
-          )"
+          version="$(python scripts/validate_release_metadata.py)"
           tag="v${version}"
-
-          if ! grep -Eq "^## \[${version}\] - [0-9]{4}-[0-9]{2}-[0-9]{2}$" CHANGELOG.md; then
-            echo "CHANGELOG.md has no dated ${version} release entry" >&2
-            exit 1
-          fi
 
           echo "version=${version}" >> "${GITHUB_OUTPUT}"
           echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
