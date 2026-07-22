@@ -1023,13 +1023,13 @@ def run_headless_single_target_oscillation(target_key: str, steps: int) -> None:
         accepted += 1
         max_q_step = max(max_q_step, q_step_component)
         dq_norm = float(np.linalg.norm(np.asarray(robot.difference(q_before, q), dtype=float)))
-        if target_delta > 1e-4 and dq_norm <= 1e-8:
-            zero_motion_events += 1
         target_error = _target_position_error(robot, target_frame_by_key[target_key], moving_target)
+        if target_delta > 1e-4 and dq_norm <= 1e-8 and target_error > 0.02:
+            zero_motion_events += 1
         max_target_error = max(max_target_error, target_error)
         productive = (
             result.status == embodik.SolverStatus.SUCCESS
-            or (target_delta <= 1e-4 and target_error <= 0.02)
+            or target_error <= 0.02
             or (dq_norm > 1e-8 and target_error <= 0.03)
         )
         statuses.append("SUCCESS" if productive else result.status.name)

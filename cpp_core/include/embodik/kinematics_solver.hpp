@@ -1349,6 +1349,7 @@ private:
   std::vector<double> position_step_collision_command_floor_distances_;
   int position_step_call_depth_ = 0;
   std::optional<double> position_step_merit_window_anchor_;
+  std::optional<int> position_step_merit_priority_;
   std::optional<std::vector<double>>
       position_step_stationary_anchor_blocks_;
   double position_step_merit_window_motion_ = 0.0;
@@ -1381,7 +1382,8 @@ private:
       const std::vector<double> &final_target_merits,
       const std::vector<double> &initial_target_block_merits,
       const std::vector<double> &final_target_block_merits,
-      double configuration_step_norm, bool owns_position_step_continuity,
+      int merit_priority, double configuration_step_norm,
+      bool owns_position_step_continuity,
       bool collision_violated, bool step_constraint_tradeoff_active);
   std::optional<Eigen::MatrixXd> warm_start_selector_cache_;
   int warm_start_constraint_rows_ = -1;
@@ -1787,6 +1789,7 @@ private:
     int advisor_scale_sample_count = 0;
     Eigen::VectorXd previous_dq;
     std::optional<double> position_step_merit_window_anchor;
+    std::optional<int> position_step_merit_priority;
     std::optional<std::vector<double>>
         position_step_stationary_anchor_blocks;
     double position_step_merit_window_motion = 0.0;
