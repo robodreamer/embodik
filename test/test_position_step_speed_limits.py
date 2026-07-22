@@ -7,6 +7,7 @@ import os
 import tempfile
 
 import numpy as np
+import pytest
 
 import embodik as eik
 
@@ -75,6 +76,30 @@ def test_position_step_resets_stale_target_velocities_on_all_tasks():
         check = solver.solve_velocity(q, apply_limits=False)
         dq = np.array(check.joint_velocities, dtype=float)
         assert np.linalg.norm(dq) < 1e-10
+    finally:
+        os.unlink(urdf_path)
+
+
+@pytest.mark.parametrize("bad_value", [-1.0, float("nan")])
+def test_position_step_configuration_step_cap_rejects_invalid_values(bad_value: float):
+    urdf_path, robot, solver = _make_solver()
+    try:
+        task = solver.add_frame_task("ee_task", "ee")
+        task.priority = 0
+        task.weight = 1.0
+
+        q = np.array([0.0, 0.0], dtype=float)
+        robot.update_configuration(q)
+        target = np.eye(4, dtype=float)
+        target[:3, 3] = np.array(robot.get_frame_pose("ee").translation, dtype=float)
+        target[1, 3] += 0.1
+
+        opts = eik.PositionStepOptions()
+        opts.max_configuration_step_norm = bad_value
+
+        out = solver.solve_position_step(q, target, "ee_task", opts)
+        assert out.status == eik.SolverStatus.INVALID_INPUT
+        assert "max_configuration_step_norm" in out.status_message
     finally:
         os.unlink(urdf_path)
 

@@ -66,7 +66,7 @@ Eigen::VectorXd joint_limit_distance_gradient(
     if (ab < kAbEpsilon) {
       dhdp = 0.0;
     } else {
-      dhdp = (2.0 * p * ab + p * p * (a - b)) / (ab * ab);
+      dhdp = (2.0 * p * ab - p * p * (a - b)) / (ab * ab);
     }
     const double dpdq = 2.0 / ranges(i);
     grad(i) = -dhdp * dpdq;

@@ -8,12 +8,34 @@ This produces smoother joint velocity profiles (lower jerk) without
 degrading tracking accuracy, especially during fast direction changes.
 """
 
+import pathlib
+
 import numpy as np
 import pytest
 
 import embodik as eik
 
 PANDA_HOME = np.array([0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785, 0.04, 0.04])
+
+
+def _write_prismatic_limit_urdf(tmp_path: pathlib.Path) -> pathlib.Path:
+    urdf_path = tmp_path / "prismatic_limit.urdf"
+    urdf_path.write_text(
+        """<?xml version="1.0"?>
+<robot name="prismatic_limit">
+  <link name="world"/>
+  <link name="moving"/>
+  <joint name="moving_slide" type="prismatic">
+    <parent link="world"/>
+    <child link="moving"/>
+    <axis xyz="1 0 0"/>
+    <limit lower="0" upper="0.2" effort="100" velocity="1"/>
+  </joint>
+</robot>
+""",
+        encoding="utf-8",
+    )
+    return urdf_path
 
 
 @pytest.fixture
@@ -56,6 +78,41 @@ class TestAccelerationConstraints:
         with pytest.raises(ValueError, match="finite and non-negative"):
             solver.set_acceleration_limits(bad_limits)
 
+    def test_sampled_stopping_bound_only_applies_with_acceleration_history(self, tmp_path):
+        """Acceleration mode must not tighten the established position-only bound."""
+        robot = eik.RobotModel(str(_write_prismatic_limit_urdf(tmp_path)))
+        solver = eik.KinematicsSolver(robot)
+        margin = 0.04
+        acceleration_limit = 10.0
+        dt = 0.01
+
+        _, legacy_upper = solver.calculate_velocity_box_constraint(
+            margin, margin, 100.0, acceleration_limit, dt
+        )
+        np.testing.assert_allclose(
+            legacy_upper,
+            np.sqrt(2.0 * acceleration_limit * margin),
+            rtol=0.0,
+            atol=1e-12,
+        )
+
+        solver.set_acceleration_limits(np.array([acceleration_limit], dtype=float))
+        solver.enable_acceleration_limits(True)
+        _, sampled_upper = solver.calculate_velocity_box_constraint(
+            margin, margin, 100.0, acceleration_limit, dt
+        )
+
+        normalized_margin = margin / (acceleration_limit * dt * dt)
+        braking_intervals = np.ceil(0.5 * (np.sqrt(1.0 + 8.0 * normalized_margin) - 1.0) - 1e-12)
+        expected_sampled_upper = (
+            acceleration_limit
+            * dt
+            * (normalized_margin + 0.5 * braking_intervals * (braking_intervals - 1.0))
+            / braking_intervals
+        )
+        np.testing.assert_allclose(sampled_upper, expected_sampled_upper, rtol=0.0, atol=1e-12)
+        assert sampled_upper < legacy_upper
+
     def test_acceleration_limits_bound_first_enabled_tick_from_rest(self, panda_setup):
         """Enabling acceleration limits should constrain the first solve from zero velocity."""
         robot, solver = panda_setup
@@ -79,6 +136,688 @@ class TestAccelerationConstraints:
 
         assert result.status == eik.SolverStatus.SUCCESS
         assert np.max(np.abs(np.asarray(result.joint_velocities))) <= a_max * solver.dt * 1.02
+
+    def test_multistep_position_velocity_matches_applied_outer_step(self, panda_setup):
+        """A multi-step result must report the velocity that produced q_solution."""
+        robot, solver = panda_setup
+        task = solver.add_frame_task("ee", "panda_hand", eik.TaskType.FRAME_POSE)
+        task.priority = 0
+        task.weight = 1.0
+        solver.enable_position_limits(True)
+        solver.enable_velocity_limits(True)
+
+        q = PANDA_HOME.copy()
+        robot.update_configuration(q)
+        ee_pose = robot.get_frame_pose("panda_hand")
+        target = ee_pose.homogeneous()
+        target[0, 3] += 0.2
+
+        options = eik.PositionStepOptions()
+        options.dt = solver.dt
+        options.max_steps = 3
+        options.position_gain = 10.0
+        options.orientation_gain = 10.0
+
+        result = solver.solve_position_step(q, [eik.TaskTarget("ee", target)], options)
+
+        assert result.status == eik.SolverStatus.SUCCESS
+        applied_velocity = (np.asarray(result.q_solution) - q) / solver.dt
+        np.testing.assert_allclose(
+            np.asarray(result.joint_velocities),
+            applied_velocity,
+            rtol=1e-7,
+            atol=1e-9,
+        )
+
+    def test_multistep_position_respects_outer_tick_acceleration_limit(self, panda_setup):
+        """Inner refinements must not multiply the configured outer-tick acceleration."""
+        robot, solver = panda_setup
+        task = solver.add_frame_task("ee", "panda_hand", eik.TaskType.FRAME_POSE)
+        task.priority = 0
+        task.weight = 1.0
+        solver.enable_position_limits(True)
+        solver.enable_velocity_limits(True)
+
+        acceleration_limit = 10.0
+        solver.set_acceleration_limits(np.full(robot.nv, acceleration_limit))
+        solver.enable_acceleration_limits(True)
+
+        q = PANDA_HOME.copy()
+        robot.update_configuration(q)
+        ee_pose = robot.get_frame_pose("panda_hand")
+        target = ee_pose.homogeneous()
+        target[0, 3] += 0.3
+
+        options = eik.PositionStepOptions()
+        options.dt = solver.dt
+        options.max_steps = 3
+        options.position_gain = 10.0
+        options.orientation_gain = 10.0
+
+        previous_applied_velocity = np.zeros(robot.nv)
+        for _ in range(5):
+            result = solver.solve_position_step(q, [eik.TaskTarget("ee", target)], options)
+            assert result.status == eik.SolverStatus.SUCCESS
+            q_next = np.asarray(result.q_solution)
+            applied_velocity = (q_next - q) / solver.dt
+            max_velocity_change = acceleration_limit * solver.dt * 1.02
+            assert (
+                np.max(np.abs(applied_velocity - previous_applied_velocity)) <= max_velocity_change
+            )
+            np.testing.assert_allclose(
+                np.asarray(result.joint_velocities),
+                applied_velocity,
+                rtol=1e-7,
+                atol=1e-9,
+            )
+            previous_applied_velocity = applied_velocity
+            q = q_next
+
+    def test_multistep_position_applies_physical_acceleration_once(self):
+        """Speculative refinements must not consume extra acceleration intervals."""
+        pytest.importorskip("robot_descriptions.panda_description")
+        from robot_descriptions.panda_description import URDF_PATH
+
+        def build_solver():
+            robot = eik.RobotModel(URDF_PATH, floating_base=False)
+            solver = eik.KinematicsSolver(robot)
+            solver.dt = 0.02
+            solver.set_damping(0.05)
+            solver.enable_position_limits(True)
+            solver.enable_velocity_limits(True)
+            task = solver.add_frame_task("ee", "panda_hand", eik.TaskType.FRAME_POSE)
+            task.priority = 0
+            task.weight = 1.0
+            solver.set_acceleration_limits(np.full(robot.nv, 2.0))
+            solver.enable_acceleration_limits(True)
+            return robot, solver
+
+        q = PANDA_HOME.copy()
+        one_step_robot, one_step_solver = build_solver()
+        one_step_robot.update_configuration(q)
+        target = one_step_robot.get_frame_pose("panda_hand").homogeneous()
+        target[:3, 3] += np.array([0.20, 0.12, 0.08])
+
+        one_step_options = eik.PositionStepOptions()
+        one_step_options.dt = one_step_solver.dt
+        one_step_options.max_steps = 1
+        one_step_options.position_gain = 10.0
+        one_step_options.orientation_gain = 10.0
+        one_step = one_step_solver.solve_position_step(
+            q, [eik.TaskTarget("ee", target)], one_step_options
+        )
+
+        multistep_robot, multistep_solver = build_solver()
+        multistep_options = eik.PositionStepOptions()
+        multistep_options.dt = multistep_solver.dt
+        multistep_options.max_steps = 3
+        multistep_options.position_gain = 10.0
+        multistep_options.orientation_gain = 10.0
+        multistep = multistep_solver.solve_position_step(
+            q, [eik.TaskTarget("ee", target)], multistep_options
+        )
+
+        assert one_step.status == eik.SolverStatus.SUCCESS
+        assert multistep.status == eik.SolverStatus.SUCCESS
+        one_step_velocity = (np.asarray(one_step.q_solution) - q) / one_step_options.dt
+        multistep_velocity = (np.asarray(multistep.q_solution) - q) / multistep_options.dt
+        assert np.max(np.abs(one_step_velocity)) <= 2.0 * one_step_options.dt * 1.02
+        assert np.max(np.abs(multistep_velocity)) <= 2.0 * multistep_options.dt * 1.02
+
+    @pytest.mark.parametrize(
+        ("translation_offset", "rotation_angle"),
+        (
+            (np.array([0.20, 0.12, 0.08]), 0.35),
+            (np.zeros(3), 0.35),
+            (np.array([0.20, 0.12, 0.08]), 0.0),
+        ),
+        ids=("full-pose", "orientation-only", "translation-only"),
+    )
+    def test_multistep_position_masks_uncommanded_predictive_blocks(
+        self, translation_offset, rotation_angle
+    ):
+        """Prediction stays feasible without activating an uncommanded pose block."""
+        pytest.importorskip("robot_descriptions.panda_description")
+        from robot_descriptions.panda_description import URDF_PATH
+
+        def build_solver(*, acceleration_limited: bool):
+            robot = eik.RobotModel(URDF_PATH, floating_base=False)
+            solver = eik.KinematicsSolver(robot)
+            solver.dt = 0.02
+            solver.set_damping(0.05)
+            solver.enable_position_limits(True)
+            solver.enable_velocity_limits(True)
+            if acceleration_limited:
+                solver.set_acceleration_limits(np.full(robot.nv, 100.0))
+                solver.enable_acceleration_limits(True)
+            task = solver.add_frame_task("ee", "panda_hand", eik.TaskType.FRAME_POSE)
+            task.priority = 0
+            task.weight = 1.0
+            return robot, solver, task
+
+        q = PANDA_HOME.copy()
+        q[-2:] = 0.02
+        target_robot, nominal_solver, _ = build_solver(acceleration_limited=False)
+        target_robot.update_configuration(q)
+        target = target_robot.get_frame_pose("panda_hand").homogeneous()
+        target[:3, 3] += translation_offset
+        rotation_delta = np.array(
+            [
+                [np.cos(rotation_angle), 0.0, np.sin(rotation_angle)],
+                [0.0, 1.0, 0.0],
+                [-np.sin(rotation_angle), 0.0, np.cos(rotation_angle)],
+            ]
+        )
+        target[:3, :3] = rotation_delta @ target[:3, :3]
+
+        position_gain = 1.0
+        orientation_gain = 1.0
+        options = eik.PositionStepOptions()
+        options.dt = 0.02
+        options.max_steps = 3
+        options.position_gain = position_gain
+        options.orientation_gain = orientation_gain
+        options.primary_solve_mode = eik.TaskSolveMode.MIN_ERROR
+
+        predictor_steps = 1 if np.linalg.norm(translation_offset) <= 1e-12 else 3
+        options.max_steps = predictor_steps
+        nominal_result = nominal_solver.solve_position_step(
+            q, [eik.TaskTarget("ee", target)], options
+        )
+        assert nominal_result.status == eik.SolverStatus.SUCCESS
+        nominal_velocity = (np.asarray(nominal_result.q_solution) - q) / options.dt
+        options.max_steps = 3
+
+        direct_robot, direct_solver, direct_task = build_solver(acceleration_limited=True)
+        direct_task.solve_mode = eik.TaskSolveMode.MIN_ERROR
+        direct_robot.update_configuration(q)
+        direct_task.set_target_pose(target[:3, 3], target[:3, :3])
+        direct_task.update(direct_robot)
+        current_error = np.asarray(direct_task.get_error(), dtype=float)
+        current_task_velocity = np.concatenate(
+            (
+                position_gain * current_error[:3],
+                orientation_gain * current_error[3:],
+            )
+        )
+        predictive_task_velocity = (
+            np.asarray(direct_task.get_jacobian(), dtype=float) @ nominal_velocity
+        )
+
+        projected_task_velocity = np.zeros(6, dtype=float)
+        linear_commanded = float(current_task_velocity[:3] @ current_task_velocity[:3]) > 1e-12
+        angular_commanded = float(current_task_velocity[3:] @ current_task_velocity[3:]) > 1e-12
+        if linear_commanded:
+            projected_task_velocity[:3] = predictive_task_velocity[:3]
+        if linear_commanded or angular_commanded:
+            projected_task_velocity[3:] = predictive_task_velocity[3:]
+
+        direct_task.set_target_velocity(projected_task_velocity)
+        direct_result = direct_solver.solve_velocity(q, apply_limits=True)
+        direct_task.clear_target_velocity()
+        assert direct_result.status == eik.SolverStatus.SUCCESS
+
+        step_robot, step_solver, _ = build_solver(acceleration_limited=True)
+        options.dt = step_solver.dt
+        step_result = step_solver.solve_position_step(q, [eik.TaskTarget("ee", target)], options)
+        assert step_result.status == eik.SolverStatus.SUCCESS
+
+        applied_velocity = (np.asarray(step_result.q_solution) - q) / options.dt
+        np.testing.assert_allclose(
+            applied_velocity,
+            np.asarray(direct_result.joint_velocities),
+            rtol=1e-6,
+            atol=1e-8,
+        )
+
+    def test_multistep_position_selects_lower_merit_feasible_outer_candidate(self):
+        """Outer acceleration projection should keep the better safe task step."""
+        pytest.importorskip("robot_descriptions.panda_description")
+        from robot_descriptions.panda_description import URDF_PATH
+
+        def build_solver(*, acceleration_limited: bool):
+            robot = eik.RobotModel(URDF_PATH, floating_base=False)
+            solver = eik.KinematicsSolver(robot)
+            solver.dt = 0.02
+            solver.set_damping(0.05)
+            solver.enable_position_limits(True)
+            solver.enable_velocity_limits(True)
+            if acceleration_limited:
+                solver.set_acceleration_limits(np.full(robot.nv, 2.0))
+                solver.enable_acceleration_limits(True)
+            task = solver.add_frame_task("ee", "panda_hand", eik.TaskType.FRAME_POSE)
+            task.solve_mode = eik.TaskSolveMode.MIN_ERROR
+            return robot, solver, task
+
+        q = np.array(
+            [
+                -0.17136382,
+                -0.78512805,
+                -0.20969206,
+                -2.17748321,
+                0.05088892,
+                1.60011931,
+                0.95083846,
+                0.02,
+                0.02,
+            ]
+        )
+        translation_offset = np.array([-0.05516292, 0.0813279, -0.04271275])
+        axis = np.array([-0.75289164, 0.03292882, 0.51645381])
+        axis /= np.linalg.norm(axis)
+        angle = 0.7206624117090492
+        x, y, z = axis
+        c = np.cos(angle)
+        s = np.sin(angle)
+        one_minus_c = 1.0 - c
+        rotation_delta = np.array(
+            [
+                [
+                    c + x * x * one_minus_c,
+                    x * y * one_minus_c - z * s,
+                    x * z * one_minus_c + y * s,
+                ],
+                [
+                    y * x * one_minus_c + z * s,
+                    c + y * y * one_minus_c,
+                    y * z * one_minus_c - x * s,
+                ],
+                [
+                    z * x * one_minus_c - y * s,
+                    z * y * one_minus_c + x * s,
+                    c + z * z * one_minus_c,
+                ],
+            ]
+        )
+
+        nominal_robot, nominal_solver, nominal_task = build_solver(acceleration_limited=False)
+        nominal_robot.update_configuration(q)
+        target = nominal_robot.get_frame_pose("panda_hand").homogeneous()
+        target[:3, 3] += translation_offset
+        target[:3, :3] = rotation_delta @ target[:3, :3]
+
+        options = eik.PositionStepOptions()
+        options.dt = nominal_solver.dt
+        options.max_steps = 3
+        options.position_gain = 1.0
+        options.orientation_gain = 1.0
+        options.primary_solve_mode = eik.TaskSolveMode.MIN_ERROR
+        nominal_result = nominal_solver.solve_position_step(
+            q, [eik.TaskTarget("ee", target)], options
+        )
+        assert nominal_result.status == eik.SolverStatus.SUCCESS
+        nominal_velocity = (np.asarray(nominal_result.q_solution) - q) / options.dt
+
+        acceleration_step = 2.0 * options.dt * 1.01
+        componentwise_velocity = np.clip(nominal_velocity, -acceleration_step, acceleration_step)
+        componentwise_q = q + options.dt * componentwise_velocity
+
+        metric_robot, metric_solver, metric_task = build_solver(acceleration_limited=True)
+        metric_robot.update_configuration(q)
+        metric_task.set_target_pose(target[:3, 3], target[:3, :3])
+        metric_task.update(metric_robot)
+        metric_task.set_target_velocity(np.asarray(metric_task.get_jacobian()) @ nominal_velocity)
+        metric_result = metric_solver.solve_velocity(q, apply_limits=True)
+        metric_task.clear_target_velocity()
+        assert metric_result.status == eik.SolverStatus.SUCCESS
+        metric_q = q + options.dt * np.asarray(metric_result.joint_velocities)
+
+        def task_block_merits(robot, task, candidate_q):
+            robot.update_configuration(candidate_q)
+            task.set_target_pose(target[:3, 3], target[:3, :3])
+            task.update(robot)
+            error = np.asarray(task.get_error())
+            return float(np.linalg.norm(error[:3])), float(np.linalg.norm(error[3:]))
+
+        componentwise_merits = task_block_merits(nominal_robot, nominal_task, componentwise_q)
+        metric_merits = task_block_merits(metric_robot, metric_task, metric_q)
+        assert componentwise_merits[0] + 1e-7 < metric_merits[0]
+        assert componentwise_merits[1] + 1e-7 < metric_merits[1]
+
+        step_robot, step_solver, _ = build_solver(acceleration_limited=True)
+        step_result = step_solver.solve_position_step(q, [eik.TaskTarget("ee", target)], options)
+        assert step_result.status == eik.SolverStatus.SUCCESS
+        np.testing.assert_allclose(
+            np.asarray(step_result.q_solution), componentwise_q, rtol=0.0, atol=1e-9
+        )
+
+    def test_moving_pose_projection_is_continuous_across_negligible_translation(self):
+        """Nanometer target noise must not switch to a distant joint velocity."""
+        pytest.importorskip("robot_descriptions.panda_description")
+        from robot_descriptions.panda_description import URDF_PATH
+
+        q0 = np.array(
+            [
+                -0.17136382,
+                -0.78512805,
+                -0.20969206,
+                -2.17748321,
+                0.05088892,
+                1.60011931,
+                0.95083846,
+                0.02,
+                0.02,
+            ]
+        )
+        translation_offset = np.array([-0.05516292, 0.0813279, -0.04271275])
+        axis = np.array([-0.75289164, 0.03292882, 0.51645381])
+        axis /= np.linalg.norm(axis)
+
+        def rotation_delta(angle):
+            x, y, z = axis
+            c = np.cos(angle)
+            s = np.sin(angle)
+            one_minus_c = 1.0 - c
+            return np.array(
+                [
+                    [
+                        c + x * x * one_minus_c,
+                        x * y * one_minus_c - z * s,
+                        x * z * one_minus_c + y * s,
+                    ],
+                    [
+                        y * x * one_minus_c + z * s,
+                        c + y * y * one_minus_c,
+                        y * z * one_minus_c - x * s,
+                    ],
+                    [
+                        z * x * one_minus_c - y * s,
+                        z * y * one_minus_c + x * s,
+                        c + z * z * one_minus_c,
+                    ],
+                ]
+            )
+
+        options = eik.PositionStepOptions()
+        options.dt = 0.02
+        options.max_steps = 3
+        options.position_gain = 1.0
+        options.orientation_gain = 1.0
+        options.primary_solve_mode = eik.TaskSolveMode.MIN_ERROR
+
+        def second_tick_velocity(translation_noise):
+            robot = eik.RobotModel(URDF_PATH, floating_base=False)
+            solver = eik.KinematicsSolver(robot)
+            solver.dt = options.dt
+            solver.set_damping(0.05)
+            solver.enable_position_limits(True)
+            solver.enable_velocity_limits(True)
+            solver.set_acceleration_limits(np.full(robot.nv, 2.0))
+            solver.enable_acceleration_limits(True)
+            task = solver.add_frame_task("ee", "panda_hand", eik.TaskType.FRAME_POSE)
+            task.solve_mode = eik.TaskSolveMode.MIN_ERROR
+
+            robot.update_configuration(q0)
+            base_target = robot.get_frame_pose("panda_hand").homogeneous()
+            first_target = base_target.copy()
+            first_target[:3, 3] += translation_offset
+            first_target[:3, :3] = rotation_delta(0.55) @ first_target[:3, :3]
+            first_result = solver.solve_position_step(
+                q0, [eik.TaskTarget("ee", first_target)], options
+            )
+            assert first_result.status == eik.SolverStatus.SUCCESS
+
+            q1 = np.asarray(first_result.q_solution)
+            second_target = base_target.copy()
+            second_target[:3, 3] += translation_offset + np.array([translation_noise, 0.0, 0.0])
+            second_target[:3, :3] = rotation_delta(0.7206624117090492) @ second_target[:3, :3]
+            second_result = solver.solve_position_step(
+                q1, [eik.TaskTarget("ee", second_target)], options
+            )
+            assert second_result.status == eik.SolverStatus.SUCCESS
+            return (np.asarray(second_result.q_solution) - q1) / options.dt
+
+        exact_velocity = second_tick_velocity(0.0)
+        perturbed_velocity = second_tick_velocity(2e-9)
+
+        assert np.linalg.norm(perturbed_velocity - exact_velocity) < 1e-4
+
+    def test_streaming_rotation_target_keeps_first_tick_projection(self):
+        """Incidental position error must not reclassify a rotation command."""
+        pytest.importorskip("robot_descriptions.panda_description")
+        from robot_descriptions.panda_description import URDF_PATH
+
+        def build_solver(*, acceleration_limited: bool):
+            robot = eik.RobotModel(URDF_PATH, floating_base=False)
+            solver = eik.KinematicsSolver(robot)
+            solver.dt = 0.02
+            solver.set_damping(0.05)
+            solver.enable_position_limits(True)
+            solver.enable_velocity_limits(True)
+            if acceleration_limited:
+                solver.set_acceleration_limits(np.full(robot.nv, 100.0))
+                solver.enable_acceleration_limits(True)
+            task = solver.add_frame_task("ee", "panda_hand", eik.TaskType.FRAME_POSE)
+            task.solve_mode = eik.TaskSolveMode.MIN_ERROR
+            return robot, solver, task
+
+        q0 = PANDA_HOME.copy()
+        q0[-2:] = 0.02
+        target_robot, _, _ = build_solver(acceleration_limited=False)
+        target_robot.update_configuration(q0)
+        base_target = target_robot.get_frame_pose("panda_hand").homogeneous()
+
+        def rotated_target(angle):
+            target = base_target.copy()
+            rotation_delta = np.array(
+                [
+                    [np.cos(angle), 0.0, np.sin(angle)],
+                    [0.0, 1.0, 0.0],
+                    [-np.sin(angle), 0.0, np.cos(angle)],
+                ]
+            )
+            target[:3, :3] = rotation_delta @ target[:3, :3]
+            return target
+
+        options = eik.PositionStepOptions()
+        options.dt = 0.02
+        options.max_steps = 3
+        options.position_gain = 1.0
+        options.orientation_gain = 1.0
+        options.primary_solve_mode = eik.TaskSolveMode.MIN_ERROR
+
+        step_robot, step_solver, step_task = build_solver(acceleration_limited=True)
+        first_target = rotated_target(0.20)
+        first_result = step_solver.solve_position_step(
+            q0, [eik.TaskTarget("ee", first_target)], options
+        )
+        assert first_result.status == eik.SolverStatus.SUCCESS
+        q1 = np.asarray(first_result.q_solution)
+        previous_velocity = (q1 - q0) / options.dt
+
+        second_target = rotated_target(0.35)
+        step_robot.update_configuration(q1)
+        step_task.set_target_pose(second_target[:3, 3], second_target[:3, :3])
+        step_task.update(step_robot)
+        assert np.linalg.norm(np.asarray(step_task.get_error())[:3]) > 1e-8
+
+        nominal_robot, nominal_solver, _ = build_solver(acceleration_limited=False)
+        options.max_steps = 1
+        nominal_result = nominal_solver.solve_position_step(
+            q1, [eik.TaskTarget("ee", second_target)], options
+        )
+        assert nominal_result.status == eik.SolverStatus.SUCCESS
+        first_tick_velocity = (np.asarray(nominal_result.q_solution) - q1) / options.dt
+        options.max_steps = 3
+
+        direct_robot, direct_solver, direct_task = build_solver(acceleration_limited=True)
+        direct_solver.set_previous_joint_velocities(previous_velocity)
+        direct_robot.update_configuration(q1)
+        direct_task.set_target_pose(second_target[:3, 3], second_target[:3, :3])
+        direct_task.update(direct_robot)
+        direct_task.set_target_velocity(
+            np.asarray(direct_task.get_jacobian()) @ first_tick_velocity
+        )
+        direct_result = direct_solver.solve_velocity(q1, apply_limits=True)
+        direct_task.clear_target_velocity()
+        assert direct_result.status == eik.SolverStatus.SUCCESS
+
+        second_result = step_solver.solve_position_step(
+            q1, [eik.TaskTarget("ee", second_target)], options
+        )
+        assert second_result.status == eik.SolverStatus.SUCCESS
+        applied_velocity = (np.asarray(second_result.q_solution) - q1) / options.dt
+        np.testing.assert_allclose(
+            applied_velocity,
+            np.asarray(direct_result.joint_velocities),
+            rtol=1e-6,
+            atol=1e-8,
+        )
+
+    def test_position_step_accepts_caller_applied_velocity_reference(self, panda_setup):
+        """A caller can synchronize acceleration state to the velocity it applied."""
+        robot, solver = panda_setup
+        task = solver.add_frame_task("ee", "panda_hand", eik.TaskType.FRAME_POSE)
+        task.priority = 0
+        task.weight = 1.0
+        solver.enable_position_limits(True)
+        solver.enable_velocity_limits(True)
+
+        acceleration_limit = 10.0
+        solver.set_acceleration_limits(np.full(robot.nv, acceleration_limit))
+        solver.enable_acceleration_limits(True)
+        caller_velocity = np.full(robot.nv, 0.5)
+        caller_velocity[-2:] = 0.0
+        solver.set_previous_joint_velocities(caller_velocity)
+
+        q = PANDA_HOME.copy()
+        robot.update_configuration(q)
+        ee_pose = robot.get_frame_pose("panda_hand")
+        target = ee_pose.homogeneous()
+        target[0, 3] -= 0.3
+
+        options = eik.PositionStepOptions()
+        options.dt = solver.dt
+        options.max_steps = 3
+        options.position_gain = 10.0
+        options.orientation_gain = 10.0
+
+        result = solver.solve_position_step(q, [eik.TaskTarget("ee", target)], options)
+        applied_velocity = (np.asarray(result.q_solution) - q) / solver.dt
+        np.testing.assert_array_less(
+            np.abs(applied_velocity - caller_velocity),
+            np.full(robot.nv, acceleration_limit * solver.dt * 1.02 + 1e-12),
+        )
+        np.testing.assert_allclose(
+            solver.get_previous_joint_velocities(),
+            applied_velocity,
+            rtol=1e-7,
+            atol=1e-9,
+        )
+
+    def test_position_limit_overrides_infeasible_acceleration_reference(self, panda_setup):
+        """A hard position limit stops an outward caller velocity immediately."""
+        robot, solver = panda_setup
+        task = solver.add_frame_task("ee", "panda_hand", eik.TaskType.FRAME_POSE)
+        task.priority = 0
+        task.weight = 1.0
+        solver.enable_position_limits(True)
+        solver.enable_velocity_limits(True)
+        solver.set_acceleration_limits(np.full(robot.nv, 10.0))
+        solver.enable_acceleration_limits(True)
+
+        q = PANDA_HOME.copy()
+        robot.update_configuration(q)
+        ee_pose = robot.get_frame_pose("panda_hand")
+        target = ee_pose.homogeneous()
+        target[0, 3] -= 0.3
+
+        infeasible_reference = np.zeros(robot.nv)
+        infeasible_reference[-2:] = 0.5
+        solver.set_previous_joint_velocities(infeasible_reference)
+        options = eik.PositionStepOptions()
+        options.dt = solver.dt
+        options.max_steps = 3
+
+        result = solver.solve_position_step(q, [eik.TaskTarget("ee", target)], options)
+        applied_velocity = (np.asarray(result.q_solution) - q) / solver.dt
+
+        assert np.all(np.asarray(result.q_solution)[-2:] <= q[-2:] + 1e-12)
+        assert np.all(applied_velocity[-2:] <= 1e-12)
+
+    def test_far_stationary_target_decelerates_before_hold(self, panda_setup):
+        """A continuity hold must brake a feasible moving command before stopping."""
+        robot, solver = panda_setup
+        solver.dt = 0.02
+        task = solver.add_frame_task("ee", "panda_hand", eik.TaskType.FRAME_POSE)
+        task.priority = 0
+        task.weight = 1.0
+        solver.enable_position_limits(True)
+        solver.enable_velocity_limits(True)
+
+        acceleration_limit = 10.0
+        solver.set_acceleration_limits(np.full(robot.nv, acceleration_limit))
+        solver.enable_acceleration_limits(True)
+
+        q = PANDA_HOME.copy()
+        robot.update_configuration(q)
+        target = robot.get_frame_pose("panda_hand").homogeneous()
+        target[0, 3] += 0.8
+        target[2, 3] += 0.8
+
+        options = eik.PositionStepOptions()
+        options.dt = solver.dt
+        options.max_steps = 3
+        options.position_gain = 10.0
+        options.orientation_gain = 10.0
+        options.max_configuration_step_norm = 0.12
+
+        previous_velocity = np.zeros(robot.nv)
+        hold_seen = False
+        for _ in range(80):
+            result = solver.solve_position_step(q, [eik.TaskTarget("ee", target)], options)
+            q_next = np.asarray(result.q_solution)
+            applied_velocity = (q_next - q) / solver.dt
+            assert (
+                np.max(np.abs(applied_velocity - previous_velocity))
+                <= acceleration_limit * solver.dt * 1.02
+            )
+            if result.position_step_hold_active:
+                np.testing.assert_allclose(applied_velocity, np.zeros(robot.nv), atol=1e-12)
+                hold_seen = True
+            previous_velocity = applied_velocity
+            q = q_next
+
+        assert hold_seen
+        np.testing.assert_allclose(previous_velocity, np.zeros(robot.nv), atol=1e-12)
+
+    def test_multistep_position_brakes_before_joint_limit(self, tmp_path):
+        robot = eik.RobotModel(str(_write_prismatic_limit_urdf(tmp_path)))
+        solver = eik.KinematicsSolver(robot)
+        solver.dt = 0.02
+        solver.set_damping(0.01)
+        solver.enable_position_limits(True)
+        solver.enable_velocity_limits(True)
+        acceleration_limit = 10.0
+        solver.set_acceleration_limits(np.array([acceleration_limit], dtype=float))
+        solver.enable_acceleration_limits(True)
+
+        task = solver.add_frame_task("moving_task", "moving")
+        task.priority = 0
+        task.weight = 1.0
+        q = np.array([0.02], dtype=float)
+        robot.update_configuration(q)
+        target = robot.get_frame_pose("moving").homogeneous()
+        target[0, 3] += 0.5
+
+        options = eik.PositionStepOptions()
+        options.dt = solver.dt
+        options.max_steps = 3
+        options.position_gain = 10.0
+        options.orientation_gain = 1.0
+
+        previous_velocity = np.zeros(robot.nv)
+        for _ in range(100):
+            result = solver.solve_position_step(q, target, "moving_task", options)
+            q_next = np.asarray(result.q_solution)
+            applied_velocity = (q_next - q) / solver.dt
+            assert q_next[0] <= 0.2 + 1e-12
+            assert (
+                np.max(np.abs(applied_velocity - previous_velocity))
+                <= acceleration_limit * solver.dt * 1.02
+            )
+            previous_velocity = applied_velocity
+            q = q_next
 
     def test_acceleration_limits_reduce_jerk(self, panda_setup):
         """With acceleration limits, max joint velocity jump (jerk proxy)

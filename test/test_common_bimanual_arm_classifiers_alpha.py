@@ -17,12 +17,14 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from examples.example_helpers.common_bimanual_teleop_app import (
+    DEFAULT_AUTO_TORSO_CONTRIBUTION,
     DEFAULT_MAX_ANGULAR_SPEED,
     DEFAULT_MAX_LINEAR_SPEED,
     _apply_bimanual_task_dof_ownership,
     _apply_position_step_speed_caps,
     _apply_torso_control_priority_policy,
     _collect_torso_arm_contribution_indices,
+    _effective_torso_contribution,
     _is_arm_joint,
     _is_left_arm_joint,
     _is_right_arm_joint,
@@ -237,6 +239,15 @@ def test_alpha_torso_contribution_metric_groups_torso_and_arms() -> None:
         )
         is None
     )
+
+
+def test_auto_torso_contribution_caps_torso_bias() -> None:
+    assert _effective_torso_contribution(0.75, torso_prefer_locked=False) == 0.75
+    assert (
+        _effective_torso_contribution(0.75, torso_prefer_locked=True)
+        == DEFAULT_AUTO_TORSO_CONTRIBUTION
+    )
+    assert _effective_torso_contribution(0.2, torso_prefer_locked=True) == 0.2
 
 
 def test_common_bimanual_default_speed_caps_apply_to_position_step_options() -> None:

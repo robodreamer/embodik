@@ -900,13 +900,14 @@ class TestDualEEBodyStall:
     to match the dual-EE teleop pattern.
     """
 
-    def test_stall_recovery_does_not_relax_margin_without_stall(self):
-        """The robust baseline should not spend margin budget when no stall occurs."""
+    def test_stationary_merit_hold_does_not_relax_collision_margin(self):
+        """A continuity hold must not spend collision-margin recovery budget."""
         setup = _setup_dual_iiwa_body_stall()
         if setup is None:
             pytest.skip("Dual iiwa model not available")
 
         robot, solver, q0, left_T, right_T, min_dist = setup
+        solver.set_non_worsening_collision_floor_enabled(True)
         solver.configure_stall_handler(stall_threshold=5)
         opts = eik.PositionStepOptions()
         opts.stall_recovery = True
@@ -930,15 +931,17 @@ class TestDualEEBodyStall:
         assert np.all(np.isfinite(q))
         assert max(stall_counters) == 0
         assert final_min == pytest.approx(min_dist)
+        assert solver.solve_position_step(q, targets, opts).position_step_hold_active
         solver.disable_stall_handler()
 
-    def test_stall_counter_stays_clear_when_solver_remains_productive(self):
-        """Do not report legacy collision stalls when robust solve keeps moving."""
+    def test_stationary_merit_hold_does_not_count_as_collision_stall(self):
+        """A deliberate continuity hold is not a collision-recovery stall."""
         setup = _setup_dual_iiwa_body_stall()
         if setup is None:
             pytest.skip("Dual iiwa model not available")
 
         robot, solver, q0, left_T, right_T, min_dist = setup
+        solver.set_non_worsening_collision_floor_enabled(True)
         solver.configure_stall_handler(stall_threshold=5)
         opts = eik.PositionStepOptions()
         opts.stall_recovery = True
@@ -949,7 +952,7 @@ class TestDualEEBodyStall:
             eik.TaskTarget("right_body", right_T),
         ]
 
-        _, _, stall_counters = _run_position_step_loop(
+        q, _, stall_counters = _run_position_step_loop(
             solver,
             robot,
             q0.copy(),
@@ -959,6 +962,7 @@ class TestDualEEBodyStall:
         )
 
         assert max(stall_counters) == 0
+        assert solver.solve_position_step(q, targets, opts).position_step_hold_active
         solver.disable_stall_handler()
 
     def test_computation_time_bounded_during_stall(self):
@@ -1423,7 +1427,7 @@ class TestClampingDoesNotTriggerStallRelaxation:
     the stall handler must NOT misinterpret this as a collision-caused
     stall and relax ``min_distance``.
 
-    Root cause scenario observed on Alpha robot:
+    Root cause scenario observed in a body-clearance configuration:
       1. Arm approaches torso → joints near limits get Jacobian columns
          clamped to zero.
       2. Clamped Jacobian produces INFEASIBLE or SUCCESS with tiny ||dq||.

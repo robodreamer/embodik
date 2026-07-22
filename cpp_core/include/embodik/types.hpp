@@ -145,6 +145,19 @@ struct VelocitySolverResult : public SolverResult {
   /// the optional stateful layout switcher. Zero when the switcher is disabled
   /// or has not yet seen a prior solve.
   double binding_score = 0.0;
+
+  // Preferred-lock candidate diagnostics.
+  bool preferred_lock_attempted = false;
+  bool preferred_lock_used = false;
+  bool preferred_lock_fallback_used = false;
+  SolverStatus preferred_lock_candidate_status = SolverStatus::kInvalidInput;
+  double preferred_lock_candidate_position_error =
+      std::numeric_limits<double>::quiet_NaN();
+  double preferred_lock_candidate_orientation_error =
+      std::numeric_limits<double>::quiet_NaN();
+  double preferred_lock_candidate_step_norm =
+      std::numeric_limits<double>::quiet_NaN();
+  double preferred_lock_candidate_time_ms = 0.0;
 };
 
 // Configuration for regularized matrix inversion
@@ -167,6 +180,7 @@ struct ObjectiveSolveConfig {
   int priority = 0;
   TaskSolveMode solve_mode = TaskSolveMode::kScale;
   bool allow_min_error_fallback = true;
+  bool use_goal_directed_limit_clamp = false;
 };
 
 // Optional torso tracking/constraint configuration for position IK.
@@ -287,6 +301,24 @@ struct PositionStepOptions {
   // Optional task-space speed caps (0 or negative = unlimited).
   double max_linear_speed = 0.0;  // m/s cap on ||v_linear||
   double max_angular_speed = 0.0; // rad/s cap on ||v_angular||
+  /// Optional configuration-space cap for the whole solve_position_step call.
+  /// When >0, q_solution is constrained so
+  /// ||difference(current_q, q_solution)|| <= max_configuration_step_norm,
+  /// regardless of solve mode or max_steps. This bounds the outer control tick
+  /// while preserving the caller's selected hierarchy/fallback semantics.
+  double max_configuration_step_norm = 0.0;
+  /// Optional frame used only when comparing successive targets for stationary
+  /// continuity. World-frame pose tasks are expressed in this frame before
+  /// target-change detection; relative-frame tasks are already invariant and
+  /// remain unchanged. This does not alter the target passed to IK.
+  std::string continuity_reference_frame;
+  /// Optional caller-owned command identity for stationary continuity.
+  /// Values >= 0 override pose-derived target-change detection: the caller
+  /// must increment the revision whenever the source command changes. This is
+  /// useful when world-frame targets are re-derived from a moving or
+  /// asynchronously sampled reference frame. The default -1 keeps automatic
+  /// geometry-based detection.
+  std::int64_t continuity_command_revision = -1;
   // Optional torso orientation task and torso pose bounds. Bounds are enforced
   // in solve_position_step via additional inequality rows, consistent with
   // solve_position semantics.
@@ -356,6 +388,29 @@ struct PositionStepOptions {
   /// scale collapse or NUMERICAL_ERROR under active collision/CoM constraints.
   /// Mirrors PositionIKOptions::primary_allow_min_error_fallback semantics.
   bool primary_allow_min_error_fallback = false;
+  /// Try one extra solve with these nv-indices hard locked before the normal
+  /// solve. The locked candidate is accepted when it is continuous and each
+  /// active-target error component is either inside tolerance or still making
+  /// meaningful progress; otherwise the normal solve runs from the original
+  /// current_q. Candidate and fallback are each evaluated as one integration
+  /// step so a lock-policy handoff cannot hide a multi-step jump inside one
+  /// outer control tick. Empty = no extra solve.
+  std::vector<int> preferred_locked_joint_indices;
+  /// Primary pose-task solve mode used only by the preferred-lock candidate.
+  TaskSolveMode preferred_lock_solve_mode = TaskSolveMode::kMinError;
+  /// Maximum active-target position error allowed for the preferred-lock
+  /// candidate (metres).
+  double preferred_lock_tracking_tolerance = 0.035;
+  /// Maximum active-target orientation error allowed for the preferred-lock
+  /// candidate (radians). Set <=0 to disable this orientation gate.
+  double preferred_lock_orientation_tolerance = 0.25;
+  /// Maximum configuration step norm allowed for the preferred-lock candidate.
+  /// Set <=0 to disable this continuity gate.
+  double preferred_lock_max_step_norm = 0.35;
+  /// Minimum fractional reduction required for each over-tolerance active-target
+  /// error component before accepting a preferred-lock candidate that is still
+  /// outside the final tracking tolerance.
+  double preferred_lock_min_error_reduction_ratio = 0.02;
 };
 
 // Per-task target for multi-task solve_position_step().
@@ -366,6 +421,14 @@ struct TaskTarget {
   double orientation_gain = 1.0;
   Eigen::Matrix4d secondary_target_pose = Eigen::Matrix4d::Identity();
   bool has_secondary_target_pose = false;
+  /// Admissible position error for acceleration-aware finite-step protection
+  /// of a higher-priority task. Values <= 0 retain the default final-candidate
+  /// guard without adding a viability row.
+  double priority_position_tolerance = -1.0;
+  /// Admissible orientation error for acceleration-aware finite-step
+  /// protection of a higher-priority task. Values <= 0 retain the default
+  /// final-candidate guard without adding a viability row.
+  double priority_orientation_tolerance = -1.0;
 };
 
 // Position IK result
@@ -385,6 +448,10 @@ struct PositionIKResult : public VelocitySolverResult {
   /// Number of steps where a Jacobian-based escape nudge was applied to
   /// move the configuration out of collision penetration during a stall.
   int stall_escape_count = 0;
+  /// True when solve_position_step intentionally returned the unchanged input
+  /// configuration because a stationary or soft-infeasible command exhausted
+  /// useful progress. Callers may accept this non-success result as a hold.
+  bool position_step_hold_active = false;
 };
 
 /// Lightweight, derived bundle of diagnostics from a PositionIKResult.
@@ -432,6 +499,18 @@ struct SolveDiagnostics {
   SolverRecoveryStage recovery_stage = SolverRecoveryStage::kPrioritized;
   /// Mirrors VelocitySolverResult::binding_score.
   double binding_score = 0.0;
+  /// Mirrors VelocitySolverResult preferred-lock candidate diagnostics.
+  bool preferred_lock_attempted = false;
+  bool preferred_lock_used = false;
+  bool preferred_lock_fallback_used = false;
+  SolverStatus preferred_lock_candidate_status = SolverStatus::kInvalidInput;
+  double preferred_lock_candidate_position_error =
+      std::numeric_limits<double>::quiet_NaN();
+  double preferred_lock_candidate_orientation_error =
+      std::numeric_limits<double>::quiet_NaN();
+  double preferred_lock_candidate_step_norm =
+      std::numeric_limits<double>::quiet_NaN();
+  double preferred_lock_candidate_time_ms = 0.0;
 };
 
 /// Bundled runtime defaults for interactive solve loops.
@@ -451,6 +530,11 @@ struct SolverRuntimeConfig {
   double adaptive_dt_max_scale = 5.0;
   /// Default PositionStepOptions::adaptive_dt_reference_distance value.
   double adaptive_dt_reference_distance = 0.05;
+  /// Enforce first-order non-worsening of scalar joint-limit slack once a
+  /// finite limit enters joint_limit_non_worsening_margin. Default off.
+  bool joint_limit_non_worsening_enabled = false;
+  /// Activation distance from either finite scalar joint limit.
+  double joint_limit_non_worsening_margin = 0.04;
   /// Enable read-only constrained weighted-advisor diagnostics. When true, each
   /// velocity solve also computes a weighted stacked MIN_ERROR candidate under
   /// the same hard constraints. The prioritized SNS output remains

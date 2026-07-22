@@ -117,6 +117,42 @@ def test_consistent_arm_targets_recover_object_target(dual_arm_solver):
     np.testing.assert_allclose(error[:3], object_target[:3, 3] - object_calib[:3, 3], atol=1e-10)
 
 
+def test_stationary_paired_ects_targets_latch_zero_output(dual_arm_solver):
+    solver, robot = dual_arm_solver
+    absolute_task, _object_pose, left_fk, right_fk = _calibrated_task(solver, robot)
+    relative_task = solver.add_relative_frame_task("rel", "left_ee", "right_ee")
+    absolute_task.solve_mode = embodik.TaskSolveMode.MIN_ERROR
+    relative_task.solve_mode = embodik.TaskSolveMode.MIN_ERROR
+
+    q = np.asarray(robot.get_current_configuration(), dtype=float)
+    relative_target = np.linalg.inv(left_fk) @ right_fk
+    absolute_target = embodik.TaskTarget("abs", left_fk, 10.0, 10.0)
+    absolute_target.secondary_target_pose = right_fk
+    absolute_target.has_secondary_target_pose = True
+    targets = [
+        absolute_target,
+        embodik.TaskTarget("rel", relative_target, 10.0, 10.0),
+    ]
+    options = embodik.PositionStepOptions()
+    options.max_steps = 1
+    options.dt = solver.dt
+    options.primary_solve_mode = embodik.TaskSolveMode.MIN_ERROR
+    options.continuity_command_revision = 1
+
+    results = []
+    for _ in range(45):
+        result = solver.solve_position_step(q, targets, options)
+        q = np.asarray(result.q_solution, dtype=float)
+        robot.update_configuration(q)
+        results.append(result)
+
+    assert any(result.position_step_hold_active for result in results)
+    assert all(result.position_step_hold_active for result in results[-10:])
+    for result in results[-10:]:
+        np.testing.assert_allclose(result.q_solution, q, rtol=0.0, atol=1e-12)
+        np.testing.assert_allclose(result.joint_velocities, 0.0, rtol=0.0, atol=1e-12)
+
+
 def test_task_target_pair_records_secondary_pose():
     primary = _make_se3(_rot_z(0.1), np.array([0.1, 0.2, 0.3]))
     secondary = _make_se3(_rot_z(-0.2), np.array([-0.1, 0.4, 0.2]))

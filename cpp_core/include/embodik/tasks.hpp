@@ -12,9 +12,11 @@
 
 #include <Eigen/Dense>
 #include <embodik/types.hpp>
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace embodik {
 
@@ -23,6 +25,7 @@ using Matrix6Xd = Eigen::Matrix<double, 6, Eigen::Dynamic>;
 
 // Forward declarations
 class RobotModel;
+class KinematicsSolver;
 
 /**
  * @brief Task types enumeration
@@ -122,6 +125,10 @@ public:
      * @param velocity Target velocity vector
      */
     virtual void setTargetVelocity(const Eigen::VectorXd& velocity) {
+        if (!target_velocity_.has_value() ||
+            !target_velocity_->isApprox(velocity, 0.0)) {
+            markContinuityStateChanged();
+        }
         target_velocity_ = velocity;
     }
 
@@ -129,6 +136,9 @@ public:
      * @brief Clear target velocity (revert to error-based velocity)
      */
     virtual void clearTargetVelocity() {
+        if (target_velocity_.has_value()) {
+            markContinuityStateChanged();
+        }
         target_velocity_.reset();
     }
 
@@ -143,6 +153,11 @@ public:
      * @return Type of this task
      */
     virtual TaskType getType() const = 0;
+
+    /**
+     * @brief Whether near-limit Jacobian clamping should use the task goal.
+     */
+    virtual bool usesGoalDirectedLimitClamp() const { return false; }
 
     // Getters and setters
     const std::string& getName() const { return name_; }
@@ -161,8 +176,15 @@ public:
     void setLastEffectiveMode(TaskSolveMode mode) { last_effective_mode_ = mode; }
     bool getUsedMinErrorFallback() const { return used_min_error_fallback_; }
     void setUsedMinErrorFallback(bool used) { used_min_error_fallback_ = used; }
+    std::uint64_t getContinuityRevision() const { return continuity_revision_; }
+    std::uint64_t getContinuityTargetRevision() const {
+        return continuity_target_revision_;
+    }
 
 protected:
+    void markContinuityStateChanged() { ++continuity_revision_; }
+    void markContinuityTargetChanged() { ++continuity_target_revision_; }
+
     std::string name_;
     int priority_;
     double weight_;
@@ -173,6 +195,19 @@ protected:
     bool used_min_error_fallback_ = false;
     mutable std::optional<Eigen::VectorXd> target_velocity_;  // Direct velocity specification
     std::vector<int> excluded_joint_indices_;  // Velocity space indices to exclude from Jacobian
+    std::uint64_t continuity_revision_ = 0;
+    std::uint64_t continuity_target_revision_ = 0;
+
+private:
+    friend class KinematicsSolver;
+
+    void setPositionStepTargetVelocity(const Eigen::VectorXd& velocity) {
+        target_velocity_ = velocity;
+    }
+
+    void clearPositionStepTargetVelocity() {
+        target_velocity_.reset();
+    }
 };
 
 /**
@@ -237,15 +272,24 @@ public:
      * @brief Set position mask (which axes to control)
      * @param mask 3D boolean mask (true = control axis)
      */
-    void setPositionMask(const Eigen::Vector3d& mask) { position_mask_ = mask; }
+    void setPositionMask(const Eigen::Vector3d& mask) {
+        if (!position_mask_.isApprox(mask, 0.0)) {
+            position_mask_ = mask;
+            markContinuityStateChanged();
+            invalidateCache();
+        }
+    }
 
     /**
      * @brief Set orientation mask (which axes to control)
      * @param mask 3D boolean mask (true = control axis)
      */
     void setOrientationMask(const Eigen::Vector3d& mask) {
-        orientation_mask_ = mask;
-        invalidateCache();
+        if (!orientation_mask_.isApprox(mask, 0.0)) {
+            orientation_mask_ = mask;
+            markContinuityStateChanged();
+            invalidateCache();
+        }
     }
 
     /**
@@ -334,7 +378,12 @@ public:
      * @brief Set position mask (which axes to control)
      * @param mask 3D boolean mask (true = control axis)
      */
-    void setPositionMask(const Eigen::Vector3d& mask) { position_mask_ = mask; }
+    void setPositionMask(const Eigen::Vector3d& mask) {
+        if (!position_mask_.isApprox(mask, 0.0)) {
+            position_mask_ = mask;
+            markContinuityStateChanged();
+        }
+    }
 
     // Implement base class methods
     void update(const RobotModel& model) override;
@@ -398,6 +447,13 @@ public:
     void setTargetConfiguration(const Eigen::VectorXd& q_target);
 
     /**
+     * @brief Update a moving regularization reference without declaring a new
+     * posture command.
+     * @param q_reference Reference joint configuration
+     */
+    void setReferenceConfiguration(const Eigen::VectorXd& q_reference);
+
+    /**
      * @brief Set target values for controlled joints only
      * @param target_values Values for controlled joints (size must match controlled_joint_indices)
      */
@@ -407,7 +463,12 @@ public:
      * @brief Set joint mask (which joints to control)
      * @param mask Boolean mask (true = control joint)
      */
-    void setJointMask(const Eigen::VectorXd& mask) { joint_mask_ = mask; }
+    void setJointMask(const Eigen::VectorXd& mask) {
+        if (joint_mask_.size() != mask.size() || !joint_mask_.isApprox(mask, 0.0)) {
+            joint_mask_ = mask;
+            markContinuityStateChanged();
+        }
+    }
 
     /**
      * @brief Set controlled joint indices
@@ -419,7 +480,13 @@ public:
      * @brief Set per-joint weights
      * @param weights Weight for each joint
      */
-    void setJointWeights(const Eigen::VectorXd& weights) { joint_weights_ = weights; }
+    void setJointWeights(const Eigen::VectorXd& weights) {
+        if (joint_weights_.size() != weights.size() ||
+            !joint_weights_.isApprox(weights, 0.0)) {
+            joint_weights_ = weights;
+            markContinuityStateChanged();
+        }
+    }
 
     /**
      * @brief Set weights for controlled joints only
@@ -463,6 +530,135 @@ private:
 };
 
 /**
+ * @brief Joint-space task that ascends a frame manipulability score.
+ *
+ * Computes the analytic gradient of
+ * 0.5 * log det(J J^T + epsilon^2 I) for a selected LOCAL frame Jacobian
+ * block, then smoothly bounds the gradient magnitude for singularity-safe use
+ * as a velocity task.
+ */
+class ManipulabilityTask : public Task {
+public:
+    ManipulabilityTask(const std::string& name,
+                       std::shared_ptr<RobotModel> model,
+                       const std::string& frame_name,
+                       TaskType frame_task_type = TaskType::FRAME_POSITION,
+                       int priority = 10,
+                       double weight = 1.0);
+
+    /**
+     * @brief Set controlled velocity-space indices. Empty controls all nv.
+     * @param indices Velocity-space indices to control
+     */
+    void setControlledJointIndices(const std::vector<int>& indices);
+
+    /**
+     * @brief Set positive determinant regularization epsilon.
+     */
+    void setRegularization(double regularization);
+
+    /**
+     * @brief Penalize normalized proximity to scalar joint limits.
+     *
+     * The frame-manipulability gradient is first projected onto the
+     * first-order non-worsening half-space of the joint-limit metric, then the
+     * inward penalty is applied. This prevents the two objectives from trading
+     * away hard-limit recovery when their gradients oppose each other.
+     *
+     * A zero penalty preserves the frame-only manipulability objective.
+     */
+    void setJointLimitPenalty(double penalty, double epsilon = 0.04);
+
+    void set_excluded_joint_indices(
+        const std::vector<int>& excluded_indices) override;
+    void clear_excluded_joint_indices() override;
+
+    void update(const RobotModel& model) override;
+    Eigen::VectorXd getError() const override;
+    Eigen::MatrixXd getJacobian() const override;
+    int getDimension() const override;
+    TaskType getType() const override { return TaskType::POSTURE; }
+    bool usesGoalDirectedLimitClamp() const override { return true; }
+
+    const std::string& getFrameName() const { return frame_name_; }
+    TaskType getFrameTaskType() const { return frame_task_type_; }
+    double getScore() const { return score_; }
+    double getRegularization() const { return regularization_; }
+    double getJointLimitPenalty() const { return joint_limit_penalty_; }
+    double getJointLimitEpsilon() const { return joint_limit_epsilon_; }
+    const std::vector<int>& getControlledJointIndices() const {
+        return controlled_joint_indices_;
+    }
+
+private:
+    std::shared_ptr<RobotModel> model_;
+    std::string frame_name_;
+    TaskType frame_task_type_;
+    std::vector<int> controlled_joint_indices_;
+    double regularization_ = 1e-6;
+    double joint_limit_penalty_ = 0.0;
+    double joint_limit_epsilon_ = 0.04;
+    double score_ = 0.0;
+    Eigen::VectorXd bounded_gradient_;
+    Eigen::MatrixXd jacobian_;
+    std::vector<int> velocity_to_config_index_;
+
+    std::vector<int> taskVelocityIndices() const;
+    std::vector<int> metricVelocityIndices() const;
+    Eigen::MatrixXd selectTaskRows(const Eigen::MatrixXd& spatial) const;
+    void rebuildVelocityToConfigIndex();
+    void updateJacobian();
+};
+
+/**
+ * @brief Smooth joint-space objective that moves scalar joints away from limits.
+ *
+ * Each controlled joint contributes a signed cubic-smoothstep activation inside
+ * a configurable proximity margin. The task is exactly zero outside the margin
+ * and remains subject to the solver's hard position and velocity constraints.
+ */
+class JointLimitAvoidanceTask : public Task {
+public:
+    JointLimitAvoidanceTask(
+        const std::string& name,
+        std::shared_ptr<RobotModel> model,
+        const std::vector<int>& controlled_joint_indices = {},
+        int priority = 10,
+        double weight = 0.01);
+
+    void setControlledJointIndices(const std::vector<int>& indices);
+    void setActivationMargin(double activation_margin);
+
+    void set_excluded_joint_indices(
+        const std::vector<int>& excluded_indices) override;
+    void clear_excluded_joint_indices() override;
+
+    void update(const RobotModel& model) override;
+    Eigen::VectorXd getError() const override;
+    Eigen::MatrixXd getJacobian() const override;
+    int getDimension() const override;
+    TaskType getType() const override { return TaskType::POSTURE; }
+    bool usesGoalDirectedLimitClamp() const override { return true; }
+
+    double getActivationMargin() const { return activation_margin_; }
+    const std::vector<int>& getControlledJointIndices() const {
+        return controlled_joint_indices_;
+    }
+
+private:
+    std::shared_ptr<RobotModel> model_;
+    std::vector<int> controlled_joint_indices_;
+    std::vector<int> velocity_to_config_index_;
+    double activation_margin_ = 0.05;
+    Eigen::VectorXd avoidance_velocity_;
+    Eigen::MatrixXd jacobian_;
+
+    std::vector<int> taskVelocityIndices() const;
+    void rebuildVelocityToConfigIndex();
+    void updateJacobian();
+};
+
+/**
  * @brief Task for controlling a single joint
  */
 class JointTask : public Task {
@@ -503,7 +699,12 @@ public:
      * @brief Set target joint value
      * @param value Target value in radians
      */
-    void setTargetValue(double value) { target_value_ = value; }
+    void setTargetValue(double value) {
+        if (target_value_ != value) {
+            target_value_ = value;
+            markContinuityStateChanged();
+        }
+    }
 
     // Implement base class methods
     void update(const RobotModel& model) override;
@@ -618,8 +819,18 @@ public:
     void setTargetPose(const Eigen::Vector3d& position,
                        const Eigen::Matrix3d& rotation);
 
-    void setPositionMask(const Eigen::Vector3d& mask) { position_mask_ = mask; }
-    void setOrientationMask(const Eigen::Vector3d& mask) { orientation_mask_ = mask; }
+    void setPositionMask(const Eigen::Vector3d& mask) {
+        if (!position_mask_.isApprox(mask, 0.0)) {
+            position_mask_ = mask;
+            markContinuityStateChanged();
+        }
+    }
+    void setOrientationMask(const Eigen::Vector3d& mask) {
+        if (!orientation_mask_.isApprox(mask, 0.0)) {
+            orientation_mask_ = mask;
+            markContinuityStateChanged();
+        }
+    }
 
     /**
      * @brief Capture the current relative pose as the target
@@ -675,11 +886,26 @@ public:
     void setTargetPose(const Eigen::Vector3d& position,
                        const Eigen::Matrix3d& rotation);
 
-    void setAlpha(double alpha) { alpha_ = alpha; }
+    void setAlpha(double alpha) {
+        if (alpha_ != alpha) {
+            alpha_ = alpha;
+            markContinuityStateChanged();
+        }
+    }
     double getAlpha() const { return alpha_; }
 
-    void setPositionMask(const Eigen::Vector3d& mask) { position_mask_ = mask; }
-    void setOrientationMask(const Eigen::Vector3d& mask) { orientation_mask_ = mask; }
+    void setPositionMask(const Eigen::Vector3d& mask) {
+        if (!position_mask_.isApprox(mask, 0.0)) {
+            position_mask_ = mask;
+            markContinuityStateChanged();
+        }
+    }
+    void setOrientationMask(const Eigen::Vector3d& mask) {
+        if (!orientation_mask_.isApprox(mask, 0.0)) {
+            orientation_mask_ = mask;
+            markContinuityStateChanged();
+        }
+    }
 
     /**
      * @brief Set virtual TCP offsets applied to each frame before ECTS computation

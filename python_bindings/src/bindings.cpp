@@ -167,7 +167,25 @@ NB_MODULE(_embodik_impl, m) {
       .def_ro("recovery_stage", &eik::VelocitySolverResult::recovery_stage,
               "Recovery stage that supplied the accepted velocity")
       .def_ro("binding_score", &eik::VelocitySolverResult::binding_score,
-              "Binding score used by the optional auto-switcher");
+              "Binding score used by the optional auto-switcher")
+      .def_ro("preferred_lock_attempted",
+              &eik::VelocitySolverResult::preferred_lock_attempted)
+      .def_ro("preferred_lock_used",
+              &eik::VelocitySolverResult::preferred_lock_used)
+      .def_ro("preferred_lock_fallback_used",
+              &eik::VelocitySolverResult::preferred_lock_fallback_used)
+      .def_ro("preferred_lock_candidate_status",
+              &eik::VelocitySolverResult::preferred_lock_candidate_status)
+      .def_ro("preferred_lock_candidate_position_error",
+              &eik::VelocitySolverResult::
+                  preferred_lock_candidate_position_error)
+      .def_ro("preferred_lock_candidate_orientation_error",
+              &eik::VelocitySolverResult::
+                  preferred_lock_candidate_orientation_error)
+      .def_ro("preferred_lock_candidate_step_norm",
+              &eik::VelocitySolverResult::preferred_lock_candidate_step_norm)
+      .def_ro("preferred_lock_candidate_time_ms",
+              &eik::VelocitySolverResult::preferred_lock_candidate_time_ms);
 
   nb::class_<eik::VelocityBoxHeadroomPolicy>(
       m, "VelocityBoxHeadroomPolicy",
@@ -386,7 +404,9 @@ NB_MODULE(_embodik_impl, m) {
       "Options for solve_position_step(): gains, timestep, and optional joint "
       "controls. Field names match PositionIKOptions where applicable "
       "(excluded_joint_indices uses the same nv convention as "
-      "PositionIKOptions and Task.set_excluded_joint_indices).")
+      "PositionIKOptions and Task.set_excluded_joint_indices). SCALE-family "
+      "primary targets that are soft-infeasible and only induce self-motion "
+      "return NO_PROGRESS with q_solution held at current_q.")
       .def(nb::init<>())
       .def_rw("position_gain", &eik::PositionStepOptions::position_gain,
               "Multiplier on the linear pose error (default 1.0)")
@@ -400,6 +420,19 @@ NB_MODULE(_embodik_impl, m) {
               "Maximum linear speed magnitude in solve_position_step (m/s); <=0 means unlimited")
       .def_rw("max_angular_speed", &eik::PositionStepOptions::max_angular_speed,
               "Maximum angular speed magnitude in solve_position_step (rad/s); <=0 means unlimited")
+      .def_rw("max_configuration_step_norm",
+              &eik::PositionStepOptions::max_configuration_step_norm,
+              "Maximum configuration-space delta for the whole "
+              "solve_position_step call; <=0 means unlimited")
+      .def_rw("continuity_reference_frame",
+              &eik::PositionStepOptions::continuity_reference_frame,
+              "Optional frame used to compare targets for stationary "
+              "continuity without changing the IK target")
+      .def_rw("continuity_command_revision",
+              &eik::PositionStepOptions::continuity_command_revision,
+              "Optional caller-owned command revision; values >= 0 override "
+              "pose-derived continuity identity and must change with the "
+              "source command (default -1 disables the override)")
       .def_rw("torso_constraint", &eik::PositionStepOptions::torso_constraint,
               "Optional torso orientation task and torso pose bounds for step IK")
       .def_rw("excluded_joint_indices",
@@ -459,7 +492,33 @@ NB_MODULE(_embodik_impl, m) {
       .def_rw("primary_allow_min_error_fallback",
               &eik::PositionStepOptions::primary_allow_min_error_fallback,
               "Re-run solve_position_step once in MIN_ERROR when SCALE collapses "
-              "under active constraints");
+              "under active constraints")
+      .def_rw("preferred_locked_joint_indices",
+              &eik::PositionStepOptions::preferred_locked_joint_indices,
+              "Nv-indices to try locked in one extra candidate solve before the "
+              "normal step. Accepted when continuity passes and each active "
+              "target error is within tolerance or still making progress.")
+      .def_rw("preferred_lock_solve_mode",
+              &eik::PositionStepOptions::preferred_lock_solve_mode,
+              "Primary pose-task solve mode used only by the preferred-lock "
+              "candidate")
+      .def_rw("preferred_lock_tracking_tolerance",
+              &eik::PositionStepOptions::preferred_lock_tracking_tolerance,
+              "Maximum active-target position error for accepting the preferred "
+              "locked candidate (metres)")
+      .def_rw("preferred_lock_orientation_tolerance",
+              &eik::PositionStepOptions::preferred_lock_orientation_tolerance,
+              "Maximum active-target orientation error for accepting the preferred "
+              "locked candidate (radians); <=0 disables this gate")
+      .def_rw("preferred_lock_max_step_norm",
+              &eik::PositionStepOptions::preferred_lock_max_step_norm,
+              "Maximum configuration step norm for accepting the preferred locked "
+              "candidate; <=0 disables this gate")
+      .def_rw("preferred_lock_min_error_reduction_ratio",
+              &eik::PositionStepOptions::preferred_lock_min_error_reduction_ratio,
+              "Minimum fractional active-target error reduction for accepting a "
+              "preferred locked candidate that is still outside final tracking "
+              "tolerance");
 
   nb::class_<eik::TaskTarget>(
       m, "TaskTarget",
@@ -507,7 +566,19 @@ NB_MODULE(_embodik_impl, m) {
       .def_rw("position_gain", &eik::TaskTarget::position_gain)
       .def_rw("orientation_gain", &eik::TaskTarget::orientation_gain)
       .def_rw("has_secondary_target_pose",
-              &eik::TaskTarget::has_secondary_target_pose);
+              &eik::TaskTarget::has_secondary_target_pose)
+      .def_rw(
+          "priority_position_tolerance",
+          &eik::TaskTarget::priority_position_tolerance,
+          "Admissible protected-task position error for an acceleration-aware "
+          "finite-step viability row; <=0 keeps only the default final "
+          "candidate guard")
+      .def_rw(
+          "priority_orientation_tolerance",
+          &eik::TaskTarget::priority_orientation_tolerance,
+          "Admissible protected-task orientation error for an "
+          "acceleration-aware finite-step viability row; <=0 keeps only the "
+          "default final candidate guard");
 
   nb::class_<eik::SolveDiagnostics>(
       m, "SolveDiagnostics",
@@ -540,7 +611,25 @@ NB_MODULE(_embodik_impl, m) {
               &eik::SolveDiagnostics::advisor_scale_adapt_active)
       .def_ro("active_task_layout", &eik::SolveDiagnostics::active_task_layout)
       .def_ro("recovery_stage", &eik::SolveDiagnostics::recovery_stage)
-      .def_ro("binding_score", &eik::SolveDiagnostics::binding_score);
+      .def_ro("binding_score", &eik::SolveDiagnostics::binding_score)
+      .def_ro("preferred_lock_attempted",
+              &eik::SolveDiagnostics::preferred_lock_attempted)
+      .def_ro("preferred_lock_used",
+              &eik::SolveDiagnostics::preferred_lock_used)
+      .def_ro("preferred_lock_fallback_used",
+              &eik::SolveDiagnostics::preferred_lock_fallback_used)
+      .def_ro("preferred_lock_candidate_status",
+              &eik::SolveDiagnostics::preferred_lock_candidate_status)
+      .def_ro("preferred_lock_candidate_position_error",
+              &eik::SolveDiagnostics::
+                  preferred_lock_candidate_position_error)
+      .def_ro("preferred_lock_candidate_orientation_error",
+              &eik::SolveDiagnostics::
+                  preferred_lock_candidate_orientation_error)
+      .def_ro("preferred_lock_candidate_step_norm",
+              &eik::SolveDiagnostics::preferred_lock_candidate_step_norm)
+      .def_ro("preferred_lock_candidate_time_ms",
+              &eik::SolveDiagnostics::preferred_lock_candidate_time_ms);
 
   nb::class_<eik::SolverRuntimeConfig>(
       m, "SolverRuntimeConfig",
@@ -554,6 +643,12 @@ NB_MODULE(_embodik_impl, m) {
               &eik::SolverRuntimeConfig::adaptive_dt_max_scale)
       .def_rw("adaptive_dt_reference_distance",
               &eik::SolverRuntimeConfig::adaptive_dt_reference_distance)
+      .def_rw("joint_limit_non_worsening_enabled",
+              &eik::SolverRuntimeConfig::joint_limit_non_worsening_enabled,
+              "Keep active scalar joint-limit slack from decreasing")
+      .def_rw("joint_limit_non_worsening_margin",
+              &eik::SolverRuntimeConfig::joint_limit_non_worsening_margin,
+              "Distance from a finite scalar limit where non-worsening starts")
       .def_rw("weighted_advisor_enabled",
               &eik::SolverRuntimeConfig::weighted_advisor_enabled,
               "Enable constrained weighted-advisor diagnostics without changing "
@@ -609,6 +704,8 @@ NB_MODULE(_embodik_impl, m) {
               &eik::PositionIKResult::collision_rejection_count)
       .def_ro("stall_escape_count",
               &eik::PositionIKResult::stall_escape_count)
+      .def_ro("position_step_hold_active",
+              &eik::PositionIKResult::position_step_hold_active)
       .def_prop_ro(
           "diagnostics",
           [](const eik::PositionIKResult &r) {
@@ -620,7 +717,9 @@ NB_MODULE(_embodik_impl, m) {
             d.task_used_fallback = r.task_used_fallback;
             d.task_modes_effective = r.task_modes_effective;
             d.any_intervention = (r.collision_rejection_count > 0) ||
-                                 (r.stall_escape_count > 0);
+                                 (r.stall_escape_count > 0) ||
+                                 r.preferred_lock_used ||
+                                 r.preferred_lock_fallback_used;
             d.weighted_advisory_available = r.weighted_advisory_available;
             d.weighted_fallback_used = r.weighted_fallback_used;
             d.weighted_advisory_v_norm = r.weighted_advisory_v_norm;
@@ -636,6 +735,19 @@ NB_MODULE(_embodik_impl, m) {
             d.active_task_layout = r.active_task_layout;
             d.recovery_stage = r.recovery_stage;
             d.binding_score = r.binding_score;
+            d.preferred_lock_attempted = r.preferred_lock_attempted;
+            d.preferred_lock_used = r.preferred_lock_used;
+            d.preferred_lock_fallback_used = r.preferred_lock_fallback_used;
+            d.preferred_lock_candidate_status =
+                r.preferred_lock_candidate_status;
+            d.preferred_lock_candidate_position_error =
+                r.preferred_lock_candidate_position_error;
+            d.preferred_lock_candidate_orientation_error =
+                r.preferred_lock_candidate_orientation_error;
+            d.preferred_lock_candidate_step_norm =
+                r.preferred_lock_candidate_step_norm;
+            d.preferred_lock_candidate_time_ms =
+                r.preferred_lock_candidate_time_ms;
             return d;
           });
 

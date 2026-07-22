@@ -85,6 +85,17 @@ void bind_kinematics_solver(nb::module_ &m) {
           nb::arg("name"), nb::arg("controlled_joints"),
           "Add a posture regularization task for specific joints")
 
+      .def("add_manipulability_task",
+           &KinematicsSolver::add_manipulability_task, nb::arg("name"),
+           nb::arg("frame_name"),
+           nb::arg("frame_task_type") = TaskType::FRAME_POSITION,
+           "Add a regularized frame manipulability gradient task")
+
+      .def("add_joint_limit_avoidance_task",
+           &KinematicsSolver::add_joint_limit_avoidance_task, nb::arg("name"),
+           nb::arg("controlled_joint_indices") = std::vector<int>{},
+           "Add a smooth joint-limit avoidance task")
+
       .def("add_joint_task", &KinematicsSolver::add_joint_task, nb::arg("name"),
            nb::arg("joint_name"), nb::arg("target_value") = 0.0,
            "Add a single joint tracking task")
@@ -208,6 +219,16 @@ void bind_kinematics_solver(nb::module_ &m) {
            &KinematicsSolver::set_acceleration_limits, nb::arg("limits"),
            "Set per-joint acceleration limits (rad/s^2)")
 
+      .def("set_previous_joint_velocities",
+           &KinematicsSolver::set_previous_joint_velocities,
+           nb::arg("velocities"),
+           "Synchronize acceleration state to the joint velocity applied by "
+           "the outer controller")
+
+      .def("get_previous_joint_velocities",
+           &KinematicsSolver::get_previous_joint_velocities,
+           "Return the joint velocity used as the acceleration reference")
+
       .def("set_base_position_bounds",
            &KinematicsSolver::set_base_position_bounds, nb::arg("lower"),
            nb::arg("upper"), "Set floating-base position bounds (3D)")
@@ -240,7 +261,12 @@ void bind_kinematics_solver(nb::module_ &m) {
            "untouched. Unlike solve_position(), this does not create "
            "temporary tasks. The recovery state machine (stuck detection, "
            "collision homotopy, etc.) is automatically exercised. Optional "
-           "no-progress detection can return SolverStatus.NO_PROGRESS.")
+           "no-progress detection can return SolverStatus.NO_PROGRESS. If a "
+           "SCALE-family primary task is soft-infeasible, keeps a large "
+           "residual, and only produces self-motion, the step returns "
+           "SolverStatus.NO_PROGRESS with q_solution held at current_q. "
+           "Preferred-lock candidate/fallback policy handoffs are evaluated "
+           "as a single integration step from the entry configuration.")
       .def(
           "solve_position_step",
           [](KinematicsSolver &self, const Eigen::VectorXd &current_q,
@@ -263,7 +289,12 @@ void bind_kinematics_solver(nb::module_ &m) {
            "Each TaskTarget carries task_name, target_pose, and per-task "
            "position/orientation gains. For each step, all task target "
            "velocities are computed from pose errors, then solve_velocity() "
-           "is called once to preserve coordinated multi-task behavior.")
+           "is called once to preserve coordinated multi-task behavior. If "
+           "the primary SCALE-family target is soft-infeasible, keeps a large "
+           "residual, and only produces self-motion, the step returns "
+           "SolverStatus.NO_PROGRESS with q_solution held at current_q. "
+           "Preferred-lock candidate/fallback policy handoffs are evaluated "
+           "as a single integration step from the entry configuration.")
 
       .def("solve_position_in_tcp", &KinematicsSolver::solve_position_in_tcp,
            nb::arg("seed_q"), nb::arg("relative_target"), nb::arg("frame_name"),
@@ -366,11 +397,12 @@ void bind_kinematics_solver(nb::module_ &m) {
           "  exclude_pairs: List of (geom_a, geom_b) tuples to ignore.\n"
           "  nearest_points_all_pairs: If False, compute nearest points only "
           "for the selected pair.\n"
-          "  max_constraints: Number of simultaneous QP constraint rows. Each "
-          "row protects one of the closest pairs independently. Defaults to 1 "
-          "(original behaviour). Values of 3-5 are recommended for complex "
-          "robots with multiple tight-clearance regions (e.g. base/leg and "
-          "arm/torso simultaneously).")
+          "  max_constraints: Nominal QP collision-row budget. Each row "
+          "protects one of the closest pairs independently. Penetrating pairs "
+          "and pairs at a non-worsening recovery floor remain active even when "
+          "that exceeds the budget. Defaults to 1. Values of 3-5 are "
+          "recommended for complex robots with multiple tight-clearance "
+          "regions (e.g. base/leg and arm/torso simultaneously).")
 
       .def(
           "add_collision_constraint",
@@ -440,8 +472,8 @@ void bind_kinematics_solver(nb::module_ &m) {
       // ---- Tunable collision boundary parameters (for sweep / autoresearch) ----
       .def("set_collision_repulsion_deadband",
            &KinematicsSolver::set_collision_repulsion_deadband, nb::arg("metres"),
-           "Width (m) of the no-braking zone above min_distance.  Default 0.003 m.\n"
-           "Set to 0 to eliminate the discontinuity that causes boundary oscillation.")
+           "Width (m) of the no-braking zone above min_distance. Defaults to 0, "
+           "which keeps the velocity bound continuous at the boundary.")
       .def("get_collision_repulsion_deadband",
            &KinematicsSolver::get_collision_repulsion_deadband)
       .def("set_collision_recovery_scale",
@@ -718,9 +750,10 @@ void bind_kinematics_solver(nb::module_ &m) {
       .def("get_last_collision_debug_list",
            &KinematicsSolver::get_last_collision_debug_list,
            "Retrieve debug information for all active collision constraint "
-           "pairs after the last solve (one entry per constraint row, up to "
-           "max_constraints). Returns an empty list when no collision "
-           "constraint is configured or no solve has been performed.")
+           "pairs after the last solve (one entry per constraint row). "
+           "Safety-critical rows can exceed the nominal max_constraints "
+           "budget. Returns an empty list when no collision constraint is "
+           "configured or no solve has been performed.")
 
       .def("evaluate_collision_debug",
            &KinematicsSolver::evaluate_collision_debug,
@@ -734,6 +767,18 @@ void bind_kinematics_solver(nb::module_ &m) {
            "Evaluate the scalar collision distance used by post-step safety "
            "checks. Prefers cached / targeted collision data before falling "
            "back to a global scan.")
+
+      .def("get_last_post_step_collision_exact_distance_queries",
+           &KinematicsSolver::
+               get_last_post_step_collision_exact_distance_queries,
+           "Return exact post-step collision queries from the latest outer "
+           "position step.")
+
+      .def("get_last_post_step_collision_motion_bound_culled_pairs",
+           &KinematicsSolver::
+               get_last_post_step_collision_motion_bound_culled_pairs,
+           "Return post-step pair checks certified by cached rigid-body "
+           "motion bounds in the latest outer position step.")
 
       .def("evaluate_min_collision_distance",
            &KinematicsSolver::evaluate_min_collision_distance,

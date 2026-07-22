@@ -164,6 +164,108 @@ def test_mixed_contact_types_enforce_expected_axes():
         os.remove(urdf)
 
 
+def test_rigid_contact_projection_preserves_active_joint_limit_slack():
+    urdf = _create_floating_contact_urdf()
+    try:
+        robot, solver, task = _make_solver_with_hand_task(urdf)
+        lower, upper = (np.asarray(value, dtype=float) for value in robot.get_joint_limits())
+        q = np.asarray(robot.neutral_configuration(), dtype=float)
+        arm_q_index = int(robot.get_joint_config_index("arm_joint"))
+        arm_v_index = int(robot.get_joint_velocity_index("arm_joint"))
+        q[arm_q_index] = upper[arm_q_index] - 0.01
+        robot.update_configuration(q)
+
+        runtime = solver.runtime_config()
+        runtime.joint_limit_non_worsening_enabled = True
+        runtime.joint_limit_non_worsening_margin = 0.04
+        solver.configure_runtime(runtime)
+
+        hand_pose = robot.get_frame_pose("hand_link")
+        hand_jacobian = np.asarray(robot.get_frame_jacobian("hand_link"), dtype=float)
+        outward_direction = hand_jacobian[:3, arm_v_index]
+        outward_direction /= np.linalg.norm(outward_direction)
+        target_position = np.asarray(hand_pose.translation, dtype=float) + 0.08 * outward_direction
+        task.set_target_pose(target_position, np.asarray(hand_pose.rotation, dtype=float))
+
+        solver.add_contact_frame("left_contact", eik.ContactType.RIGID_CONTACT)
+        result = solver.solve_velocity(q, apply_limits=True)
+        assert result.status in (
+            eik.SolverStatus.SUCCESS,
+            eik.SolverStatus.NO_PROGRESS,
+        )
+        velocity = np.asarray(result.joint_velocities, dtype=float)
+
+        contact_jacobian = np.asarray(robot.get_frame_jacobian("left_contact"), dtype=float)
+        assert np.linalg.norm(contact_jacobian @ velocity) < 1e-8
+        assert velocity[arm_v_index] <= 1e-10
+        q_next = np.asarray(robot.integrate(q, velocity * solver.dt), dtype=float)
+        assert q_next[arm_q_index] <= q[arm_q_index] + 1e-12
+        assert np.min(np.minimum(q_next - lower, upper - q_next)) >= -1e-10
+    finally:
+        os.remove(urdf)
+
+
+def test_rigid_contact_active_limit_overrides_stale_outward_acceleration_history():
+    urdf = _create_floating_contact_urdf()
+    try:
+        robot, solver, task = _make_solver_with_hand_task(urdf)
+        lower, upper = (np.asarray(value, dtype=float) for value in robot.get_joint_limits())
+        arm_q_index = int(robot.get_joint_config_index("arm_joint"))
+        arm_v_index = int(robot.get_joint_velocity_index("arm_joint"))
+
+        runtime = solver.runtime_config()
+        runtime.joint_limit_non_worsening_enabled = True
+        runtime.joint_limit_non_worsening_margin = 0.04
+        solver.configure_runtime(runtime)
+        solver.set_acceleration_limits(np.full(robot.nv, 0.1, dtype=float))
+        solver.enable_acceleration_limits(True)
+        solver.add_contact_frame("left_contact", eik.ContactType.RIGID_CONTACT)
+
+        q_clear = np.asarray(robot.neutral_configuration(), dtype=float)
+        q_clear[arm_q_index] = 0.0
+        robot.update_configuration(q_clear)
+        clear_pose = robot.get_frame_pose("hand_link")
+        arm_direction = np.asarray(robot.get_frame_jacobian("hand_link"), dtype=float)[
+            :3, arm_v_index
+        ]
+        arm_direction /= np.linalg.norm(arm_direction)
+        task.set_target_pose(
+            np.asarray(clear_pose.translation, dtype=float) + 0.30 * arm_direction,
+            np.asarray(clear_pose.rotation, dtype=float),
+        )
+        previous_velocity = np.zeros(robot.nv, dtype=float)
+        for _ in range(12):
+            result = solver.solve_velocity(q_clear, apply_limits=True)
+            assert result.status == eik.SolverStatus.SUCCESS
+            previous_velocity = np.asarray(result.joint_velocities, dtype=float)
+        assert previous_velocity[arm_v_index] > 0.01
+
+        q_active = q_clear.copy()
+        q_active[arm_q_index] = upper[arm_q_index] - 0.01
+        robot.update_configuration(q_active)
+        active_pose = robot.get_frame_pose("hand_link")
+        task.set_target_pose(
+            np.asarray(active_pose.translation, dtype=float) + 0.08 * arm_direction,
+            np.asarray(active_pose.rotation, dtype=float),
+        )
+
+        result = solver.solve_velocity(q_active, apply_limits=True)
+        velocity = np.asarray(result.joint_velocities, dtype=float)
+
+        assert result.status in (
+            eik.SolverStatus.SUCCESS,
+            eik.SolverStatus.NO_PROGRESS,
+        ), result.status_message
+        contact_jacobian = np.asarray(robot.get_frame_jacobian("left_contact"), dtype=float)
+        assert np.linalg.norm(contact_jacobian @ velocity) < 1e-8
+        assert velocity[arm_v_index] <= 1e-10
+        q_next = np.asarray(robot.integrate(q_active, velocity * solver.dt), dtype=float)
+        assert q_next[arm_q_index] <= q_active[arm_q_index] + 1e-12
+        assert np.min(np.minimum(q_next - lower, upper - q_next)) >= -1e-10
+    finally:
+        os.remove(urdf)
+
+
 def _run_position_loop(mode: str, steps: int = 50):
     urdf = _create_floating_contact_urdf()
     try:

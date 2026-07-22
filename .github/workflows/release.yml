@@ -1,19 +1,64 @@
-name: Release
+name: Prepare Release
 
 on:
+  push:
+    branches:
+      - main
+    paths:
+      - pyproject.toml
+      - pixi.toml
   workflow_dispatch:
 
+concurrency:
+  group: release-${{ github.repository }}
+  cancel-in-progress: false
+
+permissions:
+  actions: write
+  contents: write
+
 jobs:
-  github-release:
+  tag-and-dispatch:
+    name: Tag and dispatch package release
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Validate release metadata and create tag
+        id: release
+        shell: bash
+        run: |
+          version="$(python scripts/validate_release_metadata.py)"
+          tag="v${version}"
+
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+
+          if git rev-parse --verify --quiet "refs/tags/${tag}" >/dev/null; then
+            echo "Tag ${tag} already exists; no automatic release is needed."
+            echo "created=false" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag --annotate "${tag}" --message "Release ${tag}"
+          git push origin "${tag}"
+          echo "created=true" >> "${GITHUB_OUTPUT}"
+
+      # GITHUB_TOKEN tag pushes do not start another workflow. workflow_dispatch
+      # is the documented exception, so dispatch the package workflow explicitly.
+      - name: Dispatch wheel and PyPI release
+        if: steps.release.outputs.created == 'true' || github.event_name == 'workflow_dispatch'
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run wheels.yml --ref "${{ steps.release.outputs.tag }}"

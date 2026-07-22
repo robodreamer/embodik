@@ -118,11 +118,24 @@ pixi run docs-build
 
 ## Release Process
 
-1. Update version in `pyproject.toml`
-2. Update `CHANGELOG.md`
-3. Create git tag: `git tag v0.1.0`
-4. Push tag: `git push origin v0.1.0`
-5. GitHub Actions will build and publish to PyPI
+1. Bump the version with `pixi run version --bump <patch|minor|major>`. Verify
+   `pyproject.toml` and `pixi.toml` contain the same version.
+2. Move the release notes into a dated version section in `CHANGELOG.md`.
+3. Open and merge the release pull request into `main`.
+4. The `Prepare Release` workflow validates the synchronized version and dated
+   changelog entry, creates the missing `v<version>` tag, and dispatches
+   `wheels.yml` on that tag.
+5. The tag workflow builds Linux/macOS wheels and the source distribution,
+   publishes them to PyPI through trusted publishing, and creates the GitHub
+   release after publication succeeds.
+
+The merge-triggered workflow is idempotent: an existing version tag makes a
+normal `main` push a no-op. For release recovery, manually dispatch `release.yml`
+on `main`; it reuses the existing tag and reruns the package workflow.
+
+The release workflow explicitly dispatches `wheels.yml` after creating the tag.
+GitHub suppresses ordinary workflow runs caused by tag pushes made with
+`GITHUB_TOKEN`, while `workflow_dispatch` is allowed to start a new run.
 
 The PyPI trusted publisher for `embodik` must match the tag workflow exactly:
 

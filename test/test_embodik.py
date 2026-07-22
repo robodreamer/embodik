@@ -174,6 +174,17 @@ def test_invalid_inputs():
     assert result.status == eik.SolverStatus.SHAPE_MISMATCH
     assert "dimension mismatch" in result.status_message
 
+    # Backend non-finite evidence must remain distinct from an ordinary stall.
+    result = eik.computeMultiObjectiveVelocitySolutionEigen(
+        [np.array([np.nan])],
+        [np.array([[1.0]])],
+        np.eye(1),
+        np.array([-1.0]),
+        np.array([1.0]),
+    )
+    assert result.status == eik.SolverStatus.NON_FINITE_INPUT
+    assert np.array_equal(np.asarray(result.solution, dtype=float), np.zeros(1))
+
 
 def test_solver_status_hint_helper():
     """Status hint helper should return actionable guidance text."""

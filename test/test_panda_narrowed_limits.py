@@ -123,6 +123,7 @@ def run_round_trip(
     task.weight = 10.0
 
     robot.update_kinematics(q)
+    task.update(robot)
     ee_start = np.array(task.current_position)
     ee_start_rot = np.array(task.current_orientation)
 

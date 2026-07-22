@@ -116,13 +116,42 @@ def _make_panda_solver(tuning_mode: str = "speed"):
     return robot, solver, q, target, opts
 
 
-def _benchmark_position_step(tuning_mode: str, warmup: int = 5, steps: int = 50):
+def _benchmark_position_step(
+    tuning_mode: str,
+    warmup: int = 5,
+    steps: int = 50,
+    *,
+    acceleration_limit: float | None = None,
+    collision_min_distance: float | None = None,
+    max_steps: int = 1,
+    trajectory_amplitude_m: float = 0.08,
+    force_preferred_lock_fallback: bool = False,
+):
     """Run solve_position_step with a moving target to keep the robot active.
 
     Uses a circular trajectory to ensure the robot is always tracking (not
     converged), which reflects the interactive-use case in example 02.
     """
     robot, solver, q, _, opts = _make_panda_solver(tuning_mode)
+    if collision_min_distance is not None:
+        exclusions = _panda_collision_exclusions(robot)
+        solver.configure_collision_constraint(
+            min_distance=collision_min_distance,
+            include_pairs=[],
+            exclude_pairs=exclusions,
+            nearest_points_all_pairs=False,
+            max_constraints=3,
+        )
+    opts.max_steps = max_steps
+    if acceleration_limit is not None:
+        solver.set_acceleration_limits(np.full(robot.nv, acceleration_limit))
+        solver.enable_acceleration_limits(True)
+    if force_preferred_lock_fallback:
+        opts.preferred_locked_joint_indices = [0]
+        opts.preferred_lock_tracking_tolerance = 1e-9
+        opts.preferred_lock_orientation_tolerance = 0.0
+        opts.preferred_lock_max_step_norm = 0.35
+        opts.preferred_lock_min_error_reduction_ratio = 10.0
 
     hand_pose = robot.get_frame_pose("panda_hand")
     base_pos = np.asarray(hand_pose.translation, dtype=float)
@@ -133,7 +162,11 @@ def _benchmark_position_step(tuning_mode: str, warmup: int = 5, steps: int = 50)
         target = np.eye(4, dtype=float)
         target[:3, :3] = base_rot
         target[:3, 3] = base_pos + np.array(
-            [0.08 * np.cos(t), 0.08 * np.sin(t), 0.02 * np.sin(t * 0.7)],
+            [
+                trajectory_amplitude_m * np.cos(t),
+                trajectory_amplitude_m * np.sin(t),
+                0.25 * trajectory_amplitude_m * np.sin(t * 0.7),
+            ],
             dtype=float,
         )
         return target
@@ -145,13 +178,32 @@ def _benchmark_position_step(tuning_mode: str, warmup: int = 5, steps: int = 50)
         robot.update_configuration(q)
 
     timings = []
+    statuses = []
+    moving_steps = 0
+    post_step_exact_queries = 0
+    post_step_motion_bound_culls = 0
+    preferred_lock_attempted_steps = 0
+    preferred_lock_fallback_steps = 0
     for i in range(steps):
         target = make_target(warmup + i)
         t0 = time.perf_counter()
         res = solver.solve_position_step(q, target, "panda_ee", opts)
         dt_ms = (time.perf_counter() - t0) * 1000.0
         timings.append(dt_ms)
-        q = np.asarray(res.q_solution, dtype=float)
+        statuses.append(res.status)
+        preferred_lock_attempted_steps += int(res.preferred_lock_attempted)
+        preferred_lock_fallback_steps += int(res.preferred_lock_fallback_used)
+        if hasattr(solver, "get_last_post_step_collision_exact_distance_queries"):
+            post_step_exact_queries += int(
+                solver.get_last_post_step_collision_exact_distance_queries()
+            )
+        if hasattr(solver, "get_last_post_step_collision_motion_bound_culled_pairs"):
+            post_step_motion_bound_culls += int(
+                solver.get_last_post_step_collision_motion_bound_culled_pairs()
+            )
+        q_next = np.asarray(res.q_solution, dtype=float)
+        moving_steps += int(np.linalg.norm(q_next - q) > 1e-10)
+        q = q_next
         robot.update_configuration(q)
 
     return {
@@ -159,6 +211,12 @@ def _benchmark_position_step(tuning_mode: str, warmup: int = 5, steps: int = 50)
         "p95_ms": float(np.percentile(timings, 95)),
         "mean_ms": float(np.mean(timings)),
         "timings": timings,
+        "statuses": statuses,
+        "moving_steps": moving_steps,
+        "post_step_exact_queries": post_step_exact_queries,
+        "post_step_motion_bound_culls": post_step_motion_bound_culls,
+        "preferred_lock_attempted_steps": preferred_lock_attempted_steps,
+        "preferred_lock_fallback_steps": preferred_lock_fallback_steps,
     }
 
 
@@ -181,6 +239,47 @@ class TestCollisionTuningPerformance:
         assert median < 4.0, (
             f"Balanced mode median={median:.2f}ms, expected <4ms. "
             f"Full collision scan likely running in hot path."
+        )
+
+    def test_acceleration_limited_collision_path_under_15ms_p95(self):
+        """Successful predictive projection must retain WBC deadline headroom."""
+        result = _benchmark_position_step(
+            "speed",
+            warmup=10,
+            steps=80,
+            acceleration_limit=10.0,
+            collision_min_distance=0.02,
+            max_steps=3,
+            trajectory_amplitude_m=0.02,
+        )
+        assert set(result["statuses"]) == {eik.SolverStatus.SUCCESS}
+        assert result["moving_steps"] == 80
+        p95 = result["p95_ms"]
+        assert p95 < 15.0, (
+            f"Acceleration-limited collision path p95={p95:.2f}ms, "
+            "expected <15ms to preserve WBC integration headroom."
+        )
+
+    def test_preferred_lock_rollback_path_under_15ms_p95(self):
+        """Rollback snapshots must not consume the WBC compute budget."""
+        result = _benchmark_position_step(
+            "speed",
+            warmup=10,
+            steps=80,
+            acceleration_limit=10.0,
+            collision_min_distance=0.02,
+            max_steps=3,
+            trajectory_amplitude_m=0.02,
+            force_preferred_lock_fallback=True,
+        )
+        assert set(result["statuses"]) == {eik.SolverStatus.SUCCESS}
+        assert result["preferred_lock_attempted_steps"] == 80
+        assert result["preferred_lock_fallback_steps"] > 0
+        assert result["post_step_exact_queries"] > 0
+        p95 = result["p95_ms"]
+        assert p95 < 15.0, (
+            f"Preferred-lock rollback path p95={p95:.2f}ms, "
+            "expected <15ms to preserve WBC integration headroom."
         )
 
     def test_speed_not_slower_than_precise(self):

@@ -29,6 +29,8 @@ stall handler, auto layout, weighted fallback). Summary:
 cfg = solver.runtime_config()
 cfg.enable_auto_task_layout = True
 cfg.weighted_fallback_enabled = True
+cfg.joint_limit_non_worsening_enabled = True
+cfg.joint_limit_non_worsening_margin = 0.02
 solver.configure_runtime(cfg)
 ```
 
@@ -46,6 +48,14 @@ collision, CoM, relative-pose, contact projection, and linear constraints.
 Disable `weighted_fallback_enabled` only when you are running an A/B benchmark
 or need to reproduce historical strict-priority behavior. Disable
 `enable_auto_task_layout` when you need a fixed merged or split pose-task layout.
+
+`joint_limit_non_worsening_enabled` adds an inward/tangent hard half-space for
+finite scalar joints inside `joint_limit_non_worsening_margin`. It keeps that
+limit slack from decreasing across primary and lower-priority tasks while
+leaving inward and Cartesian tangent progress available. With acceleration
+limits enabled, an exact sampled-data stopping envelope brakes outward motion
+before the margin so entry remains continuous. The policy is off by default and
+requires position limits to be enabled.
 
 ## Adaptive dt, elastic band, stall handler
 
@@ -69,12 +79,11 @@ solver.set_non_worsening_collision_floor_enabled(True)
 solver.set_collision_structural_floor(0.005)  # metres; default 5 mm
 ```
 
-The default 5 mm floor preserves the historical non-worsening behavior for
-positive structural clearances: pairs that already rest above the floor keep
-their observed clearance rather than being pushed to the global collision
-margin. When an app deliberately raises the floor, first-seen positive pairs
-below that raised floor recover toward the floor; first-seen penetrating pairs
-also recover toward the floor, capped by the active collision margin.
+For a pair first seen below the global collision margin, the floor is both the
+minimum retained clearance and the recovery target. A pair below the floor
+recovers toward it; a pair already above the floor may move down toward it
+instead of being pinned at its first observed clearance. The target is capped by
+the pair's active collision margin, including per-pair overrides.
 
 The floor is **off by default**. Getter/setter pairs:
 `get_non_worsening_collision_floor_enabled()` and
@@ -107,6 +116,9 @@ batch parallelization notes, and measured Speed vs Precise timings.
 - `primary_solve_mode` — mirrors registered EE task solve mode for the primary band
 - `primary_allow_min_error_fallback` — when `True`, retry a stalled SCALE/SCALE_ELASTIC
   primary solve once with MIN_ERROR before accepting freeze
+- `continuity_command_revision` — optional caller-owned source-command identity; keep a
+  non-negative value stable across derived-frame re-expression and increment it when the source
+  command changes (`-1` keeps automatic pose-based detection)
 
 See `docs/examples/collision_aware_ik.md` for collision-floor, adaptive dt, elastic band, and
 fallback interaction with `configure_collision_constraint()`.

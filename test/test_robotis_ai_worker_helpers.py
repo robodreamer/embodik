@@ -528,7 +528,7 @@ def test_rby1_auto_pose_layout_keeps_bimanual_case_productive() -> None:
     merged_statuses, merged_layouts, merged_errors, merged_moved = (
         _run_limited_rby1_pose_group_case(mode="merged", limit_width=0.02, target_offset=offset)
     )
-    split_statuses, split_layouts, _split_errors, split_moved = _run_limited_rby1_pose_group_case(
+    split_statuses, split_layouts, split_errors, split_moved = _run_limited_rby1_pose_group_case(
         mode="split", limit_width=0.02, target_offset=offset
     )
     auto_statuses, auto_layouts, auto_errors, auto_moved = _run_limited_rby1_pose_group_case(
@@ -545,7 +545,8 @@ def test_rby1_auto_pose_layout_keeps_bimanual_case_productive() -> None:
         assert merged_moved < 25
     assert split_moved >= 35
     assert auto_moved >= 35
-    assert auto_moved >= split_moved
+    assert split_errors[-1] <= split_errors[0] - 0.005
+    assert auto_errors[-1] <= auto_errors[0] - 0.005
     assert auto_errors[-1] <= merged_errors[-1] + 0.02
 
 
@@ -659,6 +660,7 @@ def test_rby1_collision_push_release_uses_hardening_policy_without_stall_lock() 
     late_stalled_frames = 0
     moved_frames = 0
     release_moved_frames = 0
+    statuses = []
     for step_idx in range(80):
         right_target = right_push if step_idx < 40 else right_start
         step = robust_solve_position_step(
@@ -673,6 +675,7 @@ def test_rby1_collision_push_release_uses_hardening_policy_without_stall_lock() 
         dq = float(
             np.linalg.norm(np.asarray(step.q_next, dtype=float) - np.asarray(q, dtype=float))
         )
+        statuses.append(step.solver_result.status)
         q = np.asarray(step.q_next, dtype=float)
         robot.update_configuration(q)
         current_min = float(solver.evaluate_collision_debug(q).distance)
@@ -695,6 +698,7 @@ def test_rby1_collision_push_release_uses_hardening_policy_without_stall_lock() 
     assert late_stalled_frames <= 3
     assert moved_frames >= 35
     assert release_moved_frames >= 35
+    assert embodik.SolverStatus.NON_FINITE_INPUT not in statuses
     assert float(solver.evaluate_collision_debug(q).distance) > min_distance_m
 
 
@@ -812,7 +816,7 @@ def test_rby1_repeated_collision_entry_release_uses_solver_owned_recovery() -> N
     release_stalled_frames = 0
     release_moved_frames = 0
     release_window_moves = [0, 0, 0]
-    entered_collision_shell = False
+    reached_collision_boundary = False
     min_distance_seen = float("inf")
     for step_idx in range(72):
         cycle_idx = step_idx // 24
@@ -835,7 +839,9 @@ def test_rby1_repeated_collision_entry_release_uses_solver_owned_recovery() -> N
         robot.update_configuration(q)
         current_min = float(solver.evaluate_collision_debug(q).distance)
         min_distance_seen = min(min_distance_seen, current_min)
-        entered_collision_shell = entered_collision_shell or current_min < min_distance_m
+        reached_collision_boundary = (
+            reached_collision_boundary or current_min <= min_distance_m + 5e-4
+        )
 
         right_err = float(
             np.linalg.norm(
@@ -852,8 +858,9 @@ def test_rby1_repeated_collision_entry_release_uses_solver_owned_recovery() -> N
                 release_stalled_frames += 1
 
     assert (
-        entered_collision_shell
-    ), f"test did not exercise collision shell; min={min_distance_seen:.4f}"
+        reached_collision_boundary
+    ), f"test did not reach the collision boundary; min={min_distance_seen:.4f}"
+    assert min_distance_seen >= min_distance_m - 1e-4
     assert release_stalled_frames <= 18
     assert release_moved_frames >= 20
     assert release_window_moves[0] >= 3
@@ -862,10 +869,6 @@ def test_rby1_repeated_collision_entry_release_uses_solver_owned_recovery() -> N
     assert float(solver.evaluate_collision_debug(q).distance) > min_distance_m
 
 
-@pytest.mark.xfail(
-    reason="Known compact RBY1 drag regression: solver stalls near collision more than expected.",
-    strict=True,
-)
 def test_rby1_compact_dual_target_drag_stays_productive_near_collision() -> None:
     """Both active targets near the torso should not collapse into zero motion."""
     _require_rby1_description()

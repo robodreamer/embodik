@@ -45,6 +45,7 @@ solver.configure_runtime(cfg)
 | `weighted_fallback_enabled` | **on** | After a non-success prioritized solve, may accept a **constrained weighted** MIN_ERROR candidate that still satisfies collision, limits, CoM, etc. |
 | `enable_auto_task_layout` | off in raw solver; **on in examples** | Toggles **merged 6D pose** vs **split position + orientation** tasks when binding score says one layout fits better |
 | `adaptive_dt` | off | When stamped into `PositionStepOptions`, scales integration `dt` with position error |
+| `joint_limit_non_worsening_enabled` | off | Inside `joint_limit_non_worsening_margin`, prevents finite scalar joint-limit slack from decreasing while retaining inward and tangent motion |
 | `weighted_advisor_enabled` | off | Computes weighted candidate every step for diagnostics without changing authoritative output |
 
 Prioritized SNS remains authoritative on **success**. Fallback and layout switches happen at
@@ -73,6 +74,38 @@ candidate is feasible, it can replace the failed prioritized step (`recovery_sta
 
 Disable only for strict-priority A/B benchmarks — not for production teleop.
 
+### Active joint-limit non-worsening
+
+Enable `joint_limit_non_worsening_enabled` when a limited-ROM robot must not
+spend its remaining joint-limit margin to follow an infeasible Cartesian
+direction:
+
+```python
+cfg = solver.runtime_config()
+cfg.joint_limit_non_worsening_enabled = True
+cfg.joint_limit_non_worsening_margin = 0.02  # joint coordinates; default 0.04
+solver.configure_runtime(cfg)
+```
+
+The policy requires position limits to be enabled. For each finite scalar joint
+inside the activation margin, the solver adds an inward/tangent velocity
+half-space. When acceleration limits are enabled, a sampled-data stopping bound
+starts limiting outward speed before the margin so the command reaches the
+half-space continuously. An outward `SCALE` objective is first represented by
+its closest achievable Cartesian tangent objective; exact task motion through
+the task nullspace is retained when feasible. The same hard interval then
+constrains `MIN_ERROR`, posture, manipulability, and other lower-priority
+objectives, so a secondary task cannot reintroduce the removed outward motion.
+
+The policy is default-off because the useful activation width depends on robot
+range of motion and control rate. It does not replace hard position limits or
+relax collision, CoM, contact, or velocity constraints. Normal integrated motion
+remains inside the configured acceleration corridor through sampled braking. If
+an external state synchronization makes remembered acceleration history
+incompatible with the active limit interval, the limit interval takes
+precedence for that solve. Non-finite or non-positive margins are rejected when
+the policy is enabled.
+
 ## Task solve modes
 
 Per-task `TaskSolveMode` controls how strictly a frame task must be met each velocity step:
@@ -86,6 +119,71 @@ Per-task `TaskSolveMode` controls how strictly a frame task must be met each vel
 `PositionStepOptions.primary_allow_min_error_fallback = True` retries a stalled primary
 `SCALE` / `SCALE_ELASTIC` step once with **MIN_ERROR** while keeping collision and CoM active —
 see [Collision-Aware IK](examples/collision_aware_ik.md).
+
+## Stationary-target continuity
+
+`solve_position_step()` evaluates nonlinear Cartesian merit over a 20-call window after the same
+pose target and solve policy remain unchanged. Productive windows continue even when individual
+joint steps reverse direction, as can happen while an automatic layout or redundant whole-body
+solve makes useful net progress. A window that moves without enough merit reduction, or repeatedly
+reverses without strong net progress, activates a hold at the last accepted configuration. The
+minimum absolute benefit scales with the number of calls in the window, so a longer policy dwell
+cannot hide the same low-rate drift. Aggregate progress also cannot excuse repeatedly worsening
+the currently worst commanded target. This prevents persistent null-space motion, target trading,
+and limit cycles after a far or constrained target has exhausted useful progress.
+
+For a pure velocity-level position step, the solver also remembers whether the target has actually
+moved since continuity state was initialized. Once that moving target becomes stationary, the
+solver anchors each commanded target's position and orientation error at that stop boundary. A
+candidate that worsens the anchor's dominant error block beyond the numerical tolerance is held
+immediately instead of being integrated for the rest of the 20-call dwell. The anchor remains fixed
+while the command is stationary. Candidates may still trade smaller error blocks while preserving
+the dominant block and making sufficient net progress over the continuity window, so workspace-edge
+convergence and singularity recovery do not require an acceleration bound or joint-space reset.
+
+This immediate non-regression check is deliberately disabled when acceleration limits are active,
+where sampled braking governs continuity, and when constraint paths that can require target-error
+tradeoffs are active. Those paths include collision, CoM, relative-pose, torso-pose, user linear,
+tight frame/point, contact projection, and protected-task viability constraints. They continue
+through the windowed continuity and constraint-specific acceptance logic so tangential or coupled
+recovery is not converted into a hard hold.
+
+The hold is mode-agnostic: it applies to `SCALE`, `SCALE_ELASTIC`, and `MIN_ERROR`, including the
+single-target and multi-target APIs. A held target that is already satisfied remains `SUCCESS`;
+an unsatisfied target with no useful nonlinear progress reports `NO_PROGRESS`. In both cases,
+`q_solution` and the reported applied velocity describe the unchanged configuration.
+
+The window restarts when an explicit step target, registered task target or control state, task
+policy, step option, runtime configuration, or task graph changes. This includes lower-priority
+posture and torso objectives, so a new command can make progress immediately even when a
+higher-priority target is already held. A hold caused by low progress can reopen when a later
+candidate becomes efficient. Explicit collision rejection and stall-escape candidates bypass the
+merit hold. Samples produced inside a collision margin remain part of the continuity window,
+preserving productive tangential sliding without allowing repeated contact-bound cycling to
+masquerade as recovery.
+
+When an adapter re-expresses one source command into changing world-frame poses, set
+`PositionStepOptions.continuity_command_revision` to a non-negative caller-owned revision. Keep
+the value unchanged while the source command is unchanged, and increment it when target geometry
+or ownership changes. With this explicit identity, derived pose changes do not restart the
+continuity window. Once strong nonlinear progress is exhausted, the hold remains latched until the
+revision, task policy, or task graph changes. This avoids low-rate self-motion from repeatedly
+re-derived targets while preserving one-tick command recovery. The default value `-1` retains
+automatic pose-based identity and its reversible low-progress hold.
+
+Adapters that add their own outer-loop velocity or acceleration continuity must preserve this
+hold contract after the native solve. If the source command is unchanged and the accepted
+position-step output is a hold, publish the unchanged configuration and zero applied velocity until
+the command identity changes. If an adapter synthesizes an equivalent app-owned hold from repeated
+stationary residual or reversal motion, latch that app-owned hold on the same command identity too.
+Otherwise an outer-loop filter can reintroduce low-rate self-motion even though the IK target is
+stationary.
+
+Adapters that recenter a nullspace posture anchor after each accepted step should use
+`PostureTask.set_reference_configuration()`. It updates the regularization reference without
+declaring a new command on every tick. Use `set_target_configuration()` or
+`set_controlled_joint_targets()` for commanded posture changes; those setters restart the
+continuity window so useful motion resumes immediately.
 
 ## Adaptive integration timestep
 
