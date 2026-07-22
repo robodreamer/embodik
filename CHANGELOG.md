@@ -7,35 +7,73 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.20.17] - 2026-07-19
+## [0.20.17] - 2026-07-22
 
 ### Added
 
 - Added manipulability and joint-limit avoidance tasks, including C++ and
   Python APIs, for lower-priority conditioning without overriding commanded
   Cartesian motion.
-- Added position-step acceleration-reference synchronization and collision
-  validation diagnostics for controllers that hold or post-process solver
-  output.
+- Added an opt-in active joint-limit non-worsening policy that preserves inward
+  and tangent motion near finite scalar limits, including sampled braking when
+  acceleration limits are enabled.
+- Added position-step controls for whole-step configuration caps, caller-owned
+  continuity identity, continuity reference frames, preferred-lock candidates,
+  and protected-task position/orientation tolerances.
+- Added explicit position-step hold and preferred-lock diagnostics, APIs to
+  synchronize the applied acceleration reference, and post-step collision query
+  counters for controllers that hold or post-process solver output.
+- Added `PostureTask.set_reference_configuration()` so applications can move a
+  regularization anchor without declaring a new posture command every tick.
 
 ### Changed
 
 - Kept finite position steps inside velocity, acceleration, active joint-limit,
   collision, and protected-task constraints while preserving useful progress
   through nonlinear refinement.
-- Improved collision-row retention and conservative post-step validation so
-  constrained motion can slide tangentially along a contact boundary without
-  sacrificing the configured recovery floor.
+- Made preferred-lock arbitration evaluate the locked candidate and fallback
+  from the same entry state, preserving one physical integration step while
+  allowing useful arms-first progress before shared-body fallback.
+- Improved collision-row retention, tangent-space task projection, conservative
+  post-step validation, and broadphase certification so constrained motion can
+  slide along a contact boundary without sacrificing the configured recovery
+  floor.
+- Treated `max_constraints` as a nominal collision-row budget: penetrating and
+  floor-critical pairs remain represented when safety requires additional rows.
+- Used the configured structural floor as the recovery and retention target for
+  pairs first observed inside the global collision margin, instead of pinning
+  every positive-clearance pair at its first observed distance.
+- Kept task-local joint exclusions local to their tasks so collision recovery
+  can still use globally available joints.
+- Updated the public bimanual example to cap Auto-mode torso contribution,
+  accept measurable arms-only progress before fallback, and use a lower default
+  adaptive-dt scale for smoother large target transitions.
+- Updated GitHub checkout, Python setup, Pages, and artifact actions used by CI,
+  documentation, wheel, and release workflows.
+- Automated version-bump releases after merge to `main`: synchronized package
+  metadata and the dated changelog entry are validated before the version tag
+  is created and the wheel/sdist/PyPI workflow is dispatched.
 
 ### Fixed
 
 - Prevented infeasible or stationary targets from producing residual
   self-motion after useful progress is exhausted; intentional holds are now
   reported explicitly to callers.
+- Prevented stationary workspace-boundary targets from accumulating regressive
+  velocity-level steps after marker motion stops, while retaining productive
+  convergence through smaller position/orientation error trades.
 - Improved recovery from fully extended, singular, and active joint-limit
   configurations without requiring a joint-space reset.
+- Prevented conditioning, acceleration projection, and lower-priority tasks
+  from spending active joint-limit slack or returning finite steps outside the
+  configured hard limits.
 - Preserved primary task and grasp continuity across preferred-lock handoffs,
   acceleration projection, target changes, and collision-pair switches.
+- Preserved collision recovery floors across cache refreshes, active-row
+  switches, target changes, and diagnostic probes; non-finite collision evidence
+  now fails closed without replacing warm solver state.
+- Distinguished recoverable finite numerical stalls from invalid non-finite
+  input so valid constrained commands can retry without hiding malformed data.
 
 ## [0.20.16] - 2026-06-08
 
