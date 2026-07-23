@@ -11,7 +11,9 @@
 
 #include <Eigen/Core>
 
+#include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
@@ -270,6 +272,38 @@ struct VelocityCollisionLiftOptions {
   int validation_substeps = 1;
 };
 
+enum class CollisionConstraintOutsidePolicy {
+  kReject,
+  kRecoverNonWorsening,
+};
+
+/**
+ * @brief One-sided acceleration policy for native signed-distance rows.
+ *
+ * Positive coordinate rate and acceleration increase sphere separation.
+ * Native continuous certification is initially limited to exact-name
+ * sphere-sphere catalogs on fixed-base all-prismatic scalar models.
+ */
+struct CollisionConstraintAccelerationPolicy {
+  bool proximity_activation_enabled = true;
+  double activation_margin = 0.05;
+  double maximum_approach_rate = 0.4;
+  double maximum_inward_acceleration = 0.1;
+  double minimum_braking_acceleration = 0.1;
+  CollisionConstraintOutsidePolicy outside_policy =
+      CollisionConstraintOutsidePolicy::kRecoverNonWorsening;
+  double recovery_scale = 0.2;
+  double minimum_recovery_rate = 0.01;
+  double maximum_recovery_rate = 0.15;
+};
+
+enum class AccelerationCollisionRegime {
+  kUnknown,
+  kStrictInterior,
+  kExactFloor,
+  kBelowLimitRecovery,
+};
+
 struct AccelerationTaskReference {
   Eigen::VectorXd desired_velocity;
   Eigen::VectorXd desired_acceleration;
@@ -294,6 +328,33 @@ struct AccelerationAllocationDiagnostics {
   Eigen::VectorXd reference_acceleration;
   Eigen::VectorXd weighted_physical_residual;
   double objective_value = 0.0;
+};
+
+struct AccelerationAnalyticCollisionPairDiagnostics {
+  std::size_t pair_index = 0;
+  std::string pair_key;
+  std::string object_a;
+  std::string object_b;
+  AccelerationCollisionRegime regime =
+      AccelerationCollisionRegime::kUnknown;
+  double minimum_distance = 0.0;
+  double current_signed_distance =
+      std::numeric_limits<double>::quiet_NaN();
+  double current_signed_distance_lower_bound =
+      std::numeric_limits<double>::quiet_NaN();
+  double current_signed_distance_upper_bound =
+      std::numeric_limits<double>::quiet_NaN();
+  double current_rate_lower_bound =
+      std::numeric_limits<double>::quiet_NaN();
+  double current_rate_upper_bound =
+      std::numeric_limits<double>::quiet_NaN();
+  double endpoint_signed_distance_lower_bound =
+      std::numeric_limits<double>::quiet_NaN();
+  double lowest_path_signed_distance_lower_bound =
+      std::numeric_limits<double>::quiet_NaN();
+  bool state_rate_shaping_active = false;
+  bool braking_witness_required = false;
+  bool step_certified = false;
 };
 
 struct AccelerationSolverResult : public SolverResult {
@@ -322,13 +383,27 @@ struct AccelerationSolverResult : public SolverResult {
   std::uint64_t collision_lift_pairs_considered = 0;
   std::uint64_t collision_lift_row_pairs = 0;
   std::uint64_t collision_lift_row_exact_queries = 0;
+  bool native_collision_constraint_applied = false;
+  std::vector<AccelerationAnalyticCollisionPairDiagnostics>
+      native_collision_diagnostics;
+  std::uint64_t native_collision_pair_evaluations = 0;
+  std::uint64_t native_collision_path_visited_nodes = 0;
+  std::uint64_t native_collision_certified_intervals = 0;
 };
 
 struct AccelerationSolverCapabilities {
   bool supports_fixed_base_scalar_joints = true;
   bool supports_floating_base = false;
   bool supports_scale_elastic = false;
+#ifdef PINOCCHIO_WITH_HPP_FCL
+  // True when at least one native collision family is available. Inspect the
+  // precise capability below and configuration contract for its scope.
+  bool supports_collision_constraints = true;
+  bool supports_analytic_sphere_collision_constraints = true;
+#else
   bool supports_collision_constraints = false;
+  bool supports_analytic_sphere_collision_constraints = false;
+#endif
   bool supports_effort_constraints = true;
   bool supports_fixed_base_contact_kinematics = true;
   bool supports_tight_point_constraints = true;
@@ -380,6 +455,33 @@ public:
   void remove_task(const std::string &name);
   void clear_tasks();
 
+  /**
+   * @brief Configure native continuously certified analytic collision.
+   *
+   * The definition uses exact collision-geometry names. Configuration is
+   * atomic and rejects unsupported geometry or topology. The initial native
+   * proof supports complete sphere-sphere catalogs on fixed-base
+   * all-prismatic scalar models; other catalogs remain available through the
+   * non-certifying velocity-collision compatibility adapter.
+   *
+   * While this native mode is configured, solve() accepts joint position,
+   * velocity, and acceleration boxes, generalized allocation, and soft tasks.
+   * Other per-call hard families are rejected until they provide matching
+   * predicted-state certificate hooks.
+   */
+  void configure_collision_constraint(
+      const CollisionConstraintDefinition &definition,
+      const CollisionConstraintAccelerationPolicy &policy);
+  void clear_collision_constraint();
+  bool has_collision_constraint() const;
+  /// Returns the default distance, not any pair-specific override.
+  double get_collision_min_distance() const;
+  std::optional<CollisionConstraintDefinition>
+  get_collision_constraint_definition() const;
+  std::optional<CollisionConstraintAccelerationPolicy>
+  get_collision_constraint_policy() const;
+  std::vector<CollisionGeometryPair> get_active_collision_pairs() const;
+
   AccelerationSolverResult
   solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq, double dt,
         const AccelerationSolveOptions &options = AccelerationSolveOptions{});
@@ -406,6 +508,12 @@ private:
   std::vector<std::shared_ptr<Task>> tasks_;
   std::unordered_map<std::string, std::shared_ptr<Task>> task_map_;
   std::unordered_map<std::string, AccelerationTaskReference> task_references_;
+  std::optional<CollisionConstraintDefinition> native_collision_definition_;
+  std::optional<CollisionConstraintAccelerationPolicy>
+      native_collision_policy_;
+  std::vector<CollisionGeometryPair> native_collision_active_pairs_;
+  std::vector<std::size_t> native_collision_pair_indices_;
+  std::vector<double> native_collision_minimum_distances_;
 };
 
 } // namespace embodik

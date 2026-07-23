@@ -143,10 +143,13 @@ TEST_F(AccelerationVelocityCollisionLiftTest,
   const auto capabilities = AccelerationSolver::capabilities();
 #ifdef PINOCCHIO_WITH_HPP_FCL
   EXPECT_TRUE(capabilities.supports_velocity_collision_lift);
+  EXPECT_TRUE(capabilities.supports_collision_constraints);
+  EXPECT_TRUE(capabilities.supports_analytic_sphere_collision_constraints);
 #else
   EXPECT_FALSE(capabilities.supports_velocity_collision_lift);
-#endif
   EXPECT_FALSE(capabilities.supports_collision_constraints);
+  EXPECT_FALSE(capabilities.supports_analytic_sphere_collision_constraints);
+#endif
 }
 
 TEST_F(AccelerationVelocityCollisionLiftTest, FlagsAndExactAccountingPass) {

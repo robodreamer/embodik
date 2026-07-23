@@ -111,12 +111,18 @@ static_assert(!std::is_copy_assignable_v<AccelerationSolver>);
 static_assert(std::is_nothrow_move_constructible_v<AccelerationSolver>);
 static_assert(std::is_nothrow_move_assignable_v<AccelerationSolver>);
 
-TEST_F(AccelerationSolverTest, CapabilitiesExposeMinimalR04Scope) {
+TEST_F(AccelerationSolverTest, CapabilitiesExposeCurrentNativeScope) {
   const auto capabilities = AccelerationSolver::capabilities();
   EXPECT_TRUE(capabilities.supports_fixed_base_scalar_joints);
   EXPECT_FALSE(capabilities.supports_floating_base);
   EXPECT_FALSE(capabilities.supports_scale_elastic);
+#ifdef PINOCCHIO_WITH_HPP_FCL
+  EXPECT_TRUE(capabilities.supports_collision_constraints);
+  EXPECT_TRUE(capabilities.supports_analytic_sphere_collision_constraints);
+#else
   EXPECT_FALSE(capabilities.supports_collision_constraints);
+  EXPECT_FALSE(capabilities.supports_analytic_sphere_collision_constraints);
+#endif
   EXPECT_TRUE(capabilities.supports_effort_constraints);
   EXPECT_TRUE(capabilities.supports_fixed_base_contact_kinematics);
   EXPECT_FALSE(capabilities.supports_dynamic_contact);

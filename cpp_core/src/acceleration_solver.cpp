@@ -1,5 +1,6 @@
 #include <embodik/acceleration_solver.hpp>
 
+#include "acceleration_analytic_collision.hpp"
 #include "acceleration_allocation_transform.hpp"
 #include "acceleration_com_support_polygon_constraint.hpp"
 #include "acceleration_fixed_frame_pose_constraint.hpp"
@@ -51,6 +52,42 @@ bool fixed_base_scalar_joints_only(const RobotModel &robot) {
     }
   }
   return true;
+}
+
+bool native_collision_options_are_supported(
+    const AccelerationSolveOptions &options, std::string *message) {
+  const bool unsupported =
+      options.effort_constraints.has_value() ||
+      !options.affine_constraints.empty() ||
+      !options.frozen_next_velocity_constraints.empty() ||
+      !options.task_acceleration_bounds.empty() ||
+      !options.contact_acceleration_constraints.empty() ||
+      !options.tight_point_constraints.empty() ||
+      !options.tight_frame_pose_constraints.empty() ||
+      !options.relative_pose_constraints.empty() ||
+      !options.torso_pose_bound_constraints.empty() ||
+      !options.com_support_polygon_constraints.empty() ||
+      !options.zero_acceleration_joint_indices.empty() ||
+      !options.zero_next_velocity_joint_indices.empty() ||
+      !options.fixed_current_position_joint_indices.empty();
+  if (unsupported && message != nullptr) {
+    *message =
+        "native collision certification currently permits joint state boxes, "
+        "generalized allocation, and soft tasks only; another hard family "
+        "lacks a predicted-state certificate provider";
+  }
+  return !unsupported;
+}
+
+detail::CompiledAnalyticCollisionConstraint make_stored_collision_compilation(
+    const std::vector<std::size_t> &pair_indices,
+    const std::vector<double> &minimum_distances,
+    const std::vector<CollisionGeometryPair> &active_pairs) {
+  detail::CompiledAnalyticCollisionConstraint compiled;
+  compiled.pair_indices = pair_indices;
+  compiled.minimum_distances = minimum_distances;
+  compiled.active_pairs = active_pairs;
+  return compiled;
 }
 
 template <typename Constraint>
@@ -1801,6 +1838,57 @@ void AccelerationSolver::clear_tasks() {
   task_references_.clear();
 }
 
+void AccelerationSolver::configure_collision_constraint(
+    const CollisionConstraintDefinition &definition,
+    const CollisionConstraintAccelerationPolicy &policy) {
+  const auto compiled = detail::compile_analytic_collision_constraint(
+      *robot_, definition, policy);
+  if (!compiled.satisfied()) {
+    throw std::invalid_argument(compiled.message);
+  }
+
+  native_collision_definition_ = definition;
+  native_collision_policy_ = policy;
+  native_collision_active_pairs_ = compiled.active_pairs;
+  native_collision_pair_indices_ = compiled.pair_indices;
+  native_collision_minimum_distances_ = compiled.minimum_distances;
+}
+
+void AccelerationSolver::clear_collision_constraint() {
+  native_collision_definition_.reset();
+  native_collision_policy_.reset();
+  native_collision_active_pairs_.clear();
+  native_collision_pair_indices_.clear();
+  native_collision_minimum_distances_.clear();
+}
+
+bool AccelerationSolver::has_collision_constraint() const {
+  return native_collision_definition_.has_value() &&
+         native_collision_policy_.has_value() &&
+         !native_collision_active_pairs_.empty();
+}
+
+double AccelerationSolver::get_collision_min_distance() const {
+  return native_collision_definition_.has_value()
+             ? native_collision_definition_->min_distance
+             : -1.0;
+}
+
+std::optional<CollisionConstraintDefinition>
+AccelerationSolver::get_collision_constraint_definition() const {
+  return native_collision_definition_;
+}
+
+std::optional<CollisionConstraintAccelerationPolicy>
+AccelerationSolver::get_collision_constraint_policy() const {
+  return native_collision_policy_;
+}
+
+std::vector<CollisionGeometryPair>
+AccelerationSolver::get_active_collision_pairs() const {
+  return native_collision_active_pairs_;
+}
+
 AccelerationSolverResult
 AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
                           double dt,
@@ -1852,6 +1940,48 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
       build_joint_state_box(*robot_, q, dq, dt, accel_limits, options);
   if (state_box.status != SolverStatus::kSuccess) {
     return finish(failure(state_box.status, state_box.message));
+  }
+  std::optional<detail::CompiledAnalyticCollisionConstraint>
+      native_collision_compiled;
+  std::unique_ptr<detail::CollisionDifferentialScratch>
+      native_collision_scratch;
+  detail::PreparedAnalyticCollisionConstraint native_collision_prepared;
+  if (has_collision_constraint()) {
+    std::string unsupported_message;
+    if (!native_collision_options_are_supported(options,
+                                                &unsupported_message)) {
+      auto failed =
+          failure(SolverStatus::kInvalidInput, unsupported_message);
+      failed.native_collision_constraint_applied = true;
+      return finish(clear_outputs(std::move(failed)));
+    }
+    native_collision_compiled = make_stored_collision_compilation(
+        native_collision_pair_indices_, native_collision_minimum_distances_,
+        native_collision_active_pairs_);
+    if (!native_collision_compiled->satisfied()) {
+      auto failed = failure(
+          SolverStatus::kNumericalError,
+          "stored native collision configuration is inconsistent");
+      failed.native_collision_constraint_applied = true;
+      return finish(clear_outputs(std::move(failed)));
+    }
+    native_collision_scratch =
+        std::make_unique<detail::CollisionDifferentialScratch>(*robot_);
+    native_collision_prepared =
+        detail::prepare_analytic_collision_constraint(
+            *robot_, *native_collision_scratch, *native_collision_compiled,
+            *native_collision_policy_, q, dq, dt, state_box.lower,
+            state_box.upper, "current-state");
+    if (!native_collision_prepared.satisfied()) {
+      auto failed = failure(native_collision_prepared.status,
+                            native_collision_prepared.message);
+      failed.native_collision_constraint_applied = true;
+      failed.native_collision_diagnostics =
+          native_collision_prepared.diagnostics;
+      failed.native_collision_pair_evaluations =
+          native_collision_prepared.pair_evaluations;
+      return finish(clear_outputs(std::move(failed)));
+    }
   }
   std::optional<detail::PreparedAccelerationAllocationTransform> allocation;
   if (options.generalized_acceleration_allocation.has_value()) {
@@ -1984,6 +2114,8 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
           relative_pose_constraints.row_count +
           com_support_polygon_constraints.row_count +
           lock_rows.coefficients.rows() +
+          native_collision_prepared.physical_constraint.coefficient_matrix
+              .rows() +
           (effort_constraint.has_value() ? robot_->nv() : 0),
       false);
   detail::GeneralizedConstraintBlock joint_box;
@@ -1995,6 +2127,15 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
   if (!constraints.append_block(std::move(joint_box))) {
     return finish(failure(SolverStatus::kNumericalError,
                           "failed to assemble acceleration constraints"));
+  }
+  if (native_collision_prepared.has_rows() &&
+      !constraints.append_block(make_affine_constraint_block(
+          {native_collision_prepared.physical_constraint}, robot_->nv(),
+          native_collision_prepared.physical_constraint.coefficient_matrix
+              .rows()))) {
+    return finish(failure(
+        SolverStatus::kNumericalError,
+        "failed to assemble native collision acceleration constraints"));
   }
   if (effort_constraint.has_value() &&
       !constraints.append_block(
@@ -2142,32 +2283,51 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
   static_cast<SolverResult &>(result) = std::move(backend);
   result.acceleration_limits_applied = true;
   result.effort_limits_applied = effort_constraint.has_value();
+  result.native_collision_constraint_applied =
+      native_collision_compiled.has_value();
+  if (native_collision_compiled.has_value()) {
+    result.native_collision_diagnostics =
+        native_collision_prepared.diagnostics;
+    result.native_collision_pair_evaluations =
+        native_collision_prepared.pair_evaluations;
+  }
   if (result.status != SolverStatus::kSuccess) {
     return finish(clear_outputs(std::move(result)));
   }
+  const auto fail_after_backend =
+      [&result, &native_collision_compiled](SolverStatus status,
+                                            std::string message) {
+        if (native_collision_compiled.has_value()) {
+          result.status = status;
+          result.status_message = std::move(message);
+          return clear_outputs(std::move(result));
+        }
+        return clear_outputs(failure(status, std::move(message)));
+      };
 
   Eigen::VectorXd backend_solution = vector_from_solution(result);
   if (allocation.has_value()) {
     const auto physical =
         allocation->reconstruct_physical_acceleration(backend_solution);
     if (!physical.satisfied()) {
-      return finish(failure(physical.status, physical.message));
+      return finish(fail_after_backend(physical.status, physical.message));
     }
     result.joint_accelerations = physical.vector;
     assign_solution_from_vector(&result, result.joint_accelerations);
     if (!populate_allocation_diagnostics(&result, *allocation,
                                          result.joint_accelerations)) {
-      return finish(clear_outputs(failure(
+      return finish(fail_after_backend(
           SolverStatus::kNumericalError,
-          "acceleration allocation diagnostics are not finite")));
+          "acceleration allocation diagnostics are not finite"));
     }
   } else {
     result.joint_accelerations = std::move(backend_solution);
   }
   if (result.joint_accelerations.size() != robot_->nv() ||
       !result.joint_accelerations.allFinite()) {
-    return finish(failure(SolverStatus::kNumericalError,
-                          "backend returned an invalid acceleration vector"));
+    return finish(fail_after_backend(
+        SolverStatus::kNumericalError,
+        "backend returned an invalid acceleration vector"));
   }
   if ((result.joint_accelerations.array() <
        state_box.lower.array() - kConstraintTolerance)
@@ -2175,9 +2335,17 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
       (result.joint_accelerations.array() >
        state_box.upper.array() + kConstraintTolerance)
           .any()) {
-    return finish(clear_outputs(failure(
+    return finish(fail_after_backend(
         SolverStatus::kNumericalError,
-        "accepted acceleration violates the compatible state box")));
+        "accepted acceleration violates the compatible state box"));
+  }
+  if (native_collision_prepared.has_rows() &&
+      !accepted_affine_constraints_are_satisfied(
+          {native_collision_prepared.physical_constraint},
+          result.joint_accelerations)) {
+    return finish(fail_after_backend(
+        SolverStatus::kNumericalError,
+        "accepted acceleration violates native collision constraints"));
   }
   if (!accepted_affine_constraints_are_satisfied(options.affine_constraints,
                                                  result.joint_accelerations)) {
@@ -2286,38 +2454,44 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
     result.q_solution = robot_->integrate(
         q, dt * dq + 0.5 * dt * dt * result.joint_accelerations);
   } catch (const std::exception &error) {
-    return finish(clear_outputs(failure(
+    return finish(fail_after_backend(
         SolverStatus::kNumericalError,
         std::string("accepted acceleration integration failed: ") +
-            error.what())));
+            error.what()));
   }
   if (!result.joint_velocities_next.allFinite() ||
       !result.q_solution.allFinite()) {
-    return finish(clear_outputs(failure(
+    return finish(fail_after_backend(
         SolverStatus::kNumericalError,
-        "accepted acceleration produced non-finite next state")));
+        "accepted acceleration produced non-finite next state"));
   }
-  if (!tight_point_constraints.prepared_constraints.empty() ||
+  const bool has_predicted_geometric_acceptance =
+      !tight_point_constraints.prepared_constraints.empty() ||
       !tight_frame_pose_constraints.prepared_constraints.empty() ||
       !torso_pose_bound_constraints.prepared_constraints.empty() ||
       !relative_pose_constraints.prepared_constraints.empty() ||
-      !com_support_polygon_constraints.prepared_constraints.empty()) {
-    const auto predicted_state_box = build_joint_state_box(
+      !com_support_polygon_constraints.prepared_constraints.empty();
+  std::optional<StateBoxAssembly> predicted_state_box;
+  if (has_predicted_geometric_acceptance ||
+      native_collision_compiled.has_value()) {
+    predicted_state_box = build_joint_state_box(
         *robot_, result.q_solution, result.joint_velocities_next, dt,
         accel_limits, options);
-    if (predicted_state_box.status != SolverStatus::kSuccess) {
-      return finish(clear_outputs(failure(
-          predicted_state_box.status,
+    if (predicted_state_box->status != SolverStatus::kSuccess) {
+      return finish(fail_after_backend(
+          predicted_state_box->status,
           "accepted geometric constraints could not construct the predicted "
           "joint acceleration support box: " +
-              predicted_state_box.message)));
+              predicted_state_box->message));
     }
+  }
+  if (has_predicted_geometric_acceptance) {
     for (const auto &prepared :
          tight_point_constraints.prepared_constraints) {
       const auto acceptance =
           detail::validate_tight_point_constraint_acceptance(
               prepared, *robot_, q, dq, result.joint_accelerations, dt,
-              predicted_state_box.lower, predicted_state_box.upper);
+              predicted_state_box->lower, predicted_state_box->upper);
       if (!acceptance.satisfied()) {
         return finish(clear_outputs(
             failure(acceptance.status, acceptance.message)));
@@ -2328,7 +2502,7 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
       const auto acceptance =
           detail::validate_fixed_frame_pose_constraint_acceptance(
               prepared, *robot_, q, dq, result.joint_accelerations, dt,
-              predicted_state_box.lower, predicted_state_box.upper);
+              predicted_state_box->lower, predicted_state_box->upper);
       if (!acceptance.satisfied()) {
         return finish(clear_outputs(
             failure(acceptance.status, acceptance.message)));
@@ -2339,7 +2513,7 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
       const auto acceptance =
           detail::validate_fixed_frame_pose_constraint_acceptance(
               prepared, *robot_, q, dq, result.joint_accelerations, dt,
-              predicted_state_box.lower, predicted_state_box.upper);
+              predicted_state_box->lower, predicted_state_box->upper);
       if (!acceptance.satisfied()) {
         return finish(clear_outputs(
             failure(acceptance.status, acceptance.message)));
@@ -2350,7 +2524,7 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
       const auto acceptance =
           detail::validate_relative_pose_constraint_acceptance(
               prepared, *robot_, q, dq, result.joint_accelerations, dt,
-              predicted_state_box.lower, predicted_state_box.upper);
+              predicted_state_box->lower, predicted_state_box->upper);
       if (!acceptance.satisfied()) {
         return finish(clear_outputs(
             failure(acceptance.status, acceptance.message)));
@@ -2361,11 +2535,36 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
       const auto acceptance =
           detail::validate_com_support_polygon_constraint_acceptance(
               prepared, *robot_, q, dq, result.joint_accelerations, dt,
-              predicted_state_box.lower, predicted_state_box.upper);
+              predicted_state_box->lower, predicted_state_box->upper);
       if (!acceptance.satisfied()) {
         return finish(clear_outputs(
             failure(acceptance.status, acceptance.message)));
       }
+    }
+  }
+  if (native_collision_compiled.has_value()) {
+    const auto certificate = detail::certify_analytic_collision_step(
+        *robot_, *native_collision_scratch, *native_collision_compiled,
+        *native_collision_policy_, native_collision_prepared, q, dq,
+        result.joint_accelerations, dt, result.q_solution,
+        result.joint_velocities_next, predicted_state_box->lower,
+        predicted_state_box->upper);
+    result.native_collision_pair_evaluations +=
+        certificate.pair_evaluations;
+    result.native_collision_path_visited_nodes =
+        certificate.path_visited_nodes;
+    result.native_collision_certified_intervals =
+        certificate.certified_intervals;
+    result.collision_endpoint_validated =
+        certificate.endpoint_validated;
+    result.collision_step_certified = certificate.step_certified;
+    if (!certificate.diagnostics.empty()) {
+      result.native_collision_diagnostics = certificate.diagnostics;
+    }
+    if (!certificate.satisfied()) {
+      result.status = certificate.status;
+      result.status_message = certificate.message;
+      return finish(clear_outputs(std::move(result)));
     }
   }
   if (options.apply_velocity_limits) {
@@ -2376,9 +2575,9 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
         (result.joint_velocities_next.array() >
          velocity_limits.array() + kConstraintTolerance)
             .any()) {
-      return finish(clear_outputs(failure(
+      return finish(fail_after_backend(
           SolverStatus::kNumericalError,
-          "accepted acceleration violates next velocity limits")));
+          "accepted acceleration violates next velocity limits"));
     }
   }
   if (options.apply_position_limits) {
@@ -2389,9 +2588,9 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
         (result.q_solution.array() >
          position_limits.second.array() + kConstraintTolerance)
             .any()) {
-      return finish(clear_outputs(failure(
+      return finish(fail_after_backend(
           SolverStatus::kNumericalError,
-          "accepted acceleration violates next position limits")));
+          "accepted acceleration violates next position limits"));
     }
   }
   attribute_saturation(&result, state_box, result.joint_accelerations);

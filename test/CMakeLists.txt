@@ -412,6 +412,25 @@ add_test(NAME test_collision_constraint_differential
     COMMAND test_collision_constraint_differential
 )
 
+add_executable(test_acceleration_solver_native_collision
+    test_acceleration_solver_native_collision.cpp
+)
+
+target_link_libraries(test_acceleration_solver_native_collision
+    embodik_core
+    GTest::gtest_main
+    GTest::gtest
+)
+
+target_include_directories(test_acceleration_solver_native_collision
+    PRIVATE
+        ${CMAKE_SOURCE_DIR}/cpp_core/src
+)
+
+add_test(NAME test_acceleration_solver_native_collision
+    COMMAND test_acceleration_solver_native_collision
+)
+
 add_executable(test_shared_constraint_definitions
     test_shared_constraint_definitions.cpp
 )
