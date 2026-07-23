@@ -65,6 +65,10 @@ constraint_family_name<FrozenNextVelocityConstraint>(
   return "frozen next-velocity constraint";
 }
 
+const char *constraint_family_name(const TaskAccelerationBounds &) {
+  return "task acceleration bounds";
+}
+
 template <typename Constraint>
 bool lower_side_active(const Constraint &constraint, Eigen::Index row) {
   return constraint.lower_bound_active.empty() ||
@@ -300,17 +304,17 @@ ConstraintValidation validate_constraint_family(
 ConstraintValidation validate_acceleration_constraints(
     const std::vector<AffineAccelerationConstraint> &affine_constraints,
     const std::vector<FrozenNextVelocityConstraint> &frozen_constraints,
-    Eigen::Index variable_count) {
+    Eigen::Index variable_count,
+    std::unordered_set<std::string> *source_ids) {
   ConstraintValidation validation;
-  std::unordered_set<std::string> source_ids;
   validation = validate_constraint_family(affine_constraints, variable_count,
-                                          &source_ids, true);
+                                          source_ids, true);
   if (validation.status != SolverStatus::kSuccess) {
     return validation;
   }
   const Eigen::Index affine_rows = validation.row_count;
   validation = validate_constraint_family(frozen_constraints, variable_count,
-                                          &source_ids, false);
+                                          source_ids, false);
   validation.row_count += affine_rows;
   return validation;
 }
@@ -582,6 +586,165 @@ ObjectiveAssembly assemble_objectives(
     assembly.references.push_back(std::move(group_references));
   }
   return assembly;
+}
+
+const detail::AccelerationTaskDifferential *
+find_active_task_differential(const ObjectiveAssembly &objectives,
+                              const std::string &task_name) {
+  for (std::size_t group_index = 0; group_index < objectives.groups.size();
+       ++group_index) {
+    for (std::size_t task_index = 0;
+         task_index < objectives.groups[group_index].size(); ++task_index) {
+      if (objectives.groups[group_index][task_index]->getName() ==
+          task_name) {
+        return &objectives.differentials[group_index][task_index];
+      }
+    }
+  }
+  return nullptr;
+}
+
+ConstraintValidation validate_task_acceleration_bounds(
+    const std::vector<TaskAccelerationBounds> &bounds,
+    const ObjectiveAssembly &objectives,
+    std::unordered_set<std::string> *source_ids) {
+  ConstraintValidation validation;
+  std::unordered_set<std::string> task_names;
+  for (const auto &constraint : bounds) {
+    const std::string family = constraint_family_name(constraint);
+    if (constraint.source_id.empty()) {
+      validation.status = SolverStatus::kInvalidInput;
+      validation.message = family + " source_id must not be empty";
+      return validation;
+    }
+    if (!source_ids->insert(constraint.source_id).second) {
+      validation.status = SolverStatus::kInvalidInput;
+      validation.message = "duplicate acceleration constraint source_id '" +
+                           constraint.source_id + "'";
+      return validation;
+    }
+    if (constraint.task_name.empty()) {
+      validation.status = SolverStatus::kInvalidInput;
+      validation.message = family + " '" + constraint.source_id +
+                           "' task_name must not be empty";
+      return validation;
+    }
+    if (!task_names.insert(constraint.task_name).second) {
+      validation.status = SolverStatus::kInvalidInput;
+      validation.message = "duplicate task acceleration bounds for task '" +
+                           constraint.task_name + "'";
+      return validation;
+    }
+    const auto *differential =
+        find_active_task_differential(objectives, constraint.task_name);
+    if (differential == nullptr) {
+      validation.status = SolverStatus::kInvalidInput;
+      validation.message = family + " '" + constraint.source_id +
+                           "' references an unknown or inactive task '" +
+                           constraint.task_name + "'";
+      return validation;
+    }
+    const Eigen::Index rows = differential->physical_jacobian.rows();
+    if (rows == 0) {
+      validation.status = SolverStatus::kInvalidInput;
+      validation.message = family + " '" + constraint.source_id +
+                           "' task has no physical rows";
+      return validation;
+    }
+    if (constraint.lower_bounds.size() != rows ||
+        constraint.upper_bounds.size() != rows) {
+      validation.status = SolverStatus::kConstraintBoundsMismatch;
+      validation.message = family + " '" + constraint.source_id +
+                           "' bounds must match physical task rows";
+      return validation;
+    }
+    if ((!constraint.lower_bound_active.empty() &&
+         constraint.lower_bound_active.size() !=
+             static_cast<std::size_t>(rows)) ||
+        (!constraint.upper_bound_active.empty() &&
+         constraint.upper_bound_active.size() !=
+             static_cast<std::size_t>(rows))) {
+      validation.status = SolverStatus::kShapeMismatch;
+      validation.message = family + " '" + constraint.source_id +
+                           "' active-side flags must match physical task rows";
+      return validation;
+    }
+    if (!constraint.lower_bounds.allFinite() ||
+        !constraint.upper_bounds.allFinite()) {
+      validation.status = SolverStatus::kNonFiniteInput;
+      validation.message = family + " '" + constraint.source_id +
+                           "' must contain only finite bounds";
+      return validation;
+    }
+    for (Eigen::Index row = 0; row < rows; ++row) {
+      const bool lower_active = lower_side_active(constraint, row);
+      const bool upper_active = upper_side_active(constraint, row);
+      if (!lower_active && !upper_active) {
+        validation.status = SolverStatus::kInvalidInput;
+        validation.message = family + " '" + constraint.source_id + "' row " +
+                             std::to_string(row) +
+                             " has no active bound side";
+        return validation;
+      }
+      if (lower_active && upper_active &&
+          constraint.lower_bounds(row) > constraint.upper_bounds(row)) {
+        validation.status = SolverStatus::kInvalidInput;
+        validation.message = family + " '" + constraint.source_id +
+                             "' lower bound exceeds upper bound";
+        return validation;
+      }
+      if ((lower_active &&
+           !checked_shifted_bound(constraint.lower_bounds(row),
+                                  differential->jacobian_bias(row))) ||
+          (upper_active &&
+           !checked_shifted_bound(constraint.upper_bounds(row),
+                                  differential->jacobian_bias(row)))) {
+        validation.status = SolverStatus::kInvalidInput;
+        validation.message = family + " '" + constraint.source_id +
+                             "' shifted bound is not finite";
+        return validation;
+      }
+      double inactive_magnitude = 0.0;
+      double inactive_side_bound = 0.0;
+      if (!inactive_bound_magnitude(differential->physical_jacobian.row(row),
+                                    &inactive_magnitude) ||
+          (!lower_active &&
+           !checked_add(differential->jacobian_bias(row), -inactive_magnitude,
+                        &inactive_side_bound)) ||
+          (!upper_active &&
+           !checked_add(differential->jacobian_bias(row), inactive_magnitude,
+                        &inactive_side_bound))) {
+        validation.status = SolverStatus::kInvalidInput;
+        validation.message = family + " '" + constraint.source_id +
+                             "' inactive side cannot be represented in the "
+                             "finite backend range";
+        return validation;
+      }
+    }
+    validation.row_count += rows;
+  }
+  return validation;
+}
+
+std::vector<AffineAccelerationConstraint> make_task_bound_affine_constraints(
+    const std::vector<TaskAccelerationBounds> &bounds,
+    const ObjectiveAssembly &objectives) {
+  std::vector<AffineAccelerationConstraint> constraints;
+  constraints.reserve(bounds.size());
+  for (const auto &bound : bounds) {
+    const auto *differential =
+        find_active_task_differential(objectives, bound.task_name);
+    AffineAccelerationConstraint constraint;
+    constraint.source_id = bound.source_id;
+    constraint.coefficient_matrix = differential->physical_jacobian;
+    constraint.affine_bias = differential->jacobian_bias;
+    constraint.lower_bounds = bound.lower_bounds;
+    constraint.upper_bounds = bound.upper_bounds;
+    constraint.lower_bound_active = bound.lower_bound_active;
+    constraint.upper_bound_active = bound.upper_bound_active;
+    constraints.push_back(std::move(constraint));
+  }
+  return constraints;
 }
 
 Eigen::VectorXd vector_from_solution(const SolverResult &result) {
@@ -1137,9 +1300,10 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
     return finish(failure(state_box.status, state_box.message));
   }
 
-  const auto constraint_validation = validate_acceleration_constraints(
+  std::unordered_set<std::string> constraint_source_ids;
+  auto constraint_validation = validate_acceleration_constraints(
       options.affine_constraints, options.frozen_next_velocity_constraints,
-      robot_->nv());
+      robot_->nv(), &constraint_source_ids);
   if (constraint_validation.status != SolverStatus::kSuccess) {
     return finish(
         failure(constraint_validation.status, constraint_validation.message));
@@ -1167,6 +1331,16 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
   if (objectives.status != SolverStatus::kSuccess) {
     return finish(failure(objectives.status, objectives.message));
   }
+
+  const auto task_bound_validation = validate_task_acceleration_bounds(
+      options.task_acceleration_bounds, objectives, &constraint_source_ids);
+  if (task_bound_validation.status != SolverStatus::kSuccess) {
+    return finish(failure(task_bound_validation.status,
+                          task_bound_validation.message));
+  }
+
+  const auto task_bound_constraints = make_task_bound_affine_constraints(
+      options.task_acceleration_bounds, objectives);
   if (zero_excluded_by_bounds(state_box.lower, state_box.upper)) {
     for (auto &config : objectives.configs) {
       config.allow_min_error_fallback = true;
@@ -1176,7 +1350,7 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
   detail::GeneralizedConstraintSet constraints(
       robot_->nv(),
       robot_->nv() + constraint_validation.row_count +
-          lock_rows.coefficients.rows(),
+          task_bound_validation.row_count + lock_rows.coefficients.rows(),
       false);
   detail::GeneralizedConstraintBlock joint_box;
   joint_box.coefficient_matrix =
@@ -1211,6 +1385,14 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
                             "failed to assemble acceleration lock "
                             "constraints"));
     }
+  }
+  if (task_bound_validation.row_count > 0 &&
+      !constraints.append_block(make_affine_constraint_block(
+          task_bound_constraints, robot_->nv(),
+          task_bound_validation.row_count))) {
+    return finish(failure(
+        SolverStatus::kNumericalError,
+        "failed to assemble task acceleration bounds"));
   }
   if (!constraints.finalize()) {
     return finish(failure(SolverStatus::kNumericalError,
@@ -1264,6 +1446,12 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
     return finish(clear_outputs(failure(
         SolverStatus::kNumericalError,
         "accepted acceleration violates an acceleration lock constraint")));
+  }
+  if (!accepted_affine_constraints_are_satisfied(task_bound_constraints,
+                                                 result.joint_accelerations)) {
+    return finish(clear_outputs(failure(
+        SolverStatus::kNumericalError,
+        "accepted acceleration violates task acceleration bounds")));
   }
   result.joint_velocities_next = dq + dt * result.joint_accelerations;
   try {

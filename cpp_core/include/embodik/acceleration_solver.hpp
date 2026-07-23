@@ -58,12 +58,33 @@ struct FrozenNextVelocityConstraint {
   std::vector<bool> upper_bound_active;
 };
 
+/**
+ * @brief Named caller-owned physical task acceleration bounds.
+ *
+ * The record names one active registered task and enforces the physical rows:
+ *   lower_bounds <= J_physical * ddq + Jdot_dq <= upper_bounds
+ *
+ * Empty active-side vectors mean every side is active. Otherwise each vector
+ * must have one flag per task row, and every row must keep at least one active
+ * side. Task-local excluded joint columns are ignored for these hard physical
+ * rows; exclusions still apply to the soft task objective.
+ */
+struct TaskAccelerationBounds {
+  std::string source_id;
+  std::string task_name;
+  Eigen::VectorXd lower_bounds;
+  Eigen::VectorXd upper_bounds;
+  std::vector<bool> lower_bound_active;
+  std::vector<bool> upper_bound_active;
+};
+
 struct AccelerationSolveOptions {
   std::optional<Eigen::VectorXd> acceleration_limits_override;
   bool apply_velocity_limits = true;
   bool apply_position_limits = true;
   std::vector<AffineAccelerationConstraint> affine_constraints;
   std::vector<FrozenNextVelocityConstraint> frozen_next_velocity_constraints;
+  std::vector<TaskAccelerationBounds> task_acceleration_bounds;
   std::vector<int> zero_acceleration_joint_indices;
   std::vector<int> zero_next_velocity_joint_indices;
   std::vector<int> fixed_current_position_joint_indices;
