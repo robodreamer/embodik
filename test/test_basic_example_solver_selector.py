@@ -137,6 +137,24 @@ def test_basic_example_reports_velocity_only_when_acceleration_api_missing() -> 
         assert "missing Python acceleration API" in reason
 
 
+def test_basic_example_preserves_acceleration_constructor_failure_reason(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _load_basic_example_module()
+    robot = _two_link_robot(tmp_path)
+    q = np.zeros(robot.nq)
+
+    class RejectingAccelerationSolver:
+        def __init__(self, _robot):
+            raise RuntimeError("unsupported test topology")
+
+    monkeypatch.setattr(module.embodik, "AccelerationSolver", RejectingAccelerationSolver)
+    runtime, reason = module.basic_acceleration_runtime_status(robot, "tip", q)
+
+    assert runtime is None
+    assert reason == "RuntimeError: unsupported test topology"
+
+
 def test_basic_example_acceleration_stationary_step_runs_headlessly(tmp_path: Path) -> None:
     module = _load_basic_example_module()
     _skip_without_acceleration_api(module)

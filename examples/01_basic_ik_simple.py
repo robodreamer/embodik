@@ -139,14 +139,14 @@ def make_basic_acceleration_options(
     return options
 
 
-def configure_basic_acceleration_runtime(
+def _try_configure_basic_acceleration_runtime(
     robot: embodik.RobotModel,
     target_link: str,
     q_default: np.ndarray,
-) -> BasicAccelerationRuntime | None:
+) -> tuple[BasicAccelerationRuntime | None, str]:
     reason = acceleration_api_unavailable_reason()
     if reason:
-        return None
+        return None, reason
 
     try:
         solver = embodik.AccelerationSolver(robot)
@@ -157,8 +157,8 @@ def configure_basic_acceleration_runtime(
             "ee_orientation", target_link, embodik.TaskType.FRAME_ORIENTATION
         )
         posture_task = solver.add_posture_task("posture_bias")
-    except Exception:
-        return None
+    except Exception as exc:
+        return None, f"{type(exc).__name__}: {exc}"
 
     for task in (position_task, orientation_task):
         task.priority = 0
@@ -172,14 +172,26 @@ def configure_basic_acceleration_runtime(
     posture_task.allow_min_error_fallback = False
     posture_task.set_target_configuration(np.asarray(q_default, dtype=float))
 
-    return BasicAccelerationRuntime(
-        solver=solver,
-        target_link=target_link,
-        position_task=position_task,
-        orientation_task=orientation_task,
-        posture_task=posture_task,
-        dq=np.zeros(robot.nv, dtype=float),
+    return (
+        BasicAccelerationRuntime(
+            solver=solver,
+            target_link=target_link,
+            position_task=position_task,
+            orientation_task=orientation_task,
+            posture_task=posture_task,
+            dq=np.zeros(robot.nv, dtype=float),
+        ),
+        "",
     )
+
+
+def configure_basic_acceleration_runtime(
+    robot: embodik.RobotModel,
+    target_link: str,
+    q_default: np.ndarray,
+) -> BasicAccelerationRuntime | None:
+    runtime, _ = _try_configure_basic_acceleration_runtime(robot, target_link, q_default)
+    return runtime
 
 
 def solve_basic_acceleration_step(
@@ -243,12 +255,9 @@ def basic_acceleration_runtime_status(
     target_link: str,
     q_default: np.ndarray,
 ) -> tuple[BasicAccelerationRuntime | None, str]:
-    reason = acceleration_api_unavailable_reason()
-    if reason:
-        return None, reason
-    runtime = configure_basic_acceleration_runtime(robot, target_link, q_default)
+    runtime, reason = _try_configure_basic_acceleration_runtime(robot, target_link, q_default)
     if runtime is None:
-        return None, "failed to construct AccelerationSolver runtime"
+        return None, reason or "failed to construct AccelerationSolver runtime"
     robot.update_configuration(np.asarray(q_default, dtype=float))
     target_pose = robot.get_frame_pose(target_link)
     step = solve_basic_acceleration_step(

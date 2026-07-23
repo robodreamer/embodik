@@ -145,6 +145,36 @@ def test_capabilities_and_simple_fixed_base_solve(tmp_path):
     assert np.allclose(lightweight.joint_accelerations, result.joint_accelerations)
 
 
+def test_acceleration_runtime_does_not_change_velocity_solver_behavior(tmp_path):
+    robot = _two_joint_robot(tmp_path)
+    q = np.array([0.1, -0.2])
+
+    velocity_solver = eik.KinematicsSolver(robot)
+    velocity_task = velocity_solver.add_joint_task("velocity_joint1", "joint1", target_value=0.5)
+    velocity_task.priority = 1
+    before = velocity_solver.solve_velocity(q, apply_limits=True)
+
+    acceleration_solver = eik.AccelerationSolver(robot)
+    acceleration_solver.add_joint_task("acceleration_joint2", "joint2", target_value=0.0)
+    reference = eik.AccelerationTaskReference()
+    reference.desired_acceleration = np.array([2.0])
+    acceleration_solver.set_task_reference("acceleration_joint2", reference)
+    acceleration = acceleration_solver.solve(
+        q,
+        np.zeros(robot.nv),
+        0.01,
+        _options_with_limits([10.0, 10.0]),
+    )
+    after = velocity_solver.solve_velocity(q, apply_limits=True)
+
+    assert before.status == eik.SolverStatus.SUCCESS
+    assert acceleration.status == eik.SolverStatus.SUCCESS
+    assert after.status == before.status
+    np.testing.assert_allclose(after.joint_velocities, before.joint_velocities, atol=1e-12)
+    np.testing.assert_allclose(after.task_scales, before.task_scales, atol=1e-12)
+    np.testing.assert_allclose(after.task_errors, before.task_errors, atol=1e-12)
+
+
 def test_invalid_acceleration_solve_fails_clear(tmp_path):
     robot = _two_joint_robot(tmp_path)
     solver = eik.AccelerationSolver(robot)

@@ -16,6 +16,10 @@ jerk-limited actuator interface.
 
 ## Supported Scope
 
+`KinematicsSolver` remains EmbodiK's default velocity-level backend. The
+acceleration solver is a separate, opt-in API: constructing or running it does
+not replace, reconfigure, or import tasks from an existing velocity solver.
+
 | Area | Current acceleration support |
 | --- | --- |
 | Model topology | Fixed-base scalar 1-DoF joints |
@@ -145,10 +149,10 @@ rejected until they provide the same predicted-state certificate contract.
 
 ## Build And ABI Notes
 
-The acceleration API is introduced in `0.20.19` on top of the `0.20.18`
-integration baseline. The shared `Task` virtual interface and object layout are
-unchanged, but source builds must rebuild `embodik_core` and the Nanobind
-extension together before using the new Python types.
+The acceleration API is introduced in `0.21.0` on top of the `0.20.x`
+velocity-solver integration baseline. The shared `Task` virtual interface and
+object layout are unchanged, but source builds must rebuild `embodik_core` and
+the Nanobind extension together before using the new Python types.
 
 ## API Reference
 

@@ -52,3 +52,34 @@ def test_acceleration_page_is_in_navigation_and_current_release_changelog() -> N
     release = changelog.split(f"## [{version}]", maxsplit=1)[1].split("## [", maxsplit=1)[0]
     assert "fixed-base acceleration-level eSNS API" in release
     assert "non-hard-real-time" in release
+
+
+def test_development_guide_defines_pre_one_versioning_contract() -> None:
+    guide = (ROOT / "docs" / "development.md").read_text()
+
+    for required in (
+        "Versioning Contract",
+        "Patch (`0.Y.Z`)",
+        "Minor (`0.Y.0`)",
+        "new public solvers",
+        "`1.0.0`",
+        "applies prospectively from `0.21.0`",
+    ):
+        assert required in guide
+
+
+def test_example_index_classifies_every_runnable_script() -> None:
+    overview = (ROOT / "docs" / "examples" / "index.md").read_text()
+    examples = ROOT / "examples"
+    scripts = {
+        path.relative_to(examples).as_posix()
+        for path in examples.rglob("*.py")
+        if 'if __name__ == "__main__"' in path.read_text()
+        or "if __name__ == '__main__'" in path.read_text()
+    }
+
+    missing = sorted(name for name in scripts if f"`{name}`" not in overview)
+    assert missing == []
+    for status in ("Selectable", "Velocity-only", "Unsupported", "Not applicable"):
+        assert status in overview
+    assert "Velocity remains the default solver for all IK examples" in overview

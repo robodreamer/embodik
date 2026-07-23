@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.20.19] - 2026-07-23
+## [0.21.0] - 2026-07-23
 
 ### Added
 
@@ -29,6 +29,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   contact forces remain outside the stable surface.
 - Kept the shared task virtual interface and object layout unchanged; source
   consumers must still rebuild the core library and Nanobind extension together.
+- Defined the pre-1.0 versioning contract so new public solver capabilities use
+  minor releases while compatible fixes and internal improvements use patches.
+- Documented acceleration compatibility for every runnable example; velocity
+  remains the default and acceleration selection stays limited to examples that
+  explicitly own compatible state and constraint policies.
 
 ## [0.20.18] - 2026-07-22
 
