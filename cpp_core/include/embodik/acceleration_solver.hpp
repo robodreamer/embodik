@@ -424,7 +424,9 @@ struct AccelerationSolverCapabilities {
  *
  * This initial surface consumes explicit q, dq, and dt on every solve. It does
  * not store or infer previous command state. Unsupported model/task families
- * fail closed instead of falling back to velocity-level behavior.
+ * fail closed instead of falling back to velocity-level behavior. The API is
+ * not a hard real-time controller and makes no allocation-free or bounded-time
+ * execution guarantee.
  */
 class AccelerationSolver {
 public:

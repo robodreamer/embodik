@@ -25,6 +25,7 @@ nanobind_add_module(_embodik_impl
     src/tasks_bindings.cpp
     src/kinematics_solver_bindings.cpp
     src/pose_metrics_bindings.cpp
+    src/acceleration_solver_bindings.cpp
 )
 
 # Link with core library

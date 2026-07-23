@@ -20,6 +20,10 @@ DEFAULT_COLLISION_TUNING_MODE = "balanced"
 COLLISION_TUNING_OPTIONS = ("speed", "balanced", "precise")
 COLLISION_DEBUG_LOG_PERIOD_S = 5.0
 
+SOLVER_LEVEL_VELOCITY = "Velocity"
+SOLVER_LEVEL_ACCELERATION = "Acceleration"
+SOLVER_LEVEL_OPTIONS = (SOLVER_LEVEL_VELOCITY, SOLVER_LEVEL_ACCELERATION)
+
 
 def quiet_websocket_handshake_logs() -> None:
     """Hide benign Viser websocket disconnect traces from example output."""

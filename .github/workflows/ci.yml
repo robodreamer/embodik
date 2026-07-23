@@ -35,6 +35,9 @@ jobs:
       - name: Build and install package
         run: pixi run install
 
+      - name: Run native solver tests
+        run: pixi run test-native
+
       - name: Run tests
         run: pixi run test
 

@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Added a fixed-base acceleration-level eSNS API with Python bindings for
+  compatible joint state boxes, task and affine rows, effort limits,
+  fixed-contact kinematics, geometric constraints, and explicit diagnostics.
+- Added sampled velocity-collision row compatibility and continuously certified
+  native sphere-sphere collision support with distinct result flags.
+- Added velocity/acceleration solver-level selection to the basic and
+  collision-aware examples, gated by the active model and safety contract.
+
+### Changed
+
+- Kept velocity collision pair filtering authoritative for the sampled
+  acceleration compatibility path, including include/exclude pairs, active
+  per-pair floors, row ordering, and exact validation accounting.
+- Documented the acceleration solver as fixed-base, scalar-joint, and
+  non-hard-real-time; floating-base dynamics, wheel constraints, and dynamic
+  contact forces remain outside the stable surface.
+
 ## [0.20.18] - 2026-07-22
 
 ### Changed

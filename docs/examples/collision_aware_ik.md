@@ -13,8 +13,9 @@ want to inspect collision behavior, timing, task modes, and solver tuning.
 
 ## API Walkthrough
 
-The example uses the same `solve_position_step()` path as the basic example,
-then adds collision constraints and diagnostics:
+Velocity remains the default solver level. The example can also run one
+explicit acceleration step when the model and active collision configuration
+pass the acceleration capability gate:
 
 | Step | API calls | Purpose |
 | --- | --- | --- |
@@ -22,7 +23,33 @@ then adds collision constraints and diagnostics:
 | Configure collision avoidance | `configure_collision_constraint(...)` | Add self-collision velocity-damper constraints to each step. |
 | Tune task behavior | `TaskSolveMode`, `allow_min_error_fallback`, posture `weight` | Let the UI switch between strict scaling, fallback, and nullspace settings. |
 | Step the target | `solve_position_step(q, target_pose, "ee_task", step_opts)` | Produce the next safe configuration and per-task diagnostics. |
+| Step acceleration IK | `solve()` or `solve_with_velocity_collision()` | Use native acceleration without collision, or reuse the velocity solver's exact collision pair policy when collision is active. |
 | Visualize/debug | `compute_collision_distances()`, result diagnostics | Show closest pairs, timing, effective task modes, and fallback state. |
+
+The **Solver Level** control exposes Acceleration only after a stationary smoke
+solve succeeds. If the model runtime or active collision contract is not
+supported, the control remains velocity-only and the existing status field
+reports the reason.
+
+When Acceleration is selected, the example fixes the task mode to `SCALE`,
+advances one fixed-`dt` state step, and keeps native acceleration limits
+enabled. The velocity-only task-mode, fallback, multi-step, and adaptive-`dt`
+controls are disabled until Velocity is selected again.
+
+When collision is active, acceleration mode uses
+`solve_with_velocity_collision()`. This preserves the same include/exclude
+filtering, per-pair floors, active-row policy, and row ordering as the velocity
+solver. It validates exact distance samples and the endpoint, but it does not
+claim continuous swept-path certification:
+
+```text
+collision_endpoint_validated = true
+collision_step_certified = false
+```
+
+See the [Acceleration Solver guide](../acceleration_solver.md#collision-modes)
+for the distinction between sampled compatibility and the narrower native
+analytic certificate.
 
 Use `examples/02_collision_aware_IK.py` as the runnable source for the full UI
 and option wiring.
