@@ -9,6 +9,7 @@ first `solve_position_step()` loop.
 | Your goal | Start here | Then |
 |-----------|------------|------|
 | First working IK loop | [Quickstart](../quickstart.md) → [Basic IK](../examples/basic_ik.md) | [KinematicsSolver API](../api/kinematics_solver.md) |
+| Fixed-base acceleration-level control | [Acceleration Solver](../acceleration_solver.md) | [Basic IK](../examples/basic_ik.md), [Collision-Aware IK](../examples/collision_aware_ik.md) |
 | Teleop freezes, weak tracking, or limit stalls | [Solver Robustness & Recovery](../solver_robustness.md) | [Teleop IK](../examples/teleop_ik.md), [Collision-Aware IK](../examples/collision_aware_ik.md) |
 | Collision too slow or too strict in WBC | [Collision Constraints & Tuning](../collision_constraints.md) | [Collision-Aware IK](../examples/collision_aware_ik.md) |
 | Whole-body stability (CoM, dual-arm) | [CoM example](../examples/com_constraint_ik.md), [Dual-Arm ECTS](../examples/dual_arm_ects.md) | [Solver Robustness](../solver_robustness.md) (stall + fallback) |
@@ -22,6 +23,7 @@ flowchart TB
   Q[Quickstart + examples] --> R[Solver Robustness]
   R --> C[Collision Constraints]
   R --> API[KinematicsSolver API]
+  Q --> A[Acceleration Solver]
   C --> API
   Q --> T[Transforms]
   Q --> G[GPU Batch Solvers]

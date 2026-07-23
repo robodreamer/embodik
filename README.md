@@ -182,6 +182,7 @@ Most examples default to the Panda preset. Use `--robot <key>` when a script sup
 
 - ⚙️ C++ IK core with Nanobind Python bindings.
 - 🎯 Hierarchical velocity IK tasks for frames, posture, CoM, and dual-arm coordination.
+- 🧮 Fixed-base acceleration eSNS with compatible position, velocity, acceleration, effort, contact-kinematics, and geometry constraints.
 - 🛡️ Joint-limit, self-collision, and CoM support-polygon constraints.
 - 📈 Solver diagnostics for timing, task scaling, and Jacobian condition-number logging.
 - 🧭 Lie-group-aware configuration operations for floating-base, quaternion, and continuous joints.
@@ -193,6 +194,7 @@ Most examples default to the Panda preset. Use `--robot <key>` when a script sup
 
 - [Installation](https://robodreamer.github.io/embodik/installation/) - platform setup, source builds, and troubleshooting.
 - [Quickstart](https://robodreamer.github.io/embodik/quickstart/) - first IK calls and solver concepts.
+- [Acceleration Solver](https://robodreamer.github.io/embodik/acceleration_solver/) - fixed-base scope, state-box semantics, and collision certification boundaries.
 - [Working with Transforms](https://robodreamer.github.io/embodik/transforms/) - transform helpers and SE(3) operations.
 - [Examples](https://robodreamer.github.io/embodik/examples/) - public scripts and development-only demos.
 - [API Reference](https://robodreamer.github.io/embodik/api/) - Python API generated from docstrings.

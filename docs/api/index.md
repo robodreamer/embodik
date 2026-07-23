@@ -23,6 +23,12 @@ The `KinematicsSolver` provides inverse kinematics solving capabilities.
       show_root_heading: true
       show_root_toc_entry: true
 
+### AccelerationSolver
+
+The opt-in fixed-base acceleration-level API, its constraints, diagnostics, and
+explicit unsupported scope are documented in the
+[Acceleration Solver guide and API](../acceleration_solver.md).
+
 ## Task Types
 
 EmbodiK supports various task types for multi-task IK:

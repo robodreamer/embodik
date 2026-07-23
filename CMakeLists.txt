@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(embodik VERSION 0.20.14)
+project(embodik VERSION 0.21.0)
 
 # Python is used to auto-discover Pinocchio (PyPI `pin`) CMake config during sdist builds.
 find_package(Python REQUIRED COMPONENTS Interpreter)
@@ -107,6 +107,24 @@ add_library(embodik_core SHARED
     cpp_core/src/robot_model.cpp
     cpp_core/src/tasks.cpp
     cpp_core/src/dual_arm_ects.cpp
+    cpp_core/src/frame_kinematic_differential.cpp
+    cpp_core/src/so3_log_differential.cpp
+    cpp_core/src/geometric_constraint_differential.cpp
+    cpp_core/src/collision_constraint_differential.cpp
+    cpp_core/src/acceleration_analytic_collision.cpp
+    cpp_core/src/dual_arm_ects_differential.cpp
+    cpp_core/src/acceleration_allocation_transform.cpp
+    cpp_core/src/acceleration_task_differential.cpp
+    cpp_core/src/acceleration_state_box.cpp
+    cpp_core/src/acceleration_braking_witness.cpp
+    cpp_core/src/acceleration_geometric_constraint_policy.cpp
+    cpp_core/src/acceleration_scalar_geometric_constraint.cpp
+    cpp_core/src/support_polygon_geometry.cpp
+    cpp_core/src/acceleration_com_support_polygon_constraint.cpp
+    cpp_core/src/acceleration_fixed_frame_pose_constraint.cpp
+    cpp_core/src/acceleration_relative_pose_constraint.cpp
+    cpp_core/src/acceleration_tight_point_constraint.cpp
+    cpp_core/src/acceleration_solver.cpp
     cpp_core/src/kinematics_solver.cpp
     cpp_core/src/pose_metrics.cpp
     cpp_core/src/sphere_broadphase.cpp

@@ -1,6 +1,6 @@
 [workspace]
 name = "embodik"
-version = "0.20.18"
+version = "0.21.0"
 description = "High-performance inverse kinematics solver optimized for cross-embodiment VLA/AI applications"
 authors = ["Andy Park <andypark.purdue@gmail.com>"]
 channels = ["conda-forge"]
@@ -66,6 +66,9 @@ build = { cmd = "python -m pip install --no-build-isolation .", depends-on = [
 ] }
 test = "python -m pytest test/"
 test-verbose = "python -m pytest test/ -v"
+test-native = { cmd = "bash -lc 'cmake -S . -B build/native-tests -G Ninja -DBUILD_TESTS=ON -DBUILD_PYTHON_BINDINGS=OFF -DBUILD_EXAMPLES=OFF -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=\"$CONDA_PREFIX\" -Dpinocchio_DIR=\"$CONDA_PREFIX/lib/cmake/pinocchio\" -DEigen3_DIR=\"$CONDA_PREFIX/share/eigen3/cmake\" -DCMAKE_EXE_LINKER_FLAGS=\"-L$CONDA_PREFIX/lib -Wl,-rpath,$CONDA_PREFIX/lib\" && cmake --build build/native-tests --parallel 2 && ctest --test-dir build/native-tests --output-on-failure --parallel 2'", depends-on = [
+    "patch-qhull",
+] }
 test-spot-ik = "python -m pytest test/test_spot_whole_body_ik_headless.py -v"
 verify-agent = "python scripts/verify_changed.py --run"
 verify-ai-worker = "python scripts/verify_ai_worker_robustness.py --scenario all --output-json /tmp/ai_worker_metrics.json"

@@ -21,8 +21,8 @@ Example code and tutorials for EmbodiK.
 These are the public examples that are kept closest to release quality and are
 the best starting points for users.
 
-- [`01_basic_ik_simple.py`](basic_ik.md) — Minimal fixed-base IK loop with interactive target
-- [`02_collision_aware_IK.py`](collision_aware_ik.md) — Collision-aware IK with optional GPU mode
+- [`01_basic_ik_simple.py`](basic_ik.md) — Minimal fixed-base IK loop with velocity/acceleration solver selection
+- [`02_collision_aware_IK.py`](collision_aware_ik.md) — Collision-aware IK with velocity/acceleration solver selection and optional GPU mode
 - [`03_teleop_ik.py`](teleop_ik.md) — Minimal teleop input adapter into EmbodiK IK
 - [`04_com_constraint_example.py`](com_constraint_ik.md) — CoM support-polygon constraint demo in Viser
 - [`05_dual_arm_ects.py`](dual_arm_ects.md) — Dual-arm ECTS/Orthogonal coordination with collision handling
@@ -36,6 +36,42 @@ code stays focused on tasks, targets, and visualization while robust constraint
 handling remains in C++.
 Viser examples share the same default browser endpoint,
 `http://localhost:8080`; pass `--port` when running multiple viewers at once.
+
+## Acceleration Compatibility
+
+Velocity remains the default solver for all IK examples. Acceleration is
+selectable only where the script owns explicit `q`, `dq`, and `dt` state,
+translates every active task and constraint, and can fail closed when the model
+or policy is unsupported. A fixed-base model alone does not make a velocity
+example acceleration-compatible. The acceleration-limit option on
+`KinematicsSolver` only bounds changes in velocity output; it does not switch
+the application to `AccelerationSolver`.
+
+| Script | Acceleration status | Reason |
+| --- | --- | --- |
+| `01_basic_ik_simple.py` | Selectable | Fixed-base scalar joints with explicit acceleration state and task references. |
+| `02_collision_aware_IK.py` | Selectable | Adds explicit state ownership and a fail-closed sampled velocity-collision adapter. |
+| `03_teleop_ik.py` | Velocity-only | The teleop backend owns velocity position-step and reset policy; no acceleration adapter is implemented. |
+| `04_com_constraint_example.py` | Velocity-only | The topology and CoM constraint have acceleration equivalents, but the interactive runtime has not been ported to explicit `dq` ownership. |
+| `05_dual_arm_ects.py` | Velocity-only | ECTS mode switching and its task semantics are not exposed by the initial acceleration task API. |
+| `06_bimanual_whole_body_ik.py` | Velocity-only | The shared bimanual runtime depends on velocity-specific continuity, ownership, collision, and fallback policies. |
+| `07_unitree_g1_retargeting_ik.py` | Unsupported | Uses a floating-base humanoid model; the acceleration solver accepts fixed-base scalar joints only. |
+| `08_spot_full_body_ik_viser.py` | Unsupported | Uses a floating-base whole-body model and velocity-specific recovery policy. |
+| `09_spot_locomanip_mjviser.py` | Unsupported | Couples floating-base IK to wheel/locomotion policy and MuJoCo runtime state. |
+| `collision_hardening_demo.py` | Velocity-only | Demonstrates velocity position-step collision recovery and non-worsening-floor behavior. |
+| `example_helpers/common_bimanual_teleop_app.py` | Velocity-only | Internal executable behind the bimanual example; it has the same velocity-specific policy dependencies. |
+| `floating_base_torso_hierarchy.py` | Unsupported | Its subject is floating-base hierarchy behavior. |
+| `gpu_batch_ik.py` | Not applicable | Benchmarks the separate batched velocity GPU API. |
+| `gpu_collision_batch.py` | Not applicable | Benchmarks collision-distance queries, not an IK solver loop. |
+| `gpu_solver_demo.py` | Not applicable | Compares CPU/GPU batched velocity kernels. |
+| `harnesses/ai_worker_weighted_fallback_harness.py` | Not applicable | Measures the velocity solver's weighted-fallback policy, which the acceleration API does not import. |
+| `harnesses/g1_four_gizmo_ik_benchmark.py` | Unsupported | Exercises the same floating-base G1 runtime as example 07. |
+| `parallel_trajectory_tracking.py` | Not applicable | Exercises the separate parallel batched velocity pipeline. |
+| `robot_model_example.py` | Not applicable | Walks through model, FK, Jacobian, and CoM APIs without an IK loop. |
+| `visualization_example.py` | Not applicable | Demonstrates visualization and marker APIs without an IK solver loop. |
+
+For the exact supported constraints and failure behavior, see the
+[Acceleration Solver](../acceleration_solver.md) guide.
 
 ## 🧪 Specialized References
 

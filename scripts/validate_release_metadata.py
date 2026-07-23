@@ -28,6 +28,20 @@ def validate_release_metadata(project_root: Path = PROJECT_ROOT) -> str:
     if package_version != pixi_version:
         raise ValueError(f"version mismatch: pyproject={package_version}, pixi={pixi_version}")
 
+    cmake_text = (project_root / "CMakeLists.txt").read_text()
+    cmake_match = re.search(
+        r"^\s*project\s*\(\s*embodik\s+VERSION\s+(?P<version>\d+\.\d+\.\d+)\s*\)",
+        cmake_text,
+        re.MULTILINE | re.IGNORECASE,
+    )
+    if cmake_match is None:
+        raise ValueError("CMakeLists.txt must declare project(embodik VERSION ...)")
+    cmake_version = cmake_match.group("version")
+    if package_version != cmake_version:
+        raise ValueError(
+            f"version mismatch: pyproject={package_version}, cmake={cmake_version}"
+        )
+
     changelog = (project_root / "CHANGELOG.md").read_text()
     heading_pattern = re.compile(
         rf"^## \[{re.escape(package_version)}\] - " r"(?P<date>\d{4}-\d{2}-\d{2})$",

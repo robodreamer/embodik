@@ -8,10 +8,11 @@ Minimal interactive IK for bringing up a fixed-base robot preset.
 path for trying EmbodiK on a robot model:
 
 - load a robot preset and default posture
-- create a `KinematicsSolver`
+- create velocity and acceleration solver runtimes when the model supports both
 - add one end-effector frame task and one posture/nullspace task
 - drag a Viser target transform
-- call `solve_position_step()` and visualize the returned configuration
+- switch the **Solver Level** control between velocity and acceleration
+- call the selected solver and visualize only an accepted configuration
 
 Detailed tuning panels, joint sliders, diagnostics, and limit-scaling controls
 are kept out of this minimal example. Use the other public examples for richer
@@ -29,6 +30,15 @@ The public script uses the current registered-task API:
 | Register posture bias | `solver.add_posture_task("posture_bias")`, `set_target_configuration(q_default)` | Keep unused freedom near the default posture. |
 | Configure position updates | `PositionStepOptions()` | Set gains, one inner solve, and adaptive timestep behavior. |
 | Advance IK | `solver.solve_position_step(q, target_pose, "ee_task", step_opts)` | Return a `PositionIKResult`; the next displayed configuration is `result.q_solution`. |
+| Advance acceleration IK | `AccelerationSolver.solve(q, dq, dt, options)` | Return one explicit acceleration, next velocity, and configuration step from the compatible state box. |
+
+Velocity is the default. Acceleration is offered only after the fixed-base
+capability and a stationary smoke solve succeed for the selected model. The
+example resets its caller-owned `dq` when the solver level changes, when the
+robot resets, or when an acceleration result is rejected.
+
+See the [Acceleration Solver guide](../acceleration_solver.md) for the supported
+constraint matrix and non-real-time scope.
 
 For the exact imports, visualization wiring, and UI loop, use the script itself:
 `examples/01_basic_ik_simple.py`.

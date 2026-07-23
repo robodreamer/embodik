@@ -30,10 +30,11 @@
 
 namespace embodik {
 
-enum class ContactType {
-  kPointContact, // 3 rows (linear velocity only)
-  kRigidContact, // 6 rows (full spatial velocity)
-};
+class AccelerationSolver;
+
+namespace detail {
+struct VelocityConstraintTestObserver;
+} // namespace detail
 
 /**
  * @brief High-level kinematics solver
@@ -731,12 +732,25 @@ public:
    *  global clearance while preserving safe tangential freedom. Use a per-pair
    *  min-distance override for geometry that cannot reach the floor. Off by
    *  default because it changes recovery semantics for violated seeds. */
-  void   set_non_worsening_collision_floor_enabled(bool enable) { non_worsening_collision_floor_enabled_ = enable; }
+  void set_non_worsening_collision_floor_enabled(bool enable) {
+    if (non_worsening_collision_floor_enabled_ != enable) {
+      non_worsening_collision_floor_enabled_ = enable;
+      ++collision_validation_policy_revision_;
+      invalidate_collision_validation_state_certificates();
+    }
+  }
   bool   get_non_worsening_collision_floor_enabled() const      { return non_worsening_collision_floor_enabled_; }
 
   /** Minimum penetration-prevention clearance (metres) for pairs first observed
    *  below min_distance. Default 5 mm. */
-  void   set_collision_structural_floor(double metres) { collision_structural_floor_ = std::max(0.0, metres); }
+  void set_collision_structural_floor(double metres) {
+    const double floor = std::max(0.0, metres);
+    if (collision_structural_floor_ != floor) {
+      collision_structural_floor_ = floor;
+      ++collision_validation_policy_revision_;
+      invalidate_collision_validation_state_certificates();
+    }
+  }
   double get_collision_structural_floor() const        { return collision_structural_floor_; }
 
   /** Maximum separation speed (m/s) for non-penetrating recovery.
@@ -1501,6 +1515,22 @@ private:
     Eigen::Vector3d point_b_world = Eigen::Vector3d::Zero();
   };
 
+  struct CollisionVelocityConstraintLinearization {
+    // Frozen velocity-level row contract:
+    //   lower_bounds <= coefficient_matrix * dq_next <= upper_bounds.
+    // Acceleration callers may algebraically lift this for a sampled next
+    // velocity, but this is not a continuous collision certificate.
+    Eigen::MatrixXd coefficient_matrix;
+    Eigen::VectorXd lower_bounds;
+    Eigen::VectorXd upper_bounds;
+    double dt = 0.0;
+    double distance = std::numeric_limits<double>::infinity();
+    std::string object_a;
+    std::string object_b;
+    Eigen::Vector3d point_a_world = Eigen::Vector3d::Zero();
+    Eigen::Vector3d point_b_world = Eigen::Vector3d::Zero();
+  };
+
   // ---- Stall handler ----
   struct StallHandlerConfig {
     bool enabled = false;
@@ -1731,6 +1761,8 @@ private:
   bool last_constraint_was_full_scan_ = false;
   // Cached constraint result for lazy reuse when configuration change is small.
   std::optional<CollisionConstraintResult> last_collision_constraint_result_;
+  double last_collision_constraint_row_dt_ =
+      std::numeric_limits<double>::quiet_NaN();
   Eigen::VectorXd last_collision_constraint_q_;
   struct PostStepCollisionDistanceCertificate {
     Eigen::VectorXd q;
@@ -1767,7 +1799,74 @@ private:
       const Eigen::VectorXd &q);
   std::optional<double>
   evaluate_post_step_collision_distance_from_current_results();
+  friend struct detail::VelocityConstraintTestObserver;
+
   std::optional<CollisionConstraintResult> compute_collision_constraint();
+  std::optional<CollisionConstraintResult>
+  compute_collision_constraint(double row_dt);
+  struct CollisionRecoveryDistances {
+    double effective_min_distance = 0.0;
+    double recovery_target = 0.0;
+  };
+  CollisionRecoveryDistances resolve_collision_recovery_distances(
+      std::size_t pair_index, double signed_distance);
+  std::optional<CollisionVelocityConstraintLinearization>
+  linearize_collision_velocity_constraint(double row_dt);
+  struct CollisionSampleValidationResult {
+    SolverStatus status = SolverStatus::kSuccess;
+    std::string message;
+    bool acceptable = false;
+    std::uint64_t samples_checked = 0;
+    std::uint64_t allowed_pair_count = 0;
+    std::uint64_t pairs_checked = 0;
+    std::uint64_t exact_distance_queries = 0;
+    std::uint64_t initial_exact_distance_queries = 0;
+    std::uint64_t sample_exact_distance_queries = 0;
+    std::uint64_t conservative_bound_checks = 0;
+    std::uint64_t conservative_bound_certified_pairs = 0;
+    std::uint64_t kinematics_updates = 0;
+    std::uint64_t geometry_updates = 0;
+    bool initial_state_certificate_reused = false;
+    std::uint64_t failed_sample_index = 0;
+    std::uint64_t failed_pair_catalog_index =
+        std::numeric_limits<std::uint64_t>::max();
+    std::uint64_t failed_pair_model_index =
+        std::numeric_limits<std::uint64_t>::max();
+    std::string failed_pair_key;
+  };
+  CollisionSampleValidationResult validate_collision_samples(
+      const Eigen::VectorXd &q_from,
+      const std::vector<Eigen::VectorXd> &q_samples);
+
+  struct CollisionValidationPairMetadata {
+    std::size_t pair_index = 0;
+    std::size_t object_a = 0;
+    std::size_t object_b = 0;
+    std::string key;
+  };
+  struct CollisionStateSafetyCertificate {
+    Eigen::VectorXd q;
+    std::vector<double> distance_lower_bounds;
+    const pinocchio::GeometryModel *geometry_model = nullptr;
+    std::uint64_t geometry_revision = 0;
+    std::uint64_t catalog_revision = 0;
+    std::uint64_t policy_revision = 0;
+  };
+  std::vector<CollisionValidationPairMetadata> collision_validation_catalog_;
+  std::vector<std::uint8_t> collision_validation_effective_pair_mask_;
+  const pinocchio::GeometryModel *collision_validation_geometry_model_ =
+      nullptr;
+  std::size_t collision_validation_geometry_object_count_ = 0;
+  std::size_t collision_validation_pair_count_ = 0;
+  std::uint64_t collision_validation_catalog_revision_ = 1;
+  std::uint64_t collision_validation_policy_revision_ = 1;
+  std::unique_ptr<pinocchio::Data> collision_validation_data_;
+  std::unique_ptr<pinocchio::GeometryData> collision_validation_geometry_data_;
+  std::optional<CollisionStateSafetyCertificate>
+      collision_validation_seed_certificate_;
+  void invalidate_collision_validation_state_certificates();
+  void invalidate_collision_validation_cache();
+  friend class AccelerationSolver;
 
   struct PositionStepMutableStateSnapshot {
     struct TaskState {
@@ -1831,6 +1930,8 @@ private:
         std::numeric_limits<double>::infinity();
     bool last_constraint_was_full_scan = false;
     std::optional<CollisionConstraintResult> last_collision_constraint_result;
+    double last_collision_constraint_row_dt =
+        std::numeric_limits<double>::quiet_NaN();
     Eigen::VectorXd last_collision_constraint_q;
     std::vector<std::shared_ptr<const PostStepCollisionDistanceCertificate>>
         post_step_collision_distance_cache;

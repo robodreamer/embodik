@@ -27,11 +27,16 @@
 namespace nb = nanobind;
 namespace eik = embodik;
 
+#ifndef EMBODIK_VERSION
+#define EMBODIK_VERSION "unknown"
+#endif
+
 // Forward declarations for sub-module bindings
 void bind_robot_model(nb::module_ &m);
 void bind_tasks(nb::module_ &m);
 void bind_kinematics_solver(nb::module_ &m);
 void bind_pose_metrics(nb::module_ &m);
+void bind_acceleration_solver(nb::module_ &m);
 
 NB_MODULE(_embodik_impl, m) {
   m.doc() = "embodiK: High-performance inverse kinematics with Pinocchio";
@@ -826,7 +831,7 @@ NB_MODULE(_embodik_impl, m) {
           )pbdoc");
 
   // Module metadata
-  m.attr("__version__") = "0.20.14";
+  m.attr("__version__") = EMBODIK_VERSION;
   m.attr("DEFAULT_REGULARIZATION") = eik::BasicSolverConfig{}.regularization;
 
   // Bind robot model with Pinocchio integration
@@ -840,4 +845,7 @@ NB_MODULE(_embodik_impl, m) {
 
   // Bind pose metrics free functions
   bind_pose_metrics(m);
+
+  // Bind acceleration-level solver
+  bind_acceleration_solver(m);
 }

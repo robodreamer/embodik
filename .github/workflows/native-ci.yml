@@ -1,0 +1,40 @@
+name: Native Solver CI
+
+on:
+  push:
+    branches: [main, packaging-and-docs]
+    paths:
+      - "CMakeLists.txt"
+      - "pixi.toml"
+      - "cpp_core/**"
+      - "python_bindings/**"
+      - "test/CMakeLists.txt"
+      - "test/*.cpp"
+  pull_request:
+    branches: [main, packaging-and-docs]
+    paths:
+      - "CMakeLists.txt"
+      - "pixi.toml"
+      - "cpp_core/**"
+      - "python_bindings/**"
+      - "test/CMakeLists.txt"
+      - "test/*.cpp"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native-solver:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install Pixi
+        uses: prefix-dev/setup-pixi@v0
+
+      - name: Run native solver tests
+        run: pixi run test-native
