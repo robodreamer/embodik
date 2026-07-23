@@ -265,6 +265,7 @@ def test_position_step_single_task_benchmark(benchmark):  # type: ignore[no-unty
                 if hasattr(eik.SolverStatus, "kSuccess")
                 else eik.SolverStatus.SUCCESS
             ),  # compatibility
+            eik.SolverStatus.NO_PROGRESS,
             eik.SolverStatus.INFEASIBLE,
             eik.SolverStatus.NUMERICAL_ERROR,
         )

@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.18] - 2026-07-22
+
+### Changed
+
+- Made finite position-step hierarchy validation aggregate task blocks at the
+  same priority, preserving lexicographic priority without freezing productive
+  bimanual and whole-body tradeoffs.
+- Reused validated backtracked directions for unconstrained velocity-level
+  steps and skipped redundant shorter-timestep retries when no admissible
+  fraction exists.
+
+### Fixed
+
+- Restored continuous G1 single-target oscillation, whole-body torso-bias
+  recovery, and split/Auto bimanual progress while retaining hold-last-target
+  behavior at genuinely exhausted joint limits.
+- Kept stationary-target regression holds responsive to each commanded task
+  while limiting continuity decisions to the highest unsatisfied priority.
+
 ## [0.20.17] - 2026-07-22
 
 ### Added

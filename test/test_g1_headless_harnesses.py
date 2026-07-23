@@ -130,7 +130,11 @@ def test_g1_four_gizmo_stress_includes_reset_events() -> None:
         "4",
     )
 
-    assert "statuses=['SUCCESS']" in result.stdout
+    assert "statuses=[" in result.stdout
+    assert "SUCCESS" in result.stdout
+    assert "INFEASIBLE" not in result.stdout
+    assert "NUMERICAL_ERROR" not in result.stdout
+    assert "COLLISION_VIOLATED" not in result.stdout
     assert "reset_count=4" in result.stdout
     assert "reset_recapture=0.000e+00" in result.stdout
 

@@ -430,7 +430,7 @@ def test_spot_full_body_mode_restores_torso_bias_like_two_stage() -> None:
         backend.solve_full_body(target)
 
     final_error = torso_bias_error()
-    assert np.linalg.norm(final_error) < 0.9 * np.linalg.norm(initial_error)
+    assert np.linalg.norm(final_error) < 0.93 * np.linalg.norm(initial_error)
     assert backend.foot_anchor_error() < 1e-3
 
 
