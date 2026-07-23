@@ -23,6 +23,7 @@ struct ScalarGeometricCoordinateSample {
   Eigen::VectorXd value;
   Eigen::VectorXd rate;
   Eigen::VectorXd acceleration;
+  std::optional<Eigen::Matrix3d> so3_rotation;
 };
 
 struct ScalarGeometricConstraintSpecification {
@@ -118,5 +119,8 @@ ScalarGeometricConstraintResult validate_scalar_geometric_path(
     const ScalarGeometricPathValidationOptions &options,
     const ScalarGeometricPathSampleEvaluator &sample_evaluator,
     const ScalarGeometricPathSegmentValidator &segment_validator = {});
+
+ScalarGeometricConstraintResult validate_so3_log_rotation_segment(
+    const ScalarGeometricPathSegment &segment);
 
 } // namespace embodik::detail

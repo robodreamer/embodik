@@ -8,6 +8,7 @@
 #include <pinocchio/multibody/data.hpp>
 #include <pinocchio/spatial/se3.hpp>
 
+#include <optional>
 #include <string>
 
 namespace embodik::detail {
@@ -17,6 +18,7 @@ struct GeometricCoordinateDifferential {
   Eigen::VectorXd rate;
   Eigen::MatrixXd jacobian;
   Eigen::VectorXd affine_bias;
+  std::optional<Eigen::Matrix3d> so3_rotation;
 };
 
 GeometricCoordinateDifferential evaluate_fixed_frame_pose_differential(

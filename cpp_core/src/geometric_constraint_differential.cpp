@@ -94,6 +94,7 @@ GeometricCoordinateDifferential compose_fixed_frame_pose_differential(
   result.value.head<3>() =
       frame.pose.translation() - reference_pose.translation();
   result.value.tail<3>() = angular.value;
+  result.so3_rotation = frame.pose.rotation();
   result.jacobian.topRows<3>() = frame.jacobian.topRows<3>();
   result.jacobian.bottomRows<3>() = angular.jacobian;
   result.rate.head<3>() = result.jacobian.topRows<3>() * velocity;
@@ -133,6 +134,9 @@ GeometricCoordinateDifferential compose_relative_pose_differential(
           frames.frame_b.pose.rotation(),
       right_angular_jacobian, right_angular_affine_bias, velocity);
   result.value.tail<3>() = angular.value;
+  result.so3_rotation =
+      frames.frame_a.pose.rotation().transpose() *
+      frames.frame_b.pose.rotation();
   result.rate.tail<3>() = angular.rate;
   result.jacobian.bottomRows<3>() = angular.jacobian;
   result.affine_bias.tail<3>() = angular.affine_bias;

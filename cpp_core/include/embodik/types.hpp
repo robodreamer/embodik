@@ -340,6 +340,27 @@ struct TightFramePoseConstraintDefinition {
       Eigen::Matrix<double, 6, 1>::Ones();
 };
 
+/**
+ * @brief Fixed-reference torso pose bound geometry.
+ *
+ * Coordinates use:
+ *   [world translation - reference translation,
+ *    log3(reference_R^T * frame_R)]
+ *
+ * reference_pose is optional at the definition layer so callers can represent
+ * incomplete input, but acceleration solvers require it to be set explicitly.
+ */
+struct TorsoPoseBoundDefinition {
+  std::string frame_name;
+  std::optional<Eigen::Matrix4d> reference_pose;
+  Eigen::Matrix<double, 6, 1> lower_bounds =
+      Eigen::Matrix<double, 6, 1>::Zero();
+  Eigen::Matrix<double, 6, 1> upper_bounds =
+      Eigen::Matrix<double, 6, 1>::Zero();
+  Eigen::Matrix<double, 6, 1> axis_mask =
+      Eigen::Matrix<double, 6, 1>::Ones();
+};
+
 // Position IK options
 struct PositionIKOptions {
   double position_tolerance = 1e-3;    // Position error tolerance (meters)

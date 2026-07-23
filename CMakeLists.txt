@@ -116,6 +116,7 @@ add_library(embodik_core SHARED
     cpp_core/src/acceleration_state_box.cpp
     cpp_core/src/acceleration_geometric_constraint_policy.cpp
     cpp_core/src/acceleration_scalar_geometric_constraint.cpp
+    cpp_core/src/acceleration_fixed_frame_pose_constraint.cpp
     cpp_core/src/acceleration_tight_point_constraint.cpp
     cpp_core/src/acceleration_solver.cpp
     cpp_core/src/kinematics_solver.cpp

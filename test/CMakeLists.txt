@@ -279,6 +279,44 @@ add_test(NAME test_acceleration_solver_tight_point
     COMMAND test_acceleration_solver_tight_point
 )
 
+add_executable(test_acceleration_solver_tight_frame_pose
+    test_acceleration_solver_tight_frame_pose.cpp
+)
+
+target_link_libraries(test_acceleration_solver_tight_frame_pose
+    embodik_core
+    GTest::gtest_main
+    GTest::gtest
+)
+
+target_include_directories(test_acceleration_solver_tight_frame_pose
+    PRIVATE
+        ${CMAKE_SOURCE_DIR}/cpp_core/src
+)
+
+add_test(NAME test_acceleration_solver_tight_frame_pose
+    COMMAND test_acceleration_solver_tight_frame_pose
+)
+
+add_executable(test_acceleration_solver_torso_pose_bounds
+    test_acceleration_solver_torso_pose_bounds.cpp
+)
+
+target_link_libraries(test_acceleration_solver_torso_pose_bounds
+    embodik_core
+    GTest::gtest_main
+    GTest::gtest
+)
+
+target_include_directories(test_acceleration_solver_torso_pose_bounds
+    PRIVATE
+        ${CMAKE_SOURCE_DIR}/cpp_core/src
+)
+
+add_test(NAME test_acceleration_solver_torso_pose_bounds
+    COMMAND test_acceleration_solver_torso_pose_bounds
+)
+
 add_executable(test_geometric_constraint_differential
     test_geometric_constraint_differential.cpp
 )

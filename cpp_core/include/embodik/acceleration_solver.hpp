@@ -145,6 +145,37 @@ struct TightPointAccelerationConstraint {
   GeometricConstraintAccelerationPolicy policy;
 };
 
+/**
+ * @brief Named caller-owned acceleration-level tight frame pose constraint.
+ *
+ * The physical coordinate is:
+ *   [world translation - target translation,
+ *    log3(target_R^T * frame_R)]
+ *
+ * Active axes enforce symmetric position/orientation boxes, rate, physical
+ * acceleration, continuous-path, and endpoint braking viability. Translation
+ * only masks do not evaluate the SO(3) chart.
+ */
+struct TightFramePoseAccelerationConstraint {
+  std::string source_id;
+  TightFramePoseConstraintDefinition definition;
+  GeometricConstraintAccelerationPolicy policy;
+};
+
+/**
+ * @brief Named caller-owned torso pose acceleration bounds.
+ *
+ * reference_pose is required and is never captured or recentered by the
+ * acceleration solver. Coordinates are:
+ *   [world translation - reference translation,
+ *    log3(reference_R^T * frame_R)]
+ */
+struct TorsoPoseBoundAccelerationConstraint {
+  std::string source_id;
+  TorsoPoseBoundDefinition definition;
+  GeometricConstraintAccelerationPolicy policy;
+};
+
 struct AccelerationSolveOptions {
   std::optional<Eigen::VectorXd> acceleration_limits_override;
   bool apply_velocity_limits = true;
@@ -157,6 +188,10 @@ struct AccelerationSolveOptions {
   std::vector<TaskAccelerationBounds> task_acceleration_bounds;
   std::vector<ContactAccelerationConstraint> contact_acceleration_constraints;
   std::vector<TightPointAccelerationConstraint> tight_point_constraints;
+  std::vector<TightFramePoseAccelerationConstraint>
+      tight_frame_pose_constraints;
+  std::vector<TorsoPoseBoundAccelerationConstraint>
+      torso_pose_bound_constraints;
   std::vector<int> zero_acceleration_joint_indices;
   std::vector<int> zero_next_velocity_joint_indices;
   std::vector<int> fixed_current_position_joint_indices;
@@ -214,6 +249,8 @@ struct AccelerationSolverCapabilities {
   bool supports_effort_constraints = true;
   bool supports_fixed_base_contact_kinematics = true;
   bool supports_tight_point_constraints = true;
+  bool supports_tight_frame_pose_constraints = true;
+  bool supports_torso_pose_bound_constraints = true;
   bool supports_dynamic_contact = false;
 };
 

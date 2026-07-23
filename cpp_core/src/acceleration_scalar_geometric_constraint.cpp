@@ -1,10 +1,12 @@
 #include "acceleration_scalar_geometric_constraint.hpp"
 
 #include "acceleration_geometric_constraint_policy.hpp"
+#include "so3_log_differential.hpp"
 
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <pinocchio/spatial/explog.hpp>
 #include <unordered_set>
 #include <utility>
 
@@ -574,6 +576,64 @@ ScalarGeometricConstraintResult validate_scalar_geometric_path(
       }
     }
     previous = std::move(current);
+  }
+  return {};
+}
+
+ScalarGeometricConstraintResult validate_so3_log_rotation_segment(
+    const ScalarGeometricPathSegment &segment) {
+  if (segment.previous.coordinates.value.size() < 3 ||
+      segment.current.coordinates.value.size() < 3) {
+    return failure(SolverStatus::kNumericalError,
+                   "SO(3) segment guard coordinate dimensions are invalid");
+  }
+  if (segment.previous.tangent.size() <= 0 ||
+      segment.previous.tangent.size() != segment.current.tangent.size()) {
+    return failure(SolverStatus::kNumericalError,
+                   "SO(3) segment guard tangent dimensions are invalid");
+  }
+  if (!segment.previous.coordinates.value.allFinite() ||
+      !segment.current.coordinates.value.allFinite() ||
+      !segment.previous.tangent.allFinite() ||
+      !segment.current.tangent.allFinite()) {
+    return failure(SolverStatus::kNumericalError,
+                   "SO(3) segment guard inputs must be finite");
+  }
+  if (!segment.previous.coordinates.so3_rotation.has_value() ||
+      !segment.current.coordinates.so3_rotation.has_value()) {
+    return failure(SolverStatus::kNumericalError,
+                   "SO(3) segment guard metadata is missing");
+  }
+  if (!is_valid_so3_rotation(segment.previous.coordinates.so3_rotation.value()) ||
+      !is_valid_so3_rotation(segment.current.coordinates.so3_rotation.value())) {
+    return failure(SolverStatus::kNumericalError,
+                   "SO(3) segment guard rotations are invalid");
+  }
+  const Eigen::Vector3d previous_log =
+      segment.previous.coordinates.value.tail<3>();
+  const Eigen::Vector3d current_log =
+      segment.current.coordinates.value.tail<3>();
+  const double previous_angle = previous_log.norm();
+  const double current_angle = current_log.norm();
+  const double tangent_excursion =
+      (segment.current.tangent - segment.previous.tangent).cwiseAbs().sum();
+  const double endpoint_geodesic =
+      pinocchio::log3(segment.previous.coordinates.so3_rotation->transpose() *
+                      segment.current.coordinates.so3_rotation.value())
+          .norm();
+  if (!std::isfinite(endpoint_geodesic) ||
+      endpoint_geodesic >
+          tangent_excursion + 1e-12 * (1.0 + tangent_excursion)) {
+    return failure(SolverStatus::kNumericalError,
+                   "SO(3) endpoint geodesic exceeds generalized tangent "
+                   "excursion");
+  }
+  const double excursion_bound =
+      std::max(previous_angle, current_angle) + tangent_excursion;
+  if (!std::isfinite(excursion_bound) ||
+      excursion_bound >= kSo3Pi - kSo3LogMinimumBranchMargin) {
+    return failure(SolverStatus::kNumericalError,
+                   "SO(3) path segment can enter the near-pi chart guard");
   }
   return {};
 }
