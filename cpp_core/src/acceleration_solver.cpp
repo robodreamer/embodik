@@ -3,6 +3,7 @@
 #include "acceleration_allocation_transform.hpp"
 #include "acceleration_state_box.hpp"
 #include "acceleration_task_differential.hpp"
+#include "acceleration_tight_point_constraint.hpp"
 #include "frame_kinematic_differential.hpp"
 #include "generalized_constraint_set.hpp"
 
@@ -73,6 +74,10 @@ const char *constraint_family_name(const TaskAccelerationBounds &) {
 
 const char *constraint_family_name(const ContactAccelerationConstraint &) {
   return "contact acceleration constraint";
+}
+
+const char *constraint_family_name(const TightPointAccelerationConstraint &) {
+  return "tight point constraint";
 }
 
 template <typename Constraint>
@@ -208,6 +213,14 @@ struct ContactConstraintAssembly {
   SolverStatus status = SolverStatus::kSuccess;
   std::string message;
   std::vector<AffineAccelerationConstraint> constraints;
+  Eigen::Index row_count = 0;
+};
+
+struct TightPointConstraintAssembly {
+  SolverStatus status = SolverStatus::kSuccess;
+  std::string message;
+  std::vector<AffineAccelerationConstraint> constraints;
+  std::vector<detail::PreparedTightPointConstraint> prepared_constraints;
   Eigen::Index row_count = 0;
 };
 
@@ -850,6 +863,49 @@ ContactConstraintAssembly make_contact_acceleration_constraints(
     constraint.upper_bounds = Eigen::VectorXd::Zero(rows);
     assembly.row_count += rows;
     assembly.constraints.push_back(std::move(constraint));
+  }
+
+  return assembly;
+}
+
+TightPointConstraintAssembly make_tight_point_constraints(
+    const RobotModel &robot,
+    const std::vector<TightPointAccelerationConstraint> &tight_points,
+    double dt, const Eigen::VectorXd &joint_acceleration_lower,
+    const Eigen::VectorXd &joint_acceleration_upper,
+    std::unordered_set<std::string> *source_ids) {
+  TightPointConstraintAssembly assembly;
+  assembly.constraints.reserve(tight_points.size());
+  assembly.prepared_constraints.reserve(tight_points.size());
+
+  for (const auto &tight_point : tight_points) {
+    const std::string family = constraint_family_name(tight_point);
+    if (tight_point.source_id.empty()) {
+      assembly.status = SolverStatus::kInvalidInput;
+      assembly.message = family + " source_id must not be empty";
+      return assembly;
+    }
+    if (!source_ids->insert(tight_point.source_id).second) {
+      assembly.status = SolverStatus::kInvalidInput;
+      assembly.message = "duplicate acceleration constraint source_id '" +
+                         tight_point.source_id + "'";
+      return assembly;
+    }
+
+    const auto prepared = detail::prepare_tight_point_constraint(
+        tight_point, robot, dt, joint_acceleration_lower,
+        joint_acceleration_upper);
+    if (!prepared.satisfied()) {
+      assembly.status = prepared.status;
+      assembly.message = prepared.message;
+      return assembly;
+    }
+    assembly.row_count +=
+        prepared.prepared->state_box.physical_constraint.coefficient_matrix
+            .rows();
+    assembly.constraints.push_back(
+        prepared.prepared->state_box.physical_constraint);
+    assembly.prepared_constraints.push_back(std::move(*prepared.prepared));
   }
 
   return assembly;
@@ -1642,6 +1698,13 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
     return finish(
         failure(contact_constraints.status, contact_constraints.message));
   }
+  const auto tight_point_constraints = make_tight_point_constraints(
+      *robot_, options.tight_point_constraints, dt, state_box.lower,
+      state_box.upper, &constraint_source_ids);
+  if (tight_point_constraints.status != SolverStatus::kSuccess) {
+    return finish(failure(tight_point_constraints.status,
+                          tight_point_constraints.message));
+  }
   if (zero_excluded_by_bounds(state_box.lower, state_box.upper)) {
     for (auto &config : objectives.configs) {
       config.allow_min_error_fallback = true;
@@ -1652,7 +1715,7 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
       robot_->nv(),
       robot_->nv() + constraint_validation.row_count +
           task_bound_validation.row_count + contact_constraints.row_count +
-          lock_rows.coefficients.rows() +
+          tight_point_constraints.row_count + lock_rows.coefficients.rows() +
           (effort_constraint.has_value() ? robot_->nv() : 0),
       false);
   detail::GeneralizedConstraintBlock joint_box;
@@ -1710,6 +1773,14 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
     return finish(failure(
         SolverStatus::kNumericalError,
         "failed to assemble contact acceleration constraints"));
+  }
+  if (tight_point_constraints.row_count > 0 &&
+      !constraints.append_block(make_affine_constraint_block(
+          tight_point_constraints.constraints, robot_->nv(),
+          tight_point_constraints.row_count))) {
+    return finish(failure(
+        SolverStatus::kNumericalError,
+        "failed to assemble tight point acceleration constraints"));
   }
   if (!constraints.finalize()) {
     return finish(failure(SolverStatus::kNumericalError,
@@ -1839,6 +1910,12 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
         SolverStatus::kNumericalError,
         "accepted acceleration violates contact acceleration constraints")));
   }
+  if (!accepted_affine_constraints_are_satisfied(
+          tight_point_constraints.constraints, result.joint_accelerations)) {
+    return finish(clear_outputs(failure(
+        SolverStatus::kNumericalError,
+        "accepted acceleration violates tight point acceleration constraints")));
+  }
   if (effort_constraint.has_value()) {
     auto evaluated =
         evaluate_inverse_dynamics(*robot_, q, dq, result.joint_accelerations);
@@ -1888,6 +1965,29 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
     return finish(clear_outputs(failure(
         SolverStatus::kNumericalError,
         "accepted acceleration produced non-finite next state")));
+  }
+  if (!tight_point_constraints.prepared_constraints.empty()) {
+    const auto predicted_state_box = build_joint_state_box(
+        *robot_, result.q_solution, result.joint_velocities_next, dt,
+        accel_limits, options);
+    if (predicted_state_box.status != SolverStatus::kSuccess) {
+      return finish(clear_outputs(failure(
+          predicted_state_box.status,
+          "accepted tight point constraints could not construct the predicted "
+          "joint acceleration support box: " +
+              predicted_state_box.message)));
+    }
+    for (const auto &prepared :
+         tight_point_constraints.prepared_constraints) {
+      const auto acceptance =
+          detail::validate_tight_point_constraint_acceptance(
+              prepared, *robot_, q, dq, result.joint_accelerations, dt,
+              predicted_state_box.lower, predicted_state_box.upper);
+      if (!acceptance.satisfied()) {
+        return finish(clear_outputs(
+            failure(acceptance.status, acceptance.message)));
+      }
+    }
   }
   if (options.apply_velocity_limits) {
     const Eigen::VectorXd velocity_limits = robot_->get_velocity_limits();

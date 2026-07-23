@@ -260,6 +260,25 @@ add_test(NAME test_acceleration_solver_contact
     COMMAND test_acceleration_solver_contact
 )
 
+add_executable(test_acceleration_solver_tight_point
+    test_acceleration_solver_tight_point.cpp
+)
+
+target_link_libraries(test_acceleration_solver_tight_point
+    embodik_core
+    GTest::gtest_main
+    GTest::gtest
+)
+
+target_include_directories(test_acceleration_solver_tight_point
+    PRIVATE
+        ${CMAKE_SOURCE_DIR}/cpp_core/src
+)
+
+add_test(NAME test_acceleration_solver_tight_point
+    COMMAND test_acceleration_solver_tight_point
+)
+
 add_executable(test_geometric_constraint_differential
     test_geometric_constraint_differential.cpp
 )

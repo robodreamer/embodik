@@ -118,6 +118,33 @@ struct ContactAccelerationConstraint {
   ContactType type = ContactType::kRigidContact;
 };
 
+/**
+ * @brief Per-axis derivative policy for acceleration-level geometric rows.
+ *
+ * Braking accelerations are positive caller-declared physical envelope
+ * magnitudes used for one-tick endpoint viability. They may be asymmetric, but
+ * must fit inside the symmetric acceleration authority for the same axis.
+ */
+struct GeometricConstraintAccelerationPolicy {
+  Eigen::VectorXd rate_limits = Eigen::VectorXd::Ones(3);
+  Eigen::VectorXd acceleration_limits = Eigen::VectorXd::Ones(3);
+  Eigen::VectorXd lower_braking_accelerations = Eigen::VectorXd::Ones(3);
+  Eigen::VectorXd upper_braking_accelerations = Eigen::VectorXd::Ones(3);
+};
+
+/**
+ * @brief Named caller-owned acceleration-level tight point constraint.
+ *
+ * The physical coordinate is the named frame origin in world coordinates minus
+ * definition.target_point. Active translation axes enforce bounded state,
+ * rate, physical acceleration, continuous-path, and endpoint braking viability.
+ */
+struct TightPointAccelerationConstraint {
+  std::string source_id;
+  TightPointConstraintDefinition definition;
+  GeometricConstraintAccelerationPolicy policy;
+};
+
 struct AccelerationSolveOptions {
   std::optional<Eigen::VectorXd> acceleration_limits_override;
   bool apply_velocity_limits = true;
@@ -129,6 +156,7 @@ struct AccelerationSolveOptions {
   std::vector<FrozenNextVelocityConstraint> frozen_next_velocity_constraints;
   std::vector<TaskAccelerationBounds> task_acceleration_bounds;
   std::vector<ContactAccelerationConstraint> contact_acceleration_constraints;
+  std::vector<TightPointAccelerationConstraint> tight_point_constraints;
   std::vector<int> zero_acceleration_joint_indices;
   std::vector<int> zero_next_velocity_joint_indices;
   std::vector<int> fixed_current_position_joint_indices;
@@ -185,6 +213,7 @@ struct AccelerationSolverCapabilities {
   bool supports_collision_constraints = false;
   bool supports_effort_constraints = true;
   bool supports_fixed_base_contact_kinematics = true;
+  bool supports_tight_point_constraints = true;
   bool supports_dynamic_contact = false;
 };
 
