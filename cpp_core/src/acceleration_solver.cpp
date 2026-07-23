@@ -3,6 +3,7 @@
 #include "acceleration_allocation_transform.hpp"
 #include "acceleration_state_box.hpp"
 #include "acceleration_task_differential.hpp"
+#include "frame_kinematic_differential.hpp"
 #include "generalized_constraint_set.hpp"
 
 #include <embodik/ik_baseline.hpp>
@@ -68,6 +69,10 @@ constraint_family_name<FrozenNextVelocityConstraint>(
 
 const char *constraint_family_name(const TaskAccelerationBounds &) {
   return "task acceleration bounds";
+}
+
+const char *constraint_family_name(const ContactAccelerationConstraint &) {
+  return "contact acceleration constraint";
 }
 
 template <typename Constraint>
@@ -197,6 +202,13 @@ struct InverseDynamicsEvaluation {
   SolverStatus status = SolverStatus::kSuccess;
   std::string message;
   Eigen::VectorXd torques;
+};
+
+struct ContactConstraintAssembly {
+  SolverStatus status = SolverStatus::kSuccess;
+  std::string message;
+  std::vector<AffineAccelerationConstraint> constraints;
+  Eigen::Index row_count = 0;
 };
 
 template <typename Constraint>
@@ -762,6 +774,85 @@ std::vector<AffineAccelerationConstraint> make_task_bound_affine_constraints(
     constraints.push_back(std::move(constraint));
   }
   return constraints;
+}
+
+ContactConstraintAssembly make_contact_acceleration_constraints(
+    const RobotModel &robot,
+    const std::vector<ContactAccelerationConstraint> &contacts,
+    std::unordered_set<std::string> *source_ids) {
+  ContactConstraintAssembly assembly;
+  assembly.constraints.reserve(contacts.size());
+
+  for (const auto &contact : contacts) {
+    const std::string family = constraint_family_name(contact);
+    if (contact.source_id.empty()) {
+      assembly.status = SolverStatus::kInvalidInput;
+      assembly.message = family + " source_id must not be empty";
+      return assembly;
+    }
+    if (!source_ids->insert(contact.source_id).second) {
+      assembly.status = SolverStatus::kInvalidInput;
+      assembly.message = "duplicate acceleration constraint source_id '" +
+                         contact.source_id + "'";
+      return assembly;
+    }
+    if (contact.frame_name.empty()) {
+      assembly.status = SolverStatus::kInvalidInput;
+      assembly.message = family + " '" + contact.source_id +
+                         "' frame_name must not be empty";
+      return assembly;
+    }
+    if (contact.type != ContactType::kPointContact &&
+        contact.type != ContactType::kRigidContact) {
+      assembly.status = SolverStatus::kInvalidInput;
+      assembly.message = family + " '" + contact.source_id +
+                         "' has an unsupported contact type";
+      return assembly;
+    }
+    if (!robot.has_frame(contact.frame_name)) {
+      assembly.status = SolverStatus::kInvalidInput;
+      assembly.message = family + " '" + contact.source_id +
+                         "' references an unknown frame '" +
+                         contact.frame_name + "'";
+      return assembly;
+    }
+
+    detail::FrameKinematicDifferential differential;
+    try {
+      differential =
+          detail::evaluate_frame_kinematic_differential(robot,
+                                                        contact.frame_name);
+    } catch (const std::exception &error) {
+      assembly.status = SolverStatus::kNumericalError;
+      assembly.message = family + " '" + contact.source_id +
+                         "' kinematic differential failed: " + error.what();
+      return assembly;
+    }
+    if (differential.jacobian.cols() != robot.nv() ||
+        differential.jacobian.rows() != 6 ||
+        differential.affine_bias.size() != 6 ||
+        !differential.jacobian.allFinite() ||
+        !differential.affine_bias.allFinite()) {
+      assembly.status = SolverStatus::kNumericalError;
+      assembly.message = family + " '" + contact.source_id +
+                         "' produced a non-finite kinematic row";
+      return assembly;
+    }
+
+    const Eigen::Index rows =
+        contact.type == ContactType::kPointContact ? 3 : 6;
+    AffineAccelerationConstraint constraint;
+    constraint.source_id = contact.source_id;
+    constraint.coefficient_matrix =
+        differential.jacobian.topRows(rows);
+    constraint.affine_bias = differential.affine_bias.head(rows);
+    constraint.lower_bounds = Eigen::VectorXd::Zero(rows);
+    constraint.upper_bounds = Eigen::VectorXd::Zero(rows);
+    assembly.row_count += rows;
+    assembly.constraints.push_back(std::move(constraint));
+  }
+
+  return assembly;
 }
 
 Eigen::VectorXd vector_from_solution(const SolverResult &result) {
@@ -1545,6 +1636,12 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
 
   const auto task_bound_constraints = make_task_bound_affine_constraints(
       options.task_acceleration_bounds, objectives);
+  const auto contact_constraints = make_contact_acceleration_constraints(
+      *robot_, options.contact_acceleration_constraints, &constraint_source_ids);
+  if (contact_constraints.status != SolverStatus::kSuccess) {
+    return finish(
+        failure(contact_constraints.status, contact_constraints.message));
+  }
   if (zero_excluded_by_bounds(state_box.lower, state_box.upper)) {
     for (auto &config : objectives.configs) {
       config.allow_min_error_fallback = true;
@@ -1554,7 +1651,8 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
   detail::GeneralizedConstraintSet constraints(
       robot_->nv(),
       robot_->nv() + constraint_validation.row_count +
-          task_bound_validation.row_count + lock_rows.coefficients.rows() +
+          task_bound_validation.row_count + contact_constraints.row_count +
+          lock_rows.coefficients.rows() +
           (effort_constraint.has_value() ? robot_->nv() : 0),
       false);
   detail::GeneralizedConstraintBlock joint_box;
@@ -1604,6 +1702,14 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
     return finish(failure(
         SolverStatus::kNumericalError,
         "failed to assemble task acceleration bounds"));
+  }
+  if (contact_constraints.row_count > 0 &&
+      !constraints.append_block(make_affine_constraint_block(
+          contact_constraints.constraints, robot_->nv(),
+          contact_constraints.row_count))) {
+    return finish(failure(
+        SolverStatus::kNumericalError,
+        "failed to assemble contact acceleration constraints"));
   }
   if (!constraints.finalize()) {
     return finish(failure(SolverStatus::kNumericalError,
@@ -1726,6 +1832,12 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
     return finish(clear_outputs(failure(
         SolverStatus::kNumericalError,
         "accepted acceleration violates task acceleration bounds")));
+  }
+  if (!accepted_affine_constraints_are_satisfied(
+          contact_constraints.constraints, result.joint_accelerations)) {
+    return finish(clear_outputs(failure(
+        SolverStatus::kNumericalError,
+        "accepted acceleration violates contact acceleration constraints")));
   }
   if (effort_constraint.has_value()) {
     auto evaluated =

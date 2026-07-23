@@ -118,6 +118,8 @@ TEST_F(AccelerationSolverTest, CapabilitiesExposeMinimalR04Scope) {
   EXPECT_FALSE(capabilities.supports_scale_elastic);
   EXPECT_FALSE(capabilities.supports_collision_constraints);
   EXPECT_TRUE(capabilities.supports_effort_constraints);
+  EXPECT_TRUE(capabilities.supports_fixed_base_contact_kinematics);
+  EXPECT_FALSE(capabilities.supports_dynamic_contact);
 }
 
 TEST_F(AccelerationSolverTest, RejectsUnsupportedModelsAtConstruction) {

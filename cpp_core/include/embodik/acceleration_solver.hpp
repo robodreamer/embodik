@@ -103,6 +103,21 @@ struct EffortConstraintOptions {
   double margin_fraction = 0.0;
 };
 
+/**
+ * @brief Per-call fixed-base contact acceleration equality.
+ *
+ * Point contacts enforce zero translational acceleration of the named frame:
+ *   J_linear(q) * ddq + Jdot_linear(q, dq) * dq = 0
+ *
+ * Rigid contacts enforce the full LOCAL_WORLD_ALIGNED 6D frame acceleration.
+ * Dynamic contact forces are intentionally outside this API surface.
+ */
+struct ContactAccelerationConstraint {
+  std::string source_id;
+  std::string frame_name;
+  ContactType type = ContactType::kRigidContact;
+};
+
 struct AccelerationSolveOptions {
   std::optional<Eigen::VectorXd> acceleration_limits_override;
   bool apply_velocity_limits = true;
@@ -113,6 +128,7 @@ struct AccelerationSolveOptions {
   std::vector<AffineAccelerationConstraint> affine_constraints;
   std::vector<FrozenNextVelocityConstraint> frozen_next_velocity_constraints;
   std::vector<TaskAccelerationBounds> task_acceleration_bounds;
+  std::vector<ContactAccelerationConstraint> contact_acceleration_constraints;
   std::vector<int> zero_acceleration_joint_indices;
   std::vector<int> zero_next_velocity_joint_indices;
   std::vector<int> fixed_current_position_joint_indices;
@@ -168,6 +184,8 @@ struct AccelerationSolverCapabilities {
   bool supports_scale_elastic = false;
   bool supports_collision_constraints = false;
   bool supports_effort_constraints = true;
+  bool supports_fixed_base_contact_kinematics = true;
+  bool supports_dynamic_contact = false;
 };
 
 /**
