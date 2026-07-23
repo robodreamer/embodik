@@ -110,6 +110,8 @@ add_library(embodik_core SHARED
     cpp_core/src/frame_kinematic_differential.cpp
     cpp_core/src/dual_arm_ects_differential.cpp
     cpp_core/src/acceleration_task_differential.cpp
+    cpp_core/src/acceleration_state_box.cpp
+    cpp_core/src/acceleration_solver.cpp
     cpp_core/src/kinematics_solver.cpp
     cpp_core/src/pose_metrics.cpp
     cpp_core/src/sphere_broadphase.cpp

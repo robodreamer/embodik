@@ -89,6 +89,44 @@ add_test(NAME test_generalized_constraint_set
     COMMAND test_generalized_constraint_set
 )
 
+add_executable(test_acceleration_state_box
+    test_acceleration_state_box.cpp
+)
+
+target_link_libraries(test_acceleration_state_box
+    embodik_core
+    GTest::gtest_main
+    GTest::gtest
+)
+
+target_include_directories(test_acceleration_state_box
+    PRIVATE
+        ${CMAKE_SOURCE_DIR}/cpp_core/src
+)
+
+add_test(NAME test_acceleration_state_box
+    COMMAND test_acceleration_state_box
+)
+
+add_executable(test_acceleration_solver
+    test_acceleration_solver.cpp
+)
+
+target_link_libraries(test_acceleration_solver
+    embodik_core
+    GTest::gtest_main
+    GTest::gtest
+)
+
+target_include_directories(test_acceleration_solver
+    PRIVATE
+        ${CMAKE_SOURCE_DIR}/cpp_core/src
+)
+
+add_test(NAME test_acceleration_solver
+    COMMAND test_acceleration_solver
+)
+
 # Python tests
 find_package(Python COMPONENTS Interpreter REQUIRED)
 

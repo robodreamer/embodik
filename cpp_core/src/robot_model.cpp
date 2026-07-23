@@ -796,6 +796,10 @@ Eigen::VectorXd RobotModel::get_acceleration_limits() const {
   return Eigen::VectorXd::Constant(model_.nv, 100.0);
 }
 
+bool RobotModel::has_custom_acceleration_limits() const {
+  return custom_acceleration_limits_.has_value();
+}
+
 void RobotModel::set_acceleration_limits(const Eigen::VectorXd &accel_limits) {
   if (accel_limits.size() != model_.nv) {
     throw std::invalid_argument(

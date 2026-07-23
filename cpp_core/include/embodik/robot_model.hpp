@@ -211,6 +211,11 @@ public:
   Eigen::VectorXd get_acceleration_limits() const;
 
   /**
+   * @brief Whether acceleration limits were explicitly supplied by the caller.
+   */
+  bool has_custom_acceleration_limits() const;
+
+  /**
    * @brief Set custom joint acceleration limits
    * @param accel_limits Vector of acceleration limits (size must match nv)
    */
