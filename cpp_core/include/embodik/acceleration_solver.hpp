@@ -11,6 +11,7 @@
 
 #include <Eigen/Core>
 
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
@@ -18,6 +19,8 @@
 #include <vector>
 
 namespace embodik {
+
+class KinematicsSolver;
 
 /**
  * @brief Named caller-owned physical affine acceleration constraint.
@@ -255,6 +258,18 @@ struct AccelerationSolveOptions {
   std::vector<int> fixed_current_position_joint_indices;
 };
 
+/**
+ * @brief Sampling policy for velocity-row collision compatibility.
+ *
+ * One substep validates only the integrated endpoint and is the low-overhead
+ * default. Values greater than one also validate uniformly spaced interior
+ * samples. No setting provides a continuous swept-path certificate;
+ * `collision_step_certified` remains false for this adapter.
+ */
+struct VelocityCollisionLiftOptions {
+  int validation_substeps = 1;
+};
+
 struct AccelerationTaskReference {
   Eigen::VectorXd desired_velocity;
   Eigen::VectorXd desired_acceleration;
@@ -297,6 +312,16 @@ struct AccelerationSolverResult : public SolverResult {
   std::vector<int> saturated_effort_indices;
   std::vector<AccelerationTaskDiagnostics> task_diagnostics;
   AccelerationAllocationDiagnostics allocation_diagnostics;
+  bool velocity_collision_lift_applied = false;
+  bool collision_endpoint_validated = false;
+  bool collision_step_certified = false;
+  std::uint64_t collision_validation_samples = 0;
+  std::uint64_t collision_validation_allowed_pairs = 0;
+  std::uint64_t collision_validation_pairs_checked = 0;
+  std::uint64_t collision_validation_exact_queries = 0;
+  std::uint64_t collision_lift_pairs_considered = 0;
+  std::uint64_t collision_lift_row_pairs = 0;
+  std::uint64_t collision_lift_row_exact_queries = 0;
 };
 
 struct AccelerationSolverCapabilities {
@@ -311,6 +336,11 @@ struct AccelerationSolverCapabilities {
   bool supports_relative_pose_constraints = true;
   bool supports_torso_pose_bound_constraints = true;
   bool supports_com_support_polygon_constraints = true;
+#ifdef PINOCCHIO_WITH_HPP_FCL
+  bool supports_velocity_collision_lift = true;
+#else
+  bool supports_velocity_collision_lift = false;
+#endif
   bool supports_dynamic_contact = false;
 };
 
@@ -353,6 +383,21 @@ public:
   AccelerationSolverResult
   solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq, double dt,
         const AccelerationSolveOptions &options = AccelerationSolveOptions{});
+
+  /**
+   * @brief Reuse a configured velocity solver's collision rows and pair policy.
+   *
+   * The frozen next-velocity rows are lifted into the acceleration solve, then
+   * every allowed collision pair is checked exactly at the requested samples.
+   * This compatibility adapter fails closed but does not certify the continuous
+   * path between samples.
+   */
+  AccelerationSolverResult solve_with_velocity_collision(
+      KinematicsSolver &collision_solver, const Eigen::VectorXd &q,
+      const Eigen::VectorXd &dq, double dt,
+      const AccelerationSolveOptions &options = AccelerationSolveOptions{},
+      const VelocityCollisionLiftOptions &lift_options =
+          VelocityCollisionLiftOptions{});
 
 private:
   void ensure_unique_task_name(const std::string &name) const;

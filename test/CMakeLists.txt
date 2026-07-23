@@ -260,6 +260,25 @@ add_test(NAME test_acceleration_solver_contact
     COMMAND test_acceleration_solver_contact
 )
 
+add_executable(test_acceleration_solver_velocity_collision_lift
+    test_acceleration_solver_velocity_collision_lift.cpp
+)
+
+target_link_libraries(test_acceleration_solver_velocity_collision_lift
+    embodik_core
+    GTest::gtest_main
+    GTest::gtest
+)
+
+target_include_directories(test_acceleration_solver_velocity_collision_lift
+    PRIVATE
+        ${CMAKE_SOURCE_DIR}/cpp_core/src
+)
+
+add_test(NAME test_acceleration_solver_velocity_collision_lift
+    COMMAND test_acceleration_solver_velocity_collision_lift
+)
+
 add_executable(test_acceleration_solver_tight_point
     test_acceleration_solver_tight_point.cpp
 )
