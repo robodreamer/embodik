@@ -359,4 +359,80 @@ StateBoxRowResult shape_state_box_row(const StateBoxRowInput &input,
   return result;
 }
 
+LinearizedStateBoxResult prepare_linearized_state_box(
+    const LinearizedStateBoxInput &input, double dt,
+    Eigen::Index variable_count) {
+  LinearizedStateBoxResult result;
+  if (input.source_id.empty()) {
+    result.status = SolverStatus::kInvalidInput;
+    result.message = "linearized state-box source_id must not be empty";
+    return result;
+  }
+  const Eigen::Index row_count = input.coefficient_matrix.rows();
+  if (row_count == 0 || input.coefficient_matrix.cols() != variable_count ||
+      input.affine_bias.size() != row_count ||
+      input.rows.size() != static_cast<std::size_t>(row_count)) {
+    result.status = SolverStatus::kShapeMismatch;
+    result.message = "linearized state-box dimensions are inconsistent";
+    return result;
+  }
+  if (!input.coefficient_matrix.allFinite() || !input.affine_bias.allFinite()) {
+    result.status = SolverStatus::kNonFiniteInput;
+    result.message = "linearized state-box matrix and bias must be finite";
+    return result;
+  }
+
+  Eigen::VectorXd lower(row_count);
+  Eigen::VectorXd upper(row_count);
+  std::vector<bool> lower_active(static_cast<std::size_t>(row_count));
+  std::vector<bool> upper_active(static_cast<std::size_t>(row_count));
+  std::vector<StateBoxRowResult> shaped_rows;
+  shaped_rows.reserve(static_cast<std::size_t>(row_count));
+  for (Eigen::Index row = 0; row < row_count; ++row) {
+    auto shaped =
+        shape_state_box_row(input.rows[static_cast<std::size_t>(row)], dt);
+    if (shaped.status != SolverStatus::kSuccess) {
+      result.status = shaped.status;
+      result.message = "linearized state-box '" + input.source_id + "' row " +
+                       std::to_string(row) + ": " + shaped.message;
+      return result;
+    }
+
+    lower(row) = shaped.lower_acceleration;
+    upper(row) = shaped.upper_acceleration;
+    lower_active[static_cast<std::size_t>(row)] = shaped.lower_active;
+    upper_active[static_cast<std::size_t>(row)] = shaped.upper_active;
+
+    if (input.coefficient_matrix.row(row).stableNorm() == 0.0) {
+      const double value = input.affine_bias(row);
+      if ((shaped.lower_active &&
+           value < shaped.lower_acceleration -
+                       comparison_tolerance(value,
+                                            shaped.lower_acceleration)) ||
+          (shaped.upper_active &&
+           value > shaped.upper_acceleration +
+                       comparison_tolerance(value,
+                                            shaped.upper_acceleration))) {
+        result.status = SolverStatus::kInfeasible;
+        result.message = "linearized state-box '" + input.source_id +
+                         "' has an infeasible zero acceleration row";
+        return result;
+      }
+    }
+
+    shaped_rows.push_back(std::move(shaped));
+  }
+
+  result.physical_constraint.source_id = input.source_id;
+  result.physical_constraint.coefficient_matrix = input.coefficient_matrix;
+  result.physical_constraint.affine_bias = input.affine_bias;
+  result.physical_constraint.lower_bounds = std::move(lower);
+  result.physical_constraint.upper_bounds = std::move(upper);
+  result.physical_constraint.lower_bound_active = std::move(lower_active);
+  result.physical_constraint.upper_bound_active = std::move(upper_active);
+  result.state_rows = input.rows;
+  result.shaped_rows = std::move(shaped_rows);
+  return result;
+}
+
 } // namespace embodik::detail

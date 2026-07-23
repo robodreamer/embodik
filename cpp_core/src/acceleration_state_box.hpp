@@ -1,9 +1,12 @@
 #pragma once
 
-#include <embodik/types.hpp>
+#include <embodik/acceleration_solver.hpp>
+
+#include <Eigen/Core>
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace embodik::detail {
 
@@ -68,5 +71,24 @@ struct StateBoxRowResult {
 
 StateBoxRowResult shape_state_box_row(const StateBoxRowInput &input,
                                       double dt);
+
+struct LinearizedStateBoxInput {
+  std::string source_id;
+  Eigen::MatrixXd coefficient_matrix;
+  Eigen::VectorXd affine_bias;
+  std::vector<StateBoxRowInput> rows;
+};
+
+struct LinearizedStateBoxResult {
+  SolverStatus status = SolverStatus::kSuccess;
+  std::string message;
+  AffineAccelerationConstraint physical_constraint;
+  std::vector<StateBoxRowInput> state_rows;
+  std::vector<StateBoxRowResult> shaped_rows;
+};
+
+LinearizedStateBoxResult prepare_linearized_state_box(
+    const LinearizedStateBoxInput &input, double dt,
+    Eigen::Index variable_count);
 
 } // namespace embodik::detail
