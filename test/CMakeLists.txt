@@ -51,6 +51,44 @@ add_test(NAME test_acceleration_task_differential
     COMMAND test_acceleration_task_differential
 )
 
+add_executable(test_velocity_collision_linearization
+    test_velocity_collision_linearization.cpp
+)
+
+target_link_libraries(test_velocity_collision_linearization
+    embodik_core
+    GTest::gtest_main
+    GTest::gtest
+)
+
+target_include_directories(test_velocity_collision_linearization
+    PRIVATE
+        ${CMAKE_SOURCE_DIR}/cpp_core/src
+)
+
+add_test(NAME test_velocity_collision_linearization
+    COMMAND test_velocity_collision_linearization
+)
+
+add_executable(test_generalized_constraint_set
+    test_generalized_constraint_set.cpp
+)
+
+target_link_libraries(test_generalized_constraint_set
+    embodik_core
+    GTest::gtest_main
+    GTest::gtest
+)
+
+target_include_directories(test_generalized_constraint_set
+    PRIVATE
+        ${CMAKE_SOURCE_DIR}/cpp_core/src
+)
+
+add_test(NAME test_generalized_constraint_set
+    COMMAND test_generalized_constraint_set
+)
+
 # Python tests
 find_package(Python COMPONENTS Interpreter REQUIRED)
 

@@ -30,6 +30,10 @@
 
 namespace embodik {
 
+namespace detail {
+struct VelocityConstraintTestObserver;
+} // namespace detail
+
 enum class ContactType {
   kPointContact, // 3 rows (linear velocity only)
   kRigidContact, // 6 rows (full spatial velocity)
@@ -1501,6 +1505,22 @@ private:
     Eigen::Vector3d point_b_world = Eigen::Vector3d::Zero();
   };
 
+  struct CollisionVelocityConstraintLinearization {
+    // Frozen velocity-level row contract:
+    //   lower_bounds <= coefficient_matrix * dq_next <= upper_bounds.
+    // Acceleration callers may algebraically lift this for a sampled next
+    // velocity, but this is not a continuous collision certificate.
+    Eigen::MatrixXd coefficient_matrix;
+    Eigen::VectorXd lower_bounds;
+    Eigen::VectorXd upper_bounds;
+    double dt = 0.0;
+    double distance = std::numeric_limits<double>::infinity();
+    std::string object_a;
+    std::string object_b;
+    Eigen::Vector3d point_a_world = Eigen::Vector3d::Zero();
+    Eigen::Vector3d point_b_world = Eigen::Vector3d::Zero();
+  };
+
   // ---- Stall handler ----
   struct StallHandlerConfig {
     bool enabled = false;
@@ -1731,6 +1751,8 @@ private:
   bool last_constraint_was_full_scan_ = false;
   // Cached constraint result for lazy reuse when configuration change is small.
   std::optional<CollisionConstraintResult> last_collision_constraint_result_;
+  double last_collision_constraint_row_dt_ =
+      std::numeric_limits<double>::quiet_NaN();
   Eigen::VectorXd last_collision_constraint_q_;
   struct PostStepCollisionDistanceCertificate {
     Eigen::VectorXd q;
@@ -1767,7 +1789,13 @@ private:
       const Eigen::VectorXd &q);
   std::optional<double>
   evaluate_post_step_collision_distance_from_current_results();
+  friend struct detail::VelocityConstraintTestObserver;
+
   std::optional<CollisionConstraintResult> compute_collision_constraint();
+  std::optional<CollisionConstraintResult>
+  compute_collision_constraint(double row_dt);
+  std::optional<CollisionVelocityConstraintLinearization>
+  linearize_collision_velocity_constraint(double row_dt);
 
   struct PositionStepMutableStateSnapshot {
     struct TaskState {
@@ -1831,6 +1859,8 @@ private:
         std::numeric_limits<double>::infinity();
     bool last_constraint_was_full_scan = false;
     std::optional<CollisionConstraintResult> last_collision_constraint_result;
+    double last_collision_constraint_row_dt =
+        std::numeric_limits<double>::quiet_NaN();
     Eigen::VectorXd last_collision_constraint_q;
     std::vector<std::shared_ptr<const PostStepCollisionDistanceCertificate>>
         post_step_collision_distance_cache;

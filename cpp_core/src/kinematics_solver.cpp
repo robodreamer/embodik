@@ -3220,6 +3220,8 @@ void KinematicsSolver::configure_collision_constraint(
         std::numeric_limits<double>::infinity();
     last_constraint_was_full_scan_ = false;
     last_collision_constraint_result_.reset();
+    last_collision_constraint_row_dt_ =
+        std::numeric_limits<double>::quiet_NaN();
     last_collision_constraint_q_ = Eigen::VectorXd();
     collision_stuck_counters_.clear();
     collision_stuck_last_distances_.clear();
@@ -4176,6 +4178,8 @@ void KinematicsSolver::clear_collision_constraint() {
       std::numeric_limits<double>::infinity();
   last_constraint_was_full_scan_ = false;
   last_collision_constraint_result_.reset();
+  last_collision_constraint_row_dt_ =
+      std::numeric_limits<double>::quiet_NaN();
   last_collision_constraint_q_ = Eigen::VectorXd();
   collision_stuck_counters_.clear();
   collision_stuck_last_distances_.clear();
@@ -5011,7 +5015,17 @@ KinematicsSolver::get_active_collision_pairs() const {
 
 std::optional<KinematicsSolver::CollisionConstraintResult>
 KinematicsSolver::compute_collision_constraint() {
+  return compute_collision_constraint(std::max(dt_, 1e-6));
+}
+
+std::optional<KinematicsSolver::CollisionConstraintResult>
+KinematicsSolver::compute_collision_constraint(double row_dt) {
+  if (row_dt <= 0.0 || !std::isfinite(row_dt)) {
+    throw std::invalid_argument(
+        "collision constraint row_dt must be finite and positive");
+  }
 #ifdef PINOCCHIO_WITH_HPP_FCL
+  const double constraint_dt = row_dt;
   const bool acceleration_braking_lookahead_active =
       acceleration_limits_enabled_ && position_step_call_depth_ > 0 &&
       previous_dq_.size() == robot_->nv() && previous_dq_.allFinite() &&
@@ -5031,6 +5045,8 @@ KinematicsSolver::compute_collision_constraint() {
     if (constraint_active_for_reuse && collision_pair_cache_enabled_ &&
         !acceleration_braking_lookahead_active &&
         last_collision_constraint_result_.has_value() &&
+        std::isfinite(last_collision_constraint_row_dt_) &&
+        last_collision_constraint_row_dt_ == constraint_dt &&
         last_collision_constraint_q_.size() == robot_->nq() &&
         std::isfinite(last_constraint_min_distance_) &&
         !last_collision_budget_exhausted_ &&
@@ -5142,7 +5158,8 @@ KinematicsSolver::compute_collision_constraint() {
     int braking_steps = 0;
     braking_lookahead_certified = true;
     for (int index = 0; index < robot_->nv(); ++index) {
-      const double acceleration_step = acceleration_limits_[index] * dt_;
+      const double acceleration_step =
+          acceleration_limits_[index] * constraint_dt;
       const double deadband = acceleration_step * 0.01;
       const double step = acceleration_step + deadband;
       if (step <= constraint_tolerance_) {
@@ -5165,7 +5182,8 @@ KinematicsSolver::compute_collision_constraint() {
       braking_placement_samples.reserve(braking_steps);
       for (int step_index = 0; step_index < braking_steps; ++step_index) {
         for (int index = 0; index < robot_->nv(); ++index) {
-          const double acceleration_step = acceleration_limits_[index] * dt_;
+          const double acceleration_step =
+              acceleration_limits_[index] * constraint_dt;
           const double deadband = acceleration_step * 0.01;
           const double step = acceleration_step + deadband;
           if (rollout_velocity[index] > step) {
@@ -5177,7 +5195,7 @@ KinematicsSolver::compute_collision_constraint() {
           }
         }
         rollout_q = pinocchio::integrate(
-            robot_->model(), rollout_q, dt_ * rollout_velocity);
+            robot_->model(), rollout_q, constraint_dt * rollout_velocity);
         pinocchio::forwardKinematics(robot_->model(), rollout_data, rollout_q);
 
         BrakingPlacementSample sample;
@@ -5811,7 +5829,6 @@ KinematicsSolver::compute_collision_constraint() {
     return std::nullopt;
   }
 
-  const double dt = std::max(dt_, 1e-6);
   const int nv = robot_->nv();
   const int num_selected = static_cast<int>(selected_sorted.size());
 
@@ -5870,7 +5887,8 @@ KinematicsSolver::compute_collision_constraint() {
     double lower_bound = 0.0;
     if (signed_distance >= (recovery_target + repulsion_deadband)) {
       lower_bound =
-          (recovery_target + config.tolerance - signed_distance) / dt;
+          (recovery_target + config.tolerance - signed_distance) /
+          constraint_dt;
     } else if (signed_distance >= recovery_target) {
       lower_bound = 0.0;
     } else {
@@ -5878,7 +5896,8 @@ KinematicsSolver::compute_collision_constraint() {
       // signed_distance drops below the (non-worsening) recovery target. No
       // dead-zone — recovery force is active at all violation depths.
       const double desired =
-          (recovery_target + config.tolerance - signed_distance) / dt;
+          (recovery_target + config.tolerance - signed_distance) /
+          constraint_dt;
       if (signed_distance >= 0.0) {
         // Non-penetrating: proportional recovery, capped.
         lower_bound = std::min(max_sep_speed_nonpen,
@@ -5893,7 +5912,8 @@ KinematicsSolver::compute_collision_constraint() {
     // Stuck override: ensure a floor that can actually produce motion.
     if (stuck_active && signed_distance >= 0.0) {
       const double desired =
-          (effective_min_distance + config.tolerance - signed_distance) / dt;
+          (effective_min_distance + config.tolerance - signed_distance) /
+          constraint_dt;
       lower_bound = std::max(
           lower_bound,
           std::min(max_sep_speed_nonpen,
@@ -5902,7 +5922,8 @@ KinematicsSolver::compute_collision_constraint() {
     }
 
     const double upper_bound =
-        (config.upper_distance - config.tolerance + signed_distance) / dt;
+        (config.upper_distance - config.tolerance + signed_distance) /
+        constraint_dt;
     return {lower_bound, upper_bound};
   };
 
@@ -5988,7 +6009,7 @@ KinematicsSolver::compute_collision_constraint() {
       const double braking_speed = std::max(
           0.0,
           std::sqrt(2.0 * separating_acceleration_limit * braking_slack) -
-              separating_acceleration_limit * dt);
+              separating_acceleration_limit * constraint_dt);
       const double braking_lower_bound = -braking_speed;
       lb = std::max(lb, braking_lower_bound);
     }
@@ -6020,6 +6041,7 @@ KinematicsSolver::compute_collision_constraint() {
 
   // Cache the result and configuration for lazy reuse.
   last_collision_constraint_result_ = result;
+  last_collision_constraint_row_dt_ = constraint_dt;
   last_collision_constraint_q_ = robot_->get_current_configuration();
   collision_cache_frozen_indices_ = active_collision_lock_indices();
 
@@ -6029,6 +6051,26 @@ KinematicsSolver::compute_collision_constraint() {
   last_collision_debug_list_.clear();
   return std::nullopt;
 #endif
+}
+
+std::optional<KinematicsSolver::CollisionVelocityConstraintLinearization>
+KinematicsSolver::linearize_collision_velocity_constraint(double row_dt) {
+  auto rows = compute_collision_constraint(row_dt);
+  if (!rows.has_value()) {
+    return std::nullopt;
+  }
+
+  CollisionVelocityConstraintLinearization linearization;
+  linearization.coefficient_matrix = rows->jacobian;
+  linearization.lower_bounds = rows->lower_bounds;
+  linearization.upper_bounds = rows->upper_bounds;
+  linearization.dt = row_dt;
+  linearization.distance = rows->distance;
+  linearization.object_a = rows->object_a;
+  linearization.object_b = rows->object_b;
+  linearization.point_a_world = rows->point_a_world;
+  linearization.point_b_world = rows->point_b_world;
+  return linearization;
 }
 
 std::pair<double, double> KinematicsSolver::calculate_velocity_box_constraint(
@@ -7378,6 +7420,8 @@ KinematicsSolver::capture_position_step_mutable_state() const {
   snapshot.last_constraint_was_full_scan = last_constraint_was_full_scan_;
   snapshot.last_collision_constraint_result =
       last_collision_constraint_result_;
+  snapshot.last_collision_constraint_row_dt =
+      last_collision_constraint_row_dt_;
   snapshot.last_collision_constraint_q = last_collision_constraint_q_;
   snapshot.post_step_collision_distance_cache =
       post_step_collision_distance_cache_;
@@ -7484,6 +7528,8 @@ void KinematicsSolver::restore_position_step_mutable_state(
   last_constraint_was_full_scan_ = snapshot.last_constraint_was_full_scan;
   last_collision_constraint_result_ =
       snapshot.last_collision_constraint_result;
+  last_collision_constraint_row_dt_ =
+      snapshot.last_collision_constraint_row_dt;
   last_collision_constraint_q_ = snapshot.last_collision_constraint_q;
   post_step_collision_distance_cache_ =
       snapshot.post_step_collision_distance_cache;
