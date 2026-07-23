@@ -241,6 +241,25 @@ add_test(NAME test_acceleration_solver_effort
     COMMAND test_acceleration_solver_effort
 )
 
+add_executable(test_geometric_constraint_differential
+    test_geometric_constraint_differential.cpp
+)
+
+target_link_libraries(test_geometric_constraint_differential
+    embodik_core
+    GTest::gtest_main
+    GTest::gtest
+)
+
+target_include_directories(test_geometric_constraint_differential
+    PRIVATE
+        ${CMAKE_SOURCE_DIR}/cpp_core/src
+)
+
+add_test(NAME test_geometric_constraint_differential
+    COMMAND test_geometric_constraint_differential
+)
+
 add_executable(test_shared_constraint_definitions
     test_shared_constraint_definitions.cpp
 )
