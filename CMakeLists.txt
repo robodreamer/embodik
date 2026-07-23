@@ -110,6 +110,7 @@ add_library(embodik_core SHARED
     cpp_core/src/frame_kinematic_differential.cpp
     cpp_core/src/so3_log_differential.cpp
     cpp_core/src/geometric_constraint_differential.cpp
+    cpp_core/src/collision_constraint_differential.cpp
     cpp_core/src/dual_arm_ects_differential.cpp
     cpp_core/src/acceleration_allocation_transform.cpp
     cpp_core/src/acceleration_task_differential.cpp
