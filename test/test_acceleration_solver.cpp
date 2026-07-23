@@ -246,6 +246,7 @@ TEST_F(AccelerationSolverTest,
                    options(vector({acceleration_limit, 10.0})));
 
   ASSERT_EQ(result.status, SolverStatus::kSuccess) << result.status_message;
+  EXPECT_TRUE(result.state_box_task_fallback_applied);
   EXPECT_NEAR(result.joint_accelerations(0), expected_ddq, kTolerance);
   EXPECT_TRUE(contains_index(result.saturated_position_indices, 0));
   EXPECT_NEAR(result.q_solution(0),
@@ -254,6 +255,26 @@ TEST_F(AccelerationSolverTest,
   EXPECT_LE(result.joint_velocities_next(0) *
                 result.joint_velocities_next(0),
             2.0 * acceleration_limit * next_margin + kTolerance);
+}
+
+TEST_F(AccelerationSolverTest,
+       StateBoxTaskFallbackCanBeDisabledForStrictTaskSemantics) {
+  AccelerationSolver solver(robot_);
+  auto task = solver.add_joint_task("joint1_task", "joint1", 0.0);
+  task->setAllowMinErrorFallback(false);
+  AccelerationTaskReference reference;
+  reference.desired_acceleration = vector({2.0});
+  solver.set_task_reference("joint1_task", reference);
+
+  auto solve_options = options(vector({2.0, 10.0}));
+  solve_options.allow_state_box_task_fallback = false;
+  const auto result =
+      solver.solve(vector({0.9, 0.0}), vector({0.6, 0.0}), 0.1,
+                   solve_options);
+
+  EXPECT_NE(result.status, SolverStatus::kSuccess);
+  EXPECT_FALSE(result.state_box_task_fallback_applied);
+  expect_no_motion_outputs(result);
 }
 
 TEST_F(AccelerationSolverTest, CombinedLimitShapingMirrorsAtLowerBoundary) {
@@ -436,6 +457,48 @@ TEST_F(AccelerationSolverTest, HigherPriorityObjectiveIsPreserved) {
 
   ASSERT_EQ(result.status, SolverStatus::kSuccess) << result.status_message;
   EXPECT_NEAR(result.joint_accelerations(0), 2.0, kTolerance);
+}
+
+TEST_F(AccelerationSolverTest,
+       LightweightErrorsRemainPhysicalForTaskLocalExclusions) {
+  AccelerationSolver solver(robot_);
+  auto excluded = solver.add_joint_task("excluded", "joint1", 0.0);
+  excluded->setPriority(0);
+  excluded->setSolveMode(TaskSolveMode::kMinError);
+  excluded->set_excluded_joint_indices({0});
+  auto driver = solver.add_joint_task("driver", "joint1", 0.0);
+  driver->setPriority(1);
+  driver->setSolveMode(TaskSolveMode::kMinError);
+
+  AccelerationTaskReference excluded_reference;
+  excluded_reference.desired_acceleration = vector({1.0});
+  solver.set_task_reference("excluded", excluded_reference);
+  AccelerationTaskReference driver_reference;
+  driver_reference.desired_acceleration = vector({3.0});
+  solver.set_task_reference("driver", driver_reference);
+
+  auto rich_options = options(vector({10.0, 10.0}));
+  rich_options.apply_position_limits = false;
+  rich_options.apply_velocity_limits = false;
+  const auto rich = solver.solve(vector({0.0, 0.0}), vector({0.0, 0.0}),
+                                 0.1, rich_options);
+  ASSERT_EQ(rich.status, SolverStatus::kSuccess) << rich.status_message;
+
+  auto lightweight_options = rich_options;
+  lightweight_options.collect_task_diagnostics = false;
+  const auto lightweight =
+      solver.solve(vector({0.0, 0.0}), vector({0.0, 0.0}), 0.1,
+                   lightweight_options);
+  ASSERT_EQ(lightweight.status, SolverStatus::kSuccess)
+      << lightweight.status_message;
+  ASSERT_EQ(lightweight.task_errors.size(), rich.task_errors.size());
+  EXPECT_TRUE(Eigen::Map<const Eigen::VectorXd>(lightweight.task_errors.data(),
+                                                lightweight.task_errors.size())
+                  .isApprox(
+                      Eigen::Map<const Eigen::VectorXd>(
+                          rich.task_errors.data(), rich.task_errors.size()),
+                      kTolerance));
+  EXPECT_NEAR(lightweight.final_error, rich.final_error, kTolerance);
 }
 
 TEST_F(AccelerationSolverTest, TaskWeightAppliesOnceToPositionError) {

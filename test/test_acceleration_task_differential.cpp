@@ -141,6 +141,34 @@ TEST_F(AccelerationTaskDifferentialTest, FrameAndComBiasAreZeroAtZeroVelocity) {
 }
 
 TEST_F(AccelerationTaskDifferentialTest,
+       ControlOnlyZeroVelocityDifferentialMatchesFullControlRows) {
+  model_->update_kinematics(q_, Eigen::VectorXd::Zero(model_->nv()));
+  FrameTask frame("frame", model_, "end_effector", TaskType::FRAME_POSITION);
+  frame.setPositionMask(Eigen::Vector3d(1.0, 0.0, 1.0));
+  frame.set_excluded_joint_indices({0});
+  frame.update(*model_);
+
+  const auto full =
+      detail::evaluate_acceleration_task_differential(frame, *model_);
+  const auto control_only = detail::evaluate_acceleration_task_differential(
+      frame, *model_, /*control_only_zero_velocity=*/true);
+
+  expect_success(full);
+  ASSERT_EQ(control_only.status,
+            detail::AccelerationTaskDifferentialStatus::kSuccess)
+      << control_only.message;
+  EXPECT_EQ(control_only.physical_jacobian.size(), 0);
+  EXPECT_TRUE(control_only.control_jacobian.isApprox(full.control_jacobian,
+                                                     kTolerance));
+  EXPECT_TRUE(control_only.position_error.isApprox(full.position_error,
+                                                   kTolerance));
+  EXPECT_TRUE(control_only.jacobian_bias.isApprox(full.jacobian_bias,
+                                                  kTolerance));
+  EXPECT_TRUE(control_only.reference_row_scale.isApprox(
+      full.reference_row_scale, kTolerance));
+}
+
+TEST_F(AccelerationTaskDifferentialTest,
        HeldFrameAndComTargetsExposeRobotModelBiasAtNonzeroVelocity) {
   FrameTask frame("frame", model_, "end_effector", TaskType::FRAME_POSE);
   const auto pose = model_->get_frame_pose("end_effector");

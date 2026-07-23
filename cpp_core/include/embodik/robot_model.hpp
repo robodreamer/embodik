@@ -29,6 +29,7 @@
 #include <pinocchio/parsers/urdf.hpp>
 #include <pinocchio/spatial/se3.hpp>
 
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
@@ -467,9 +468,25 @@ public:
   const pinocchio::GeometryModel *visual_model() const {
     return visual_model_.get();
   }
-  pinocchio::GeometryModel *collision_model() { return collision_model_.get(); }
+  /**
+   * @brief Get mutable collision geometry.
+   *
+   * Requesting mutable access permanently disables collision safety-certificate
+   * reuse because subsequent in-place mutations are not observable.
+   */
+  pinocchio::GeometryModel *collision_model() {
+    collision_geometry_mutable_access_exposed_ = true;
+    ++collision_geometry_revision_;
+    return collision_model_.get();
+  }
   const pinocchio::GeometryModel *collision_model() const {
     return collision_model_.get();
+  }
+  std::uint64_t collision_geometry_revision() const {
+    return collision_geometry_revision_;
+  }
+  bool collision_geometry_provenance_trackable() const {
+    return !collision_geometry_mutable_access_exposed_;
   }
   pinocchio::GeometryData *collision_data() { return collision_data_.get(); }
   const pinocchio::GeometryData *collision_data() const {
@@ -575,6 +592,8 @@ private:
   // Optional geometry models
   std::unique_ptr<pinocchio::GeometryModel> visual_model_;
   std::unique_ptr<pinocchio::GeometryModel> collision_model_;
+  std::uint64_t collision_geometry_revision_ = 1;
+  bool collision_geometry_mutable_access_exposed_ = false;
   mutable std::unique_ptr<pinocchio::GeometryData> visual_data_;
   mutable std::unique_ptr<pinocchio::GeometryData> collision_data_;
 };

@@ -15,6 +15,16 @@ def test_acceleration_guide_names_supported_and_unsupported_scope() -> None:
         "floating bases",
         "wheel rolling/steering constraints",
         "not a hard real-time controller",
+        "Inequality Constraint Parity",
+        "`FrozenNextVelocityConstraint`",
+        "Floating-base position/orientation bounds",
+        "position-step priority-policy rows are not imported automatically",
+        "allow_state_box_task_fallback = True",
+        "state_box_task_fallback_applied",
+        "collect_task_diagnostics = False",
+        "backend_computation_time_ms",
+        "conservative enclosing-sphere lower bound",
+        "ambiguous geometry falls back",
     ):
         assert required in guide
 

@@ -310,6 +310,10 @@ Eigen::Matrix<double, 6, 1> RobotModel::get_frame_jacobian_bias(
         "Kinematics not updated. Call update_kinematics() first.");
   }
 
+  if (current_v_.isZero(0.0)) {
+    return Eigen::Matrix<double, 6, 1>::Zero();
+  }
+
   const FrameIndex frame_id = get_frame_id(frame_name);
   if (!jacobian_time_variation_updated_) {
     pinocchio::computeJointJacobiansTimeVariation(model_, data_, current_q_,
@@ -531,6 +535,10 @@ Eigen::Vector3d RobotModel::get_com_jacobian_bias() const {
   if (!kinematics_updated_) {
     throw std::runtime_error(
         "Kinematics not updated. Call update_kinematics() first.");
+  }
+
+  if (current_v_.isZero(0.0)) {
+    return Eigen::Vector3d::Zero();
   }
 
   if (!com_acceleration_updated_) {

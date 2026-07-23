@@ -312,6 +312,50 @@ TEST_F(AccelerationVelocityCollisionLiftTest,
 }
 
 TEST_F(AccelerationVelocityCollisionLiftTest,
+       ValidationCatalogTracksActivePairMaskChanges) {
+  urdf_ = std::make_unique<ScopedUrdf>(
+      "embodik_acceleration_velocity_collision_lift_active_mask.urdf",
+      multi_pair_urdf());
+  robot_ = std::make_shared<RobotModel>(urdf_->path(), false);
+  AccelerationSolver solver(robot_);
+  KinematicsSolver collision(robot_);
+  collision.configure_collision_constraint(0.005, {}, {}, true, 2);
+  collision.set_collision_tuning_mode(CollisionTuningMode::kPrecise);
+  collision.set_proximity_gated_collision_activation_enabled(false);
+
+  const auto initial = solver.solve_with_velocity_collision(
+      collision, vector({0.0}), vector({0.0}), 0.01,
+      options_with_limits(10.0), lift_options(2));
+  ASSERT_EQ(initial.status, SolverStatus::kSuccess) << initial.status_message;
+  ASSERT_GE(initial.collision_validation_allowed_pairs, 2U);
+
+  auto *collision_data = robot_->collision_data();
+  ASSERT_NE(collision_data, nullptr);
+  const auto active_pair =
+      std::find(collision_data->activeCollisionPairs.begin(),
+                collision_data->activeCollisionPairs.end(), true);
+  ASSERT_NE(active_pair, collision_data->activeCollisionPairs.end());
+  *active_pair = false;
+  const auto reduced = solver.solve_with_velocity_collision(
+      collision, vector({0.0}), vector({0.0}), 0.01,
+      options_with_limits(10.0), lift_options(2));
+  ASSERT_EQ(reduced.status, SolverStatus::kSuccess) << reduced.status_message;
+  EXPECT_EQ(reduced.collision_validation_allowed_pairs,
+            initial.collision_validation_allowed_pairs - 1U);
+  EXPECT_FALSE(reduced.collision_validation_initial_certificate_reused);
+
+  *active_pair = true;
+  const auto restored = solver.solve_with_velocity_collision(
+      collision, vector({0.0}), vector({0.0}), 0.01,
+      options_with_limits(10.0), lift_options(2));
+  ASSERT_EQ(restored.status, SolverStatus::kSuccess)
+      << restored.status_message;
+  EXPECT_EQ(restored.collision_validation_allowed_pairs,
+            initial.collision_validation_allowed_pairs);
+  EXPECT_FALSE(restored.collision_validation_initial_certificate_reused);
+}
+
+TEST_F(AccelerationVelocityCollisionLiftTest,
        PerPairFloorAndInitiallyViolatedNonWorseningAreAccepted) {
   AccelerationSolver solver(robot_);
   auto collision = collision_solver(0.005, false);
@@ -441,6 +485,45 @@ TEST_F(AccelerationVelocityCollisionLiftTest,
   ASSERT_EQ(result.status, SolverStatus::kSuccess) << result.status_message;
   EXPECT_TRUE(robot_->get_current_configuration().isApprox(q, 0.0));
   EXPECT_TRUE(robot_->get_current_velocity().isApprox(dq, 0.0));
+}
+
+TEST_F(AccelerationVelocityCollisionLiftTest,
+       ConservativeValidationCertifiesSafeSamplesAndReusesOnlyTrackableSeed) {
+  AccelerationSolver solver(robot_);
+  KinematicsSolver collision(robot_);
+  collision.configure_collision_constraint(0.005, {}, {}, true, 1);
+  collision.set_proximity_gated_collision_activation_enabled(false);
+  collision.enable_sphere_broadphase(true);
+
+  const Eigen::VectorXd q = vector({0.2});
+  const Eigen::VectorXd dq = vector({0.0});
+  const auto cold = solver.solve_with_velocity_collision(
+      collision, q, dq, 0.01, options_with_limits(10.0), lift_options(3));
+  ASSERT_EQ(cold.status, SolverStatus::kSuccess) << cold.status_message;
+  EXPECT_TRUE(cold.collision_endpoint_validated);
+  EXPECT_FALSE(cold.collision_step_certified);
+  EXPECT_EQ(cold.collision_validation_allowed_pairs, 1U);
+  EXPECT_EQ(cold.collision_validation_pairs_checked, 3U);
+  EXPECT_EQ(cold.collision_validation_conservative_checks, 3U);
+  EXPECT_GT(cold.collision_validation_conservative_certified_pairs, 0U);
+  EXPECT_EQ(cold.collision_validation_initial_exact_queries, 1U);
+  EXPECT_LT(cold.collision_validation_sample_exact_queries,
+            cold.collision_validation_pairs_checked);
+  EXPECT_FALSE(cold.collision_validation_initial_certificate_reused);
+
+  const auto warm = solver.solve_with_velocity_collision(
+      collision, q, dq, 0.01, options_with_limits(10.0), lift_options(3));
+  ASSERT_EQ(warm.status, SolverStatus::kSuccess) << warm.status_message;
+  EXPECT_TRUE(warm.collision_validation_initial_certificate_reused);
+  EXPECT_EQ(warm.collision_validation_initial_exact_queries, 0U);
+
+  (void)robot_->collision_model();
+  const auto untrackable = solver.solve_with_velocity_collision(
+      collision, q, dq, 0.01, options_with_limits(10.0), lift_options(3));
+  ASSERT_EQ(untrackable.status, SolverStatus::kSuccess)
+      << untrackable.status_message;
+  EXPECT_FALSE(untrackable.collision_validation_initial_certificate_reused);
+  EXPECT_EQ(untrackable.collision_validation_initial_exact_queries, 1U);
 }
 
 } // namespace

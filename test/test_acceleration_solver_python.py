@@ -63,6 +63,8 @@ def _single_prismatic_sphere_pair_urdf() -> str:
 
 def _options_with_limits(limits: list[float] | np.ndarray) -> eik.AccelerationSolveOptions:
     options = eik.AccelerationSolveOptions()
+    assert options.allow_state_box_task_fallback
+    assert options.collect_task_diagnostics
     options.acceleration_limits_override = np.asarray(limits, dtype=float)
     options.apply_position_limits = False
     options.apply_velocity_limits = False
@@ -120,9 +122,27 @@ def test_capabilities_and_simple_fixed_base_solve(tmp_path):
     assert np.allclose(result.joint_velocities_next, [0.3, 0.0], atol=1e-9)
     assert np.allclose(result.q_solution, [0.015, 0.0], atol=1e-9)
     assert result.acceleration_limits_applied
+    assert not result.state_box_task_fallback_applied
+    assert result.preprocessing_time_ms >= 0.0
+    assert result.backend_computation_time_ms >= 0.0
+    assert result.postprocessing_time_ms >= 0.0
+    assert result.computation_time_ms >= result.backend_computation_time_ms
     assert len(result.task_diagnostics) == 1
     assert result.task_diagnostics[0].task_name == "joint1_task"
     assert np.allclose(result.task_diagnostics[0].reference_acceleration, [3.0])
+
+    lightweight_options = _options_with_limits([10.0, 10.0])
+    lightweight_options.collect_task_diagnostics = False
+    lightweight = solver.solve(
+        np.array([0.0, 0.0]),
+        np.array([0.0, 0.0]),
+        0.1,
+        lightweight_options,
+    )
+    assert lightweight.status == eik.SolverStatus.SUCCESS
+    assert lightweight.task_diagnostics == []
+    assert len(lightweight.task_errors) == 1
+    assert np.allclose(lightweight.joint_accelerations, result.joint_accelerations)
 
 
 def test_invalid_acceleration_solve_fails_clear(tmp_path):

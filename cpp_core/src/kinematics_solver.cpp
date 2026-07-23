@@ -3135,7 +3135,8 @@ void KinematicsSolver::configure_collision_constraint(
         "Collision geometry is not available for this robot model.");
   }
 
-  auto *collision_model_ptr = robot_->collision_model();
+  const auto *collision_model_ptr =
+      static_cast<const RobotModel &>(*robot_).collision_model();
   auto *collision_data = robot_->collision_data();
 
   if (!collision_constraint_.has_value()) {
@@ -3228,6 +3229,8 @@ void KinematicsSolver::configure_collision_constraint(
     collision_pair_distance_floor_.clear();
     post_step_collision_distance_cache_.clear();
     collision_cache_frozen_indices_.clear();
+    ++collision_validation_policy_revision_;
+    invalidate_collision_validation_cache();
   }
   if (sphere_broadphase_enabled_ && !sphere_broadphase_.is_built()) {
     sphere_broadphase_.build(*collision_model_ptr);
@@ -3271,7 +3274,8 @@ KinematicsSolver::evaluate_collision_debug(const Eigen::VectorXd &current_q) {
     robot_->update_kinematics(robot_->get_current_configuration());
   }
 
-  auto *collision_model = robot_->collision_model();
+  const auto *collision_model =
+      static_cast<const RobotModel &>(*robot_).collision_model();
   auto *collision_data = robot_->collision_data();
   if (collision_model == nullptr || collision_data == nullptr) {
     return std::nullopt;
@@ -3364,7 +3368,8 @@ KinematicsSolver::evaluate_min_collision_distance(const Eigen::VectorXd &current
     robot_->update_kinematics(robot_->get_current_configuration());
   }
 
-  auto *collision_model = robot_->collision_model();
+  const auto *collision_model =
+      static_cast<const RobotModel &>(*robot_).collision_model();
   auto *collision_data = robot_->collision_data();
   if (collision_model == nullptr || collision_data == nullptr) {
     return std::nullopt;
@@ -3419,7 +3424,8 @@ KinematicsSolver::evaluate_min_collision_distance_targeted(
     robot_->update_kinematics(robot_->get_current_configuration());
   }
 
-  auto *collision_model = robot_->collision_model();
+  const auto *collision_model =
+      static_cast<const RobotModel &>(*robot_).collision_model();
   auto *collision_data = robot_->collision_data();
   if (collision_model == nullptr || collision_data == nullptr) {
     return std::nullopt;
@@ -3532,7 +3538,8 @@ KinematicsSolver::evaluate_post_step_collision_recovery_margins(
         "Invalid configuration size for collision recovery evaluation.");
   }
 
-  auto *collision_model = robot_->collision_model();
+  const auto *collision_model =
+      static_cast<const RobotModel &>(*robot_).collision_model();
   auto *collision_data = robot_->collision_data();
   if (collision_model == nullptr || collision_data == nullptr) {
     return {};
@@ -3817,7 +3824,8 @@ KinematicsSolver::evaluate_post_step_collision_recovery_margins(
 std::optional<double>
 KinematicsSolver::evaluate_post_step_collision_distance_from_current_results() {
 #ifdef PINOCCHIO_WITH_HPP_FCL
-  auto *collision_model = robot_->collision_model();
+  const auto *collision_model =
+      static_cast<const RobotModel &>(*robot_).collision_model();
   auto *collision_data = robot_->collision_data();
   if (collision_model == nullptr || collision_data == nullptr) {
     return std::nullopt;
@@ -3878,7 +3886,8 @@ void KinematicsSolver::capture_position_step_collision_command_floor(
   }
   const std::vector<double> current_margins =
       evaluate_post_step_collision_recovery_margins(current_q);
-  const auto *collision_model = robot_->collision_model();
+  const auto *collision_model =
+      static_cast<const RobotModel &>(*robot_).collision_model();
   if (collision_model == nullptr || current_margins.empty()) {
     return;
   }
@@ -3928,7 +3937,8 @@ std::optional<double>
 KinematicsSolver::evaluate_per_pair_override_violations(const Eigen::VectorXd &q) {
 #ifdef PINOCCHIO_WITH_HPP_FCL
   if (per_pair_min_distance_overrides_.empty()) return std::nullopt;
-  const auto *geom_model = robot_->collision_model();
+  const auto *geom_model =
+      static_cast<const RobotModel &>(*robot_).collision_model();
   if (!geom_model) return std::nullopt;
 
   double worst_margin = std::numeric_limits<double>::infinity();
@@ -3995,6 +4005,8 @@ bool KinematicsSolver::set_collision_min_distance(double min_distance) {
     collision_constraint_->constraint_activation_margin = 0.0;
   }
   post_step_collision_distance_cache_.clear();
+  ++collision_validation_policy_revision_;
+  invalidate_collision_validation_state_certificates();
   return true;
 }
 
@@ -4138,7 +4150,8 @@ void KinematicsSolver::enable_sphere_broadphase(bool enable) {
   }
   sphere_broadphase_enabled_ = enable;
   if (enable && !sphere_broadphase_.is_built() && robot_->has_collision_geometry()) {
-    sphere_broadphase_.build(*robot_->collision_model());
+    sphere_broadphase_.build(
+        *static_cast<const RobotModel &>(*robot_).collision_model());
   }
 #else
   (void)enable;
@@ -4183,13 +4196,16 @@ void KinematicsSolver::clear_collision_constraint() {
   last_collision_constraint_q_ = Eigen::VectorXd();
   collision_stuck_counters_.clear();
   collision_stuck_last_distances_.clear();
+  ++collision_validation_policy_revision_;
+  invalidate_collision_validation_cache();
 }
 
 void KinematicsSolver::set_collision_pair_min_distance(const std::string &link_a,
                                                         const std::string &link_b,
                                                         double min_distance,
                                                         bool activate_when_clear) {
-  const auto *geom_model = robot_->collision_model();
+  const auto *geom_model =
+      static_cast<const RobotModel &>(*robot_).collision_model();
   if (!geom_model) return;
 
   // Collect geometry indices whose parent frame name contains link_a or link_b.
@@ -4228,11 +4244,14 @@ void KinematicsSolver::set_collision_pair_min_distance(const std::string &link_a
     }
   }
   post_step_collision_distance_cache_.clear();
+  ++collision_validation_policy_revision_;
+  invalidate_collision_validation_state_certificates();
 }
 
 void KinematicsSolver::clear_collision_pair_min_distance(const std::string &link_a,
                                                           const std::string &link_b) {
-  const auto *geom_model = robot_->collision_model();
+  const auto *geom_model =
+      static_cast<const RobotModel &>(*robot_).collision_model();
   if (!geom_model) return;
 
   std::vector<std::size_t> geoms_a, geoms_b;
@@ -4261,6 +4280,8 @@ void KinematicsSolver::clear_collision_pair_min_distance(const std::string &link
     }
   }
   post_step_collision_distance_cache_.clear();
+  ++collision_validation_policy_revision_;
+  invalidate_collision_validation_state_certificates();
 }
 
 std::vector<std::pair<std::string, double>>
@@ -4976,7 +4997,8 @@ KinematicsSolver::get_active_collision_pairs() const {
     return result;
   }
 
-  const auto *collision_model_ptr = robot_->collision_model();
+  const auto *collision_model_ptr =
+      static_cast<const RobotModel &>(*robot_).collision_model();
   if (collision_model_ptr == nullptr) {
     return result;
   }
@@ -5022,7 +5044,8 @@ KinematicsSolver::resolve_collision_recovery_distances(
     throw std::logic_error(
         "collision recovery distances require a configured constraint");
   }
-  const auto *collision_model = robot_->collision_model();
+  const auto *collision_model =
+      static_cast<const RobotModel &>(*robot_).collision_model();
   if (collision_model == nullptr ||
       pair_index >= collision_model->collisionPairs.size()) {
     throw std::out_of_range("collision recovery pair index is invalid");
@@ -5041,6 +5064,8 @@ KinematicsSolver::resolve_collision_recovery_distances(
     per_pair_min_distance_overrides_[pair_key] = deferred->second;
     per_pair_deferred_overrides_.erase(deferred);
     post_step_collision_distance_cache_.clear();
+    ++collision_validation_policy_revision_;
+    invalidate_collision_validation_state_certificates();
   }
   const auto override = per_pair_min_distance_overrides_.find(pair_key);
   if (override != per_pair_min_distance_overrides_.end()) {
@@ -5154,7 +5179,8 @@ KinematicsSolver::compute_collision_constraint(double row_dt) {
     return std::nullopt;
   }
 
-  auto *collision_model = robot_->collision_model();
+  const auto *collision_model =
+      static_cast<const RobotModel &>(*robot_).collision_model();
   auto *collision_data = robot_->collision_data();
   if (collision_model == nullptr || collision_data == nullptr) {
     return std::nullopt;
@@ -6080,6 +6106,22 @@ KinematicsSolver::linearize_collision_velocity_constraint(double row_dt) {
   return linearization;
 }
 
+void KinematicsSolver::invalidate_collision_validation_state_certificates() {
+  collision_validation_seed_certificate_.reset();
+}
+
+void KinematicsSolver::invalidate_collision_validation_cache() {
+  collision_validation_catalog_.clear();
+  collision_validation_effective_pair_mask_.clear();
+  collision_validation_geometry_model_ = nullptr;
+  collision_validation_geometry_object_count_ = 0;
+  collision_validation_pair_count_ = 0;
+  collision_validation_data_.reset();
+  collision_validation_geometry_data_.reset();
+  ++collision_validation_catalog_revision_;
+  invalidate_collision_validation_state_certificates();
+}
+
 KinematicsSolver::CollisionSampleValidationResult
 KinematicsSolver::validate_collision_samples(
     const Eigen::VectorXd &q_from,
@@ -6104,18 +6146,6 @@ KinematicsSolver::validate_collision_samples(
     return fail(SolverStatus::kNonFiniteInput,
                 "collision sample seed must be finite");
   }
-  for (std::size_t sample_index = 0; sample_index < q_samples.size();
-       ++sample_index) {
-    result.samples_checked = sample_index + 1;
-    if (q_samples[sample_index].size() != robot_->nq()) {
-      return fail(SolverStatus::kShapeMismatch,
-                  "collision samples must have size nq");
-    }
-    if (!q_samples[sample_index].allFinite()) {
-      return fail(SolverStatus::kNonFiniteInput,
-                  "collision samples must be finite");
-    }
-  }
 
   if (!collision_constraint_.has_value() ||
       !collision_constraint_->enabled) {
@@ -6134,6 +6164,11 @@ KinematicsSolver::validate_collision_samples(
     return fail(SolverStatus::kInvalidInput,
                 "collision sample validation requires collision geometry");
   }
+  const bool geometry_trackable =
+      static_cast<const RobotModel &>(*robot_)
+          .collision_geometry_provenance_trackable();
+  const std::uint64_t geometry_revision =
+      static_cast<const RobotModel &>(*robot_).collision_geometry_revision();
 
   const auto &pairs = collision_model->collisionPairs;
   if (pairs.empty() ||
@@ -6144,79 +6179,198 @@ KinematicsSolver::validate_collision_samples(
                 "inconsistent");
   }
 
-  std::vector<std::size_t> allowed_pair_indices;
-  allowed_pair_indices.reserve(pairs.size());
+  std::vector<std::uint8_t> effective_pair_mask(pairs.size(), 0U);
   for (std::size_t pair_index = 0; pair_index < pairs.size(); ++pair_index) {
-    if (collision_allowed_pair_mask_[pair_index] != 0U &&
-        shared_collision_data->activeCollisionPairs[pair_index]) {
-      allowed_pair_indices.push_back(pair_index);
+    effective_pair_mask[pair_index] =
+        collision_allowed_pair_mask_[pair_index] != 0U &&
+                shared_collision_data->activeCollisionPairs[pair_index]
+            ? 1U
+            : 0U;
+  }
+  const bool catalog_stale =
+      collision_validation_geometry_model_ != collision_model ||
+      collision_validation_geometry_object_count_ !=
+          collision_model->geometryObjects.size() ||
+      collision_validation_pair_count_ != pairs.size() ||
+      collision_validation_effective_pair_mask_ != effective_pair_mask;
+  if (catalog_stale) {
+    invalidate_collision_validation_cache();
+  }
+  if (collision_validation_catalog_.empty()) {
+    collision_validation_geometry_model_ = collision_model;
+    collision_validation_geometry_object_count_ =
+        collision_model->geometryObjects.size();
+    collision_validation_pair_count_ = pairs.size();
+    collision_validation_effective_pair_mask_ = effective_pair_mask;
+    collision_validation_catalog_.reserve(pairs.size());
+    for (std::size_t pair_index = 0; pair_index < pairs.size();
+         ++pair_index) {
+      if (effective_pair_mask[pair_index] == 0U) {
+        continue;
+      }
+      const auto &pair = pairs[pair_index];
+      const auto &object_a = collision_model->geometryObjects[pair.first];
+      const auto &object_b = collision_model->geometryObjects[pair.second];
+      CollisionValidationPairMetadata metadata;
+      metadata.pair_index = pair_index;
+      metadata.object_a = pair.first;
+      metadata.object_b = pair.second;
+      metadata.key = canonical_pair_key(object_a.name, object_b.name);
+      collision_validation_catalog_.push_back(std::move(metadata));
     }
   }
-  if (allowed_pair_indices.empty()) {
+  if (collision_validation_catalog_.empty()) {
     return fail(SolverStatus::kInvalidInput,
                 "collision sample validation found no allowed active pairs");
   }
-  result.allowed_pair_count = allowed_pair_indices.size();
+  result.allowed_pair_count = collision_validation_catalog_.size();
 
-  pinocchio::Data validation_data(robot_->model());
-  pinocchio::GeometryData validation_geometry_data(*collision_model);
-  if (validation_geometry_data.distanceRequests.size() != pairs.size() ||
-      validation_geometry_data.distanceResults.size() != pairs.size()) {
+  if (!collision_validation_data_) {
+    collision_validation_data_ =
+        std::make_unique<pinocchio::Data>(robot_->model());
+  }
+  if (!collision_validation_geometry_data_) {
+    collision_validation_geometry_data_ =
+        std::make_unique<pinocchio::GeometryData>(*collision_model);
+  }
+  if (collision_validation_geometry_data_->distanceRequests.size() !=
+          pairs.size() ||
+      collision_validation_geometry_data_->distanceResults.size() !=
+          pairs.size()) {
     return fail(SolverStatus::kInvalidInput,
                 "collision sample validation workspace topology is "
                 "inconsistent");
   }
-  for (auto &request : validation_geometry_data.distanceRequests) {
+  for (auto &request : collision_validation_geometry_data_->distanceRequests) {
     request.enable_signed_distance = true;
     request.enable_nearest_points = false;
   }
 
-  const auto evaluate_configuration =
-      [&](const Eigen::VectorXd &sample_q,
-          std::vector<double> *distances) -> std::optional<std::string> {
+  const auto pair_sphere_lower_bound =
+      [&](const CollisionValidationPairMetadata &metadata)
+      -> std::optional<double> {
+    if (!sphere_broadphase_enabled_ || !sphere_broadphase_.is_built()) {
+      return std::nullopt;
+    }
+    const auto &object_a = collision_model->geometryObjects[metadata.object_a];
+    const auto &object_b = collision_model->geometryObjects[metadata.object_b];
+    const auto joint_a_id = object_a.parentJoint;
+    const auto joint_b_id = object_b.parentJoint;
+    if (joint_a_id >=
+            static_cast<pinocchio::JointIndex>(
+                collision_validation_data_->oMi.size()) ||
+        joint_b_id >=
+            static_cast<pinocchio::JointIndex>(
+                collision_validation_data_->oMi.size())) {
+      return std::nullopt;
+    }
+    const double lower_bound = sphere_broadphase_.compute_pair_lower_bound(
+        metadata.object_a, metadata.object_b,
+        collision_validation_data_->oMi[joint_a_id].translation(),
+        collision_validation_data_->oMi[joint_a_id].rotation(),
+        collision_validation_data_->oMi[joint_b_id].translation(),
+        collision_validation_data_->oMi[joint_b_id].rotation());
+    if (!std::isfinite(lower_bound)) {
+      return std::nullopt;
+    }
+    return lower_bound;
+  };
+
+  const auto update_validation_geometry =
+      [&](const Eigen::VectorXd &sample_q) -> std::optional<std::string> {
     try {
-      pinocchio::forwardKinematics(robot_->model(), validation_data, sample_q);
+      pinocchio::forwardKinematics(robot_->model(),
+                                   *collision_validation_data_, sample_q);
+      ++result.kinematics_updates;
       pinocchio::updateGeometryPlacements(
-          robot_->model(), validation_data, *collision_model,
-          validation_geometry_data);
-      distances->resize(allowed_pair_indices.size());
-      for (std::size_t cursor = 0; cursor < allowed_pair_indices.size();
-           ++cursor) {
-        const std::size_t pair_index = allowed_pair_indices[cursor];
-        if (pair_index >= pairs.size() ||
-            collision_allowed_pair_mask_[pair_index] == 0U ||
-            !shared_collision_data->activeCollisionPairs[pair_index]) {
-          return "collision pair mask changed during sample validation";
-        }
-        pinocchio::computeDistance(*collision_model,
-                                   validation_geometry_data, pair_index);
-        ++result.exact_distance_queries;
-        const double distance =
-            validation_geometry_data.distanceResults[pair_index].min_distance;
-        if (!std::isfinite(distance)) {
-          return "collision distance evidence was non-finite";
-        }
-        (*distances)[cursor] = distance;
-      }
+          robot_->model(), *collision_validation_data_, *collision_model,
+          *collision_validation_geometry_data_);
+      ++result.geometry_updates;
     } catch (const std::exception &error) {
-      return std::string("collision distance query failed: ") + error.what();
+      return std::string("collision sample geometry update failed: ") +
+             error.what();
     }
     return std::nullopt;
   };
 
-  std::vector<double> seed_distances;
-  if (const auto error =
-          evaluate_configuration(q_from, &seed_distances);
-      error.has_value()) {
+  const auto query_exact_distance =
+      [&](const CollisionValidationPairMetadata &metadata,
+          bool initial_query, double *distance_out)
+      -> std::optional<std::string> {
+    if (metadata.pair_index >= pairs.size() ||
+        collision_allowed_pair_mask_[metadata.pair_index] == 0U ||
+        !shared_collision_data->activeCollisionPairs[metadata.pair_index]) {
+      return "collision pair mask changed during sample validation";
+    }
+    try {
+      pinocchio::computeDistance(*collision_model,
+                                 *collision_validation_geometry_data_,
+                                 metadata.pair_index);
+    } catch (const std::exception &error) {
+      return std::string("collision distance query failed: ") + error.what();
+    }
+    ++result.exact_distance_queries;
+    if (initial_query) {
+      ++result.initial_exact_distance_queries;
+    } else {
+      ++result.sample_exact_distance_queries;
+    }
+    const double distance =
+        collision_validation_geometry_data_->distanceResults
+            [metadata.pair_index]
+                .min_distance;
+    if (!std::isfinite(distance)) {
+      return "collision distance evidence was non-finite";
+    }
+    *distance_out = distance;
+    return std::nullopt;
+  };
+
+  std::vector<double> seed_distance_lower_bounds(
+      collision_validation_catalog_.size(),
+      std::numeric_limits<double>::quiet_NaN());
+  const bool certificate_matches =
+      geometry_trackable && collision_validation_seed_certificate_.has_value() &&
+      collision_validation_seed_certificate_->geometry_model ==
+          collision_model &&
+      collision_validation_seed_certificate_->geometry_revision ==
+          geometry_revision &&
+      collision_validation_seed_certificate_->catalog_revision ==
+          collision_validation_catalog_revision_ &&
+      collision_validation_seed_certificate_->policy_revision ==
+          collision_validation_policy_revision_ &&
+      collision_validation_seed_certificate_->q.size() == q_from.size() &&
+      collision_validation_seed_certificate_->q.isApprox(q_from, 0.0) &&
+      collision_validation_seed_certificate_->distance_lower_bounds.size() ==
+          collision_validation_catalog_.size();
+  if (certificate_matches) {
+    seed_distance_lower_bounds =
+        collision_validation_seed_certificate_->distance_lower_bounds;
+    result.initial_state_certificate_reused = true;
+  } else if (const auto error = update_validation_geometry(q_from);
+             error.has_value()) {
     return fail(SolverStatus::kNumericalError, *error);
   }
 
-  std::vector<double> effective_floors(allowed_pair_indices.size());
-  for (std::size_t cursor = 0; cursor < allowed_pair_indices.size();
+  std::vector<double> effective_floors(collision_validation_catalog_.size());
+  for (std::size_t cursor = 0; cursor < collision_validation_catalog_.size();
        ++cursor) {
-    const std::size_t pair_index = allowed_pair_indices[cursor];
+    if (!result.initial_state_certificate_reused) {
+      double seed_distance = 0.0;
+      if (const auto error = query_exact_distance(
+              collision_validation_catalog_[cursor], true, &seed_distance);
+          error.has_value()) {
+        return fail(SolverStatus::kNumericalError, *error);
+      }
+      seed_distance_lower_bounds[cursor] = seed_distance;
+    }
+    const auto policy_revision_before = collision_validation_policy_revision_;
     const auto recovery = resolve_collision_recovery_distances(
-        pair_index, seed_distances[cursor]);
+        collision_validation_catalog_[cursor].pair_index,
+        seed_distance_lower_bounds[cursor]);
+    if (collision_validation_policy_revision_ != policy_revision_before) {
+      result.initial_state_certificate_reused = false;
+    }
     if (!std::isfinite(recovery.recovery_target)) {
       return fail(SolverStatus::kNumericalError,
                   "collision effective floor was non-finite");
@@ -6225,29 +6379,83 @@ KinematicsSolver::validate_collision_samples(
   }
 
   constexpr double kSampleNonWorseningTolerance = 1e-8;
+  if (geometry_trackable && !result.initial_state_certificate_reused) {
+    CollisionStateSafetyCertificate certificate;
+    certificate.q = q_from;
+    certificate.distance_lower_bounds = seed_distance_lower_bounds;
+    certificate.geometry_model = collision_model;
+    certificate.geometry_revision = geometry_revision;
+    certificate.catalog_revision = collision_validation_catalog_revision_;
+    certificate.policy_revision = collision_validation_policy_revision_;
+    collision_validation_seed_certificate_ = std::move(certificate);
+  } else if (!geometry_trackable) {
+    invalidate_collision_validation_state_certificates();
+  }
+
   result.samples_checked = 0;
-  for (const auto &sample_q : q_samples) {
-    std::vector<double> sample_distances;
-    if (const auto error =
-            evaluate_configuration(sample_q, &sample_distances);
+  for (std::size_t sample_index = 0; sample_index < q_samples.size();
+       ++sample_index) {
+    const auto &sample_q = q_samples[sample_index];
+    if (sample_q.size() != robot_->nq()) {
+      result.failed_sample_index = sample_index + 1;
+      return fail(SolverStatus::kShapeMismatch,
+                  "collision samples must have size nq");
+    }
+    if (!sample_q.allFinite()) {
+      result.failed_sample_index = sample_index + 1;
+      return fail(SolverStatus::kNonFiniteInput,
+                  "collision samples must be finite");
+    }
+    if (const auto error = update_validation_geometry(sample_q);
         error.has_value()) {
       return fail(SolverStatus::kNumericalError, *error);
     }
     ++result.samples_checked;
-    for (std::size_t cursor = 0; cursor < allowed_pair_indices.size();
+    for (std::size_t cursor = 0; cursor < collision_validation_catalog_.size();
          ++cursor) {
       ++result.pairs_checked;
-      const double seed_distance = seed_distances[cursor];
+      const auto &metadata = collision_validation_catalog_[cursor];
+      const double seed_distance = seed_distance_lower_bounds[cursor];
       const double floor = effective_floors[cursor];
-      const double sample_distance = sample_distances[cursor];
+      double sample_distance = std::numeric_limits<double>::quiet_NaN();
+      bool sample_certified = false;
+      ++result.conservative_bound_checks;
+      if (const auto lower_bound = pair_sphere_lower_bound(metadata);
+          lower_bound.has_value()) {
+        sample_distance = *lower_bound;
+        if (seed_distance >= floor - kSampleNonWorseningTolerance &&
+            sample_distance >= floor - kSampleNonWorseningTolerance) {
+          sample_certified = true;
+        } else if (
+            seed_distance < floor - kSampleNonWorseningTolerance &&
+            sample_distance >=
+                seed_distance - kSampleNonWorseningTolerance) {
+          sample_certified = true;
+        }
+      }
+      if (sample_certified) {
+        ++result.conservative_bound_certified_pairs;
+      } else if (const auto error =
+                     query_exact_distance(metadata, false, &sample_distance);
+                 error.has_value()) {
+        return fail(SolverStatus::kNumericalError, *error);
+      }
       if (seed_distance >= floor - kSampleNonWorseningTolerance) {
         if (sample_distance < floor - kSampleNonWorseningTolerance) {
+          result.failed_sample_index = sample_index + 1;
+          result.failed_pair_catalog_index = cursor;
+          result.failed_pair_model_index = metadata.pair_index;
+          result.failed_pair_key = metadata.key;
           return fail(
               SolverStatus::kCollisionViolated,
               "collision sample violated an effective collision floor");
         }
       } else if (sample_distance <
                  seed_distance - kSampleNonWorseningTolerance) {
+        result.failed_sample_index = sample_index + 1;
+        result.failed_pair_catalog_index = cursor;
+        result.failed_pair_model_index = metadata.pair_index;
+        result.failed_pair_key = metadata.key;
         return fail(
             SolverStatus::kCollisionViolated,
             "collision sample worsened an initially violated pair");
@@ -11553,7 +11761,8 @@ PositionIKResult KinematicsSolver::solve_position_step(
           }
         }
       } else if (use_normal_escape) {
-        const auto *collision_model = robot_->collision_model();
+        const auto *collision_model =
+            static_cast<const RobotModel &>(*robot_).collision_model();
         auto object_to_frame_name = [&](const std::string &obj_name) -> std::string {
           if (!collision_model) return std::string();
           for (std::size_t gi = 0; gi < collision_model->ngeoms; ++gi) {
@@ -13205,7 +13414,8 @@ PositionIKResult KinematicsSolver::solve_position_step(
         // Use contact normal from the globally-closest penetrating pair.
         // Build a body-level Jacobian for the link owning object_a, project
         // the Cartesian escape direction into joint space.
-        const auto *collision_model = robot_->collision_model();
+        const auto *collision_model =
+            static_cast<const RobotModel &>(*robot_).collision_model();
         auto object_to_frame_name = [&](const std::string &obj_name) -> std::string {
           if (!collision_model) return std::string();
           for (std::size_t gi = 0; gi < collision_model->ngeoms; ++gi) {

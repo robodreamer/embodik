@@ -22,6 +22,10 @@
 
 namespace embodik {
 
+namespace detail {
+struct AccelerationSolverWorkspace;
+}
+
 class KinematicsSolver;
 
 /**
@@ -240,6 +244,15 @@ struct AccelerationSolveOptions {
   std::optional<Eigen::VectorXd> acceleration_limits_override;
   bool apply_velocity_limits = true;
   bool apply_position_limits = true;
+  // A compatible position/velocity/acceleration box can require braking, so
+  // zero acceleration may be infeasible even when the task requests strict
+  // scaling. Keep the established safety-first behavior by default, but make
+  // the MIN_ERROR fallback explicit and caller-controllable.
+  bool allow_state_box_task_fallback = true;
+  // Rich per-task acceleration records require retaining physical
+  // differentials through postprocessing. Disable for latency-sensitive loops
+  // that consume only status, scales, errors, and executable state outputs.
+  bool collect_task_diagnostics = true;
   std::optional<GeneralizedAccelerationAllocation>
       generalized_acceleration_allocation;
   std::optional<EffortConstraintOptions> effort_constraints;
@@ -358,6 +371,12 @@ struct AccelerationAnalyticCollisionPairDiagnostics {
 };
 
 struct AccelerationSolverResult : public SolverResult {
+  /// C++ time before entering the hierarchical backend.
+  double preprocessing_time_ms = 0.0;
+  /// Time reported by the hierarchical backend itself.
+  double backend_computation_time_ms = 0.0;
+  /// C++ time after the backend returned, including acceptance diagnostics.
+  double postprocessing_time_ms = 0.0;
   Eigen::VectorXd joint_accelerations;
   Eigen::VectorXd joint_velocities_next;
   Eigen::VectorXd q_solution;
@@ -365,6 +384,8 @@ struct AccelerationSolverResult : public SolverResult {
   /// True once the compatible acceleration box participated in the solve,
   /// including backend attempts that return no executable motion.
   bool acceleration_limits_applied = false;
+  /// True when the explicit state-box policy enabled MIN_ERROR fallback.
+  bool state_box_task_fallback_applied = false;
   std::vector<int> saturated_acceleration_indices;
   std::vector<int> saturated_velocity_indices;
   std::vector<int> saturated_position_indices;
@@ -380,6 +401,13 @@ struct AccelerationSolverResult : public SolverResult {
   std::uint64_t collision_validation_allowed_pairs = 0;
   std::uint64_t collision_validation_pairs_checked = 0;
   std::uint64_t collision_validation_exact_queries = 0;
+  std::uint64_t collision_validation_initial_exact_queries = 0;
+  std::uint64_t collision_validation_sample_exact_queries = 0;
+  std::uint64_t collision_validation_conservative_checks = 0;
+  std::uint64_t collision_validation_conservative_certified_pairs = 0;
+  std::uint64_t collision_validation_kinematics_updates = 0;
+  std::uint64_t collision_validation_geometry_updates = 0;
+  bool collision_validation_initial_certificate_reused = false;
   std::uint64_t collision_lift_pairs_considered = 0;
   std::uint64_t collision_lift_row_pairs = 0;
   std::uint64_t collision_lift_row_exact_queries = 0;
@@ -431,11 +459,12 @@ struct AccelerationSolverCapabilities {
 class AccelerationSolver {
 public:
   explicit AccelerationSolver(std::shared_ptr<RobotModel> robot);
+  ~AccelerationSolver();
 
   AccelerationSolver(const AccelerationSolver &) = delete;
   AccelerationSolver &operator=(const AccelerationSolver &) = delete;
-  AccelerationSolver(AccelerationSolver &&) noexcept = default;
-  AccelerationSolver &operator=(AccelerationSolver &&) noexcept = default;
+  AccelerationSolver(AccelerationSolver &&) noexcept;
+  AccelerationSolver &operator=(AccelerationSolver &&) noexcept;
 
   static AccelerationSolverCapabilities capabilities();
 
@@ -508,6 +537,8 @@ private:
 
   std::shared_ptr<RobotModel> robot_;
   std::vector<std::shared_ptr<Task>> tasks_;
+  std::vector<std::shared_ptr<Task>> ordered_task_scratch_;
+  std::unique_ptr<detail::AccelerationSolverWorkspace> workspace_;
   std::unordered_map<std::string, std::shared_ptr<Task>> task_map_;
   std::unordered_map<std::string, AccelerationTaskReference> task_references_;
   std::optional<CollisionConstraintDefinition> native_collision_definition_;

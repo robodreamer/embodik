@@ -26,13 +26,43 @@ jerk-limited actuator interface.
 | Allocation | Diagonal generalized acceleration metric and reference |
 | Contact | Fixed-base point or rigid contact kinematic acceleration equalities |
 | Geometry | Tight point, tight frame pose, relative pose, torso pose bounds, and CoM support polygons |
-| Collision compatibility | Canonical velocity collision rows lifted to next velocity, followed by exact sampled validation |
+| Collision compatibility | Canonical velocity collision rows lifted to next velocity, followed by conservative-or-exact sampled validation |
 | Native collision certification | Exact-name sphere-sphere catalogs on fixed-base all-prismatic scalar models |
 
 Unsupported scope fails explicitly. This includes floating bases, dynamic
 contact forces, friction cones, wheel rolling/steering constraints,
 `SCALE_ELASTIC`, general native collision geometry, and ROS 2 controller or
 wheelbase integration.
+
+## Inequality Constraint Parity
+
+The acceleration surface represents velocity inequalities on
+`dq_next = dq + dt * ddq` and acceleration inequalities directly. It does not
+silently import mutable `KinematicsSolver` configuration, so adapter-owned
+rows must be supplied explicitly.
+
+| Current velocity constraint family | Acceleration behavior |
+| --- | --- |
+| Joint position, velocity, and acceleration limits | Native combined acceleration state box, with accepted-state recheck |
+| General linear velocity rows | Supported through `FrozenNextVelocityConstraint` |
+| Task-space finite-step bounds | Supported through `TaskAccelerationBounds`; position-step priority-policy rows are not imported automatically |
+| Self-collision include/exclude filters and per-pair floors | Supported through `solve_with_velocity_collision()` using the configured velocity solver |
+| CoM support polygon | Native `ComSupportPolygonAccelerationConstraint` for fixed-base/root-fixed support |
+| Tight point and frame pose bounds | Native acceleration constraints |
+| Relative pose bounds | Native acceleration constraint |
+| Torso pose bounds | Native acceleration constraint with an explicit caller-owned reference pose |
+| Joint locks | Zero acceleration, zero next velocity, and fixed current-position lock rows |
+| Fixed-base effort limits | Native inverse-dynamics inequalities |
+| Floating-base position/orientation bounds | Rejected because the fixed-base solver constructor rejects floating-base topology |
+| Native collision combined with other hard-row families | Rejected until the combined predicted-state certificate is implemented |
+
+`SCALE_ELASTIC`, seed corridors, adaptive timesteps, preferred-lock retries,
+stall recovery, task-layout selection, and weighted position-step fallback are
+stateful `KinematicsSolver` controller policies rather than missing
+acceleration inequalities. A controller adapter must implement or reject those
+policies explicitly. Manipulability and joint-limit avoidance are velocity
+objective families, not hard inequality rows, and are not currently exposed as
+acceleration tasks.
 
 ## Compatible Joint Box
 
@@ -49,8 +79,24 @@ options.acceleration_limits_override = acceleration_limits
 result = solver.solve(q, dq, dt, options)
 ```
 
+When the combined box requires braking, zero acceleration is outside the hard
+set. The default `allow_state_box_task_fallback = True` makes the resulting
+MIN_ERROR task fallback explicit while preserving the mandatory braking
+command. Set it to `False` when strict task semantics should fail closed
+instead. `state_box_task_fallback_applied` reports which policy was used.
+
 Only `SolverStatus.SUCCESS` carries executable acceleration, next-velocity, and
 configuration outputs. Failures clear those outputs.
+
+For latency-sensitive controller loops, set
+`options.collect_task_diagnostics = False`. This skips rich physical
+per-task records while preserving task scales, task errors, solver status, and
+all executable outputs. `computation_time_ms` covers the complete C++ solve;
+`preprocessing_time_ms`, `backend_computation_time_ms`, and
+`postprocessing_time_ms` expose its measured phases.
+For `solve_with_velocity_collision()`, these phase fields describe the inner
+acceleration solve; `computation_time_ms` also includes collision-row lifting
+and sampled endpoint validation.
 
 ## Task References
 
@@ -76,8 +122,10 @@ robot, or rejecting a result.
 `solve_with_velocity_collision()` consumes an already configured
 `KinematicsSolver`. It reuses that solver's collision pair filtering,
 include/exclude policy, active per-pair floors, row ordering, and row budget.
-The lifted rows constrain `dq_next = dq + dt * ddq`, and exact distance checks
-validate the requested constant-acceleration samples.
+The lifted rows constrain `dq_next = dq + dt * ddq`. Every allowed pair at
+every requested constant-acceleration sample is accounted for in canonical
+order. A conservative enclosing-sphere lower bound may prove a pair safe;
+ambiguous geometry falls back to the exact collision backend.
 
 This path is fail-closed but sampled. A successful result reports
 `collision_endpoint_validated = True` and

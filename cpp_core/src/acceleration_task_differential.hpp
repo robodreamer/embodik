@@ -26,6 +26,7 @@ struct AccelerationTaskDifferential {
 };
 
 AccelerationTaskDifferential evaluate_acceleration_task_differential(
-    const Task &task, const RobotModel &model);
+    const Task &task, const RobotModel &model,
+    bool control_only_zero_velocity = false);
 
 } // namespace embodik::detail

@@ -32,6 +32,9 @@ nanobind_add_module(_embodik_impl
 target_link_libraries(_embodik_impl PRIVATE
     embodik_core
 )
+target_compile_definitions(_embodik_impl PRIVATE
+    EMBODIK_VERSION="${PROJECT_VERSION}"
+)
 
 # Set RPATH so Python can find libembodik_core.{so,dylib}.
 # Installed packages place libembodik_core under lib/. Search that directory first

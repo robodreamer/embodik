@@ -111,6 +111,9 @@ struct HierarchicalLinearSolverExecutionOptions {
   HierarchicalLinearSolverPolicy policy =
       HierarchicalLinearSolverPolicy::kGeneralizedEsns;
   double objective_equality_tolerance = 0.0;
+  // Internal fast-path contract: the caller has already proven that the
+  // immutable hard-row set has a feasible witness.
+  bool hard_constraints_prevalidated_feasible = false;
 };
 
 /**
@@ -1058,6 +1061,7 @@ inline SolverResult solveHierarchicalLinearSystemEigen(
     }
   }
   const bool run_hard_constraint_phase_one =
+      !execution_options.hard_constraints_prevalidated_feasible &&
       !immutable_constraint_rows.empty();
   Eigen::MatrixXd phase_one_coefficients(immutable_constraint_rows.size(),
                                          degrees_of_freedom);
@@ -1985,21 +1989,32 @@ inline SolverResult SolveGeneralizedHierarchicalLinearSystemEigen(
     const VelocitySolverConfig &solver_config,
     const std::vector<ObjectiveSolveConfig> &objective_configs,
     const Eigen::VectorXd *max_constraint_softening_factors,
-    double objective_equality_tolerance) {
-  Eigen::MatrixXd normalized_coefficients;
-  Eigen::VectorXd normalized_min_bounds;
-  Eigen::VectorXd normalized_max_bounds;
-  NormalizeLinearConstraintRows(
-      constraint_coefficients, min_bounds, max_bounds,
-      &normalized_coefficients, &normalized_min_bounds,
-      &normalized_max_bounds);
+    double objective_equality_tolerance,
+    bool constraint_rows_pre_normalized = false,
+    bool hard_constraints_prevalidated_feasible = false) {
+  Eigen::MatrixXd normalized_coefficients_storage;
+  Eigen::VectorXd normalized_min_bounds_storage;
+  Eigen::VectorXd normalized_max_bounds_storage;
+  const Eigen::MatrixXd *normalized_coefficients = &constraint_coefficients;
+  const Eigen::VectorXd *normalized_min_bounds = &min_bounds;
+  const Eigen::VectorXd *normalized_max_bounds = &max_bounds;
+  if (!constraint_rows_pre_normalized) {
+    NormalizeLinearConstraintRows(
+        constraint_coefficients, min_bounds, max_bounds,
+        &normalized_coefficients_storage, &normalized_min_bounds_storage,
+        &normalized_max_bounds_storage);
+    normalized_coefficients = &normalized_coefficients_storage;
+    normalized_min_bounds = &normalized_min_bounds_storage;
+    normalized_max_bounds = &normalized_max_bounds_storage;
+  }
   return solveHierarchicalLinearSystemEigen(
       scalable_objective_targets, affine_objective_biases, objective_matrices,
-      normalized_coefficients, normalized_min_bounds, normalized_max_bounds,
+      *normalized_coefficients, *normalized_min_bounds, *normalized_max_bounds,
       solver_config, objective_configs, max_constraint_softening_factors,
       HierarchicalLinearSolverExecutionOptions{
           HierarchicalLinearSolverPolicy::kGeneralizedEsns,
-          objective_equality_tolerance});
+          objective_equality_tolerance,
+          hard_constraints_prevalidated_feasible});
 }
 
 } // namespace detail

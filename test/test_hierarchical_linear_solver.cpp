@@ -526,6 +526,41 @@ TEST(HierarchicalLinearSolverTest,
 }
 
 TEST(HierarchicalLinearSolverTest,
+     PrevalidatedNormalizedBoxMatchesFullGeneralizedSolve) {
+  const std::vector<Eigen::VectorXd> targets{vector({0.4, -0.2})};
+  const std::vector<Eigen::VectorXd> biases{vector({0.05, -0.03})};
+  const std::vector<Eigen::MatrixXd> objectives{
+      matrix({{1.0, 0.2}, {-0.1, 1.0}})};
+  const Eigen::MatrixXd constraints = Eigen::Matrix2d::Identity();
+  const Eigen::VectorXd lower = vector({0.1, -0.5});
+  const Eigen::VectorXd upper = vector({0.8, 0.4});
+  const auto config = exact_config();
+
+  const auto full = detail::SolveGeneralizedHierarchicalLinearSystemEigen(
+      targets, biases, objectives, constraints, lower, upper, config, {},
+      nullptr, kTolerance);
+  const auto prevalidated =
+      detail::SolveGeneralizedHierarchicalLinearSystemEigen(
+          targets, biases, objectives, constraints, lower, upper, config, {},
+          nullptr, kTolerance, /*constraint_rows_pre_normalized=*/true,
+          /*hard_constraints_prevalidated_feasible=*/true);
+
+  expect_results_equal_except_timing(prevalidated, full);
+}
+
+TEST(HierarchicalLinearSolverTest,
+     NormalizedRowsStillRunPhaseOneWithoutPrevalidatedFeasibility) {
+  const auto result = detail::SolveGeneralizedHierarchicalLinearSystemEigen(
+      {vector({0.0})}, {vector({0.0})}, {matrix({{1.0}})},
+      matrix({{0.0}}), vector({1.0}), vector({2.0}), exact_config(), {},
+      nullptr, kTolerance, /*constraint_rows_pre_normalized=*/true,
+      /*hard_constraints_prevalidated_feasible=*/false);
+
+  EXPECT_EQ(result.status, SolverStatus::kInfeasible)
+      << result.status_message;
+}
+
+TEST(HierarchicalLinearSolverTest,
      ZeroTaskKeepsZeroWhenHardIntervalContainsZero) {
   const auto result = solve_canonical(
       {vector({0.0})}, {vector({0.0})}, {matrix({{1.0}})},

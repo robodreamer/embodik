@@ -27,6 +27,10 @@
 namespace nb = nanobind;
 namespace eik = embodik;
 
+#ifndef EMBODIK_VERSION
+#define EMBODIK_VERSION "unknown"
+#endif
+
 // Forward declarations for sub-module bindings
 void bind_robot_model(nb::module_ &m);
 void bind_tasks(nb::module_ &m);
@@ -827,7 +831,7 @@ NB_MODULE(_embodik_impl, m) {
           )pbdoc");
 
   // Module metadata
-  m.attr("__version__") = "0.20.14";
+  m.attr("__version__") = EMBODIK_VERSION;
   m.attr("DEFAULT_REGULARIZATION") = eik::BasicSolverConfig{}.regularization;
 
   // Bind robot model with Pinocchio integration

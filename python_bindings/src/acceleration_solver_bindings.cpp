@@ -270,6 +270,14 @@ void bind_acceleration_solver(nb::module_ &m) {
               &AccelerationSolveOptions::apply_velocity_limits)
       .def_rw("apply_position_limits",
               &AccelerationSolveOptions::apply_position_limits)
+      .def_rw("allow_state_box_task_fallback",
+              &AccelerationSolveOptions::allow_state_box_task_fallback,
+              "Allow an explicit MIN_ERROR fallback when the compatible "
+              "state box requires nonzero braking acceleration.")
+      .def_rw("collect_task_diagnostics",
+              &AccelerationSolveOptions::collect_task_diagnostics,
+              "Retain rich per-task acceleration diagnostics. Disable in "
+              "latency-sensitive loops that only require scales and errors.")
       .def_prop_rw(
           "generalized_acceleration_allocation",
           [](const AccelerationSolveOptions &self) {
@@ -438,6 +446,12 @@ void bind_acceleration_solver(nb::module_ &m) {
 
   nb::class_<AccelerationSolverResult, SolverResult>(
       m, "AccelerationSolverResult")
+      .def_ro("preprocessing_time_ms",
+              &AccelerationSolverResult::preprocessing_time_ms)
+      .def_ro("backend_computation_time_ms",
+              &AccelerationSolverResult::backend_computation_time_ms)
+      .def_ro("postprocessing_time_ms",
+              &AccelerationSolverResult::postprocessing_time_ms)
       .def_prop_ro("joint_accelerations",
                    [](const AccelerationSolverResult &self) {
                      return self.joint_accelerations;
@@ -452,6 +466,8 @@ void bind_acceleration_solver(nb::module_ &m) {
                    })
       .def_ro("acceleration_limits_applied",
               &AccelerationSolverResult::acceleration_limits_applied)
+      .def_ro("state_box_task_fallback_applied",
+              &AccelerationSolverResult::state_box_task_fallback_applied)
       .def_ro("saturated_acceleration_indices",
               &AccelerationSolverResult::saturated_acceleration_indices)
       .def_ro("saturated_velocity_indices",
@@ -486,6 +502,27 @@ void bind_acceleration_solver(nb::module_ &m) {
               &AccelerationSolverResult::collision_validation_pairs_checked)
       .def_ro("collision_validation_exact_queries",
               &AccelerationSolverResult::collision_validation_exact_queries)
+      .def_ro("collision_validation_initial_exact_queries",
+              &AccelerationSolverResult::
+                  collision_validation_initial_exact_queries)
+      .def_ro("collision_validation_sample_exact_queries",
+              &AccelerationSolverResult::
+                  collision_validation_sample_exact_queries)
+      .def_ro("collision_validation_conservative_checks",
+              &AccelerationSolverResult::
+                  collision_validation_conservative_checks)
+      .def_ro("collision_validation_conservative_certified_pairs",
+              &AccelerationSolverResult::
+                  collision_validation_conservative_certified_pairs)
+      .def_ro("collision_validation_kinematics_updates",
+              &AccelerationSolverResult::
+                  collision_validation_kinematics_updates)
+      .def_ro("collision_validation_geometry_updates",
+              &AccelerationSolverResult::
+                  collision_validation_geometry_updates)
+      .def_ro("collision_validation_initial_certificate_reused",
+              &AccelerationSolverResult::
+                  collision_validation_initial_certificate_reused)
       .def_ro("collision_lift_pairs_considered",
               &AccelerationSolverResult::collision_lift_pairs_considered)
       .def_ro("collision_lift_row_pairs",

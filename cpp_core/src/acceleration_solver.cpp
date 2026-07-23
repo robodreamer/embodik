@@ -18,7 +18,6 @@
 #include <chrono>
 #include <cmath>
 #include <limits>
-#include <map>
 #include <stdexcept>
 #include <unordered_set>
 #include <utility>
@@ -554,21 +553,6 @@ StateBoxAssembly build_joint_state_box(const RobotModel &robot,
   return assembly;
 }
 
-Eigen::VectorXd reference_or_zero(const Eigen::VectorXd &value,
-                                  Eigen::Index dimension,
-                                  const std::string &field_name) {
-  if (value.size() == 0) {
-    return Eigen::VectorXd::Zero(dimension);
-  }
-  if (value.size() != dimension) {
-    throw std::invalid_argument(field_name + " dimension mismatch");
-  }
-  if (!value.allFinite()) {
-    throw std::invalid_argument(field_name + " must be finite");
-  }
-  return value;
-}
-
 struct ObjectiveAssembly {
   SolverStatus status = SolverStatus::kSuccess;
   std::string message;
@@ -582,50 +566,113 @@ struct ObjectiveAssembly {
   bool synthetic_hold_objective = false;
 };
 
-ObjectiveAssembly assemble_objectives(
+void assemble_objectives(
+    ObjectiveAssembly *assembly,
     const std::vector<std::shared_ptr<Task>> &tasks,
+    std::vector<std::shared_ptr<Task>> &ordered_tasks,
     const std::unordered_map<std::string, AccelerationTaskReference> &references,
-    const RobotModel &robot, const Eigen::VectorXd &dq) {
-  ObjectiveAssembly assembly;
-  std::map<int, std::vector<std::shared_ptr<Task>>> grouped_tasks;
+    const RobotModel &robot, const Eigen::VectorXd &dq,
+    bool retain_task_differentials) {
+  assembly->status = SolverStatus::kSuccess;
+  assembly->message.clear();
+  assembly->synthetic_hold_objective = false;
+  ordered_tasks.clear();
+  ordered_tasks.reserve(tasks.size());
   for (const auto &task : tasks) {
     if (task && task->isActive()) {
       if (task->getSolveMode() == TaskSolveMode::kScaleElastic) {
-        assembly.status = SolverStatus::kInvalidInput;
-        assembly.message =
+        assembly->status = SolverStatus::kInvalidInput;
+        assembly->message =
             "AccelerationSolver does not support SCALE_ELASTIC tasks";
-        return assembly;
+        return;
       }
-      grouped_tasks[task->getPriority()].push_back(task);
+      ordered_tasks.push_back(task);
     }
   }
-  if (grouped_tasks.empty()) {
-    assembly.matrices.push_back(
-        Eigen::MatrixXd::Identity(robot.nv(), robot.nv()));
-    assembly.targets.push_back(Eigen::VectorXd::Zero(robot.nv()));
-    assembly.biases.push_back(Eigen::VectorXd::Zero(robot.nv()));
+  if (ordered_tasks.empty()) {
+    assembly->matrices.resize(1);
+    assembly->targets.resize(1);
+    assembly->biases.resize(1);
+    assembly->configs.resize(1);
+    assembly->groups.resize(1);
+    assembly->differentials.resize(1);
+    assembly->references.resize(1);
+    assembly->matrices[0].setIdentity(robot.nv(), robot.nv());
+    assembly->targets[0].setZero(robot.nv());
+    assembly->biases[0].setZero(robot.nv());
     ObjectiveSolveConfig config;
     config.priority = 0;
     config.solve_mode = TaskSolveMode::kMinError;
     config.allow_min_error_fallback = true;
-    assembly.configs.push_back(config);
-    assembly.groups.push_back({});
-    assembly.differentials.push_back({});
-    assembly.references.push_back({});
-    assembly.synthetic_hold_objective = true;
-    return assembly;
+    assembly->configs[0] = config;
+    assembly->groups[0].clear();
+    assembly->differentials[0].clear();
+    assembly->references[0].clear();
+    assembly->synthetic_hold_objective = true;
+    return;
   }
 
-  for (const auto &[priority, group] : grouped_tasks) {
+  const auto priority_less = [](const std::shared_ptr<Task> &lhs,
+                                const std::shared_ptr<Task> &rhs) {
+    if (!lhs) {
+      return static_cast<bool>(rhs);
+    }
+    if (!rhs) {
+      return false;
+    }
+    return lhs->getPriority() < rhs->getPriority();
+  };
+  if (!std::is_sorted(ordered_tasks.begin(), ordered_tasks.end(),
+                      priority_less)) {
+    std::stable_sort(ordered_tasks.begin(), ordered_tasks.end(), priority_less);
+  }
+  assembly->matrices.reserve(ordered_tasks.size());
+  assembly->targets.reserve(ordered_tasks.size());
+  assembly->biases.reserve(ordered_tasks.size());
+  assembly->configs.reserve(ordered_tasks.size());
+  assembly->groups.reserve(ordered_tasks.size());
+  assembly->differentials.reserve(ordered_tasks.size());
+  assembly->references.reserve(ordered_tasks.size());
+  const bool control_only_zero_velocity =
+      !retain_task_differentials && dq.isZero(0.0);
+  std::size_t group_index = 0;
+  for (std::size_t group_begin = 0; group_begin < ordered_tasks.size();) {
+    const int priority = ordered_tasks[group_begin]->getPriority();
+    std::size_t group_end = group_begin;
+    while (group_end < ordered_tasks.size()) {
+      if (ordered_tasks[group_end]->getPriority() != priority) {
+        break;
+      }
+      ++group_end;
+    }
+    if (assembly->groups.size() <= group_index) {
+      assembly->groups.emplace_back();
+      assembly->matrices.emplace_back();
+      assembly->targets.emplace_back();
+      assembly->biases.emplace_back();
+      assembly->configs.emplace_back();
+      assembly->differentials.emplace_back();
+      assembly->references.emplace_back();
+    }
+    auto &group = assembly->groups[group_index];
+    group.assign(ordered_tasks.begin() + group_begin,
+                 ordered_tasks.begin() + group_end);
     Eigen::Index rows = 0;
     for (const auto &task : group) {
       rows += task->getDimension();
     }
-    Eigen::MatrixXd matrix(rows, robot.nv());
-    Eigen::VectorXd target(rows);
-    Eigen::VectorXd bias(rows);
-    std::vector<detail::AccelerationTaskDifferential> group_differentials;
-    std::vector<Eigen::VectorXd> group_references;
+    auto &matrix = assembly->matrices[group_index];
+    auto &target = assembly->targets[group_index];
+    auto &bias = assembly->biases[group_index];
+    matrix.resize(rows, robot.nv());
+    target.resize(rows);
+    bias.resize(rows);
+    auto &group_differentials = assembly->differentials[group_index];
+    auto &group_references = assembly->references[group_index];
+    group_differentials.clear();
+    group_references.clear();
+    group_differentials.reserve(group.size());
+    group_references.reserve(group.size());
 
     const TaskSolveMode mode = group.front()->getSolveMode();
     const bool allow_fallback = group.front()->getAllowMinErrorFallback();
@@ -633,86 +680,98 @@ ObjectiveAssembly assemble_objectives(
     for (const auto &task : group) {
       if (task->getSolveMode() != mode ||
           task->getAllowMinErrorFallback() != allow_fallback) {
-        assembly.status = SolverStatus::kInvalidInput;
-        assembly.message =
+        assembly->status = SolverStatus::kInvalidInput;
+        assembly->message =
             "same-priority acceleration tasks must share solve mode and "
             "fallback settings";
-        return assembly;
+        return;
       }
       task->update(robot);
-      const auto differential =
-          detail::evaluate_acceleration_task_differential(*task, robot);
+      auto differential =
+          detail::evaluate_acceleration_task_differential(
+              *task, robot, control_only_zero_velocity);
       if (differential.status !=
           detail::AccelerationTaskDifferentialStatus::kSuccess) {
-        assembly.status =
+        assembly->status =
             differential.status ==
                     detail::AccelerationTaskDifferentialStatus::kInvalidInput
                 ? SolverStatus::kInvalidInput
                 : SolverStatus::kInvalidInput;
-        assembly.message = differential.message;
-        return assembly;
+        assembly->message = differential.message;
+        return;
       }
       const Eigen::Index dimension = differential.control_jacobian.rows();
       const auto found = references.find(task->getName());
-      const AccelerationTaskReference reference =
-          found == references.end() ? AccelerationTaskReference{}
-                                    : found->second;
-      Eigen::VectorXd desired_velocity;
-      Eigen::VectorXd desired_acceleration;
-      try {
-        desired_velocity =
-            reference_or_zero(reference.desired_velocity, dimension,
-                              "desired velocity");
-        desired_acceleration =
-            reference_or_zero(reference.desired_acceleration, dimension,
-                              "desired acceleration");
-      } catch (const std::invalid_argument &error) {
-        assembly.status = SolverStatus::kInvalidInput;
-        assembly.message = task->getName() + ": " + error.what();
-        return assembly;
+      static const AccelerationTaskReference kDefaultReference;
+      const auto &reference =
+          found == references.end() ? kDefaultReference : found->second;
+      if ((reference.desired_velocity.size() != 0 &&
+           reference.desired_velocity.size() != dimension) ||
+          (reference.desired_acceleration.size() != 0 &&
+           reference.desired_acceleration.size() != dimension) ||
+          (reference.desired_velocity.size() != 0 &&
+           !reference.desired_velocity.allFinite()) ||
+          (reference.desired_acceleration.size() != 0 &&
+           !reference.desired_acceleration.allFinite())) {
+        assembly->status = SolverStatus::kInvalidInput;
+        assembly->message =
+            task->getName() + ": acceleration reference is inconsistent";
+        return;
       }
       if (!std::isfinite(reference.proportional_gain) ||
           !std::isfinite(reference.derivative_gain) ||
           reference.proportional_gain < 0.0 ||
           reference.derivative_gain < 0.0) {
-        assembly.status = SolverStatus::kInvalidInput;
-        assembly.message = task->getName() + ": acceleration gains invalid";
-        return assembly;
+        assembly->status = SolverStatus::kInvalidInput;
+        assembly->message = task->getName() + ": acceleration gains invalid";
+        return;
       }
 
-      const Eigen::VectorXd task_velocity =
-          differential.physical_jacobian * dq;
-      const Eigen::VectorXd desired_velocity_scaled =
-          differential.reference_row_scale.cwiseProduct(desired_velocity);
-      const Eigen::VectorXd desired_acceleration_scaled =
-          differential.reference_row_scale.cwiseProduct(desired_acceleration);
       Eigen::VectorXd scalable =
-          desired_acceleration_scaled +
-          reference.derivative_gain *
-              (desired_velocity_scaled - task_velocity) +
           reference.proportional_gain * task->getWeight() *
-              differential.position_error;
+          differential.position_error;
+      if (control_only_zero_velocity) {
+        // No measured task-rate term is needed.
+      } else {
+        scalable.noalias() -=
+            reference.derivative_gain *
+            (differential.physical_jacobian * dq);
+      }
+      if (reference.desired_velocity.size() != 0) {
+        scalable.array() +=
+            reference.derivative_gain *
+            differential.reference_row_scale.array() *
+            reference.desired_velocity.array();
+      }
+      if (reference.desired_acceleration.size() != 0) {
+        scalable.array() += differential.reference_row_scale.array() *
+                            reference.desired_acceleration.array();
+      }
       matrix.middleRows(cursor, dimension) = differential.control_jacobian;
       target.segment(cursor, dimension) = scalable;
       bias.segment(cursor, dimension) = differential.jacobian_bias;
-      group_differentials.push_back(differential);
-      group_references.push_back(scalable);
+      if (retain_task_differentials) {
+        group_differentials.push_back(std::move(differential));
+        group_references.push_back(scalable);
+      }
       cursor += dimension;
     }
 
-    assembly.matrices.push_back(std::move(matrix));
-    assembly.targets.push_back(std::move(target));
-    assembly.biases.push_back(std::move(bias));
     ObjectiveSolveConfig config;
     config.priority = priority;
     config.solve_mode = mode;
     config.allow_min_error_fallback = allow_fallback;
-    assembly.configs.push_back(config);
-    assembly.groups.push_back(group);
-    assembly.differentials.push_back(std::move(group_differentials));
-    assembly.references.push_back(std::move(group_references));
+    assembly->configs[group_index] = config;
+    ++group_index;
+    group_begin = group_end;
   }
-  return assembly;
+  assembly->matrices.resize(group_index);
+  assembly->targets.resize(group_index);
+  assembly->biases.resize(group_index);
+  assembly->configs.resize(group_index);
+  assembly->groups.resize(group_index);
+  assembly->differentials.resize(group_index);
+  assembly->references.resize(group_index);
 }
 
 const detail::AccelerationTaskDifferential *
@@ -1691,6 +1750,13 @@ struct VelocityCollisionLiftDiagnostics {
   std::uint64_t validation_allowed_pairs = 0;
   std::uint64_t validation_pairs_checked = 0;
   std::uint64_t validation_exact_queries = 0;
+  std::uint64_t validation_initial_exact_queries = 0;
+  std::uint64_t validation_sample_exact_queries = 0;
+  std::uint64_t validation_conservative_checks = 0;
+  std::uint64_t validation_conservative_certified_pairs = 0;
+  std::uint64_t validation_kinematics_updates = 0;
+  std::uint64_t validation_geometry_updates = 0;
+  bool validation_initial_certificate_reused = false;
   std::uint64_t pairs_considered = 0;
   std::uint64_t row_pairs = 0;
   std::uint64_t row_exact_queries = 0;
@@ -1709,6 +1775,20 @@ void apply_velocity_collision_lift_diagnostics(
       diagnostics.validation_pairs_checked;
   result->collision_validation_exact_queries =
       diagnostics.validation_exact_queries;
+  result->collision_validation_initial_exact_queries =
+      diagnostics.validation_initial_exact_queries;
+  result->collision_validation_sample_exact_queries =
+      diagnostics.validation_sample_exact_queries;
+  result->collision_validation_conservative_checks =
+      diagnostics.validation_conservative_checks;
+  result->collision_validation_conservative_certified_pairs =
+      diagnostics.validation_conservative_certified_pairs;
+  result->collision_validation_kinematics_updates =
+      diagnostics.validation_kinematics_updates;
+  result->collision_validation_geometry_updates =
+      diagnostics.validation_geometry_updates;
+  result->collision_validation_initial_certificate_reused =
+      diagnostics.validation_initial_certificate_reused;
   result->collision_lift_pairs_considered = diagnostics.pairs_considered;
   result->collision_lift_row_pairs = diagnostics.row_pairs;
   result->collision_lift_row_exact_queries = diagnostics.row_exact_queries;
@@ -1724,8 +1804,18 @@ AccelerationSolverResult velocity_collision_lift_failure(
 
 } // namespace
 
+namespace detail {
+
+struct AccelerationSolverWorkspace {
+  ObjectiveAssembly objectives;
+  Eigen::MatrixXd state_box_identity;
+};
+
+} // namespace detail
+
 AccelerationSolver::AccelerationSolver(std::shared_ptr<RobotModel> robot)
-    : robot_(std::move(robot)) {
+    : robot_(std::move(robot)),
+      workspace_(std::make_unique<detail::AccelerationSolverWorkspace>()) {
   if (!robot_) {
     throw std::invalid_argument("AccelerationSolver requires a RobotModel");
   }
@@ -1739,6 +1829,12 @@ AccelerationSolver::AccelerationSolver(std::shared_ptr<RobotModel> robot)
   }
 }
 
+AccelerationSolver::~AccelerationSolver() = default;
+AccelerationSolver::AccelerationSolver(AccelerationSolver &&) noexcept =
+    default;
+AccelerationSolver &
+AccelerationSolver::operator=(AccelerationSolver &&) noexcept = default;
+
 AccelerationSolverCapabilities AccelerationSolver::capabilities() {
   return {};
 }
@@ -1750,6 +1846,7 @@ AccelerationSolver::add_frame_task(const std::string &name,
   ensure_unique_task_name(name);
   auto task = std::make_shared<FrameTask>(name, robot_, frame_name, task_type);
   tasks_.push_back(task);
+  ordered_task_scratch_.clear();
   task_map_[name] = task;
   return task;
 }
@@ -1759,6 +1856,7 @@ AccelerationSolver::add_com_task(const std::string &name) {
   ensure_unique_task_name(name);
   auto task = std::make_shared<COMTask>(name, robot_);
   tasks_.push_back(task);
+  ordered_task_scratch_.clear();
   task_map_[name] = task;
   return task;
 }
@@ -1772,6 +1870,7 @@ AccelerationSolver::add_posture_task(const std::string &name,
                   : std::make_shared<PostureTask>(name, robot_,
                                                   controlled_joints);
   tasks_.push_back(task);
+  ordered_task_scratch_.clear();
   task_map_[name] = task;
   return task;
 }
@@ -1784,6 +1883,7 @@ AccelerationSolver::add_joint_task(const std::string &name,
   auto task =
       std::make_shared<JointTask>(name, robot_, joint_name, target_value);
   tasks_.push_back(task);
+  ordered_task_scratch_.clear();
   task_map_[name] = task;
   return task;
 }
@@ -1828,12 +1928,14 @@ void AccelerationSolver::remove_task(const std::string &name) {
   }
   tasks_.erase(std::remove(tasks_.begin(), tasks_.end(), found->second),
                tasks_.end());
+  ordered_task_scratch_.clear();
   task_map_.erase(found);
   task_references_.erase(name);
 }
 
 void AccelerationSolver::clear_tasks() {
   tasks_.clear();
+  ordered_task_scratch_.clear();
   task_map_.clear();
   task_references_.clear();
 }
@@ -1894,10 +1996,21 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
                           double dt,
                           const AccelerationSolveOptions &options) {
   const auto start = std::chrono::steady_clock::now();
-  const auto finish = [&start](AccelerationSolverResult result) {
+  auto backend_start = start;
+  auto backend_end = start;
+  bool backend_completed = false;
+  const auto finish = [&start, &backend_start, &backend_end,
+                       &backend_completed](AccelerationSolverResult result) {
     const auto end = std::chrono::steady_clock::now();
     result.computation_time_ms =
         std::chrono::duration<double, std::milli>(end - start).count();
+    if (backend_completed) {
+      result.preprocessing_time_ms =
+          std::chrono::duration<double, std::milli>(backend_start - start)
+              .count();
+      result.postprocessing_time_ms =
+          std::chrono::duration<double, std::milli>(end - backend_end).count();
+    }
     return result;
   };
 
@@ -2025,10 +2138,20 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
     return finish(failure(lock_rows.status, lock_rows.message));
   }
 
-  ObjectiveAssembly objectives;
+  const bool task_exclusions_require_physical_differentials =
+      std::any_of(tasks_.begin(), tasks_.end(), [](const auto &task) {
+        return task && task->isActive() &&
+               !task->get_excluded_joint_indices().empty();
+      });
+  const bool retain_task_differentials =
+      options.collect_task_diagnostics ||
+      !options.task_acceleration_bounds.empty() ||
+      task_exclusions_require_physical_differentials;
+  auto &objectives = workspace_->objectives;
   try {
-    objectives =
-        assemble_objectives(tasks_, task_references_, *robot_, dq);
+    assemble_objectives(&objectives, tasks_, ordered_task_scratch_,
+                        task_references_, *robot_, dq,
+                        retain_task_differentials);
   } catch (const std::exception &error) {
     return finish(failure(
         SolverStatus::kNumericalError,
@@ -2098,38 +2221,48 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
     return finish(failure(com_support_polygon_constraints.status,
                           com_support_polygon_constraints.message));
   }
-  if (zero_excluded_by_bounds(state_box.lower, state_box.upper)) {
+  const bool state_box_task_fallback_applied =
+      options.allow_state_box_task_fallback &&
+      zero_excluded_by_bounds(state_box.lower, state_box.upper);
+  if (state_box_task_fallback_applied) {
     for (auto &config : objectives.configs) {
       config.allow_min_error_fallback = true;
     }
   }
 
-  detail::GeneralizedConstraintSet constraints(
-      robot_->nv(),
-      robot_->nv() + constraint_validation.row_count +
-          task_bound_validation.row_count + contact_constraints.row_count +
-          tight_point_constraints.row_count +
-          tight_frame_pose_constraints.row_count +
-          torso_pose_bound_constraints.row_count +
-          relative_pose_constraints.row_count +
-          com_support_polygon_constraints.row_count +
-          lock_rows.coefficients.rows() +
-          native_collision_prepared.physical_constraint.coefficient_matrix
-              .rows() +
-          (effort_constraint.has_value() ? robot_->nv() : 0),
-      false);
-  detail::GeneralizedConstraintBlock joint_box;
-  joint_box.coefficient_matrix =
-      Eigen::MatrixXd::Identity(robot_->nv(), robot_->nv());
-  joint_box.affine_bias = Eigen::VectorXd::Zero(robot_->nv());
-  joint_box.physical_lower_bounds = state_box.lower;
-  joint_box.physical_upper_bounds = state_box.upper;
-  if (!constraints.append_block(std::move(joint_box))) {
-    return finish(failure(SolverStatus::kNumericalError,
-                          "failed to assemble acceleration constraints"));
+  const Eigen::Index extra_hard_rows =
+      constraint_validation.row_count + task_bound_validation.row_count +
+      contact_constraints.row_count + tight_point_constraints.row_count +
+      tight_frame_pose_constraints.row_count +
+      torso_pose_bound_constraints.row_count +
+      relative_pose_constraints.row_count +
+      com_support_polygon_constraints.row_count +
+      lock_rows.coefficients.rows() +
+      native_collision_prepared.physical_constraint.coefficient_matrix.rows() +
+      (effort_constraint.has_value() ? robot_->nv() : 0);
+  const bool state_box_only = extra_hard_rows == 0;
+  auto &state_box_matrix = workspace_->state_box_identity;
+  std::optional<detail::GeneralizedConstraintSet> constraints;
+  if (state_box_only) {
+    if (state_box_matrix.rows() != robot_->nv() ||
+        state_box_matrix.cols() != robot_->nv()) {
+      state_box_matrix.setIdentity(robot_->nv(), robot_->nv());
+    }
+  } else {
+    constraints.emplace(robot_->nv(), robot_->nv() + extra_hard_rows, false);
+    detail::GeneralizedConstraintBlock joint_box;
+    joint_box.coefficient_matrix =
+        Eigen::MatrixXd::Identity(robot_->nv(), robot_->nv());
+    joint_box.affine_bias = Eigen::VectorXd::Zero(robot_->nv());
+    joint_box.physical_lower_bounds = state_box.lower;
+    joint_box.physical_upper_bounds = state_box.upper;
+    if (!constraints->append_block(std::move(joint_box))) {
+      return finish(failure(SolverStatus::kNumericalError,
+                            "failed to assemble acceleration constraints"));
+    }
   }
   if (native_collision_prepared.has_rows() &&
-      !constraints.append_block(make_affine_constraint_block(
+      !constraints->append_block(make_affine_constraint_block(
           {native_collision_prepared.physical_constraint}, robot_->nv(),
           native_collision_prepared.physical_constraint.coefficient_matrix
               .rows()))) {
@@ -2138,13 +2271,13 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
         "failed to assemble native collision acceleration constraints"));
   }
   if (effort_constraint.has_value() &&
-      !constraints.append_block(
+      !constraints->append_block(
           make_effort_constraint_block(*effort_constraint, robot_->nv()))) {
     return finish(failure(SolverStatus::kNumericalError,
                           "failed to assemble effort constraints"));
   }
   if (!options.affine_constraints.empty() &&
-      !constraints.append_block(make_affine_constraint_block(
+      !constraints->append_block(make_affine_constraint_block(
           options.affine_constraints, robot_->nv(),
           count_constraint_rows(options.affine_constraints)))) {
     return finish(failure(
@@ -2152,7 +2285,7 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
         "failed to assemble affine acceleration constraints"));
   }
   if (frozen_transform.row_count > 0 &&
-      !constraints.append_block(make_affine_constraint_block(
+      !constraints->append_block(make_affine_constraint_block(
           frozen_transform.transformed_constraints, robot_->nv(),
           frozen_transform.row_count))) {
     return finish(failure(
@@ -2160,7 +2293,7 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
         "failed to assemble frozen next-velocity constraints"));
   }
   if (lock_rows.bounds.size() > 0) {
-    if (!constraints.append_block(
+    if (!constraints->append_block(
             make_lock_constraint_block(lock_rows, robot_->nv()))) {
       return finish(failure(SolverStatus::kNumericalError,
                             "failed to assemble acceleration lock "
@@ -2168,7 +2301,7 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
     }
   }
   if (task_bound_validation.row_count > 0 &&
-      !constraints.append_block(make_affine_constraint_block(
+      !constraints->append_block(make_affine_constraint_block(
           task_bound_constraints, robot_->nv(),
           task_bound_validation.row_count))) {
     return finish(failure(
@@ -2176,7 +2309,7 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
         "failed to assemble task acceleration bounds"));
   }
   if (contact_constraints.row_count > 0 &&
-      !constraints.append_block(make_affine_constraint_block(
+      !constraints->append_block(make_affine_constraint_block(
           contact_constraints.constraints, robot_->nv(),
           contact_constraints.row_count))) {
     return finish(failure(
@@ -2184,7 +2317,7 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
         "failed to assemble contact acceleration constraints"));
   }
   if (tight_point_constraints.row_count > 0 &&
-      !constraints.append_block(make_affine_constraint_block(
+      !constraints->append_block(make_affine_constraint_block(
           tight_point_constraints.constraints, robot_->nv(),
           tight_point_constraints.row_count))) {
     return finish(failure(
@@ -2192,7 +2325,7 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
         "failed to assemble tight point acceleration constraints"));
   }
   if (tight_frame_pose_constraints.row_count > 0 &&
-      !constraints.append_block(make_affine_constraint_block(
+      !constraints->append_block(make_affine_constraint_block(
           tight_frame_pose_constraints.constraints, robot_->nv(),
           tight_frame_pose_constraints.row_count))) {
     return finish(failure(
@@ -2200,7 +2333,7 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
         "failed to assemble tight frame pose acceleration constraints"));
   }
   if (torso_pose_bound_constraints.row_count > 0 &&
-      !constraints.append_block(make_affine_constraint_block(
+      !constraints->append_block(make_affine_constraint_block(
           torso_pose_bound_constraints.constraints, robot_->nv(),
           torso_pose_bound_constraints.row_count))) {
     return finish(failure(
@@ -2208,7 +2341,7 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
         "failed to assemble torso pose bound acceleration constraints"));
   }
   if (relative_pose_constraints.row_count > 0 &&
-      !constraints.append_block(make_affine_constraint_block(
+      !constraints->append_block(make_affine_constraint_block(
           relative_pose_constraints.constraints, robot_->nv(),
           relative_pose_constraints.row_count))) {
     return finish(failure(
@@ -2216,32 +2349,46 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
         "failed to assemble relative pose acceleration constraints"));
   }
   if (com_support_polygon_constraints.row_count > 0 &&
-      !constraints.append_block(make_affine_constraint_block(
+      !constraints->append_block(make_affine_constraint_block(
           com_support_polygon_constraints.constraints, robot_->nv(),
           com_support_polygon_constraints.row_count))) {
     return finish(failure(
         SolverStatus::kNumericalError,
         "failed to assemble CoM support-polygon acceleration constraints"));
   }
-  if (!constraints.finalize()) {
+  if (!state_box_only && !constraints->finalize()) {
     return finish(failure(SolverStatus::kNumericalError,
                           "failed to assemble acceleration constraints"));
   }
 
-  auto backend_targets = objectives.targets;
-  auto backend_biases = objectives.biases;
-  auto backend_matrices = objectives.matrices;
-  Eigen::MatrixXd backend_constraint_matrix = constraints.coefficient_matrix();
-  Eigen::VectorXd backend_lower_bounds = constraints.lower_bounds();
-  Eigen::VectorXd backend_upper_bounds = constraints.upper_bounds();
+  const std::vector<Eigen::VectorXd> *backend_targets = &objectives.targets;
+  const std::vector<Eigen::VectorXd> *backend_biases = &objectives.biases;
+  const std::vector<Eigen::MatrixXd> *backend_matrices = &objectives.matrices;
+  std::vector<Eigen::VectorXd> transformed_targets;
+  std::vector<Eigen::VectorXd> transformed_biases;
+  std::vector<Eigen::MatrixXd> transformed_matrices;
+  const Eigen::MatrixXd *backend_constraint_matrix =
+      state_box_only ? &state_box_matrix : &constraints->coefficient_matrix();
+  const Eigen::VectorXd *backend_lower_bounds =
+      state_box_only ? &state_box.lower : &constraints->lower_bounds();
+  const Eigen::VectorXd *backend_upper_bounds =
+      state_box_only ? &state_box.upper : &constraints->upper_bounds();
+  Eigen::MatrixXd transformed_constraint_matrix;
+  Eigen::VectorXd transformed_lower_bounds;
+  Eigen::VectorXd transformed_upper_bounds;
   if (allocation.has_value()) {
+    transformed_targets = objectives.targets;
+    transformed_biases = objectives.biases;
+    transformed_matrices = objectives.matrices;
     for (std::size_t objective_index = 0;
-         objective_index < backend_matrices.size(); ++objective_index) {
+         objective_index < transformed_matrices.size(); ++objective_index) {
       if (objectives.synthetic_hold_objective && objective_index == 0U) {
-        backend_matrices[objective_index] =
+        transformed_matrices[objective_index] =
             Eigen::MatrixXd::Identity(robot_->nv(), robot_->nv());
-        backend_biases[objective_index] = Eigen::VectorXd::Zero(robot_->nv());
-        backend_targets[objective_index] = Eigen::VectorXd::Zero(robot_->nv());
+        transformed_biases[objective_index] =
+            Eigen::VectorXd::Zero(robot_->nv());
+        transformed_targets[objective_index] =
+            Eigen::VectorXd::Zero(robot_->nv());
         continue;
       }
       const auto transformed_matrix =
@@ -2259,29 +2406,49 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
         return finish(
             failure(transformed_bias.status, transformed_bias.message));
       }
-      backend_matrices[objective_index] = std::move(transformed_matrix.matrix);
-      backend_biases[objective_index] = std::move(transformed_bias.vector);
+      transformed_matrices[objective_index] =
+          std::move(transformed_matrix.matrix);
+      transformed_biases[objective_index] = std::move(transformed_bias.vector);
     }
+    backend_targets = &transformed_targets;
+    backend_biases = &transformed_biases;
+    backend_matrices = &transformed_matrices;
     const auto transformed_hard = allocation->transform_backend_hard_rows(
-        constraints.coefficient_matrix(), constraints.lower_bounds(),
-        constraints.upper_bounds());
+        *backend_constraint_matrix, *backend_lower_bounds,
+        *backend_upper_bounds);
     if (!transformed_hard.satisfied()) {
       return finish(failure(transformed_hard.status, transformed_hard.message));
     }
-    backend_constraint_matrix = std::move(transformed_hard.coefficient_matrix);
-    backend_lower_bounds = std::move(transformed_hard.lower_bounds);
-    backend_upper_bounds = std::move(transformed_hard.upper_bounds);
+    transformed_constraint_matrix =
+        std::move(transformed_hard.coefficient_matrix);
+    transformed_lower_bounds = std::move(transformed_hard.lower_bounds);
+    transformed_upper_bounds = std::move(transformed_hard.upper_bounds);
+    backend_constraint_matrix = &transformed_constraint_matrix;
+    backend_lower_bounds = &transformed_lower_bounds;
+    backend_upper_bounds = &transformed_upper_bounds;
   }
 
+  // The compatible state box has already proven one finite interval per
+  // scalar joint. When it is the only hard set, its identity rows are already
+  // normalized and Phase I would duplicate that feasibility proof.
+  const bool prevalidated_state_box_only =
+      !allocation.has_value() && state_box_only;
+  backend_start = std::chrono::steady_clock::now();
   auto backend = detail::SolveGeneralizedHierarchicalLinearSystemEigen(
-      backend_targets, backend_biases, backend_matrices,
-      backend_constraint_matrix, backend_lower_bounds, backend_upper_bounds,
+      *backend_targets, *backend_biases, *backend_matrices,
+      *backend_constraint_matrix, *backend_lower_bounds, *backend_upper_bounds,
       acceleration_backend_config(), objectives.configs, nullptr,
-      kConstraintTolerance);
+      kConstraintTolerance, prevalidated_state_box_only,
+      prevalidated_state_box_only);
+  backend_end = std::chrono::steady_clock::now();
+  backend_completed = true;
 
   AccelerationSolverResult result;
+  result.backend_computation_time_ms = backend.computation_time_ms;
   static_cast<SolverResult &>(result) = std::move(backend);
   result.acceleration_limits_applied = true;
+  result.state_box_task_fallback_applied =
+      state_box_task_fallback_applied;
   result.effort_limits_applied = effort_constraint.has_value();
   result.native_collision_constraint_applied =
       native_collision_compiled.has_value();
@@ -2602,12 +2769,21 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
   result.task_errors.clear();
   result.task_modes_effective.clear();
   result.task_used_fallback.clear();
+  result.task_scales.reserve(tasks_.size());
+  result.task_errors.reserve(tasks_.size());
+  result.task_modes_effective.reserve(tasks_.size());
+  result.task_used_fallback.reserve(tasks_.size());
+  if (options.collect_task_diagnostics) {
+    result.task_diagnostics.reserve(tasks_.size());
+  }
   double squared_error = 0.0;
   for (std::size_t group_index = 0; group_index < objectives.groups.size();
        ++group_index) {
+    Eigen::Index task_row_cursor = 0;
     for (std::size_t task_index = 0;
          task_index < objectives.groups[group_index].size(); ++task_index) {
       const auto &task = objectives.groups[group_index][task_index];
+      const Eigen::Index task_dimension = task->getDimension();
       const double task_scale = group_index < objective_scales.size()
                                     ? objective_scales[group_index]
                                     : 1.0;
@@ -2621,27 +2797,52 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
       result.task_modes_effective.push_back(task_mode);
       result.task_used_fallback.push_back(task_fallback);
 
-      AccelerationTaskDiagnostics diagnostic;
-      diagnostic.task_name = task->getName();
-      diagnostic.scale = task_scale;
-      diagnostic.effective_mode = task_mode;
-      diagnostic.used_min_error_fallback = task_fallback;
-      diagnostic.reference_acceleration =
-          objectives.references[group_index][task_index];
-      diagnostic.jacobian_bias =
-          objectives.differentials[group_index][task_index].jacobian_bias;
-      diagnostic.achieved_acceleration =
-          objectives.differentials[group_index][task_index].physical_jacobian *
-          result.joint_accelerations;
-      diagnostic.residual =
-          diagnostic.achieved_acceleration + diagnostic.jacobian_bias -
-          diagnostic.reference_acceleration;
-      const double task_error = diagnostic.residual.norm();
+      Eigen::VectorXd residual;
+      std::optional<AccelerationTaskDiagnostics> diagnostic;
+      if (options.collect_task_diagnostics) {
+        diagnostic.emplace();
+        diagnostic->task_name = task->getName();
+        diagnostic->scale = task_scale;
+        diagnostic->effective_mode = task_mode;
+        diagnostic->used_min_error_fallback = task_fallback;
+        diagnostic->reference_acceleration =
+            objectives.references[group_index][task_index];
+        diagnostic->jacobian_bias =
+            objectives.differentials[group_index][task_index].jacobian_bias;
+        diagnostic->achieved_acceleration =
+            objectives.differentials[group_index][task_index]
+                .physical_jacobian *
+            result.joint_accelerations;
+        diagnostic->residual =
+            diagnostic->achieved_acceleration + diagnostic->jacobian_bias -
+            diagnostic->reference_acceleration;
+        residual = diagnostic->residual;
+      } else if (retain_task_differentials) {
+        residual =
+            objectives.differentials[group_index][task_index]
+                    .physical_jacobian *
+                result.joint_accelerations +
+            objectives.differentials[group_index][task_index].jacobian_bias -
+            objectives.references[group_index][task_index];
+      } else {
+        residual =
+            objectives.matrices[group_index]
+                    .middleRows(task_row_cursor, task_dimension) *
+                result.joint_accelerations +
+            objectives.biases[group_index].segment(task_row_cursor,
+                                                   task_dimension) -
+            objectives.targets[group_index].segment(task_row_cursor,
+                                                    task_dimension);
+      }
+      const double task_error = residual.norm();
       result.task_errors.push_back(task_error);
-      squared_error += diagnostic.residual.squaredNorm();
+      squared_error += residual.squaredNorm();
       task->setLastEffectiveMode(task_mode);
       task->setUsedMinErrorFallback(task_fallback);
-      result.task_diagnostics.push_back(std::move(diagnostic));
+      if (diagnostic.has_value()) {
+        result.task_diagnostics.push_back(std::move(*diagnostic));
+      }
+      task_row_cursor += task_dimension;
     }
   }
   result.final_error = std::sqrt(squared_error);
@@ -2805,6 +3006,18 @@ AccelerationSolverResult AccelerationSolver::solve_with_velocity_collision(
   diagnostics.validation_pairs_checked = validation.pairs_checked;
   diagnostics.validation_exact_queries =
       validation.exact_distance_queries;
+  diagnostics.validation_initial_exact_queries =
+      validation.initial_exact_distance_queries;
+  diagnostics.validation_sample_exact_queries =
+      validation.sample_exact_distance_queries;
+  diagnostics.validation_conservative_checks =
+      validation.conservative_bound_checks;
+  diagnostics.validation_conservative_certified_pairs =
+      validation.conservative_bound_certified_pairs;
+  diagnostics.validation_kinematics_updates = validation.kinematics_updates;
+  diagnostics.validation_geometry_updates = validation.geometry_updates;
+  diagnostics.validation_initial_certificate_reused =
+      validation.initial_state_certificate_reused;
   if (validation.status != SolverStatus::kSuccess ||
       !validation.acceptable) {
     auto failed =

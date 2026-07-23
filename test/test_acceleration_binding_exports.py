@@ -54,6 +54,12 @@ def test_acceleration_symbols_exported_once_from_package_and_extension():
     assert eik.ContactType.POINT_CONTACT.name == "POINT_CONTACT"
 
 
+def test_extension_version_matches_package_metadata():
+    extension = importlib.import_module("embodik._embodik_impl")
+
+    assert extension.__version__ == eik.__version__
+
+
 def test_shared_constraint_definitions_round_trip_by_value():
     pair = eik.CollisionGeometryPair()
     pair.geometry_a = "base_sphere"

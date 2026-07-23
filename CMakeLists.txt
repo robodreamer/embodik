@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(embodik VERSION 0.20.14)
+project(embodik VERSION 0.20.18)
 
 # Python is used to auto-discover Pinocchio (PyPI `pin`) CMake config during sdist builds.
 find_package(Python REQUIRED COMPONENTS Interpreter)
