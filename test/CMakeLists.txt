@@ -18,6 +18,20 @@ target_link_libraries(test_robot_model
 # Add test
 add_test(NAME test_robot_model COMMAND test_robot_model)
 
+add_executable(test_hierarchical_linear_solver
+    test_hierarchical_linear_solver.cpp
+)
+
+target_link_libraries(test_hierarchical_linear_solver
+    embodik_core
+    GTest::gtest_main
+    GTest::gtest
+)
+
+add_test(NAME test_hierarchical_linear_solver
+    COMMAND test_hierarchical_linear_solver
+)
+
 # Python tests
 find_package(Python COMPONENTS Interpreter REQUIRED)
 
