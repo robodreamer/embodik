@@ -71,4 +71,19 @@ evaluate_relative_pose_translation_differential_at_state(
     const std::string &frame_a, const std::string &frame_b,
     const Eigen::VectorXd &q, const Eigen::VectorXd &dq);
 
+GeometricCoordinateDifferential
+evaluate_com_in_frame_differential(const RobotModel &robot,
+                                   const std::string &frame_name);
+
+GeometricCoordinateDifferential
+evaluate_com_in_frame_differential_at_state(
+    const RobotModel &robot, const std::string &frame_name,
+    const Eigen::VectorXd &q, const Eigen::VectorXd &dq);
+
+GeometricCoordinateDifferential
+evaluate_com_in_frame_differential_at_state(
+    const RobotModel &robot, pinocchio::Data &scratch,
+    const std::string &frame_name, const Eigen::VectorXd &q,
+    const Eigen::VectorXd &dq);
+
 } // namespace embodik::detail

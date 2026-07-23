@@ -132,6 +132,43 @@ struct GeometricConstraintAccelerationPolicy {
   Eigen::VectorXd upper_braking_accelerations = Eigen::VectorXd::Ones(3);
 };
 
+enum class ComSupportPolygonOutsidePolicy {
+  kReject,
+  kRecoverNonWorsening,
+};
+
+/**
+ * @brief Derivative policy for acceleration-level CoM support polygons.
+ *
+ * Bounds apply along each canonical support-polygon half-plane in physical
+ * outward-positive coordinates. Defaults mirror the velocity CoM prototype:
+ * 0.4 m/s rate, 0.1 m/s^2 acceleration/braking, 0.1 mm boundary dead-zone.
+ */
+struct ComSupportPolygonAccelerationPolicy {
+  double rate_limit = 0.4;
+  double acceleration_limit = 0.1;
+  double braking_acceleration = 0.1;
+  double boundary_epsilon = 1e-4;
+  double outside_recovery_scale = 0.2;
+  double outside_min_recovery_speed = 0.01;
+  ComSupportPolygonOutsidePolicy outside_policy =
+      ComSupportPolygonOutsidePolicy::kRecoverNonWorsening;
+};
+
+/**
+ * @brief Named caller-owned acceleration-level CoM support-polygon constraint.
+ *
+ * The support polygon uses the shared definition and is only supported in
+ * world or structurally root-fixed frames. Moving support frames are rejected
+ * explicitly; this constraint is kinematic and does not claim dynamic balance
+ * or contact-force feasibility.
+ */
+struct ComSupportPolygonAccelerationConstraint {
+  std::string source_id;
+  ComSupportPolygonConstraintDefinition definition;
+  ComSupportPolygonAccelerationPolicy policy;
+};
+
 /**
  * @brief Named caller-owned acceleration-level tight point constraint.
  *
@@ -211,6 +248,8 @@ struct AccelerationSolveOptions {
   std::vector<RelativePoseAccelerationConstraint> relative_pose_constraints;
   std::vector<TorsoPoseBoundAccelerationConstraint>
       torso_pose_bound_constraints;
+  std::vector<ComSupportPolygonAccelerationConstraint>
+      com_support_polygon_constraints;
   std::vector<int> zero_acceleration_joint_indices;
   std::vector<int> zero_next_velocity_joint_indices;
   std::vector<int> fixed_current_position_joint_indices;
@@ -271,6 +310,7 @@ struct AccelerationSolverCapabilities {
   bool supports_tight_frame_pose_constraints = true;
   bool supports_relative_pose_constraints = true;
   bool supports_torso_pose_bound_constraints = true;
+  bool supports_com_support_polygon_constraints = true;
   bool supports_dynamic_contact = false;
 };
 

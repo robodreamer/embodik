@@ -1,6 +1,7 @@
 #include <embodik/acceleration_solver.hpp>
 
 #include "acceleration_allocation_transform.hpp"
+#include "acceleration_com_support_polygon_constraint.hpp"
 #include "acceleration_fixed_frame_pose_constraint.hpp"
 #include "acceleration_relative_pose_constraint.hpp"
 #include "acceleration_state_box.hpp"
@@ -94,6 +95,11 @@ const char *constraint_family_name(const RelativePoseAccelerationConstraint &) {
 const char *
 constraint_family_name(const TorsoPoseBoundAccelerationConstraint &) {
   return "torso pose bound constraint";
+}
+
+const char *
+constraint_family_name(const ComSupportPolygonAccelerationConstraint &) {
+  return "CoM support-polygon constraint";
 }
 
 template <typename Constraint>
@@ -253,6 +259,15 @@ struct RelativePoseConstraintAssembly {
   std::string message;
   std::vector<AffineAccelerationConstraint> constraints;
   std::vector<detail::PreparedRelativePoseConstraint> prepared_constraints;
+  Eigen::Index row_count = 0;
+};
+
+struct ComSupportPolygonConstraintAssembly {
+  SolverStatus status = SolverStatus::kSuccess;
+  std::string message;
+  std::vector<AffineAccelerationConstraint> constraints;
+  std::vector<detail::PreparedComSupportPolygonConstraint>
+      prepared_constraints;
   Eigen::Index row_count = 0;
 };
 
@@ -1033,6 +1048,49 @@ RelativePoseConstraintAssembly make_relative_pose_constraints(
             .rows();
     assembly.constraints.push_back(
         prepared.prepared->scalar.state_box.physical_constraint);
+    assembly.prepared_constraints.push_back(std::move(*prepared.prepared));
+  }
+
+  return assembly;
+}
+
+ComSupportPolygonConstraintAssembly make_com_support_polygon_constraints(
+    const RobotModel &robot,
+    const std::vector<ComSupportPolygonAccelerationConstraint> &polygons,
+    double dt, const Eigen::VectorXd &joint_acceleration_lower,
+    const Eigen::VectorXd &joint_acceleration_upper,
+    std::unordered_set<std::string> *source_ids) {
+  ComSupportPolygonConstraintAssembly assembly;
+  assembly.constraints.reserve(polygons.size());
+  assembly.prepared_constraints.reserve(polygons.size());
+
+  for (const auto &polygon : polygons) {
+    const std::string family = constraint_family_name(polygon);
+    if (polygon.source_id.empty()) {
+      assembly.status = SolverStatus::kInvalidInput;
+      assembly.message = family + " source_id must not be empty";
+      return assembly;
+    }
+    if (!source_ids->insert(polygon.source_id).second) {
+      assembly.status = SolverStatus::kInvalidInput;
+      assembly.message = "duplicate acceleration constraint source_id '" +
+                         polygon.source_id + "'";
+      return assembly;
+    }
+
+    const auto prepared = detail::prepare_com_support_polygon_constraint(
+        polygon, robot, dt, joint_acceleration_lower,
+        joint_acceleration_upper);
+    if (!prepared.satisfied() || !prepared.prepared.has_value()) {
+      assembly.status = prepared.status;
+      assembly.message = prepared.message;
+      return assembly;
+    }
+    assembly.row_count +=
+        prepared.prepared->state_box.physical_constraint.coefficient_matrix
+            .rows();
+    assembly.constraints.push_back(
+        prepared.prepared->state_box.physical_constraint);
     assembly.prepared_constraints.push_back(std::move(*prepared.prepared));
   }
 
@@ -1863,6 +1921,14 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
     return finish(failure(relative_pose_constraints.status,
                           relative_pose_constraints.message));
   }
+  const auto com_support_polygon_constraints =
+      make_com_support_polygon_constraints(
+          *robot_, options.com_support_polygon_constraints, dt,
+          state_box.lower, state_box.upper, &constraint_source_ids);
+  if (com_support_polygon_constraints.status != SolverStatus::kSuccess) {
+    return finish(failure(com_support_polygon_constraints.status,
+                          com_support_polygon_constraints.message));
+  }
   if (zero_excluded_by_bounds(state_box.lower, state_box.upper)) {
     for (auto &config : objectives.configs) {
       config.allow_min_error_fallback = true;
@@ -1877,6 +1943,7 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
           tight_frame_pose_constraints.row_count +
           torso_pose_bound_constraints.row_count +
           relative_pose_constraints.row_count +
+          com_support_polygon_constraints.row_count +
           lock_rows.coefficients.rows() +
           (effort_constraint.has_value() ? robot_->nv() : 0),
       false);
@@ -1967,6 +2034,14 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
     return finish(failure(
         SolverStatus::kNumericalError,
         "failed to assemble relative pose acceleration constraints"));
+  }
+  if (com_support_polygon_constraints.row_count > 0 &&
+      !constraints.append_block(make_affine_constraint_block(
+          com_support_polygon_constraints.constraints, robot_->nv(),
+          com_support_polygon_constraints.row_count))) {
+    return finish(failure(
+        SolverStatus::kNumericalError,
+        "failed to assemble CoM support-polygon acceleration constraints"));
   }
   if (!constraints.finalize()) {
     return finish(failure(SolverStatus::kNumericalError,
@@ -2125,6 +2200,14 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
         "accepted acceleration violates relative pose acceleration "
         "constraints")));
   }
+  if (!accepted_affine_constraints_are_satisfied(
+          com_support_polygon_constraints.constraints,
+          result.joint_accelerations)) {
+    return finish(clear_outputs(failure(
+        SolverStatus::kNumericalError,
+        "accepted acceleration violates CoM support-polygon acceleration "
+        "constraints")));
+  }
   if (effort_constraint.has_value()) {
     auto evaluated =
         evaluate_inverse_dynamics(*robot_, q, dq, result.joint_accelerations);
@@ -2178,7 +2261,8 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
   if (!tight_point_constraints.prepared_constraints.empty() ||
       !tight_frame_pose_constraints.prepared_constraints.empty() ||
       !torso_pose_bound_constraints.prepared_constraints.empty() ||
-      !relative_pose_constraints.prepared_constraints.empty()) {
+      !relative_pose_constraints.prepared_constraints.empty() ||
+      !com_support_polygon_constraints.prepared_constraints.empty()) {
     const auto predicted_state_box = build_joint_state_box(
         *robot_, result.q_solution, result.joint_velocities_next, dt,
         accel_limits, options);
@@ -2226,6 +2310,17 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
          relative_pose_constraints.prepared_constraints) {
       const auto acceptance =
           detail::validate_relative_pose_constraint_acceptance(
+              prepared, *robot_, q, dq, result.joint_accelerations, dt,
+              predicted_state_box.lower, predicted_state_box.upper);
+      if (!acceptance.satisfied()) {
+        return finish(clear_outputs(
+            failure(acceptance.status, acceptance.message)));
+      }
+    }
+    for (const auto &prepared :
+         com_support_polygon_constraints.prepared_constraints) {
+      const auto acceptance =
+          detail::validate_com_support_polygon_constraint_acceptance(
               prepared, *robot_, q, dq, result.joint_accelerations, dt,
               predicted_state_box.lower, predicted_state_box.upper);
       if (!acceptance.satisfied()) {

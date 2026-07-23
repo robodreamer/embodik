@@ -336,6 +336,25 @@ add_test(NAME test_acceleration_solver_torso_pose_bounds
     COMMAND test_acceleration_solver_torso_pose_bounds
 )
 
+add_executable(test_acceleration_solver_com_support_polygon
+    test_acceleration_solver_com_support_polygon.cpp
+)
+
+target_link_libraries(test_acceleration_solver_com_support_polygon
+    embodik_core
+    GTest::gtest_main
+    GTest::gtest
+)
+
+target_include_directories(test_acceleration_solver_com_support_polygon
+    PRIVATE
+        ${CMAKE_SOURCE_DIR}/cpp_core/src
+)
+
+add_test(NAME test_acceleration_solver_com_support_polygon
+    COMMAND test_acceleration_solver_com_support_polygon
+)
+
 add_executable(test_geometric_constraint_differential
     test_geometric_constraint_differential.cpp
 )

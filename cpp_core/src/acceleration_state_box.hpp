@@ -17,6 +17,21 @@ struct ScalarBounds {
   bool upper_active = false;
 };
 
+struct ReachableRecoveryRateResult {
+  SolverStatus status = SolverStatus::kSuccess;
+  std::string message;
+  double rate = 0.0;
+
+  bool satisfied() const { return status == SolverStatus::kSuccess; }
+};
+
+/** Compute a positive-toward-recovery one-tick rate target. */
+ReachableRecoveryRateResult compute_reachable_recovery_rate(
+    double violation, double current_recovery_rate, double dt,
+    double recovery_scale, double minimum_recovery_rate,
+    double maximum_recovery_rate, double acceleration_authority,
+    double boundary_epsilon, double authority_fraction = 0.9);
+
 struct StateBoxRowInput {
   double value = 0.0;
   double rate = 0.0;

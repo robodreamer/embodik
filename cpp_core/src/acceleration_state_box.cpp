@@ -192,6 +192,46 @@ bool is_outside_bound(double value, double bound) {
 
 } // namespace
 
+ReachableRecoveryRateResult compute_reachable_recovery_rate(
+    double violation, double current_recovery_rate, double dt,
+    double recovery_scale, double minimum_recovery_rate,
+    double maximum_recovery_rate, double acceleration_authority,
+    double boundary_epsilon, double authority_fraction) {
+  if (!std::isfinite(violation) || !std::isfinite(current_recovery_rate) ||
+      !std::isfinite(dt) || !std::isfinite(recovery_scale) ||
+      !std::isfinite(minimum_recovery_rate) ||
+      !std::isfinite(maximum_recovery_rate) ||
+      !std::isfinite(acceleration_authority) ||
+      !std::isfinite(boundary_epsilon) ||
+      !std::isfinite(authority_fraction)) {
+    return {SolverStatus::kNonFiniteInput,
+            "recovery-rate inputs must be finite", 0.0};
+  }
+  if (violation < 0.0 || dt <= 0.0 || recovery_scale <= 0.0 ||
+      minimum_recovery_rate <= 0.0 ||
+      maximum_recovery_rate < minimum_recovery_rate ||
+      acceleration_authority <= 0.0 || boundary_epsilon < 0.0 ||
+      authority_fraction <= 0.0 || authority_fraction >= 1.0) {
+    return {SolverStatus::kInvalidInput,
+            "recovery-rate bounds or authority are invalid", 0.0};
+  }
+  const double requested_rate = std::min(
+      maximum_recovery_rate,
+      std::max(minimum_recovery_rate,
+               recovery_scale *
+                   std::max(0.0, violation - boundary_epsilon) / dt));
+  const double reachable_rate =
+      std::max(0.0, current_recovery_rate +
+                        authority_fraction * acceleration_authority * dt);
+  const double rate = std::min(requested_rate, reachable_rate);
+  if (!std::isfinite(requested_rate) || !std::isfinite(reachable_rate) ||
+      !std::isfinite(rate)) {
+    return {SolverStatus::kNumericalError,
+            "recovery-rate construction was non-finite", 0.0};
+  }
+  return {SolverStatus::kSuccess, {}, rate};
+}
+
 StateBoxRowResult shape_state_box_row(const StateBoxRowInput &input,
                                       double dt) {
   if (!input_is_finite(input, dt)) {

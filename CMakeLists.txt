@@ -114,8 +114,11 @@ add_library(embodik_core SHARED
     cpp_core/src/acceleration_allocation_transform.cpp
     cpp_core/src/acceleration_task_differential.cpp
     cpp_core/src/acceleration_state_box.cpp
+    cpp_core/src/acceleration_braking_witness.cpp
     cpp_core/src/acceleration_geometric_constraint_policy.cpp
     cpp_core/src/acceleration_scalar_geometric_constraint.cpp
+    cpp_core/src/support_polygon_geometry.cpp
+    cpp_core/src/acceleration_com_support_polygon_constraint.cpp
     cpp_core/src/acceleration_fixed_frame_pose_constraint.cpp
     cpp_core/src/acceleration_relative_pose_constraint.cpp
     cpp_core/src/acceleration_tight_point_constraint.cpp
