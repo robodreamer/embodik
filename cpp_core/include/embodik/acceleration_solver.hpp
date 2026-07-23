@@ -19,10 +19,31 @@
 
 namespace embodik {
 
+/**
+ * @brief Named caller-owned physical affine acceleration constraint.
+ *
+ * Each row enforces:
+ *   lower_bounds <= coefficient_matrix * ddq + affine_bias <= upper_bounds
+ *
+ * Empty active-side vectors mean every side is active. Otherwise each vector
+ * must have one flag per row, and every row must keep at least one active side.
+ * The record is per-call only; the solver never stores it across solve() calls.
+ */
+struct AffineAccelerationConstraint {
+  std::string source_id;
+  Eigen::MatrixXd coefficient_matrix;
+  Eigen::VectorXd affine_bias;
+  Eigen::VectorXd lower_bounds;
+  Eigen::VectorXd upper_bounds;
+  std::vector<bool> lower_bound_active;
+  std::vector<bool> upper_bound_active;
+};
+
 struct AccelerationSolveOptions {
   std::optional<Eigen::VectorXd> acceleration_limits_override;
   bool apply_velocity_limits = true;
   bool apply_position_limits = true;
+  std::vector<AffineAccelerationConstraint> affine_constraints;
 };
 
 struct AccelerationTaskReference {

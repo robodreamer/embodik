@@ -127,6 +127,25 @@ add_test(NAME test_acceleration_solver
     COMMAND test_acceleration_solver
 )
 
+add_executable(test_acceleration_solver_affine_constraints
+    test_acceleration_solver_affine_constraints.cpp
+)
+
+target_link_libraries(test_acceleration_solver_affine_constraints
+    embodik_core
+    GTest::gtest_main
+    GTest::gtest
+)
+
+target_include_directories(test_acceleration_solver_affine_constraints
+    PRIVATE
+        ${CMAKE_SOURCE_DIR}/cpp_core/src
+)
+
+add_test(NAME test_acceleration_solver_affine_constraints
+    COMMAND test_acceleration_solver_affine_constraints
+)
+
 # Python tests
 find_package(Python COMPONENTS Interpreter REQUIRED)
 

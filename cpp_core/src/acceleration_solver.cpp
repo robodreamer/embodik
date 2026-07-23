@@ -9,14 +9,17 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <limits>
 #include <map>
 #include <stdexcept>
+#include <unordered_set>
 #include <utility>
 
 namespace embodik {
 namespace {
 
 constexpr double kConstraintTolerance = 1e-8;
+constexpr double kInactiveAffineBackendBound = 1e10;
 
 AccelerationSolverResult failure(SolverStatus status, std::string message) {
   AccelerationSolverResult result;
@@ -41,6 +44,164 @@ bool fixed_base_scalar_joints_only(const RobotModel &robot) {
     }
   }
   return true;
+}
+
+bool lower_side_active(const AffineAccelerationConstraint &constraint,
+                       Eigen::Index row) {
+  return constraint.lower_bound_active.empty() ||
+         constraint.lower_bound_active[static_cast<std::size_t>(row)];
+}
+
+bool upper_side_active(const AffineAccelerationConstraint &constraint,
+                       Eigen::Index row) {
+  return constraint.upper_bound_active.empty() ||
+         constraint.upper_bound_active[static_cast<std::size_t>(row)];
+}
+
+bool inactive_affine_bound_magnitude(
+    const AffineAccelerationConstraint &constraint, Eigen::Index row,
+    double *magnitude) {
+  const double row_norm = constraint.coefficient_matrix.row(row).stableNorm();
+  if (!std::isfinite(row_norm) ||
+      (row_norm > 0.0 &&
+       row_norm > std::numeric_limits<double>::max() /
+                      kInactiveAffineBackendBound)) {
+    return false;
+  }
+  *magnitude =
+      row_norm == 0.0 ? kInactiveAffineBackendBound
+                      : kInactiveAffineBackendBound * row_norm;
+  return std::isfinite(*magnitude);
+}
+
+struct AffineConstraintValidation {
+  SolverStatus status = SolverStatus::kSuccess;
+  std::string message;
+  Eigen::Index row_count = 0;
+};
+
+AffineConstraintValidation validate_affine_constraints(
+    const std::vector<AffineAccelerationConstraint> &constraints,
+    Eigen::Index variable_count) {
+  AffineConstraintValidation validation;
+  std::unordered_set<std::string> source_ids;
+  for (const auto &constraint : constraints) {
+    if (constraint.source_id.empty()) {
+      validation.status = SolverStatus::kInvalidInput;
+      validation.message =
+          "affine acceleration constraint source_id must not be empty";
+      return validation;
+    }
+    if (!source_ids.insert(constraint.source_id).second) {
+      validation.status = SolverStatus::kInvalidInput;
+      validation.message =
+          "duplicate affine acceleration constraint source_id '" +
+          constraint.source_id + "'";
+      return validation;
+    }
+    if (constraint.coefficient_matrix.rows() == 0) {
+      validation.status = SolverStatus::kInvalidInput;
+      validation.message = "affine acceleration constraint '" +
+                           constraint.source_id +
+                           "' must contain at least one row";
+      return validation;
+    }
+    if (constraint.coefficient_matrix.cols() != variable_count) {
+      validation.status = SolverStatus::kShapeMismatch;
+      validation.message = "affine acceleration constraint '" +
+                           constraint.source_id +
+                           "' matrix must have nv columns";
+      return validation;
+    }
+    const Eigen::Index rows = constraint.coefficient_matrix.rows();
+    if (constraint.affine_bias.size() != rows) {
+      validation.status = SolverStatus::kShapeMismatch;
+      validation.message = "affine acceleration constraint '" +
+                           constraint.source_id +
+                           "' bias must match matrix rows";
+      return validation;
+    }
+    if (constraint.lower_bounds.size() != rows ||
+        constraint.upper_bounds.size() != rows) {
+      validation.status = SolverStatus::kConstraintBoundsMismatch;
+      validation.message = "affine acceleration constraint '" +
+                           constraint.source_id +
+                           "' bounds must match matrix rows";
+      return validation;
+    }
+    if ((!constraint.lower_bound_active.empty() &&
+         constraint.lower_bound_active.size() !=
+             static_cast<std::size_t>(rows)) ||
+        (!constraint.upper_bound_active.empty() &&
+         constraint.upper_bound_active.size() !=
+             static_cast<std::size_t>(rows))) {
+      validation.status = SolverStatus::kShapeMismatch;
+      validation.message = "affine acceleration constraint '" +
+                           constraint.source_id +
+                           "' active-side flags must match matrix rows";
+      return validation;
+    }
+    if (!constraint.coefficient_matrix.allFinite() ||
+        !constraint.affine_bias.allFinite() ||
+        !constraint.lower_bounds.allFinite() ||
+        !constraint.upper_bounds.allFinite()) {
+      validation.status = SolverStatus::kNonFiniteInput;
+      validation.message = "affine acceleration constraint '" +
+                           constraint.source_id +
+                           "' must contain only finite values";
+      return validation;
+    }
+    for (Eigen::Index row = 0; row < rows; ++row) {
+      const bool lower_active = lower_side_active(constraint, row);
+      const bool upper_active = upper_side_active(constraint, row);
+      if (!lower_active && !upper_active) {
+        validation.status = SolverStatus::kInvalidInput;
+        validation.message = "affine acceleration constraint '" +
+                             constraint.source_id + "' row " +
+                             std::to_string(row) +
+                             " has no active bound side";
+        return validation;
+      }
+      if (lower_active && upper_active &&
+          constraint.lower_bounds(row) > constraint.upper_bounds(row)) {
+        validation.status = SolverStatus::kInvalidInput;
+        validation.message = "affine acceleration constraint '" +
+                             constraint.source_id +
+                             "' lower bound exceeds upper bound";
+        return validation;
+      }
+      if ((lower_active &&
+           !std::isfinite(constraint.lower_bounds(row) -
+                          constraint.affine_bias(row))) ||
+          (upper_active &&
+           !std::isfinite(constraint.upper_bounds(row) -
+                          constraint.affine_bias(row)))) {
+        validation.status = SolverStatus::kInvalidInput;
+        validation.message = "affine acceleration constraint '" +
+                             constraint.source_id +
+                             "' shifted bound is not finite";
+        return validation;
+      }
+      double inactive_magnitude = 0.0;
+      if (!inactive_affine_bound_magnitude(constraint, row,
+                                           &inactive_magnitude) ||
+          (!lower_active &&
+           !std::isfinite(constraint.affine_bias(row) -
+                          inactive_magnitude)) ||
+          (!upper_active &&
+           !std::isfinite(constraint.affine_bias(row) +
+                          inactive_magnitude))) {
+        validation.status = SolverStatus::kInvalidInput;
+        validation.message = "affine acceleration constraint '" +
+                             constraint.source_id +
+                             "' inactive side cannot be represented in the "
+                             "finite backend range";
+        return validation;
+      }
+    }
+    validation.row_count += rows;
+  }
+  return validation;
 }
 
 VelocitySolverConfig acceleration_backend_config() {
@@ -378,6 +539,70 @@ void attribute_saturation(AccelerationSolverResult *result,
   }
 }
 
+detail::GeneralizedConstraintBlock make_affine_constraint_block(
+    const std::vector<AffineAccelerationConstraint> &constraints,
+    Eigen::Index variable_count, Eigen::Index row_count) {
+  detail::GeneralizedConstraintBlock block;
+  block.coefficient_matrix.resize(row_count, variable_count);
+  block.affine_bias.resize(row_count);
+  block.physical_lower_bounds.resize(row_count);
+  block.physical_upper_bounds.resize(row_count);
+
+  Eigen::Index cursor = 0;
+  for (const auto &constraint : constraints) {
+    const Eigen::Index rows = constraint.coefficient_matrix.rows();
+    block.coefficient_matrix.middleRows(cursor, rows) =
+        constraint.coefficient_matrix;
+    block.affine_bias.segment(cursor, rows) = constraint.affine_bias;
+    for (Eigen::Index row = 0; row < rows; ++row) {
+      const Eigen::Index output_row = cursor + row;
+      double inactive_magnitude = 0.0;
+      inactive_affine_bound_magnitude(constraint, row, &inactive_magnitude);
+      block.physical_lower_bounds(output_row) =
+          lower_side_active(constraint, row)
+              ? constraint.lower_bounds(row)
+              : constraint.affine_bias(row) - inactive_magnitude;
+      block.physical_upper_bounds(output_row) =
+          upper_side_active(constraint, row)
+              ? constraint.upper_bounds(row)
+              : constraint.affine_bias(row) + inactive_magnitude;
+    }
+    cursor += rows;
+  }
+  return block;
+}
+
+bool accepted_affine_constraints_are_satisfied(
+    const std::vector<AffineAccelerationConstraint> &constraints,
+    const Eigen::VectorXd &ddq) {
+  for (const auto &constraint : constraints) {
+    const Eigen::VectorXd physical =
+        constraint.coefficient_matrix * ddq + constraint.affine_bias;
+    if (!physical.allFinite()) {
+      return false;
+    }
+    for (Eigen::Index row = 0; row < physical.size(); ++row) {
+      const double lower_tolerance =
+          std::max(kConstraintTolerance,
+                   1e-12 * std::max(std::abs(physical(row)),
+                                    std::abs(constraint.lower_bounds(row))));
+      const double upper_tolerance =
+          std::max(kConstraintTolerance,
+                   1e-12 * std::max(std::abs(physical(row)),
+                                    std::abs(constraint.upper_bounds(row))));
+      if (lower_side_active(constraint, row) &&
+          physical(row) < constraint.lower_bounds(row) - lower_tolerance) {
+        return false;
+      }
+      if (upper_side_active(constraint, row) &&
+          physical(row) > constraint.upper_bounds(row) + upper_tolerance) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
 } // namespace
 
 AccelerationSolver::AccelerationSolver(std::shared_ptr<RobotModel> robot)
@@ -547,6 +772,13 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
     return finish(failure(state_box.status, state_box.message));
   }
 
+  const auto affine_validation =
+      validate_affine_constraints(options.affine_constraints, robot_->nv());
+  if (affine_validation.status != SolverStatus::kSuccess) {
+    return finish(
+        failure(affine_validation.status, affine_validation.message));
+  }
+
   ObjectiveAssembly objectives;
   try {
     objectives =
@@ -566,15 +798,26 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
   }
 
   detail::GeneralizedConstraintSet constraints(
-      robot_->nv(), robot_->nv(), false);
+      robot_->nv(), robot_->nv() + affine_validation.row_count, false);
   detail::GeneralizedConstraintBlock joint_box;
   joint_box.coefficient_matrix =
       Eigen::MatrixXd::Identity(robot_->nv(), robot_->nv());
   joint_box.affine_bias = Eigen::VectorXd::Zero(robot_->nv());
   joint_box.physical_lower_bounds = state_box.lower;
   joint_box.physical_upper_bounds = state_box.upper;
-  if (!constraints.append_block(std::move(joint_box)) ||
-      !constraints.finalize()) {
+  if (!constraints.append_block(std::move(joint_box))) {
+    return finish(failure(SolverStatus::kNumericalError,
+                          "failed to assemble acceleration constraints"));
+  }
+  if (affine_validation.row_count > 0 &&
+      !constraints.append_block(make_affine_constraint_block(
+          options.affine_constraints, robot_->nv(),
+          affine_validation.row_count))) {
+    return finish(failure(
+        SolverStatus::kNumericalError,
+        "failed to assemble affine acceleration constraints"));
+  }
+  if (!constraints.finalize()) {
     return finish(failure(SolverStatus::kNumericalError,
                           "failed to assemble acceleration constraints"));
   }
@@ -607,6 +850,12 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
     return finish(clear_outputs(failure(
         SolverStatus::kNumericalError,
         "accepted acceleration violates the compatible state box")));
+  }
+  if (!accepted_affine_constraints_are_satisfied(options.affine_constraints,
+                                                 result.joint_accelerations)) {
+    return finish(clear_outputs(failure(
+        SolverStatus::kNumericalError,
+        "accepted acceleration violates an affine acceleration constraint")));
   }
   result.joint_velocities_next = dq + dt * result.joint_accelerations;
   try {
