@@ -10,10 +10,12 @@ def _write_release_metadata(
     *,
     package_version: str = "0.20.17",
     pixi_version: str = "0.20.17",
+    cmake_version: str = "0.20.17",
     release_date: str | None = "2026-07-22",
 ) -> None:
     (root / "pyproject.toml").write_text(f'[project]\nversion = "{package_version}"\n')
     (root / "pixi.toml").write_text(f'[workspace]\nversion = "{pixi_version}"\n')
+    (root / "CMakeLists.txt").write_text(f"project(embodik VERSION {cmake_version})\n")
     heading = f"## [{package_version}] - {release_date}\n" if release_date is not None else ""
     (root / "CHANGELOG.md").write_text(f"# Changelog\n\n{heading}")
 
@@ -30,6 +32,15 @@ def test_validate_release_metadata_rejects_version_mismatch(tmp_path: Path) -> N
     _write_release_metadata(tmp_path, pixi_version="0.20.16")
 
     with pytest.raises(ValueError, match="version mismatch"):
+        validate_release_metadata(tmp_path)
+
+
+def test_validate_release_metadata_rejects_cmake_version_mismatch(
+    tmp_path: Path,
+) -> None:
+    _write_release_metadata(tmp_path, cmake_version="0.20.16")
+
+    with pytest.raises(ValueError, match="version mismatch.*cmake=0.20.16"):
         validate_release_metadata(tmp_path)
 
 

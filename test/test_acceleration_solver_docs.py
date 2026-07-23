@@ -1,3 +1,4 @@
+import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -41,11 +42,13 @@ def test_acceleration_example_docs_explain_selector_and_collision_contract() -> 
     assert "does not claim continuous swept-path certification" in collision_words
 
 
-def test_acceleration_page_is_in_navigation_and_unreleased_changelog() -> None:
+def test_acceleration_page_is_in_navigation_and_current_release_changelog() -> None:
     navigation = (ROOT / "mkdocs.yml").read_text()
     changelog = (ROOT / "CHANGELOG.md").read_text()
+    with (ROOT / "pyproject.toml").open("rb") as stream:
+        version = tomllib.load(stream)["project"]["version"]
 
     assert "Acceleration Solver: acceleration_solver.md" in navigation
-    unreleased = changelog.split("## [0.20.18]", maxsplit=1)[0]
-    assert "fixed-base acceleration-level eSNS API" in unreleased
-    assert "non-hard-real-time" in unreleased
+    release = changelog.split(f"## [{version}]", maxsplit=1)[1].split("## [", maxsplit=1)[0]
+    assert "fixed-base acceleration-level eSNS API" in release
+    assert "non-hard-real-time" in release

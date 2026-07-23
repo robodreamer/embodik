@@ -145,17 +145,89 @@ rejected until they provide the same predicted-state certificate contract.
 
 ## Build And ABI Notes
 
-The acceleration API is additive to the `0.20.18` integration baseline. The
-shared `Task` virtual interface and object layout are unchanged, but source
-builds must rebuild `embodik_core` and the Nanobind extension together before
-using the new Python types. Do not publish a changed binary under the existing
-`0.20.18` package version; the next release must bump package metadata and move
-the Unreleased changelog entries into a dated section.
+The acceleration API is introduced in `0.20.19` on top of the `0.20.18`
+integration baseline. The shared `Task` virtual interface and object layout are
+unchanged, but source builds must rebuild `embodik_core` and the Nanobind
+extension together before using the new Python types.
 
 ## API Reference
+
+### Solver
 
 ::: embodik.AccelerationSolver
 
 ::: embodik.AccelerationSolveOptions
 
 ::: embodik.AccelerationSolverResult
+
+::: embodik.AccelerationSolverCapabilities
+
+### Tasks And Diagnostics
+
+::: embodik.AccelerationTaskReference
+
+::: embodik.AccelerationTaskDiagnostics
+
+::: embodik.AccelerationAllocationDiagnostics
+
+::: embodik.AccelerationAnalyticCollisionPairDiagnostics
+
+### State, Effort, And Hard Rows
+
+::: embodik.AffineAccelerationConstraint
+
+::: embodik.FrozenNextVelocityConstraint
+
+::: embodik.TaskAccelerationBounds
+
+::: embodik.GeneralizedAccelerationAllocation
+
+::: embodik.EffortConstraintOptions
+
+::: embodik.ContactAccelerationConstraint
+
+### Geometric Constraints
+
+::: embodik.GeometricConstraintAccelerationPolicy
+
+::: embodik.ComSupportPolygonAccelerationPolicy
+
+::: embodik.ComSupportPolygonAccelerationConstraint
+
+::: embodik.TightPointAccelerationConstraint
+
+::: embodik.TightFramePoseAccelerationConstraint
+
+::: embodik.RelativePoseAccelerationConstraint
+
+::: embodik.TorsoPoseBoundAccelerationConstraint
+
+### Collision Compatibility And Certification
+
+::: embodik.VelocityCollisionLiftOptions
+
+::: embodik.CollisionConstraintAccelerationPolicy
+
+::: embodik.AccelerationCollisionRegime
+
+::: embodik.CollisionGeometryPair
+
+::: embodik.CollisionPairMinimumDistance
+
+::: embodik.CollisionConstraintDefinition
+
+::: embodik.ComSupportPolygonConstraintDefinition
+
+::: embodik.RelativePoseConstraintDefinition
+
+::: embodik.TightPointConstraintDefinition
+
+::: embodik.TightFramePoseConstraintDefinition
+
+::: embodik.TorsoPoseBoundDefinition
+
+::: embodik.ContactType
+
+::: embodik.ComSupportPolygonOutsidePolicy
+
+::: embodik.CollisionConstraintOutsidePolicy

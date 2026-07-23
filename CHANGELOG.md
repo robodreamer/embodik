@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.19] - 2026-07-23
+
 ### Added
 
 - Added a fixed-base acceleration-level eSNS API with Python bindings for
@@ -25,6 +27,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Documented the acceleration solver as fixed-base, scalar-joint, and
   non-hard-real-time; floating-base dynamics, wheel constraints, and dynamic
   contact forces remain outside the stable surface.
+- Kept the shared task virtual interface and object layout unchanged; source
+  consumers must still rebuild the core library and Nanobind extension together.
 
 ## [0.20.18] - 2026-07-22
 
