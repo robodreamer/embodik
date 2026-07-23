@@ -1,4 +1,5 @@
 #include "acceleration_geometric_constraint_policy.hpp"
+#include "acceleration_scalar_geometric_constraint.hpp"
 #include "frame_kinematic_differential.hpp"
 
 #include <embodik/acceleration_solver.hpp>
@@ -182,6 +183,75 @@ TEST(AccelerationGeometricConstraintPolicyTest,
       "six-dimensional test", "axes", mask, 6);
   ASSERT_TRUE(axis_result.satisfied()) << axis_result.message;
   EXPECT_EQ(axis_result.active_axes, std::vector<int>({0, 5}));
+}
+
+TEST(AccelerationScalarGeometricConstraintTest,
+     GenericEntryPointsRejectMalformedSpecifications) {
+  detail::ScalarGeometricConstraintSpecification specification;
+  specification.family_label = "test scalar constraint";
+  specification.source_id = "test";
+  specification.dimension = 2;
+  specification.active_axes = {0, 1};
+  specification.state_lower_bounds = vector({-0.1, -0.2});
+  specification.state_upper_bounds = vector({0.3, 0.4});
+  specification.policy.rate_limits = Eigen::Vector2d::Ones();
+  specification.policy.acceleration_limits =
+      Eigen::Vector2d::Constant(2.0);
+  specification.policy.lower_braking_accelerations =
+      Eigen::Vector2d::Constant(0.5);
+  specification.policy.upper_braking_accelerations =
+      Eigen::Vector2d::Constant(0.75);
+
+  detail::ScalarGeometricCoordinateSample sample;
+  sample.value = Eigen::Vector2d::Zero();
+  sample.rate = Eigen::Vector2d::Zero();
+  sample.acceleration = Eigen::Vector2d::Zero();
+  const auto asymmetric =
+      detail::validate_scalar_geometric_sample_acceptance(specification, sample,
+                                                          false);
+  EXPECT_TRUE(asymmetric.satisfied()) << asymmetric.message;
+
+  auto invalid_axis = specification;
+  invalid_axis.active_axes = {0, 2};
+  const auto invalid_axis_result =
+      detail::validate_scalar_geometric_sample_acceptance(invalid_axis, sample,
+                                                          false);
+  EXPECT_EQ(invalid_axis_result.status, SolverStatus::kShapeMismatch);
+
+  detail::ScalarGeometricDifferential differential;
+  differential.coefficient_matrix = Eigen::Matrix2d::Identity();
+  differential.affine_bias = Eigen::Vector2d::Zero();
+  differential.coordinates = sample;
+  const auto invalid_support =
+      detail::validate_scalar_geometric_joint_box_support(
+          invalid_axis, differential, Eigen::Vector2d::Constant(-1.0),
+          Eigen::Vector2d::Constant(1.0), "test-state");
+  EXPECT_EQ(invalid_support.status, SolverStatus::kShapeMismatch);
+
+  const detail::ScalarGeometricPathValidationOptions path_options;
+  const auto invalid_path = detail::validate_scalar_geometric_path(
+      invalid_axis, Eigen::Vector2d::Zero(), Eigen::Vector2d::Zero(), 0.01,
+      path_options,
+      [](const detail::ScalarGeometricPathPoint &,
+         detail::ScalarGeometricCoordinateSample *) {
+        return detail::ScalarGeometricConstraintResult{};
+      });
+  EXPECT_EQ(invalid_path.status, SolverStatus::kShapeMismatch);
+
+  auto nonfinite_policy = specification;
+  nonfinite_policy.policy.rate_limits(0) =
+      std::numeric_limits<double>::quiet_NaN();
+  const auto nonfinite_policy_result =
+      detail::validate_scalar_geometric_sample_acceptance(
+          nonfinite_policy, sample, false);
+  EXPECT_EQ(nonfinite_policy_result.status, SolverStatus::kNonFiniteInput);
+
+  auto malformed_sample = sample;
+  malformed_sample.acceleration = Eigen::VectorXd::Zero(1);
+  const auto malformed_sample_result =
+      detail::validate_scalar_geometric_sample_acceptance(
+          specification, malformed_sample, false);
+  EXPECT_EQ(malformed_sample_result.status, SolverStatus::kShapeMismatch);
 }
 
 TEST_F(AccelerationSolverTightPointTest, CapabilitiesExposeTightPointSupport) {

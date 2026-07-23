@@ -2,7 +2,7 @@
 
 #include <embodik/acceleration_solver.hpp>
 
-#include "acceleration_state_box.hpp"
+#include "acceleration_scalar_geometric_constraint.hpp"
 
 #include <Eigen/Core>
 #include <optional>
@@ -21,7 +21,7 @@ struct TightPointConstraintResult {
 struct PreparedTightPointConstraint {
   TightPointAccelerationConstraint specification;
   std::vector<int> active_axes;
-  LinearizedStateBoxResult state_box;
+  PreparedScalarGeometricConstraint scalar;
 };
 
 struct TightPointPreparationResult : TightPointConstraintResult {

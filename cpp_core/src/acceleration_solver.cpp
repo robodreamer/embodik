@@ -901,10 +901,11 @@ TightPointConstraintAssembly make_tight_point_constraints(
       return assembly;
     }
     assembly.row_count +=
-        prepared.prepared->state_box.physical_constraint.coefficient_matrix
+        prepared.prepared->scalar.state_box.physical_constraint
+            .coefficient_matrix
             .rows();
     assembly.constraints.push_back(
-        prepared.prepared->state_box.physical_constraint);
+        prepared.prepared->scalar.state_box.physical_constraint);
     assembly.prepared_constraints.push_back(std::move(*prepared.prepared));
   }
 
