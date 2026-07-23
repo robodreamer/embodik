@@ -347,10 +347,12 @@ TEST(HierarchicalLinearSolverTest,
 
   Eigen::VectorXd nonfinite_target = zero;
   nonfinite_target(0) = std::numeric_limits<double>::infinity();
-  EXPECT_EQ(solve_canonical({nonfinite_target}, {zero}, {identity}, identity,
-                            lower, upper)
-                .status,
-            SolverStatus::kNonFiniteInput);
+  const SolverResult nonfinite_target_result =
+      solve_canonical({nonfinite_target}, {zero}, {identity}, identity, lower,
+                      upper);
+  EXPECT_EQ(nonfinite_target_result.status, SolverStatus::kNonFiniteInput);
+  ASSERT_EQ(nonfinite_target_result.solution.size(), 1U);
+  EXPECT_DOUBLE_EQ(nonfinite_target_result.solution.front(), 0.0);
 
   Eigen::VectorXd nonfinite_upper = upper;
   nonfinite_upper(0) = std::numeric_limits<double>::quiet_NaN();

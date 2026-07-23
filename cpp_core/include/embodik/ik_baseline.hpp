@@ -952,16 +952,21 @@ inline SolverResult solveHierarchicalLinearSystemEigen(
                 "constraint rows must match lower/upper bounds");
   if (scalable_objective_targets.empty())
     return fail(SolverStatus::kEmptyProblem, "no objectives provided");
+  const auto degrees_of_freedom = constraint_coefficients.cols();
+  auto fail_non_finite = [&](const char *msg) {
+    SolverResult out = fail(SolverStatus::kNonFiniteInput, msg);
+    out.solution.assign(static_cast<size_t>(degrees_of_freedom), 0.0);
+    return out;
+  };
   if (!constraint_coefficients.allFinite() || !min_bounds.allFinite() ||
       !max_bounds.allFinite())
-    return fail(SolverStatus::kNonFiniteInput,
-                "constraints and bounds must contain only finite values");
+    return fail_non_finite(
+        "constraints and bounds must contain only finite values");
   if ((min_bounds.array() > max_bounds.array()).any())
     return fail(SolverStatus::kInvalidInput,
                 "constraint lower bounds must not exceed upper bounds");
 
   // Extract system dimensions
-  const auto degrees_of_freedom = constraint_coefficients.cols();
   const auto additional_constraints =
       constraint_coefficients.rows() - degrees_of_freedom;
   const auto total_constraints = constraint_coefficients.rows();
@@ -1005,8 +1010,8 @@ inline SolverResult solveHierarchicalLinearSystemEigen(
         !scalable_objective_targets[obj_idx].allFinite() ||
         (!preserve_legacy_velocity_behavior &&
          !affine_objective_biases[obj_idx].allFinite())) {
-      return fail(SolverStatus::kNonFiniteInput,
-                  "objective matrices and vectors must be finite");
+      return fail_non_finite(
+          "objective matrices and vectors must be finite");
     }
   }
 
