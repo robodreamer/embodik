@@ -34,11 +34,6 @@ namespace detail {
 struct VelocityConstraintTestObserver;
 } // namespace detail
 
-enum class ContactType {
-  kPointContact, // 3 rows (linear velocity only)
-  kRigidContact, // 6 rows (full spatial velocity)
-};
-
 /**
  * @brief High-level kinematics solver
  *

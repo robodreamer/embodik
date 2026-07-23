@@ -52,6 +52,11 @@ enum class SolverRecoveryStage {
   kWeightedFallback = 1,
 };
 
+enum class ContactType {
+  kPointContact, // 3 rows (linear velocity/acceleration only)
+  kRigidContact, // 6 rows (full spatial velocity/acceleration)
+};
+
 enum class SolverStatus {
   kSuccess = 0,
   kInvalidInput = 1,
@@ -183,6 +188,59 @@ struct ObjectiveSolveConfig {
   bool use_goal_directed_limit_clamp = false;
 };
 
+/**
+ * @brief Exact collision-geometry names that identify one unordered pair.
+ *
+ * Pair direction is intentionally ignored when definitions are compiled.
+ * Link-name and substring expansion are compatibility policies owned by the
+ * solver adapter, not by this shared physical definition.
+ */
+struct CollisionGeometryPair {
+  std::string geometry_a;
+  std::string geometry_b;
+};
+
+/**
+ * @brief Exact unordered geometry pair with an immutable clearance override.
+ *
+ * This is physical configuration data. Link-name expansion, deferred
+ * activation, and recovery history remain solver-adapter policy.
+ */
+struct CollisionPairMinimumDistance {
+  CollisionGeometryPair pair;
+  double min_distance = 0.0;
+};
+
+/**
+ * @brief Collision geometry shared across solver derivative orders.
+ *
+ * The definition is immutable input data after configuration. Query caches,
+ * active-row selection, derivative-order policy, and recovery state remain
+ * solver-owned.
+ */
+struct CollisionConstraintDefinition {
+  // Default clearance for every selected pair without an explicit override.
+  double min_distance = 0.05;
+  std::vector<CollisionGeometryPair> include_pairs;
+  std::vector<CollisionGeometryPair> exclude_pairs;
+  // Exact-name overrides. Each unordered pair may appear at most once.
+  std::vector<CollisionPairMinimumDistance> pair_minimum_distances;
+};
+
+/**
+ * @brief Support-polygon geometry shared across solver derivative orders.
+ *
+ * The polygon is expressed in frame_name XY coordinates. Canonical convex-hull
+ * construction, margin application, and derivative-order policy remain
+ * solver-owned.
+ */
+struct ComSupportPolygonConstraintDefinition {
+  Eigen::MatrixXd support_polygon;
+  double margin = 0.0;
+  std::string frame_name = "world";
+  double proximity_fraction = 0.0;
+};
+
 // Optional torso tracking/constraint configuration for position IK.
 struct VelocityBoxHeadroomPolicy {
   // Enable minimum velocity headroom away from nearby limits.
@@ -234,6 +292,52 @@ struct TorsoPoseConstraintOptions {
   // New code should use velocity_box_headroom.
   bool pose_bound_softening_enabled = false;
   double pose_bound_softening_fraction = 0.10;
+};
+
+/**
+ * @brief Geometry shared by velocity- and acceleration-level relative-pose rows.
+ *
+ * Coordinates use T_ab = T_a^{-1} * T_b and are ordered as
+ * [translation expressed in frame_a, log3(T_ab.rotation())]. Derivative-order
+ * shaping and lifecycle remain solver-owned.
+ */
+struct RelativePoseConstraintDefinition {
+  std::string frame_a;
+  std::string frame_b;
+  Eigen::Matrix<double, 6, 1> lower_bounds =
+      Eigen::Matrix<double, 6, 1>::Zero();
+  Eigen::Matrix<double, 6, 1> upper_bounds =
+      Eigen::Matrix<double, 6, 1>::Zero();
+  Eigen::Matrix<double, 6, 1> axis_mask =
+      Eigen::Matrix<double, 6, 1>::Ones();
+};
+
+/**
+ * @brief Geometry shared by velocity- and acceleration-level tight point rows.
+ *
+ * The constrained point is the named frame origin expressed in world
+ * coordinates. Derivative-order policy is intentionally owned by each solver.
+ */
+struct TightPointConstraintDefinition {
+  std::string frame_name;
+  Eigen::Vector3d target_point = Eigen::Vector3d::Zero();
+  double position_epsilon = 1e-5;
+  Eigen::Vector3d axis_mask = Eigen::Vector3d::Ones();
+};
+
+/**
+ * @brief Geometry shared by velocity- and acceleration-level tight frame rows.
+ *
+ * Coordinates use [world translation, log3(target_rotation^T * rotation)].
+ * Derivative-order policy remains solver-owned.
+ */
+struct TightFramePoseConstraintDefinition {
+  std::string frame_name;
+  Eigen::Matrix4d target_pose = Eigen::Matrix4d::Identity();
+  double position_epsilon = 1e-5;
+  double orientation_epsilon = 1e-4;
+  Eigen::Matrix<double, 6, 1> axis_mask =
+      Eigen::Matrix<double, 6, 1>::Ones();
 };
 
 // Position IK options

@@ -241,6 +241,20 @@ add_test(NAME test_acceleration_solver_effort
     COMMAND test_acceleration_solver_effort
 )
 
+add_executable(test_shared_constraint_definitions
+    test_shared_constraint_definitions.cpp
+)
+
+target_link_libraries(test_shared_constraint_definitions
+    embodik_core
+    GTest::gtest_main
+    GTest::gtest
+)
+
+add_test(NAME test_shared_constraint_definitions
+    COMMAND test_shared_constraint_definitions
+)
+
 # Python tests
 find_package(Python COMPONENTS Interpreter REQUIRED)
 
