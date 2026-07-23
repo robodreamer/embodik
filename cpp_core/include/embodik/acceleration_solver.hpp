@@ -39,11 +39,34 @@ struct AffineAccelerationConstraint {
   std::vector<bool> upper_bound_active;
 };
 
+/**
+ * @brief Named caller-owned frozen next-velocity affine constraint.
+ *
+ * Each row enforces:
+ *   lower_bounds <= C * dq + dt * (C * ddq + affine_bias) <= upper_bounds
+ *
+ * The coefficient matrix is frozen for this single solve call. The solver does
+ * not infer or apply any derivative of C.
+ */
+struct FrozenNextVelocityConstraint {
+  std::string source_id;
+  Eigen::MatrixXd coefficient_matrix;
+  Eigen::VectorXd affine_bias;
+  Eigen::VectorXd lower_bounds;
+  Eigen::VectorXd upper_bounds;
+  std::vector<bool> lower_bound_active;
+  std::vector<bool> upper_bound_active;
+};
+
 struct AccelerationSolveOptions {
   std::optional<Eigen::VectorXd> acceleration_limits_override;
   bool apply_velocity_limits = true;
   bool apply_position_limits = true;
   std::vector<AffineAccelerationConstraint> affine_constraints;
+  std::vector<FrozenNextVelocityConstraint> frozen_next_velocity_constraints;
+  std::vector<int> zero_acceleration_joint_indices;
+  std::vector<int> zero_next_velocity_joint_indices;
+  std::vector<int> fixed_current_position_joint_indices;
 };
 
 struct AccelerationTaskReference {

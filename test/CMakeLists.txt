@@ -146,6 +146,25 @@ add_test(NAME test_acceleration_solver_affine_constraints
     COMMAND test_acceleration_solver_affine_constraints
 )
 
+add_executable(test_acceleration_solver_frozen_locks
+    test_acceleration_solver_frozen_locks.cpp
+)
+
+target_link_libraries(test_acceleration_solver_frozen_locks
+    embodik_core
+    GTest::gtest_main
+    GTest::gtest
+)
+
+target_include_directories(test_acceleration_solver_frozen_locks
+    PRIVATE
+        ${CMAKE_SOURCE_DIR}/cpp_core/src
+)
+
+add_test(NAME test_acceleration_solver_frozen_locks
+    COMMAND test_acceleration_solver_frozen_locks
+)
+
 # Python tests
 find_package(Python COMPONENTS Interpreter REQUIRED)
 
