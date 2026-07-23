@@ -117,7 +117,7 @@ TEST_F(AccelerationSolverTest, CapabilitiesExposeMinimalR04Scope) {
   EXPECT_FALSE(capabilities.supports_floating_base);
   EXPECT_FALSE(capabilities.supports_scale_elastic);
   EXPECT_FALSE(capabilities.supports_collision_constraints);
-  EXPECT_FALSE(capabilities.supports_effort_constraints);
+  EXPECT_TRUE(capabilities.supports_effort_constraints);
 }
 
 TEST_F(AccelerationSolverTest, RejectsUnsupportedModelsAtConstruction) {

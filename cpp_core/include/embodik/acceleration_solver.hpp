@@ -90,12 +90,26 @@ struct GeneralizedAccelerationAllocation {
   Eigen::VectorXd reference_acceleration;
 };
 
+/**
+ * @brief Optional fixed-base inverse-dynamics effort envelope.
+ *
+ * When present, the solver enforces:
+ *   -effective_limits <= M(q) * ddq + h(q, dq) <= effective_limits
+ *
+ * Empty limits_override means the RobotModel effort metadata is used.
+ */
+struct EffortConstraintOptions {
+  std::optional<Eigen::VectorXd> limits_override;
+  double margin_fraction = 0.0;
+};
+
 struct AccelerationSolveOptions {
   std::optional<Eigen::VectorXd> acceleration_limits_override;
   bool apply_velocity_limits = true;
   bool apply_position_limits = true;
   std::optional<GeneralizedAccelerationAllocation>
       generalized_acceleration_allocation;
+  std::optional<EffortConstraintOptions> effort_constraints;
   std::vector<AffineAccelerationConstraint> affine_constraints;
   std::vector<FrozenNextVelocityConstraint> frozen_next_velocity_constraints;
   std::vector<TaskAccelerationBounds> task_acceleration_bounds;
@@ -141,6 +155,9 @@ struct AccelerationSolverResult : public SolverResult {
   std::vector<int> saturated_acceleration_indices;
   std::vector<int> saturated_velocity_indices;
   std::vector<int> saturated_position_indices;
+  Eigen::VectorXd predicted_torques;
+  bool effort_limits_applied = false;
+  std::vector<int> saturated_effort_indices;
   std::vector<AccelerationTaskDiagnostics> task_diagnostics;
   AccelerationAllocationDiagnostics allocation_diagnostics;
 };
@@ -150,7 +167,7 @@ struct AccelerationSolverCapabilities {
   bool supports_floating_base = false;
   bool supports_scale_elastic = false;
   bool supports_collision_constraints = false;
-  bool supports_effort_constraints = false;
+  bool supports_effort_constraints = true;
 };
 
 /**

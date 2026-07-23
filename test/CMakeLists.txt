@@ -222,6 +222,25 @@ add_test(NAME test_acceleration_solver_allocation
     COMMAND test_acceleration_solver_allocation
 )
 
+add_executable(test_acceleration_solver_effort
+    test_acceleration_solver_effort.cpp
+)
+
+target_link_libraries(test_acceleration_solver_effort
+    embodik_core
+    GTest::gtest_main
+    GTest::gtest
+)
+
+target_include_directories(test_acceleration_solver_effort
+    PRIVATE
+        ${CMAKE_SOURCE_DIR}/cpp_core/src
+)
+
+add_test(NAME test_acceleration_solver_effort
+    COMMAND test_acceleration_solver_effort
+)
+
 # Python tests
 find_package(Python COMPONENTS Interpreter REQUIRED)
 

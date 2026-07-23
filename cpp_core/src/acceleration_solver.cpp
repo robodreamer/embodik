@@ -185,6 +185,20 @@ struct ConstraintValidation {
   Eigen::Index row_count = 0;
 };
 
+struct PreparedEffortConstraint {
+  SolverStatus status = SolverStatus::kSuccess;
+  std::string message;
+  Eigen::MatrixXd mass_matrix;
+  Eigen::VectorXd bias;
+  Eigen::VectorXd limits;
+};
+
+struct InverseDynamicsEvaluation {
+  SolverStatus status = SolverStatus::kSuccess;
+  std::string message;
+  Eigen::VectorXd torques;
+};
+
 template <typename Constraint>
 ConstraintValidation validate_constraint_family(
     const std::vector<Constraint> &constraints, Eigen::Index variable_count,
@@ -794,11 +808,129 @@ bool populate_allocation_diagnostics(
   return true;
 }
 
+PreparedEffortConstraint prepare_effort_constraint(
+    const RobotModel &robot, const Eigen::VectorXd &q,
+    const Eigen::VectorXd &dq, const EffortConstraintOptions &options) {
+  PreparedEffortConstraint prepared;
+  const auto fail = [&](SolverStatus status, std::string message) {
+    prepared = {};
+    prepared.status = status;
+    prepared.message = std::move(message);
+    return prepared;
+  };
+
+  if (!std::isfinite(options.margin_fraction)) {
+    return fail(SolverStatus::kNonFiniteInput,
+                "effort margin fraction must be finite");
+  }
+  if (options.margin_fraction < 0.0 || options.margin_fraction >= 1.0) {
+    return fail(SolverStatus::kInvalidInput,
+                "effort margin fraction must be in [0, 1)");
+  }
+
+  const Eigen::Index nv = robot.nv();
+  Eigen::VectorXd raw_limits;
+  if (options.limits_override.has_value()) {
+    raw_limits = options.limits_override.value();
+    if (raw_limits.size() != nv) {
+      return fail(SolverStatus::kShapeMismatch,
+                  "effort limits override must have size nv");
+    }
+    if (!raw_limits.allFinite()) {
+      return fail(SolverStatus::kNonFiniteInput,
+                  "effort limits override must be finite");
+    }
+  } else {
+    raw_limits = robot.get_effort_limits();
+    if (raw_limits.size() != nv) {
+      return fail(SolverStatus::kShapeMismatch,
+                  "model effort limits must have size nv");
+    }
+    if (!raw_limits.allFinite()) {
+      return fail(SolverStatus::kInvalidInput,
+                  "model effort limits must be finite and positive");
+    }
+  }
+  if ((raw_limits.array() <= 0.0).any()) {
+    return fail(SolverStatus::kInvalidInput,
+                "effort limits must be strictly positive");
+  }
+
+  prepared.limits = (1.0 - options.margin_fraction) * raw_limits;
+  if (!finite_positive_vector(prepared.limits)) {
+    return fail(SolverStatus::kInvalidInput,
+                "effort margin must leave finite positive limits");
+  }
+
+  try {
+    prepared.mass_matrix = robot.compute_mass_matrix(q);
+    prepared.mass_matrix =
+        0.5 * (prepared.mass_matrix + prepared.mass_matrix.transpose());
+    prepared.bias = robot.rnea(q, dq, Eigen::VectorXd::Zero(nv));
+  } catch (const std::exception &error) {
+    return fail(SolverStatus::kNumericalError,
+                std::string("effort dynamics evaluation failed: ") +
+                    error.what());
+  }
+
+  if (prepared.mass_matrix.rows() != nv || prepared.mass_matrix.cols() != nv ||
+      prepared.bias.size() != nv) {
+    return fail(SolverStatus::kShapeMismatch,
+                "effort dynamics returned inconsistent dimensions");
+  }
+  if (!prepared.mass_matrix.allFinite() || !prepared.bias.allFinite()) {
+    return fail(SolverStatus::kNumericalError,
+                "effort dynamics returned non-finite values");
+  }
+  if (!(-prepared.limits - prepared.bias).allFinite() ||
+      !(prepared.limits - prepared.bias).allFinite()) {
+    return fail(SolverStatus::kNumericalError,
+                "shifted effort bounds are not finite");
+  }
+  return prepared;
+}
+
+InverseDynamicsEvaluation evaluate_inverse_dynamics(
+    const RobotModel &robot, const Eigen::VectorXd &q,
+    const Eigen::VectorXd &dq, const Eigen::VectorXd &ddq) {
+  InverseDynamicsEvaluation evaluation;
+  if (ddq.size() != robot.nv()) {
+    evaluation.status = SolverStatus::kShapeMismatch;
+    evaluation.message = "accepted acceleration must have size nv";
+    return evaluation;
+  }
+  if (!ddq.allFinite()) {
+    evaluation.status = SolverStatus::kNonFiniteInput;
+    evaluation.message = "accepted acceleration must be finite";
+    return evaluation;
+  }
+  try {
+    evaluation.torques = robot.rnea(q, dq, ddq);
+  } catch (const std::exception &error) {
+    evaluation.status = SolverStatus::kNumericalError;
+    evaluation.message =
+        std::string("inverse dynamics evaluation failed: ") + error.what();
+    return evaluation;
+  }
+  if (evaluation.torques.size() != robot.nv()) {
+    evaluation.status = SolverStatus::kShapeMismatch;
+    evaluation.message = "inverse dynamics returned inconsistent dimensions";
+    evaluation.torques.resize(0);
+  } else if (!evaluation.torques.allFinite()) {
+    evaluation.status = SolverStatus::kNumericalError;
+    evaluation.message = "inverse dynamics returned non-finite torques";
+    evaluation.torques.resize(0);
+  }
+  return evaluation;
+}
+
 AccelerationSolverResult clear_outputs(AccelerationSolverResult result) {
   result.solution.clear();
   result.joint_accelerations.resize(0);
   result.joint_velocities_next.resize(0);
   result.q_solution.resize(0);
+  result.predicted_torques.resize(0);
+  result.saturated_effort_indices.clear();
   result.allocation_diagnostics = {};
   return result;
 }
@@ -976,6 +1108,22 @@ detail::GeneralizedConstraintBlock make_lock_constraint_block(
   block.physical_lower_bounds = locks.bounds;
   block.physical_upper_bounds = locks.bounds;
   if (locks.coefficients.cols() != variable_count) {
+    block.coefficient_matrix.resize(0, variable_count);
+    block.affine_bias.resize(0);
+    block.physical_lower_bounds.resize(0);
+    block.physical_upper_bounds.resize(0);
+  }
+  return block;
+}
+
+detail::GeneralizedConstraintBlock make_effort_constraint_block(
+    const PreparedEffortConstraint &effort, Eigen::Index variable_count) {
+  detail::GeneralizedConstraintBlock block;
+  block.coefficient_matrix = effort.mass_matrix;
+  block.affine_bias = effort.bias;
+  block.physical_lower_bounds = -effort.limits;
+  block.physical_upper_bounds = effort.limits;
+  if (block.coefficient_matrix.cols() != variable_count) {
     block.coefficient_matrix.resize(0, variable_count);
     block.affine_bias.resize(0);
     block.physical_lower_bounds.resize(0);
@@ -1345,6 +1493,16 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
     }
     allocation = std::move(prepared);
   }
+  std::optional<PreparedEffortConstraint> effort_constraint;
+  if (options.effort_constraints.has_value()) {
+    auto prepared_effort = prepare_effort_constraint(
+        *robot_, q, dq, options.effort_constraints.value());
+    if (prepared_effort.status != SolverStatus::kSuccess) {
+      return finish(
+          failure(prepared_effort.status, prepared_effort.message));
+    }
+    effort_constraint = std::move(prepared_effort);
+  }
 
   std::unordered_set<std::string> constraint_source_ids;
   auto constraint_validation = validate_acceleration_constraints(
@@ -1396,7 +1554,8 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
   detail::GeneralizedConstraintSet constraints(
       robot_->nv(),
       robot_->nv() + constraint_validation.row_count +
-          task_bound_validation.row_count + lock_rows.coefficients.rows(),
+          task_bound_validation.row_count + lock_rows.coefficients.rows() +
+          (effort_constraint.has_value() ? robot_->nv() : 0),
       false);
   detail::GeneralizedConstraintBlock joint_box;
   joint_box.coefficient_matrix =
@@ -1407,6 +1566,12 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
   if (!constraints.append_block(std::move(joint_box))) {
     return finish(failure(SolverStatus::kNumericalError,
                           "failed to assemble acceleration constraints"));
+  }
+  if (effort_constraint.has_value() &&
+      !constraints.append_block(
+          make_effort_constraint_block(*effort_constraint, robot_->nv()))) {
+    return finish(failure(SolverStatus::kNumericalError,
+                          "failed to assemble effort constraints"));
   }
   if (!options.affine_constraints.empty() &&
       !constraints.append_block(make_affine_constraint_block(
@@ -1499,6 +1664,7 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
   AccelerationSolverResult result;
   static_cast<SolverResult &>(result) = std::move(backend);
   result.acceleration_limits_applied = true;
+  result.effort_limits_applied = effort_constraint.has_value();
   if (result.status != SolverStatus::kSuccess) {
     return finish(clear_outputs(std::move(result)));
   }
@@ -1560,6 +1726,40 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
     return finish(clear_outputs(failure(
         SolverStatus::kNumericalError,
         "accepted acceleration violates task acceleration bounds")));
+  }
+  if (effort_constraint.has_value()) {
+    auto evaluated =
+        evaluate_inverse_dynamics(*robot_, q, dq, result.joint_accelerations);
+    if (evaluated.status != SolverStatus::kSuccess) {
+      auto failed = failure(
+          evaluated.status,
+          "accepted effort evaluation failed: " + evaluated.message);
+      failed.effort_limits_applied = true;
+      return finish(clear_outputs(std::move(failed)));
+    }
+    result.predicted_torques = std::move(evaluated.torques);
+    for (Eigen::Index index = 0; index < robot_->nv(); ++index) {
+      const double tolerance =
+          std::max(kConstraintTolerance,
+                   1e-12 * std::max(
+                                effort_constraint->mass_matrix.row(index)
+                                    .stableNorm() *
+                                    result.joint_accelerations.stableNorm(),
+                                effort_constraint->limits(index)));
+      if (std::abs(result.predicted_torques(index)) >
+          effort_constraint->limits(index) + tolerance) {
+        auto failed = failure(
+            SolverStatus::kNumericalError,
+            "accepted acceleration violates effort constraints");
+        failed.effort_limits_applied = true;
+        return finish(clear_outputs(std::move(failed)));
+      }
+      if (std::abs(std::abs(result.predicted_torques(index)) -
+                   effort_constraint->limits(index)) <= tolerance) {
+        append_unique(&result.saturated_effort_indices,
+                      static_cast<int>(index));
+      }
+    }
   }
   result.joint_velocities_next = dq + dt * result.joint_accelerations;
   try {
