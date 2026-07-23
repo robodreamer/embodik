@@ -298,6 +298,25 @@ add_test(NAME test_acceleration_solver_tight_frame_pose
     COMMAND test_acceleration_solver_tight_frame_pose
 )
 
+add_executable(test_acceleration_solver_relative_pose
+    test_acceleration_solver_relative_pose.cpp
+)
+
+target_link_libraries(test_acceleration_solver_relative_pose
+    embodik_core
+    GTest::gtest_main
+    GTest::gtest
+)
+
+target_include_directories(test_acceleration_solver_relative_pose
+    PRIVATE
+        ${CMAKE_SOURCE_DIR}/cpp_core/src
+)
+
+add_test(NAME test_acceleration_solver_relative_pose
+    COMMAND test_acceleration_solver_relative_pose
+)
+
 add_executable(test_acceleration_solver_torso_pose_bounds
     test_acceleration_solver_torso_pose_bounds.cpp
 )

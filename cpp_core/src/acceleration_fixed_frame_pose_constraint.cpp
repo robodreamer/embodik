@@ -93,17 +93,13 @@ pose_coordinate_sample(const GeometricCoordinateDifferential &differential,
 GeometricCoordinateDifferential translation_only_differential(
     const FrameKinematicDifferential &frame,
     const pinocchio::SE3 &reference_pose, const Eigen::VectorXd &velocity) {
-  GeometricCoordinateDifferential differential;
-  differential.value = Eigen::VectorXd::Zero(6);
-  differential.rate = Eigen::VectorXd::Zero(6);
-  differential.jacobian = Eigen::MatrixXd::Zero(6, velocity.size());
-  differential.affine_bias = Eigen::VectorXd::Zero(6);
-  differential.value.head<3>() =
+  GeometricCoordinateDifferential translation;
+  translation.value =
       frame.pose.translation() - reference_pose.translation();
-  differential.jacobian.topRows<3>() = frame.jacobian.topRows<3>();
-  differential.rate.head<3>() = differential.jacobian.topRows<3>() * velocity;
-  differential.affine_bias.head<3>() = frame.affine_bias.head<3>();
-  return differential;
+  translation.jacobian = frame.jacobian.topRows<3>();
+  translation.rate = translation.jacobian * velocity;
+  translation.affine_bias = frame.affine_bias.head<3>();
+  return promote_translation_to_pose_differential(translation, velocity.size());
 }
 
 GeometricCoordinateDifferential evaluate_pose_differential(

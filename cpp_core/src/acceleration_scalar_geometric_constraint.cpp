@@ -581,7 +581,8 @@ ScalarGeometricConstraintResult validate_scalar_geometric_path(
 }
 
 ScalarGeometricConstraintResult validate_so3_log_rotation_segment(
-    const ScalarGeometricPathSegment &segment) {
+    const ScalarGeometricPathSegment &segment,
+    const Eigen::VectorXd *tangent_support_mask) {
   if (segment.previous.coordinates.value.size() < 3 ||
       segment.current.coordinates.value.size() < 3) {
     return failure(SolverStatus::kNumericalError,
@@ -599,6 +600,21 @@ ScalarGeometricConstraintResult validate_so3_log_rotation_segment(
     return failure(SolverStatus::kNumericalError,
                    "SO(3) segment guard inputs must be finite");
   }
+  if (tangent_support_mask != nullptr) {
+    if (tangent_support_mask->size() != segment.previous.tangent.size() ||
+        !tangent_support_mask->allFinite()) {
+      return failure(SolverStatus::kNumericalError,
+                     "SO(3) segment guard support mask dimensions are invalid");
+    }
+    for (Eigen::Index index = 0; index < tangent_support_mask->size();
+         ++index) {
+      const double value = (*tangent_support_mask)(index);
+      if (value != 0.0 && value != 1.0) {
+        return failure(SolverStatus::kNumericalError,
+                       "SO(3) segment guard support mask must be binary");
+      }
+    }
+  }
   if (!segment.previous.coordinates.so3_rotation.has_value() ||
       !segment.current.coordinates.so3_rotation.has_value()) {
     return failure(SolverStatus::kNumericalError,
@@ -615,8 +631,12 @@ ScalarGeometricConstraintResult validate_so3_log_rotation_segment(
       segment.current.coordinates.value.tail<3>();
   const double previous_angle = previous_log.norm();
   const double current_angle = current_log.norm();
-  const double tangent_excursion =
-      (segment.current.tangent - segment.previous.tangent).cwiseAbs().sum();
+  Eigen::VectorXd tangent_delta =
+      segment.current.tangent - segment.previous.tangent;
+  if (tangent_support_mask != nullptr) {
+    tangent_delta = tangent_delta.cwiseProduct(*tangent_support_mask);
+  }
+  const double tangent_excursion = tangent_delta.cwiseAbs().sum();
   const double endpoint_geodesic =
       pinocchio::log3(segment.previous.coordinates.so3_rotation->transpose() *
                       segment.current.coordinates.so3_rotation.value())
@@ -636,6 +656,17 @@ ScalarGeometricConstraintResult validate_so3_log_rotation_segment(
                    "SO(3) path segment can enter the near-pi chart guard");
   }
   return {};
+}
+
+ScalarGeometricConstraintResult
+validate_so3_log_rotation_segment(const ScalarGeometricPathSegment &segment) {
+  return validate_so3_log_rotation_segment(segment, nullptr);
+}
+
+ScalarGeometricConstraintResult validate_so3_log_rotation_segment(
+    const ScalarGeometricPathSegment &segment,
+    const Eigen::VectorXd &tangent_support_mask) {
+  return validate_so3_log_rotation_segment(segment, &tangent_support_mask);
 }
 
 } // namespace embodik::detail

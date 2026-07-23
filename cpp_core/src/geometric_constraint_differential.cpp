@@ -7,7 +7,6 @@
 #include <stdexcept>
 
 namespace embodik::detail {
-namespace {
 
 GeometricCoordinateDifferential promote_translation_to_pose_differential(
     const GeometricCoordinateDifferential &translation,
@@ -30,6 +29,8 @@ GeometricCoordinateDifferential promote_translation_to_pose_differential(
   result.affine_bias.head<3>() = translation.affine_bias;
   return result;
 }
+
+namespace {
 
 GeometricCoordinateDifferential
 compose_moving_frame_point_translation_differential(
@@ -182,12 +183,31 @@ GeometricCoordinateDifferential evaluate_relative_pose_differential(
       robot.get_current_velocity());
 }
 
+GeometricCoordinateDifferential evaluate_relative_pose_translation_differential(
+    const RobotModel &robot, const std::string &frame_a,
+    const std::string &frame_b) {
+  const auto frames =
+      evaluate_relative_frame_kinematic_differential(robot, frame_a, frame_b);
+  return compose_moving_frame_point_translation_differential(
+      frames.frame_a, frames.frame_b, robot.get_current_velocity());
+}
+
 GeometricCoordinateDifferential evaluate_relative_pose_differential_at_state(
     const RobotModel &robot, const std::string &frame_a,
     const std::string &frame_b, const Eigen::VectorXd &q,
     const Eigen::VectorXd &dq) {
   pinocchio::Data scratch(robot.model());
   return evaluate_relative_pose_differential_at_state(
+      robot, scratch, frame_a, frame_b, q, dq);
+}
+
+GeometricCoordinateDifferential
+evaluate_relative_pose_translation_differential_at_state(
+    const RobotModel &robot, const std::string &frame_a,
+    const std::string &frame_b, const Eigen::VectorXd &q,
+    const Eigen::VectorXd &dq) {
+  pinocchio::Data scratch(robot.model());
+  return evaluate_relative_pose_translation_differential_at_state(
       robot, scratch, frame_a, frame_b, q, dq);
 }
 
@@ -199,6 +219,17 @@ GeometricCoordinateDifferential evaluate_relative_pose_differential_at_state(
       evaluate_relative_frame_kinematic_differential_at_state(
           robot, scratch, frame_a, frame_b, q, dq),
       dq);
+}
+
+GeometricCoordinateDifferential
+evaluate_relative_pose_translation_differential_at_state(
+    const RobotModel &robot, pinocchio::Data &scratch,
+    const std::string &frame_a, const std::string &frame_b,
+    const Eigen::VectorXd &q, const Eigen::VectorXd &dq) {
+  const auto frames = evaluate_relative_frame_kinematic_differential_at_state(
+      robot, scratch, frame_a, frame_b, q, dq);
+  return compose_moving_frame_point_translation_differential(
+      frames.frame_a, frames.frame_b, dq);
 }
 
 } // namespace embodik::detail

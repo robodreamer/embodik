@@ -2,6 +2,7 @@
 
 #include "acceleration_allocation_transform.hpp"
 #include "acceleration_fixed_frame_pose_constraint.hpp"
+#include "acceleration_relative_pose_constraint.hpp"
 #include "acceleration_state_box.hpp"
 #include "acceleration_task_differential.hpp"
 #include "acceleration_tight_point_constraint.hpp"
@@ -84,6 +85,10 @@ const char *constraint_family_name(const TightPointAccelerationConstraint &) {
 const char *
 constraint_family_name(const TightFramePoseAccelerationConstraint &) {
   return "tight frame pose constraint";
+}
+
+const char *constraint_family_name(const RelativePoseAccelerationConstraint &) {
+  return "relative pose constraint";
 }
 
 const char *
@@ -240,6 +245,14 @@ struct FixedFramePoseConstraintAssembly {
   std::string message;
   std::vector<AffineAccelerationConstraint> constraints;
   std::vector<detail::PreparedFixedFramePoseConstraint> prepared_constraints;
+  Eigen::Index row_count = 0;
+};
+
+struct RelativePoseConstraintAssembly {
+  SolverStatus status = SolverStatus::kSuccess;
+  std::string message;
+  std::vector<AffineAccelerationConstraint> constraints;
+  std::vector<detail::PreparedRelativePoseConstraint> prepared_constraints;
   Eigen::Index row_count = 0;
 };
 
@@ -964,6 +977,50 @@ FixedFramePoseConstraintAssembly make_fixed_frame_pose_constraints(
     }
     const auto prepared = detail::prepare_fixed_frame_pose_constraint(
         record, robot, dt, joint_acceleration_lower,
+        joint_acceleration_upper);
+    if (!prepared.satisfied()) {
+      assembly.status = prepared.status;
+      assembly.message = prepared.message;
+      return assembly;
+    }
+    assembly.row_count +=
+        prepared.prepared->scalar.state_box.physical_constraint
+            .coefficient_matrix
+            .rows();
+    assembly.constraints.push_back(
+        prepared.prepared->scalar.state_box.physical_constraint);
+    assembly.prepared_constraints.push_back(std::move(*prepared.prepared));
+  }
+
+  return assembly;
+}
+
+RelativePoseConstraintAssembly make_relative_pose_constraints(
+    const RobotModel &robot,
+    const std::vector<RelativePoseAccelerationConstraint> &relative_poses,
+    double dt, const Eigen::VectorXd &joint_acceleration_lower,
+    const Eigen::VectorXd &joint_acceleration_upper,
+    std::unordered_set<std::string> *source_ids) {
+  RelativePoseConstraintAssembly assembly;
+  assembly.constraints.reserve(relative_poses.size());
+  assembly.prepared_constraints.reserve(relative_poses.size());
+
+  for (const auto &relative_pose : relative_poses) {
+    const std::string family = constraint_family_name(relative_pose);
+    if (relative_pose.source_id.empty()) {
+      assembly.status = SolverStatus::kInvalidInput;
+      assembly.message = family + " source_id must not be empty";
+      return assembly;
+    }
+    if (!source_ids->insert(relative_pose.source_id).second) {
+      assembly.status = SolverStatus::kInvalidInput;
+      assembly.message = "duplicate acceleration constraint source_id '" +
+                         relative_pose.source_id + "'";
+      return assembly;
+    }
+
+    const auto prepared = detail::prepare_relative_pose_constraint(
+        relative_pose, robot, dt, joint_acceleration_lower,
         joint_acceleration_upper);
     if (!prepared.satisfied()) {
       assembly.status = prepared.status;
@@ -1799,6 +1856,13 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
     return finish(failure(torso_pose_bound_constraints.status,
                           torso_pose_bound_constraints.message));
   }
+  const auto relative_pose_constraints = make_relative_pose_constraints(
+      *robot_, options.relative_pose_constraints, dt, state_box.lower,
+      state_box.upper, &constraint_source_ids);
+  if (relative_pose_constraints.status != SolverStatus::kSuccess) {
+    return finish(failure(relative_pose_constraints.status,
+                          relative_pose_constraints.message));
+  }
   if (zero_excluded_by_bounds(state_box.lower, state_box.upper)) {
     for (auto &config : objectives.configs) {
       config.allow_min_error_fallback = true;
@@ -1812,6 +1876,7 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
           tight_point_constraints.row_count +
           tight_frame_pose_constraints.row_count +
           torso_pose_bound_constraints.row_count +
+          relative_pose_constraints.row_count +
           lock_rows.coefficients.rows() +
           (effort_constraint.has_value() ? robot_->nv() : 0),
       false);
@@ -1894,6 +1959,14 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
     return finish(failure(
         SolverStatus::kNumericalError,
         "failed to assemble torso pose bound acceleration constraints"));
+  }
+  if (relative_pose_constraints.row_count > 0 &&
+      !constraints.append_block(make_affine_constraint_block(
+          relative_pose_constraints.constraints, robot_->nv(),
+          relative_pose_constraints.row_count))) {
+    return finish(failure(
+        SolverStatus::kNumericalError,
+        "failed to assemble relative pose acceleration constraints"));
   }
   if (!constraints.finalize()) {
     return finish(failure(SolverStatus::kNumericalError,
@@ -2045,6 +2118,13 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
         "accepted acceleration violates torso pose bound acceleration "
         "constraints")));
   }
+  if (!accepted_affine_constraints_are_satisfied(
+          relative_pose_constraints.constraints, result.joint_accelerations)) {
+    return finish(clear_outputs(failure(
+        SolverStatus::kNumericalError,
+        "accepted acceleration violates relative pose acceleration "
+        "constraints")));
+  }
   if (effort_constraint.has_value()) {
     auto evaluated =
         evaluate_inverse_dynamics(*robot_, q, dq, result.joint_accelerations);
@@ -2097,7 +2177,8 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
   }
   if (!tight_point_constraints.prepared_constraints.empty() ||
       !tight_frame_pose_constraints.prepared_constraints.empty() ||
-      !torso_pose_bound_constraints.prepared_constraints.empty()) {
+      !torso_pose_bound_constraints.prepared_constraints.empty() ||
+      !relative_pose_constraints.prepared_constraints.empty()) {
     const auto predicted_state_box = build_joint_state_box(
         *robot_, result.q_solution, result.joint_velocities_next, dt,
         accel_limits, options);
@@ -2134,6 +2215,17 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
          torso_pose_bound_constraints.prepared_constraints) {
       const auto acceptance =
           detail::validate_fixed_frame_pose_constraint_acceptance(
+              prepared, *robot_, q, dq, result.joint_accelerations, dt,
+              predicted_state_box.lower, predicted_state_box.upper);
+      if (!acceptance.satisfied()) {
+        return finish(clear_outputs(
+            failure(acceptance.status, acceptance.message)));
+      }
+    }
+    for (const auto &prepared :
+         relative_pose_constraints.prepared_constraints) {
+      const auto acceptance =
+          detail::validate_relative_pose_constraint_acceptance(
               prepared, *robot_, q, dq, result.joint_accelerations, dt,
               predicted_state_box.lower, predicted_state_box.upper);
       if (!acceptance.satisfied()) {

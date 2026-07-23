@@ -120,7 +120,11 @@ ScalarGeometricConstraintResult validate_scalar_geometric_path(
     const ScalarGeometricPathSampleEvaluator &sample_evaluator,
     const ScalarGeometricPathSegmentValidator &segment_validator = {});
 
+ScalarGeometricConstraintResult
+validate_so3_log_rotation_segment(const ScalarGeometricPathSegment &segment);
+
 ScalarGeometricConstraintResult validate_so3_log_rotation_segment(
-    const ScalarGeometricPathSegment &segment);
+    const ScalarGeometricPathSegment &segment,
+    const Eigen::VectorXd &tangent_support_mask);
 
 } // namespace embodik::detail

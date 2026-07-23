@@ -163,6 +163,24 @@ struct TightFramePoseAccelerationConstraint {
 };
 
 /**
+ * @brief Named caller-owned two-moving-frame relative pose acceleration bounds.
+ *
+ * The physical coordinate is exactly:
+ *   [translation(T_a^-1 * T_b) expressed in frame A,
+ *    log3(R_a^T * R_b)]
+ *
+ * lower_bounds and upper_bounds are explicit bounds around this physical
+ * relative pose. The acceleration solver never captures, recenters, or manages
+ * any relative reference lifecycle. Translation-only masks do not evaluate the
+ * SO(3) chart.
+ */
+struct RelativePoseAccelerationConstraint {
+  std::string source_id;
+  RelativePoseConstraintDefinition definition;
+  GeometricConstraintAccelerationPolicy policy;
+};
+
+/**
  * @brief Named caller-owned torso pose acceleration bounds.
  *
  * reference_pose is required and is never captured or recentered by the
@@ -190,6 +208,7 @@ struct AccelerationSolveOptions {
   std::vector<TightPointAccelerationConstraint> tight_point_constraints;
   std::vector<TightFramePoseAccelerationConstraint>
       tight_frame_pose_constraints;
+  std::vector<RelativePoseAccelerationConstraint> relative_pose_constraints;
   std::vector<TorsoPoseBoundAccelerationConstraint>
       torso_pose_bound_constraints;
   std::vector<int> zero_acceleration_joint_indices;
@@ -250,6 +269,7 @@ struct AccelerationSolverCapabilities {
   bool supports_fixed_base_contact_kinematics = true;
   bool supports_tight_point_constraints = true;
   bool supports_tight_frame_pose_constraints = true;
+  bool supports_relative_pose_constraints = true;
   bool supports_torso_pose_bound_constraints = true;
   bool supports_dynamic_contact = false;
 };

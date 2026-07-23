@@ -21,6 +21,10 @@ struct GeometricCoordinateDifferential {
   std::optional<Eigen::Matrix3d> so3_rotation;
 };
 
+GeometricCoordinateDifferential promote_translation_to_pose_differential(
+    const GeometricCoordinateDifferential &translation,
+    Eigen::Index variable_count);
+
 GeometricCoordinateDifferential evaluate_fixed_frame_pose_differential(
     const RobotModel &robot, const std::string &frame_name,
     const pinocchio::SE3 &reference_pose);
@@ -41,12 +45,28 @@ GeometricCoordinateDifferential evaluate_relative_pose_differential(
     const RobotModel &robot, const std::string &frame_a,
     const std::string &frame_b);
 
+GeometricCoordinateDifferential evaluate_relative_pose_translation_differential(
+    const RobotModel &robot, const std::string &frame_a,
+    const std::string &frame_b);
+
 GeometricCoordinateDifferential evaluate_relative_pose_differential_at_state(
     const RobotModel &robot, const std::string &frame_a,
     const std::string &frame_b, const Eigen::VectorXd &q,
     const Eigen::VectorXd &dq);
 
+GeometricCoordinateDifferential
+evaluate_relative_pose_translation_differential_at_state(
+    const RobotModel &robot, const std::string &frame_a,
+    const std::string &frame_b, const Eigen::VectorXd &q,
+    const Eigen::VectorXd &dq);
+
 GeometricCoordinateDifferential evaluate_relative_pose_differential_at_state(
+    const RobotModel &robot, pinocchio::Data &scratch,
+    const std::string &frame_a, const std::string &frame_b,
+    const Eigen::VectorXd &q, const Eigen::VectorXd &dq);
+
+GeometricCoordinateDifferential
+evaluate_relative_pose_translation_differential_at_state(
     const RobotModel &robot, pinocchio::Data &scratch,
     const std::string &frame_a, const std::string &frame_b,
     const Eigen::VectorXd &q, const Eigen::VectorXd &dq);
