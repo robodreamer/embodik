@@ -1,5 +1,6 @@
 #include <embodik/acceleration_solver.hpp>
 
+#include "acceleration_allocation_transform.hpp"
 #include "acceleration_state_box.hpp"
 #include "acceleration_task_differential.hpp"
 #include "generalized_constraint_set.hpp"
@@ -454,6 +455,7 @@ struct ObjectiveAssembly {
   std::vector<std::vector<std::shared_ptr<Task>>> groups;
   std::vector<std::vector<detail::AccelerationTaskDifferential>> differentials;
   std::vector<std::vector<Eigen::VectorXd>> references;
+  bool synthetic_hold_objective = false;
 };
 
 ObjectiveAssembly assemble_objectives(
@@ -486,6 +488,7 @@ ObjectiveAssembly assemble_objectives(
     assembly.groups.push_back({});
     assembly.differentials.push_back({});
     assembly.references.push_back({});
+    assembly.synthetic_hold_objective = true;
     return assembly;
   }
 
@@ -755,10 +758,40 @@ Eigen::VectorXd vector_from_solution(const SolverResult &result) {
                                            result.solution.size());
 }
 
+void assign_solution_from_vector(SolverResult *result,
+                                 const Eigen::VectorXd &solution) {
+  result->solution.assign(solution.data(), solution.data() + solution.size());
+}
+
 bool zero_excluded_by_bounds(const Eigen::VectorXd &lower,
                              const Eigen::VectorXd &upper) {
   return (lower.array() > kConstraintTolerance).any() ||
          (upper.array() < -kConstraintTolerance).any();
+}
+
+bool populate_allocation_diagnostics(
+    AccelerationSolverResult *result,
+    const detail::PreparedAccelerationAllocationTransform &allocation,
+    const Eigen::VectorXd &physical_acceleration) {
+  AccelerationAllocationDiagnostics diagnostics;
+  diagnostics.applied = true;
+  diagnostics.physical_metric_diagonal =
+      allocation.requested_metric_diagonal;
+  diagnostics.reference_acceleration =
+      allocation.reference_acceleration;
+  const Eigen::VectorXd residual =
+      physical_acceleration - allocation.reference_acceleration;
+  diagnostics.weighted_physical_residual =
+      allocation.requested_metric_diagonal.array().sqrt().matrix()
+          .cwiseProduct(residual);
+  diagnostics.objective_value =
+      0.5 * diagnostics.weighted_physical_residual.squaredNorm();
+  if (!diagnostics.weighted_physical_residual.allFinite() ||
+      !std::isfinite(diagnostics.objective_value)) {
+    return false;
+  }
+  result->allocation_diagnostics = std::move(diagnostics);
+  return true;
 }
 
 AccelerationSolverResult clear_outputs(AccelerationSolverResult result) {
@@ -766,6 +799,7 @@ AccelerationSolverResult clear_outputs(AccelerationSolverResult result) {
   result.joint_accelerations.resize(0);
   result.joint_velocities_next.resize(0);
   result.q_solution.resize(0);
+  result.allocation_diagnostics = {};
   return result;
 }
 
@@ -1299,6 +1333,18 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
   if (state_box.status != SolverStatus::kSuccess) {
     return finish(failure(state_box.status, state_box.message));
   }
+  std::optional<detail::PreparedAccelerationAllocationTransform> allocation;
+  if (options.generalized_acceleration_allocation.has_value()) {
+    const auto &requested_allocation =
+        options.generalized_acceleration_allocation.value();
+    auto prepared = detail::prepare_acceleration_allocation_transform(
+        requested_allocation.metric_diagonal,
+        requested_allocation.reference_acceleration, robot_->nv());
+    if (!prepared.satisfied()) {
+      return finish(failure(prepared.status, prepared.message));
+    }
+    allocation = std::move(prepared);
+  }
 
   std::unordered_set<std::string> constraint_source_ids;
   auto constraint_validation = validate_acceleration_constraints(
@@ -1399,11 +1445,56 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
                           "failed to assemble acceleration constraints"));
   }
 
+  auto backend_targets = objectives.targets;
+  auto backend_biases = objectives.biases;
+  auto backend_matrices = objectives.matrices;
+  Eigen::MatrixXd backend_constraint_matrix = constraints.coefficient_matrix();
+  Eigen::VectorXd backend_lower_bounds = constraints.lower_bounds();
+  Eigen::VectorXd backend_upper_bounds = constraints.upper_bounds();
+  if (allocation.has_value()) {
+    for (std::size_t objective_index = 0;
+         objective_index < backend_matrices.size(); ++objective_index) {
+      if (objectives.synthetic_hold_objective && objective_index == 0U) {
+        backend_matrices[objective_index] =
+            Eigen::MatrixXd::Identity(robot_->nv(), robot_->nv());
+        backend_biases[objective_index] = Eigen::VectorXd::Zero(robot_->nv());
+        backend_targets[objective_index] = Eigen::VectorXd::Zero(robot_->nv());
+        continue;
+      }
+      const auto transformed_matrix =
+          allocation->transform_objective_matrix(
+              objectives.matrices[objective_index]);
+      if (!transformed_matrix.satisfied()) {
+        return finish(
+            failure(transformed_matrix.status, transformed_matrix.message));
+      }
+      const auto transformed_bias =
+          allocation->transform_objective_bias(
+              objectives.matrices[objective_index],
+              objectives.biases[objective_index]);
+      if (!transformed_bias.satisfied()) {
+        return finish(
+            failure(transformed_bias.status, transformed_bias.message));
+      }
+      backend_matrices[objective_index] = std::move(transformed_matrix.matrix);
+      backend_biases[objective_index] = std::move(transformed_bias.vector);
+    }
+    const auto transformed_hard = allocation->transform_backend_hard_rows(
+        constraints.coefficient_matrix(), constraints.lower_bounds(),
+        constraints.upper_bounds());
+    if (!transformed_hard.satisfied()) {
+      return finish(failure(transformed_hard.status, transformed_hard.message));
+    }
+    backend_constraint_matrix = std::move(transformed_hard.coefficient_matrix);
+    backend_lower_bounds = std::move(transformed_hard.lower_bounds);
+    backend_upper_bounds = std::move(transformed_hard.upper_bounds);
+  }
+
   auto backend = detail::SolveGeneralizedHierarchicalLinearSystemEigen(
-      objectives.targets, objectives.biases, objectives.matrices,
-      constraints.coefficient_matrix(), constraints.lower_bounds(),
-      constraints.upper_bounds(), acceleration_backend_config(),
-      objectives.configs, nullptr, kConstraintTolerance);
+      backend_targets, backend_biases, backend_matrices,
+      backend_constraint_matrix, backend_lower_bounds, backend_upper_bounds,
+      acceleration_backend_config(), objectives.configs, nullptr,
+      kConstraintTolerance);
 
   AccelerationSolverResult result;
   static_cast<SolverResult &>(result) = std::move(backend);
@@ -1412,7 +1503,24 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
     return finish(clear_outputs(std::move(result)));
   }
 
-  result.joint_accelerations = vector_from_solution(result);
+  Eigen::VectorXd backend_solution = vector_from_solution(result);
+  if (allocation.has_value()) {
+    const auto physical =
+        allocation->reconstruct_physical_acceleration(backend_solution);
+    if (!physical.satisfied()) {
+      return finish(failure(physical.status, physical.message));
+    }
+    result.joint_accelerations = physical.vector;
+    assign_solution_from_vector(&result, result.joint_accelerations);
+    if (!populate_allocation_diagnostics(&result, *allocation,
+                                         result.joint_accelerations)) {
+      return finish(clear_outputs(failure(
+          SolverStatus::kNumericalError,
+          "acceleration allocation diagnostics are not finite")));
+    }
+  } else {
+    result.joint_accelerations = std::move(backend_solution);
+  }
   if (result.joint_accelerations.size() != robot_->nv() ||
       !result.joint_accelerations.allFinite()) {
     return finish(failure(SolverStatus::kNumericalError,

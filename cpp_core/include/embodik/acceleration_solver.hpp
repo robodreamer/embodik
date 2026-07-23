@@ -78,10 +78,24 @@ struct TaskAccelerationBounds {
   std::vector<bool> upper_bound_active;
 };
 
+/**
+ * @brief Optional diagonal metric/reference for generalized acceleration
+ * allocation.
+ *
+ * A positive diagonal metric H and physical reference r reparameterize the
+ * backend solve as ddq = r + S*z, with S proportional to H^-1/2.
+ */
+struct GeneralizedAccelerationAllocation {
+  Eigen::VectorXd metric_diagonal;
+  Eigen::VectorXd reference_acceleration;
+};
+
 struct AccelerationSolveOptions {
   std::optional<Eigen::VectorXd> acceleration_limits_override;
   bool apply_velocity_limits = true;
   bool apply_position_limits = true;
+  std::optional<GeneralizedAccelerationAllocation>
+      generalized_acceleration_allocation;
   std::vector<AffineAccelerationConstraint> affine_constraints;
   std::vector<FrozenNextVelocityConstraint> frozen_next_velocity_constraints;
   std::vector<TaskAccelerationBounds> task_acceleration_bounds;
@@ -108,6 +122,14 @@ struct AccelerationTaskDiagnostics {
   bool used_min_error_fallback = false;
 };
 
+struct AccelerationAllocationDiagnostics {
+  bool applied = false;
+  Eigen::VectorXd physical_metric_diagonal;
+  Eigen::VectorXd reference_acceleration;
+  Eigen::VectorXd weighted_physical_residual;
+  double objective_value = 0.0;
+};
+
 struct AccelerationSolverResult : public SolverResult {
   Eigen::VectorXd joint_accelerations;
   Eigen::VectorXd joint_velocities_next;
@@ -120,6 +142,7 @@ struct AccelerationSolverResult : public SolverResult {
   std::vector<int> saturated_velocity_indices;
   std::vector<int> saturated_position_indices;
   std::vector<AccelerationTaskDiagnostics> task_diagnostics;
+  AccelerationAllocationDiagnostics allocation_diagnostics;
 };
 
 struct AccelerationSolverCapabilities {

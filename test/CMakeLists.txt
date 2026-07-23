@@ -184,6 +184,44 @@ add_test(NAME test_acceleration_solver_frozen_locks
     COMMAND test_acceleration_solver_frozen_locks
 )
 
+add_executable(test_acceleration_allocation_transform
+    test_acceleration_allocation_transform.cpp
+)
+
+target_link_libraries(test_acceleration_allocation_transform
+    embodik_core
+    GTest::gtest_main
+    GTest::gtest
+)
+
+target_include_directories(test_acceleration_allocation_transform
+    PRIVATE
+        ${CMAKE_SOURCE_DIR}/cpp_core/src
+)
+
+add_test(NAME test_acceleration_allocation_transform
+    COMMAND test_acceleration_allocation_transform
+)
+
+add_executable(test_acceleration_solver_allocation
+    test_acceleration_solver_allocation.cpp
+)
+
+target_link_libraries(test_acceleration_solver_allocation
+    embodik_core
+    GTest::gtest_main
+    GTest::gtest
+)
+
+target_include_directories(test_acceleration_solver_allocation
+    PRIVATE
+        ${CMAKE_SOURCE_DIR}/cpp_core/src
+)
+
+add_test(NAME test_acceleration_solver_allocation
+    COMMAND test_acceleration_solver_allocation
+)
+
 # Python tests
 find_package(Python COMPONENTS Interpreter REQUIRED)
 
