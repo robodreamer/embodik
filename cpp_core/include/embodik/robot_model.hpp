@@ -125,6 +125,16 @@ public:
       pinocchio::ReferenceFrame ref = pinocchio::LOCAL_WORLD_ALIGNED) const;
 
   /**
+   * @brief Get Jdot_frame(q, v) * v for the current state.
+   *
+   * Uses the same spatial row ordering and reference-frame convention as
+   * get_frame_jacobian().
+   */
+  Eigen::Matrix<double, 6, 1> get_frame_jacobian_bias(
+      const std::string &frame_name,
+      pinocchio::ReferenceFrame ref = pinocchio::LOCAL_WORLD_ALIGNED) const;
+
+  /**
    * @brief Get the Jacobian of a point expressed in a frame's local
    * coordinates.
    * @param frame_name Name of the frame that contains the point.
@@ -154,6 +164,11 @@ public:
    * @return 3xN Jacobian matrix for center of mass
    */
   Eigen::Matrix<double, 3, Eigen::Dynamic> get_com_jacobian() const;
+
+  /**
+   * @brief Get Jdot_com(q, v) * v at the current state.
+   */
+  Eigen::Vector3d get_com_jacobian_bias() const;
 
   /**
    * @brief Get list of all frame names
@@ -549,6 +564,8 @@ private:
   mutable bool kinematics_updated_ = false;
   mutable bool jacobians_updated_ = false;
   mutable bool com_updated_ = false;
+  mutable bool jacobian_time_variation_updated_ = false;
+  mutable bool com_acceleration_updated_ = false;
 
   // Optional geometry models
   std::unique_ptr<pinocchio::GeometryModel> visual_model_;

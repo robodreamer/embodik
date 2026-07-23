@@ -32,6 +32,25 @@ add_test(NAME test_hierarchical_linear_solver
     COMMAND test_hierarchical_linear_solver
 )
 
+add_executable(test_acceleration_task_differential
+    test_acceleration_task_differential.cpp
+)
+
+target_link_libraries(test_acceleration_task_differential
+    embodik_core
+    GTest::gtest_main
+    GTest::gtest
+)
+
+target_include_directories(test_acceleration_task_differential
+    PRIVATE
+        ${CMAKE_SOURCE_DIR}/cpp_core/src
+)
+
+add_test(NAME test_acceleration_task_differential
+    COMMAND test_acceleration_task_differential
+)
+
 # Python tests
 find_package(Python COMPONENTS Interpreter REQUIRED)
 

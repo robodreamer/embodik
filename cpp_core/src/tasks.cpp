@@ -230,57 +230,53 @@ Eigen::VectorXd FrameTask::getError() const {
   return error_cache_;
 }
 
+Eigen::VectorXd FrameTask::referenceRowScale() const {
+  switch (task_type_) {
+  case TaskType::FRAME_POSITION:
+    return (position_mask_.array() != 0.0).cast<double>().matrix();
+  case TaskType::FRAME_ORIENTATION:
+    return (orientation_mask_.array() != 0.0).cast<double>().matrix();
+  case TaskType::FRAME_POSE: {
+    Eigen::VectorXd scale(6);
+    scale.head<3>() =
+        (position_mask_.array() != 0.0).cast<double>().matrix();
+    scale.tail<3>() =
+        (orientation_mask_.array() != 0.0).cast<double>().matrix();
+    return scale;
+  }
+  default:
+    return Eigen::VectorXd();
+  }
+}
+
+Eigen::MatrixXd FrameTask::buildPhysicalJacobian() const {
+  Eigen::MatrixXd jacobian;
+  switch (task_type_) {
+  case TaskType::FRAME_POSITION:
+    jacobian = position_jacobian_;
+    break;
+  case TaskType::FRAME_ORIENTATION:
+    jacobian = orientation_jacobian_;
+    break;
+  case TaskType::FRAME_POSE:
+    jacobian.resize(6, position_jacobian_.cols());
+    jacobian.topRows<3>() = position_jacobian_;
+    jacobian.bottomRows<3>() = orientation_jacobian_;
+    break;
+  default:
+    return Eigen::MatrixXd::Zero(0, model_->nv());
+  }
+
+  const Eigen::VectorXd row_scale = referenceRowScale();
+  for (Eigen::Index row = 0; row < row_scale.size(); ++row) {
+    jacobian.row(row) *= row_scale(row);
+  }
+  return jacobian;
+}
+
 Eigen::MatrixXd FrameTask::getJacobian() const {
   if (!cache_valid_) {
-    switch (task_type_) {
-    case TaskType::FRAME_POSITION:
-      jacobian_cache_ = position_jacobian_;
-      // Apply mask by zeroing out rows
-      for (int i = 0; i < 3; ++i) {
-        if (position_mask_(i) == 0) {
-          jacobian_cache_.row(i).setZero();
-        }
-      }
-      break;
-
-    case TaskType::FRAME_ORIENTATION:
-      jacobian_cache_ = orientation_jacobian_;
-      // Apply mask by zeroing out rows
-      for (int i = 0; i < 3; ++i) {
-        if (orientation_mask_(i) == 0) {
-          jacobian_cache_.row(i).setZero();
-        }
-      }
-      break;
-
-    case TaskType::FRAME_POSE:
-      jacobian_cache_.resize(6, position_jacobian_.cols());
-      jacobian_cache_.topRows<3>() = position_jacobian_;
-      jacobian_cache_.bottomRows<3>() = orientation_jacobian_;
-
-      // Apply masks
-      for (int i = 0; i < 3; ++i) {
-        if (position_mask_(i) == 0) {
-          jacobian_cache_.row(i).setZero();
-        }
-        if (orientation_mask_(i) == 0) {
-          jacobian_cache_.row(i + 3).setZero();
-        }
-      }
-      break;
-
-    default:
-      jacobian_cache_ = Eigen::MatrixXd::Zero(0, model_->nv());
-    }
-
-    // Apply joint exclusion: zero out excluded joint columns
-    // Excluded joints have zero columns in the Jacobian
-    for (int excluded_idx : excluded_joint_indices_) {
-      if (excluded_idx >= 0 && excluded_idx < jacobian_cache_.cols()) {
-        jacobian_cache_.col(excluded_idx).setZero();
-      }
-    }
-
+    jacobian_cache_ = apply_excluded_joint_columns(buildPhysicalJacobian());
     cache_valid_ = true;
   }
 
@@ -339,24 +335,21 @@ Eigen::VectorXd COMTask::getError() const {
   return error.cwiseProduct(position_mask_);
 }
 
+Eigen::VectorXd COMTask::referenceRowScale() const {
+  return (position_mask_.array() != 0.0).cast<double>().matrix();
+}
+
+Eigen::MatrixXd COMTask::buildPhysicalJacobian() const {
+  Eigen::MatrixXd jacobian = com_jacobian_;
+  const Eigen::VectorXd row_scale = referenceRowScale();
+  for (Eigen::Index row = 0; row < row_scale.size(); ++row) {
+    jacobian.row(row) *= row_scale(row);
+  }
+  return jacobian;
+}
+
 Eigen::MatrixXd COMTask::getJacobian() const {
-  Eigen::MatrixXd J = com_jacobian_;
-
-  // Apply mask by zeroing out rows
-  for (int i = 0; i < 3; ++i) {
-    if (position_mask_(i) == 0) {
-      J.row(i).setZero();
-    }
-  }
-
-  // Apply joint exclusion: zero out excluded joint columns
-  for (int excluded_idx : excluded_joint_indices_) {
-    if (excluded_idx >= 0 && excluded_idx < J.cols()) {
-      J.col(excluded_idx).setZero();
-    }
-  }
-
-  return J;
+  return apply_excluded_joint_columns(buildPhysicalJacobian());
 }
 
 int COMTask::getDimension() const { return 3; }
@@ -527,6 +520,12 @@ void PostureTask::update(const RobotModel &model) {
   q_current_ = model.get_current_configuration();
 }
 
+int PostureTask::configurationIndexForVelocity(int velocity_index) const {
+  return model_->is_floating_base() && velocity_index >= 6
+             ? velocity_index + 1
+             : velocity_index;
+}
+
 void PostureTask::updateProjectionMatrix() {
   projection_matrix_ = Eigen::MatrixXd::Zero(model_->nv(), model_->nv());
 
@@ -597,12 +596,59 @@ Eigen::VectorXd PostureTask::getError() const {
       v_error.tail(model_->nv() - 6) = q_error.tail(model_->nq() - 7);
     }
 
-    // Apply weights
     return v_error.cwiseProduct(joint_weights_.head(model_->nv()));
   } else {
     // For fixed base, nq == nv
     return q_error.cwiseProduct(joint_weights_.head(model_->nv()));
   }
+}
+
+Eigen::VectorXd PostureTask::referenceRowScale() const {
+  if (!controlled_joint_indices_.empty()) {
+    Eigen::VectorXd row_scale(controlled_joint_indices_.size());
+    for (size_t i = 0; i < controlled_joint_indices_.size(); ++i) {
+      const int configuration_index =
+          configurationIndexForVelocity(controlled_joint_indices_[i]);
+      row_scale(static_cast<Eigen::Index>(i)) =
+          configuration_index >= 0 &&
+          configuration_index < joint_weights_.size()
+              ? joint_weights_(configuration_index)
+              : 0.0;
+    }
+    return row_scale;
+  }
+
+  Eigen::VectorXd row_scale(model_->nv());
+  for (int velocity_index = 0; velocity_index < model_->nv();
+       ++velocity_index) {
+    row_scale(velocity_index) =
+        velocity_index >= 0 && velocity_index < joint_weights_.size()
+            ? joint_weights_(velocity_index)
+            : 0.0;
+  }
+  return row_scale;
+}
+
+Eigen::MatrixXd PostureTask::buildPhysicalJacobian() const {
+  const Eigen::VectorXd row_scale = referenceRowScale();
+  Eigen::MatrixXd jacobian;
+  if (!controlled_joint_indices_.empty()) {
+    jacobian =
+        Eigen::MatrixXd::Zero(controlled_joint_indices_.size(), model_->nv());
+    for (size_t row = 0; row < controlled_joint_indices_.size(); ++row) {
+      const int velocity_index = controlled_joint_indices_[row];
+      if (velocity_index >= 0 && velocity_index < model_->nv()) {
+        jacobian(static_cast<Eigen::Index>(row), velocity_index) =
+            row_scale(static_cast<Eigen::Index>(row));
+      }
+    }
+  } else {
+    jacobian = jacobian_;
+    for (Eigen::Index row = 0; row < row_scale.size(); ++row) {
+      jacobian.row(row) *= row_scale(row);
+    }
+  }
+  return jacobian;
 }
 
 Eigen::MatrixXd PostureTask::getJacobian() const {
@@ -1188,6 +1234,8 @@ Eigen::VectorXd JointTask::getError() const {
   return error;
 }
 
+Eigen::MatrixXd JointTask::buildPhysicalJacobian() const { return jacobian_; }
+
 Eigen::MatrixXd JointTask::getJacobian() const { return jacobian_; }
 
 //=============================================================================
@@ -1364,13 +1412,21 @@ Eigen::VectorXd MultiJointTask::getError() const {
   return error.cwiseProduct(joint_weights_);
 }
 
-Eigen::MatrixXd MultiJointTask::getJacobian() const {
+Eigen::VectorXd MultiJointTask::referenceRowScale() const {
+  return joint_weights_;
+}
+
+Eigen::MatrixXd MultiJointTask::buildPhysicalJacobian() const {
   // Apply weights to Jacobian rows
   Eigen::MatrixXd J = jacobian_;
   for (int i = 0; i < static_cast<int>(joint_indices_.size()); ++i) {
     J.row(i) *= joint_weights_(i);
   }
   return J;
+}
+
+Eigen::MatrixXd MultiJointTask::getJacobian() const {
+  return buildPhysicalJacobian();
 }
 
 //=============================================================================
@@ -1452,22 +1508,26 @@ Eigen::VectorXd RelativeFrameTask::getError() const {
   return error;
 }
 
+Eigen::VectorXd RelativeFrameTask::referenceRowScale() const {
+  Eigen::VectorXd row_scale(6);
+  row_scale.head<3>() =
+      (position_mask_.array() != 0.0).cast<double>().matrix();
+  row_scale.tail<3>() =
+      (orientation_mask_.array() != 0.0).cast<double>().matrix();
+  return row_scale;
+}
+
+Eigen::MatrixXd RelativeFrameTask::buildPhysicalJacobian() const {
+  Eigen::MatrixXd jacobian = relative_jacobian_;
+  const Eigen::VectorXd row_scale = referenceRowScale();
+  for (Eigen::Index row = 0; row < row_scale.size(); ++row) {
+    jacobian.row(row) *= row_scale(row);
+  }
+  return jacobian;
+}
+
 Eigen::MatrixXd RelativeFrameTask::getJacobian() const {
-  Eigen::MatrixXd J = relative_jacobian_;
-
-  for (int i = 0; i < 3; ++i) {
-    if (position_mask_(i) == 0)
-      J.row(i).setZero();
-    if (orientation_mask_(i) == 0)
-      J.row(i + 3).setZero();
-  }
-
-  for (int excluded_idx : excluded_joint_indices_) {
-    if (excluded_idx >= 0 && excluded_idx < J.cols())
-      J.col(excluded_idx).setZero();
-  }
-
-  return J;
+  return apply_excluded_joint_columns(buildPhysicalJacobian());
 }
 
 //=============================================================================
@@ -1636,22 +1696,26 @@ Eigen::VectorXd AbsoluteFrameTask::getError() const {
   return error;
 }
 
+Eigen::VectorXd AbsoluteFrameTask::referenceRowScale() const {
+  Eigen::VectorXd row_scale(6);
+  row_scale.head<3>() =
+      (position_mask_.array() != 0.0).cast<double>().matrix();
+  row_scale.tail<3>() =
+      (orientation_mask_.array() != 0.0).cast<double>().matrix();
+  return row_scale;
+}
+
+Eigen::MatrixXd AbsoluteFrameTask::buildPhysicalJacobian() const {
+  Eigen::MatrixXd jacobian = absolute_jacobian_;
+  const Eigen::VectorXd row_scale = referenceRowScale();
+  for (Eigen::Index row = 0; row < row_scale.size(); ++row) {
+    jacobian.row(row) *= row_scale(row);
+  }
+  return jacobian;
+}
+
 Eigen::MatrixXd AbsoluteFrameTask::getJacobian() const {
-  Eigen::MatrixXd J = absolute_jacobian_;
-
-  for (int i = 0; i < 3; ++i) {
-    if (position_mask_(i) == 0)
-      J.row(i).setZero();
-    if (orientation_mask_(i) == 0)
-      J.row(i + 3).setZero();
-  }
-
-  for (int excluded_idx : excluded_joint_indices_) {
-    if (excluded_idx >= 0 && excluded_idx < J.cols())
-      J.col(excluded_idx).setZero();
-  }
-
-  return J;
+  return apply_excluded_joint_columns(buildPhysicalJacobian());
 }
 
 } // namespace embodik

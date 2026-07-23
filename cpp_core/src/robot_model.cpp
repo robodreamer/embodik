@@ -232,6 +232,8 @@ void RobotModel::update_configuration(const Eigen::VectorXd &q) {
   kinematics_updated_ = true;
   jacobians_updated_ = false;
   com_updated_ = false;
+  jacobian_time_variation_updated_ = false;
+  com_acceleration_updated_ = false;
 }
 
 void RobotModel::update_kinematics(const Eigen::VectorXd &q,
@@ -263,6 +265,8 @@ void RobotModel::update_kinematics(const Eigen::VectorXd &q,
   kinematics_updated_ = true;
   jacobians_updated_ = false;
   com_updated_ = false;
+  jacobian_time_variation_updated_ = false;
+  com_acceleration_updated_ = false;
 }
 
 RobotModel::SE3
@@ -297,6 +301,29 @@ RobotModel::get_frame_jacobian(const std::string &frame_name,
   pinocchio::getFrameJacobian(model_, data_, frame_id, ref, J);
 
   return J;
+}
+
+Eigen::Matrix<double, 6, 1> RobotModel::get_frame_jacobian_bias(
+    const std::string &frame_name, pinocchio::ReferenceFrame ref) const {
+  if (!kinematics_updated_) {
+    throw std::runtime_error(
+        "Kinematics not updated. Call update_kinematics() first.");
+  }
+
+  const FrameIndex frame_id = get_frame_id(frame_name);
+  if (!jacobian_time_variation_updated_) {
+    pinocchio::computeJointJacobiansTimeVariation(model_, data_, current_q_,
+                                                   current_v_);
+    jacobian_time_variation_updated_ = true;
+    jacobians_updated_ = true;
+  }
+
+  Eigen::Matrix<double, 6, Eigen::Dynamic> jacobian_time_variation(6,
+                                                                    model_.nv);
+  jacobian_time_variation.setZero();
+  pinocchio::getFrameJacobianTimeVariation(
+      model_, data_, frame_id, ref, jacobian_time_variation);
+  return jacobian_time_variation * current_v_;
 }
 
 Eigen::Matrix<double, 3, Eigen::Dynamic>
@@ -498,6 +525,21 @@ Eigen::Matrix<double, 3, Eigen::Dynamic> RobotModel::get_com_jacobian() const {
   Jcom = data_.Jcom;
 
   return Jcom;
+}
+
+Eigen::Vector3d RobotModel::get_com_jacobian_bias() const {
+  if (!kinematics_updated_) {
+    throw std::runtime_error(
+        "Kinematics not updated. Call update_kinematics() first.");
+  }
+
+  if (!com_acceleration_updated_) {
+    pinocchio::centerOfMass(model_, data_, current_q_, current_v_,
+                            Eigen::VectorXd::Zero(model_.nv), false);
+    com_updated_ = true;
+    com_acceleration_updated_ = true;
+  }
+  return data_.acom[0];
 }
 
 std::vector<std::string> RobotModel::get_frame_names() const {
