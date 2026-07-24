@@ -132,20 +132,35 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
   }
 
   std::unordered_set<std::string> constraint_source_ids;
-  auto constraint_validation = validate_acceleration_constraints(
-      options.affine_constraints, options.frozen_next_velocity_constraints,
-      robot_->nv(), &constraint_source_ids);
+  ConstraintValidation constraint_validation;
+  if (!options.affine_constraints.empty() ||
+      !options.frozen_next_velocity_constraints.empty()) {
+    constraint_validation = validate_acceleration_constraints(
+        options.affine_constraints, options.frozen_next_velocity_constraints,
+        robot_->nv(), &constraint_source_ids);
+  }
   if (constraint_validation.status != SolverStatus::kSuccess) {
     return finish(
         failure(constraint_validation.status, constraint_validation.message));
   }
-  const auto frozen_transform = transform_frozen_constraints(
-      options.frozen_next_velocity_constraints, dq, dt);
+  FrozenTransform frozen_transform;
+  if (!options.frozen_next_velocity_constraints.empty()) {
+    frozen_transform = transform_frozen_constraints(
+        options.frozen_next_velocity_constraints, dq, dt);
+  }
   if (frozen_transform.status != SolverStatus::kSuccess) {
     return finish(
         failure(frozen_transform.status, frozen_transform.message));
   }
-  const auto lock_rows = build_lock_rows(options, dq, dt);
+  LockRows lock_rows;
+  if (!options.zero_acceleration_joint_indices.empty() ||
+      !options.zero_next_velocity_joint_indices.empty() ||
+      !options.fixed_current_position_joint_indices.empty()) {
+    lock_rows = build_lock_rows(options, dq, dt);
+  } else {
+    lock_rows.coefficients.resize(0, robot_->nv());
+    lock_rows.bounds.resize(0);
+  }
   if (lock_rows.status != SolverStatus::kSuccess) {
     return finish(failure(lock_rows.status, lock_rows.message));
   }
@@ -173,62 +188,86 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
     return finish(failure(objectives.status, objectives.message));
   }
 
-  const auto task_bound_validation = validate_task_acceleration_bounds(
-      options.task_acceleration_bounds, objectives, &constraint_source_ids);
+  ConstraintValidation task_bound_validation;
+  if (!options.task_acceleration_bounds.empty()) {
+    task_bound_validation = validate_task_acceleration_bounds(
+        options.task_acceleration_bounds, objectives, &constraint_source_ids);
+  }
   if (task_bound_validation.status != SolverStatus::kSuccess) {
     return finish(failure(task_bound_validation.status,
                           task_bound_validation.message));
   }
 
-  const auto task_bound_constraints = make_task_bound_affine_constraints(
-      options.task_acceleration_bounds, objectives);
-  const auto contact_constraints = make_contact_acceleration_constraints(
-      *robot_, options.contact_acceleration_constraints, &constraint_source_ids);
+  std::vector<AffineAccelerationConstraint> task_bound_constraints;
+  if (!options.task_acceleration_bounds.empty()) {
+    task_bound_constraints = make_task_bound_affine_constraints(
+        options.task_acceleration_bounds, objectives);
+  }
+  ContactConstraintAssembly contact_constraints;
+  if (!options.contact_acceleration_constraints.empty()) {
+    contact_constraints = make_contact_acceleration_constraints(
+        *robot_, options.contact_acceleration_constraints,
+        &constraint_source_ids);
+  }
   if (contact_constraints.status != SolverStatus::kSuccess) {
     return finish(
         failure(contact_constraints.status, contact_constraints.message));
   }
-  const auto tight_point_constraints = make_tight_point_constraints(
-      *robot_, options.tight_point_constraints, dt, state_box.lower,
-      state_box.upper, &constraint_source_ids);
+  TightPointConstraintAssembly tight_point_constraints;
+  if (!options.tight_point_constraints.empty()) {
+    tight_point_constraints = make_tight_point_constraints(
+        *robot_, options.tight_point_constraints, dt, state_box.lower,
+        state_box.upper, &constraint_source_ids);
+  }
   if (tight_point_constraints.status != SolverStatus::kSuccess) {
     return finish(failure(tight_point_constraints.status,
                           tight_point_constraints.message));
   }
-  const auto tight_frame_pose_constraints = make_fixed_frame_pose_constraints(
-      *robot_, options.tight_frame_pose_constraints, dt, state_box.lower,
-      state_box.upper, &constraint_source_ids,
-      [](const TightFramePoseAccelerationConstraint &constraint,
-         detail::FixedFramePoseConstraintRecord *record) {
-        *record = detail::make_tight_frame_pose_record(constraint);
-        return detail::FixedFramePoseConstraintResult{};
-      });
+  FixedFramePoseConstraintAssembly tight_frame_pose_constraints;
+  if (!options.tight_frame_pose_constraints.empty()) {
+    tight_frame_pose_constraints = make_fixed_frame_pose_constraints(
+        *robot_, options.tight_frame_pose_constraints, dt, state_box.lower,
+        state_box.upper, &constraint_source_ids,
+        [](const TightFramePoseAccelerationConstraint &constraint,
+           detail::FixedFramePoseConstraintRecord *record) {
+          *record = detail::make_tight_frame_pose_record(constraint);
+          return detail::FixedFramePoseConstraintResult{};
+        });
+  }
   if (tight_frame_pose_constraints.status != SolverStatus::kSuccess) {
     return finish(failure(tight_frame_pose_constraints.status,
                           tight_frame_pose_constraints.message));
   }
-  const auto torso_pose_bound_constraints = make_fixed_frame_pose_constraints(
-      *robot_, options.torso_pose_bound_constraints, dt, state_box.lower,
-      state_box.upper, &constraint_source_ids,
-      [](const TorsoPoseBoundAccelerationConstraint &constraint,
-         detail::FixedFramePoseConstraintRecord *record) {
-        return detail::make_torso_pose_bound_record(constraint, record);
-      });
+  FixedFramePoseConstraintAssembly torso_pose_bound_constraints;
+  if (!options.torso_pose_bound_constraints.empty()) {
+    torso_pose_bound_constraints = make_fixed_frame_pose_constraints(
+        *robot_, options.torso_pose_bound_constraints, dt, state_box.lower,
+        state_box.upper, &constraint_source_ids,
+        [](const TorsoPoseBoundAccelerationConstraint &constraint,
+           detail::FixedFramePoseConstraintRecord *record) {
+          return detail::make_torso_pose_bound_record(constraint, record);
+        });
+  }
   if (torso_pose_bound_constraints.status != SolverStatus::kSuccess) {
     return finish(failure(torso_pose_bound_constraints.status,
                           torso_pose_bound_constraints.message));
   }
-  const auto relative_pose_constraints = make_relative_pose_constraints(
-      *robot_, options.relative_pose_constraints, dt, state_box.lower,
-      state_box.upper, &constraint_source_ids);
+  RelativePoseConstraintAssembly relative_pose_constraints;
+  if (!options.relative_pose_constraints.empty()) {
+    relative_pose_constraints = make_relative_pose_constraints(
+        *robot_, options.relative_pose_constraints, dt, state_box.lower,
+        state_box.upper, &constraint_source_ids);
+  }
   if (relative_pose_constraints.status != SolverStatus::kSuccess) {
     return finish(failure(relative_pose_constraints.status,
                           relative_pose_constraints.message));
   }
-  const auto com_support_polygon_constraints =
-      make_com_support_polygon_constraints(
-          *robot_, options.com_support_polygon_constraints, dt,
-          state_box.lower, state_box.upper, &constraint_source_ids);
+  ComSupportPolygonConstraintAssembly com_support_polygon_constraints;
+  if (!options.com_support_polygon_constraints.empty()) {
+    com_support_polygon_constraints = make_com_support_polygon_constraints(
+        *robot_, options.com_support_polygon_constraints, dt, state_box.lower,
+        state_box.upper, &constraint_source_ids);
+  }
   if (com_support_polygon_constraints.status != SolverStatus::kSuccess) {
     return finish(failure(com_support_polygon_constraints.status,
                           com_support_polygon_constraints.message));
@@ -526,44 +565,53 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
         SolverStatus::kNumericalError,
         "accepted acceleration violates native collision constraints"));
   }
-  if (!accepted_affine_constraints_are_satisfied(options.affine_constraints,
-                                                 result.joint_accelerations)) {
+  if (!options.affine_constraints.empty() &&
+      !accepted_affine_constraints_are_satisfied(
+          options.affine_constraints, result.joint_accelerations)) {
     return finish(clear_outputs(failure(
         SolverStatus::kNumericalError,
         "accepted acceleration violates an affine acceleration constraint")));
   }
-  if (!accepted_frozen_constraints_are_satisfied(
+  if (!options.frozen_next_velocity_constraints.empty() &&
+      !accepted_frozen_constraints_are_satisfied(
           options.frozen_next_velocity_constraints, dq, dt,
           result.joint_accelerations)) {
     return finish(clear_outputs(failure(
         SolverStatus::kNumericalError,
         "accepted acceleration violates a frozen next-velocity constraint")));
   }
-  if (!accepted_lock_constraints_are_satisfied(options, dq, dt,
-                                               result.joint_accelerations)) {
+  if ((!options.zero_acceleration_joint_indices.empty() ||
+       !options.zero_next_velocity_joint_indices.empty() ||
+       !options.fixed_current_position_joint_indices.empty()) &&
+      !accepted_lock_constraints_are_satisfied(
+          options, dq, dt, result.joint_accelerations)) {
     return finish(clear_outputs(failure(
         SolverStatus::kNumericalError,
         "accepted acceleration violates an acceleration lock constraint")));
   }
-  if (!accepted_affine_constraints_are_satisfied(task_bound_constraints,
-                                                 result.joint_accelerations)) {
+  if (!task_bound_constraints.empty() &&
+      !accepted_affine_constraints_are_satisfied(
+          task_bound_constraints, result.joint_accelerations)) {
     return finish(clear_outputs(failure(
         SolverStatus::kNumericalError,
         "accepted acceleration violates task acceleration bounds")));
   }
-  if (!accepted_affine_constraints_are_satisfied(
+  if (!contact_constraints.constraints.empty() &&
+      !accepted_affine_constraints_are_satisfied(
           contact_constraints.constraints, result.joint_accelerations)) {
     return finish(clear_outputs(failure(
         SolverStatus::kNumericalError,
         "accepted acceleration violates contact acceleration constraints")));
   }
-  if (!accepted_affine_constraints_are_satisfied(
+  if (!tight_point_constraints.constraints.empty() &&
+      !accepted_affine_constraints_are_satisfied(
           tight_point_constraints.constraints, result.joint_accelerations)) {
     return finish(clear_outputs(failure(
         SolverStatus::kNumericalError,
         "accepted acceleration violates tight point acceleration constraints")));
   }
-  if (!accepted_affine_constraints_are_satisfied(
+  if (!tight_frame_pose_constraints.constraints.empty() &&
+      !accepted_affine_constraints_are_satisfied(
           tight_frame_pose_constraints.constraints,
           result.joint_accelerations)) {
     return finish(clear_outputs(failure(
@@ -571,7 +619,8 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
         "accepted acceleration violates tight frame pose acceleration "
         "constraints")));
   }
-  if (!accepted_affine_constraints_are_satisfied(
+  if (!torso_pose_bound_constraints.constraints.empty() &&
+      !accepted_affine_constraints_are_satisfied(
           torso_pose_bound_constraints.constraints,
           result.joint_accelerations)) {
     return finish(clear_outputs(failure(
@@ -579,14 +628,16 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
         "accepted acceleration violates torso pose bound acceleration "
         "constraints")));
   }
-  if (!accepted_affine_constraints_are_satisfied(
+  if (!relative_pose_constraints.constraints.empty() &&
+      !accepted_affine_constraints_are_satisfied(
           relative_pose_constraints.constraints, result.joint_accelerations)) {
     return finish(clear_outputs(failure(
         SolverStatus::kNumericalError,
         "accepted acceleration violates relative pose acceleration "
         "constraints")));
   }
-  if (!accepted_affine_constraints_are_satisfied(
+  if (!com_support_polygon_constraints.constraints.empty() &&
+      !accepted_affine_constraints_are_satisfied(
           com_support_polygon_constraints.constraints,
           result.joint_accelerations)) {
     return finish(clear_outputs(failure(
