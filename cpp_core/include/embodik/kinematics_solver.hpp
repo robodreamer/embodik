@@ -30,6 +30,8 @@
 
 namespace embodik {
 
+class AccelerationSolver;
+
 namespace detail {
 class VelocityCollisionConstraintProvider;
 } // namespace detail

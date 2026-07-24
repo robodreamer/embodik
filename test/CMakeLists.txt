@@ -18,6 +18,18 @@ target_link_libraries(test_robot_model
 # Add test
 add_test(NAME test_robot_model COMMAND test_robot_model)
 
+add_executable(test_kinematics_solver_header
+    test_kinematics_solver_header.cpp
+)
+
+target_link_libraries(test_kinematics_solver_header
+    embodik_core
+)
+
+add_test(NAME test_kinematics_solver_header
+    COMMAND test_kinematics_solver_header
+)
+
 add_executable(test_hierarchical_linear_solver
     test_hierarchical_linear_solver.cpp
 )
