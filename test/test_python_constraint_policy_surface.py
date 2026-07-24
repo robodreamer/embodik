@@ -127,7 +127,9 @@ def test_examples_that_construct_solvers_apply_runtime_policy() -> None:
 
 
 def test_solver_owned_backtrack_handles_all_no_motion_failure_statuses() -> None:
-    source = (REPO_ROOT / "cpp_core/src/kinematics_solver.cpp").read_text(encoding="utf-8")
+    source = (REPO_ROOT / "cpp_core/src/kinematics_solver_position_step.cpp").read_text(
+        encoding="utf-8"
+    )
     predicate_start = source.index("const bool allow_backtrack =")
     predicate_end = source.index("if (allow_backtrack)", predicate_start)
     predicate = source[predicate_start:predicate_end]
