@@ -128,6 +128,11 @@ add_library(embodik_core SHARED
     cpp_core/src/kinematics_solver.cpp
     cpp_core/src/kinematics_solver_tasks.cpp
     cpp_core/src/kinematics_solver_auto_layout.cpp
+    cpp_core/src/kinematics_solver_constraints.cpp
+    cpp_core/src/kinematics_solver_collision.cpp
+    cpp_core/src/kinematics_solver_continuity.cpp
+    cpp_core/src/kinematics_solver_velocity.cpp
+    cpp_core/src/kinematics_solver_position_step.cpp
     cpp_core/src/pose_metrics.cpp
     cpp_core/src/sphere_broadphase.cpp
 )
