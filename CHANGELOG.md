@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Modularized the velocity, position-step, and fixed-base acceleration solver
+  implementations into responsibility-focused translation units without
+  changing their public APIs, supported capabilities, numerical results, or
+  exported symbol surfaces.
+- Replaced broad acceleration access to velocity-solver collision internals
+  with a source-private provider that preserves collision-row ordering,
+  validation, and exact-query accounting.
+
 ## [0.21.0] - 2026-07-23
 
 ### Added
