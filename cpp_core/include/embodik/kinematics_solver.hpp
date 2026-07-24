@@ -30,10 +30,8 @@
 
 namespace embodik {
 
-class AccelerationSolver;
-
 namespace detail {
-struct VelocityConstraintTestObserver;
+class VelocityCollisionConstraintProvider;
 } // namespace detail
 
 /**
@@ -1799,7 +1797,7 @@ private:
       const Eigen::VectorXd &q);
   std::optional<double>
   evaluate_post_step_collision_distance_from_current_results();
-  friend struct detail::VelocityConstraintTestObserver;
+  friend class detail::VelocityCollisionConstraintProvider;
 
   std::optional<CollisionConstraintResult> compute_collision_constraint();
   std::optional<CollisionConstraintResult>
@@ -1866,7 +1864,6 @@ private:
       collision_validation_seed_certificate_;
   void invalidate_collision_validation_state_certificates();
   void invalidate_collision_validation_cache();
-  friend class AccelerationSolver;
 
   struct PositionStepMutableStateSnapshot {
     struct TaskState {

@@ -10,6 +10,7 @@
 #include "acceleration_tight_point_constraint.hpp"
 #include "frame_kinematic_differential.hpp"
 #include "generalized_constraint_set.hpp"
+#include "velocity_collision_constraint_provider.hpp"
 
 #include <embodik/ik_baseline.hpp>
 #include <embodik/kinematics_solver.hpp>
@@ -2870,7 +2871,7 @@ AccelerationSolverResult AccelerationSolver::solve_with_velocity_collision(
         "velocity collision lift validation_substeps must be in [1, 1024]",
         diagnostics));
   }
-  if (collision_solver.robot_.get() != robot_.get()) {
+  if (collision_solver.robot().get() != robot_.get()) {
     return finish(velocity_collision_lift_failure(
         SolverStatus::kInvalidInput,
         "velocity collision lift requires a KinematicsSolver sharing the "
@@ -2891,8 +2892,9 @@ AccelerationSolverResult AccelerationSolver::solve_with_velocity_collision(
     return finish(velocity_collision_lift_failure(
         SolverStatus::kInvalidInput, "dt must be positive", diagnostics));
   }
-  if (!collision_solver.collision_constraint_.has_value() ||
-      !collision_solver.collision_constraint_->enabled) {
+  detail::VelocityCollisionConstraintProvider collision_provider(
+      collision_solver);
+  if (!collision_provider.has_enabled_collision_constraint()) {
     return finish(velocity_collision_lift_failure(
         SolverStatus::kInvalidInput,
         "velocity collision lift requires a configured collision constraint",
@@ -2910,11 +2912,9 @@ AccelerationSolverResult AccelerationSolver::solve_with_velocity_collision(
         diagnostics));
   }
 
-  std::optional<KinematicsSolver::CollisionVelocityConstraintLinearization>
-      linearization;
+  std::optional<detail::VelocityCollisionConstraintLinearization> linearization;
   try {
-    linearization =
-        collision_solver.linearize_collision_velocity_constraint(dt);
+    linearization = collision_provider.linearize(dt);
   } catch (const std::invalid_argument &error) {
     return finish(velocity_collision_lift_failure(
         SolverStatus::kInvalidInput,
@@ -2928,10 +2928,9 @@ AccelerationSolverResult AccelerationSolver::solve_with_velocity_collision(
             error.what(),
         diagnostics));
   }
-  diagnostics.pairs_considered =
-      collision_solver.last_collision_pairs_considered_;
-  diagnostics.row_exact_queries =
-      collision_solver.last_collision_exact_distance_queries_;
+  const auto row_accounting = collision_provider.accounting_snapshot();
+  diagnostics.pairs_considered = row_accounting.pairs_considered;
+  diagnostics.row_exact_queries = row_accounting.exact_distance_queries;
   AccelerationSolveOptions lifted_options = options;
   if (linearization.has_value()) {
     if (linearization->coefficient_matrix.rows() == 0 ||
@@ -3000,7 +2999,7 @@ AccelerationSolverResult AccelerationSolver::solve_with_velocity_collision(
   }
 
   const auto validation =
-      collision_solver.validate_collision_samples(q, validation_samples);
+      collision_provider.validate_samples(q, validation_samples);
   diagnostics.validation_samples = validation.samples_checked;
   diagnostics.validation_allowed_pairs = validation.allowed_pair_count;
   diagnostics.validation_pairs_checked = validation.pairs_checked;
