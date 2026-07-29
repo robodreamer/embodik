@@ -1035,7 +1035,7 @@ public:
 
   void configure_capture_point_constraint(
       const Eigen::MatrixXd &support_polygon, double margin = 0.0,
-      const std::string &frame_name = "world", double height = 1.0,
+      const std::string &frame_name = "world", double height = -1.0,
       double omega = -1.0, double gravity_z = -9.81);
   void clear_capture_point_constraint();
 
@@ -1697,7 +1697,7 @@ private:
     Eigen::MatrixXd support_polygon;
     double margin = 0.0;
     std::string frame_name = "world";
-    double height = 1.0;
+    double height = -1.0;
     double omega = -1.0;
     double gravity_z = -9.81;
     double fz_min = 1.0;

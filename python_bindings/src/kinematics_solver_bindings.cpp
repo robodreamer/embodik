@@ -272,7 +272,7 @@ void bind_kinematics_solver(nb::module_ &m) {
       .def("configure_capture_point_constraint",
            &KinematicsSolver::configure_capture_point_constraint,
            nb::arg("support_polygon"), nb::arg("margin") = 0.0,
-           nb::arg("frame_name") = "world", nb::arg("height") = 1.0,
+           nb::arg("frame_name") = "world", nb::arg("height") = -1.0,
            nb::arg("omega") = -1.0, nb::arg("gravity_z") = -9.81,
            "Configure capture-point support-polygon constraint on commanded "
            "CoM velocity")

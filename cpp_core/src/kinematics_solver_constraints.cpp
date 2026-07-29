@@ -4,6 +4,8 @@
  */
 
 #include "kinematics_solver_internal.hpp"
+#include "acceleration_com_support_polygon_constraint.hpp"
+#include "geometric_constraint_differential.hpp"
 #include "support_polygon_geometry.hpp"
 
 namespace embodik {
@@ -29,6 +31,7 @@ double configured_capture_omega(double explicit_omega, double gravity_z,
   }
   return std::sqrt(std::abs(gravity_z) / height);
 }
+
 } // namespace
 
 void KinematicsSolver::configure_relative_pose_constraint(
@@ -224,17 +227,25 @@ void KinematicsSolver::configure_capture_point_constraint(
     throw std::invalid_argument("unknown capture-point support frame: " +
                                 frame_name);
   }
+  if (!detail::is_structurally_fixed_support_frame(*robot_, frame_name)) {
+    throw std::invalid_argument(
+        "capture-point support frame must be world or structurally root-fixed");
+  }
   const auto prepared = detail::prepare_support_polygon_geometry(
       make_support_definition(support_polygon, margin), "capture-point", "ik");
   if (!prepared.satisfied()) {
     throw std::invalid_argument(prepared.message);
   }
-  const double effective_omega =
-      configured_capture_omega(omega, gravity_z, height);
-  if (!(std::isfinite(effective_omega) && effective_omega > 0.0)) {
+  if (!std::isfinite(gravity_z) || gravity_z >= 0.0 ||
+      !std::isfinite(omega) ||
+      !std::isfinite(height)) {
     throw std::invalid_argument(
-        "capture-point omega must be explicit positive or derivable from "
-        "positive height and finite gravity_z");
+        "capture-point omega and height must be finite and gravity_z must be "
+        "finite and negative");
+  }
+  if (omega <= 0.0 && height == 0.0) {
+    throw std::invalid_argument(
+        "capture-point height must be positive when provided as an override");
   }
   SupportHalfspaceConfig cfg;
   cfg.enabled = true;
@@ -242,7 +253,7 @@ void KinematicsSolver::configure_capture_point_constraint(
   cfg.margin = margin;
   cfg.frame_name = frame_name;
   cfg.height = height;
-  cfg.omega = effective_omega;
+  cfg.omega = omega;
   cfg.gravity_z = gravity_z;
   cfg.A = prepared.geometry.halfspace_normals;
   cfg.b = prepared.geometry.halfspace_offsets;
@@ -260,10 +271,15 @@ void KinematicsSolver::configure_velocity_zmp_constraint(
     throw std::invalid_argument("unknown velocity-ZMP support frame: " +
                                 frame_name);
   }
-  if (!(std::isfinite(fz_min) && fz_min > 0.0) ||
-      !std::isfinite(gravity_z)) {
+  if (!detail::is_structurally_fixed_support_frame(*robot_, frame_name)) {
     throw std::invalid_argument(
-        "velocity-ZMP fz_min must be positive and gravity_z finite");
+        "velocity-ZMP support frame must be world or structurally root-fixed");
+  }
+  if (!(std::isfinite(fz_min) && fz_min > 0.0) ||
+      !std::isfinite(gravity_z) || gravity_z >= 0.0) {
+    throw std::invalid_argument(
+        "velocity-ZMP fz_min must be positive and gravity_z must be finite "
+        "and negative");
   }
   const auto prepared = detail::prepare_support_polygon_geometry(
       make_support_definition(support_polygon, margin), "velocity-ZMP", "ik");
@@ -622,197 +638,24 @@ void KinematicsSolver::clear_base_bounds() {
   base_orientation_upper_.reset();
 }
 
-// ============================================================
-// CoM support-polygon constraint helpers
-// ============================================================
-namespace {
-
-// 2D cross product of vectors OA and OB.
-static double cross2d(const Eigen::Vector2d &O, const Eigen::Vector2d &A,
-                      const Eigen::Vector2d &B) {
-  return (A.x() - O.x()) * (B.y() - O.y()) -
-         (A.y() - O.y()) * (B.x() - O.x());
-}
-
-// Graham scan: returns convex hull vertices in CCW order.
-static std::vector<Eigen::Vector2d>
-convex_hull_2d(std::vector<Eigen::Vector2d> pts) {
-  const int n = static_cast<int>(pts.size());
-  if (n < 3)
-    return pts;
-
-  std::sort(pts.begin(), pts.end(),
-            [](const Eigen::Vector2d &a, const Eigen::Vector2d &b) {
-              return a.x() < b.x() || (a.x() == b.x() && a.y() < b.y());
-            });
-  pts.erase(std::unique(pts.begin(), pts.end()), pts.end());
-
-  if (static_cast<int>(pts.size()) < 3)
-    return pts;
-
-  std::vector<Eigen::Vector2d> hull;
-  hull.reserve(2 * pts.size());
-
-  // Lower hull
-  for (const auto &p : pts) {
-    while (hull.size() >= 2 &&
-           cross2d(hull[hull.size() - 2], hull[hull.size() - 1], p) <= 0.0)
-      hull.pop_back();
-    hull.push_back(p);
-  }
-
-  // Upper hull
-  const int lower_size = static_cast<int>(hull.size()) + 1;
-  for (int i = static_cast<int>(pts.size()) - 2; i >= 0; --i) {
-    while (static_cast<int>(hull.size()) >= lower_size &&
-           cross2d(hull[hull.size() - 2], hull[hull.size() - 1], pts[i]) <=
-               0.0)
-      hull.pop_back();
-    hull.push_back(pts[i]);
-  }
-  hull.pop_back();
-  return hull;
-}
-
-// Build half-plane representation A * x <= b from a CCW convex polygon.
-// For each edge (v_i -> v_{i+1}), the outward normal points to the right.
-static void polygon_to_halfplanes(const std::vector<Eigen::Vector2d> &hull,
-                                  Eigen::MatrixXd &A, Eigen::VectorXd &b) {
-  const int n = static_cast<int>(hull.size());
-  A.resize(n, 2);
-  b.resize(n);
-  Eigen::Vector2d centroid = Eigen::Vector2d::Zero();
-  for (const auto &v : hull)
-    centroid += v;
-  centroid /= static_cast<double>(n);
-
-  for (int i = 0; i < n; ++i) {
-    const Eigen::Vector2d &v0 = hull[i];
-    const Eigen::Vector2d &v1 = hull[(i + 1) % n];
-    Eigen::Vector2d edge = v1 - v0;
-    // Candidate outward normal (CCW hull: right side is outside).
-    Eigen::Vector2d normal(edge.y(), -edge.x());
-    const double len = normal.norm();
-    if (len < 1e-12)
-      normal = Eigen::Vector2d(1.0, 0.0);
-    else
-      normal /= len;
-
-    double bi = normal.dot(v0);
-    // Robust orientation guard: enforce that polygon centroid lies in the
-    // feasible half-space A*x <= b (inside polygon), regardless of winding.
-    if (normal.dot(centroid) > bi) {
-      normal = -normal;
-      bi = -bi;
-    }
-    A.row(i) = normal.transpose();
-    b(i) = bi;
-  }
-}
-
-// Shrink polygon vertices toward centroid by fractional margin in [0, 1].
-// Uses mean distance from centroid to vertices (char_size) to match the
-// Uses char_size (mean centroid→vertex distance) for consistent shrink behavior.
-static std::vector<Eigen::Vector2d>
-shrink_polygon(const std::vector<Eigen::Vector2d> &hull, double margin) {
-  if (margin <= 0.0 || hull.empty())
-    return hull;
-
-  Eigen::Vector2d centroid = Eigen::Vector2d::Zero();
-  for (const auto &v : hull)
-    centroid += v;
-  centroid /= static_cast<double>(hull.size());
-
-  double sum_dist = 0.0;
-  for (const auto &v : hull)
-    sum_dist += (v - centroid).norm();
-  const double char_size =
-      (hull.size() > 0) ? (sum_dist / static_cast<double>(hull.size())) : 0.0;
-
-  const double shrink_dist =
-      std::clamp(margin, 0.0, 1.0) * std::max(0.0, char_size - 1e-9);
-
-  std::vector<Eigen::Vector2d> shrunk;
-  shrunk.reserve(hull.size());
-  for (const auto &v : hull) {
-    Eigen::Vector2d dir = centroid - v;
-    const double d = dir.norm();
-    if (d < 1e-12)
-      shrunk.push_back(v);
-    else
-      shrunk.push_back(v + (shrink_dist / d) * dir);
-  }
-  return shrunk;
-}
-
-// Minimum perpendicular distance from the polygon centroid to any edge.
-// This is the radius of the largest inscribed circle (inradius) and serves
-// as the natural distance scale for the polygon.
-static double polygon_inradius_2d(const std::vector<Eigen::Vector2d> &hull) {
-  if (hull.size() < 3)
-    return 0.0;
-
-  Eigen::Vector2d centroid = Eigen::Vector2d::Zero();
-  for (const auto &v : hull)
-    centroid += v;
-  centroid /= static_cast<double>(hull.size());
-
-  double min_dist = std::numeric_limits<double>::infinity();
-  const int n = static_cast<int>(hull.size());
-  for (int i = 0; i < n; ++i) {
-    const Eigen::Vector2d &a = hull[i];
-    const Eigen::Vector2d &b = hull[(i + 1) % n];
-    const Eigen::Vector2d edge = b - a;
-    const double edge_len = edge.norm();
-    if (edge_len < 1e-12)
-      continue;
-    // Outward unit normal (same convention as polygon_to_halfplanes: CCW hull)
-    const Eigen::Vector2d normal(edge.y(), -edge.x());
-    const double dist = std::fabs((centroid - a).dot(normal) / edge_len);
-    min_dist = std::min(min_dist, dist);
-  }
-  return std::isfinite(min_dist) ? min_dist : 0.0;
-}
-
-} // namespace
-
 void KinematicsSolver::configure_com_constraint(
     const Eigen::MatrixXd &vertices_xy, double margin,
     const std::string &frame_name, double com_vel_max, double com_acc_max,
     bool use_acceleration_limits, double proximity_fraction) {
-  if (vertices_xy.rows() < 3) {
-    throw std::invalid_argument(
-        "configure_com_constraint: support polygon must have at least 3 "
-        "vertices.");
-  }
-  if (vertices_xy.cols() < 2) {
-    throw std::invalid_argument(
-        "configure_com_constraint: vertices must have at least 2 columns (xy).");
-  }
   if (frame_name != "world" && !robot_->has_frame(frame_name)) {
     throw std::runtime_error("configure_com_constraint: frame '" + frame_name +
                              "' not found in robot model.");
   }
-
-  // Collect 2D points
-  std::vector<Eigen::Vector2d> pts;
-  pts.reserve(vertices_xy.rows());
-  for (int i = 0; i < vertices_xy.rows(); ++i)
-    pts.emplace_back(vertices_xy(i, 0), vertices_xy(i, 1));
-
-  // Compute convex hull (CCW)
-  auto hull = convex_hull_2d(pts);
-  if (hull.size() < 3) {
-    throw std::runtime_error(
-        "configure_com_constraint: convex hull has fewer than 3 vertices "
-        "(points may be collinear).");
+  ComSupportPolygonConstraintDefinition definition;
+  definition.support_polygon = vertices_xy;
+  definition.margin = margin;
+  definition.proximity_fraction = proximity_fraction;
+  const auto prepared = detail::prepare_support_polygon_geometry(
+      definition, "CoM support-polygon", "ik");
+  if (!prepared.satisfied()) {
+    throw std::invalid_argument("configure_com_constraint: " +
+                                prepared.message);
   }
-
-  // Apply inward margin
-  if (margin > 0.0)
-    hull = shrink_polygon(hull, margin);
-
-  // Build half-plane representation in frame_name
   ComConstraintConfig cfg;
   cfg.enabled = true;
   cfg.vertices_xy = vertices_xy;
@@ -821,13 +664,9 @@ void KinematicsSolver::configure_com_constraint(
   cfg.com_vel_max = com_vel_max;
   cfg.com_acc_max = com_acc_max;
   cfg.use_acceleration_limits = use_acceleration_limits;
-  // Auto-compute proximity threshold from the convex hull inradius so the
-  // caller never needs to reason about polygon geometry themselves.
-  if (proximity_fraction > 0.0)
-    cfg.proximity_threshold = proximity_fraction * polygon_inradius_2d(hull);
-  else
-    cfg.proximity_threshold = std::numeric_limits<double>::infinity();
-  polygon_to_halfplanes(hull, cfg.A, cfg.b);
+  cfg.proximity_threshold = prepared.geometry.proximity_threshold;
+  cfg.A = prepared.geometry.halfspace_normals;
+  cfg.b = prepared.geometry.halfspace_offsets;
   com_constraint_ = std::move(cfg);
 }
 
@@ -952,6 +791,8 @@ KinematicsSolver::compute_capture_point_constraint() {
     return std::nullopt;
   }
   const auto &cfg = *capture_point_constraint_;
+  Eigen::Matrix3d R = Eigen::Matrix3d::Identity();
+  Eigen::Vector3d t = Eigen::Vector3d::Zero();
   if (cfg.frame_name != "world") {
     const Matrix6Xd J_frame = robot_->get_frame_jacobian(cfg.frame_name);
     if (J_frame.norm() > 1e-10) {
@@ -962,11 +803,25 @@ KinematicsSolver::compute_capture_point_constraint() {
       fail.violated_rows = Eigen::ArrayXi::Ones(1);
       return fail;
     }
+    const auto frame_pose = robot_->get_frame_pose(cfg.frame_name);
+    R = frame_pose.rotation();
+    t = frame_pose.translation();
   }
-  const Eigen::Vector3d com = robot_->get_com_position();
-  const Eigen::MatrixXd Jcom = robot_->get_com_jacobian();
+  const Eigen::Vector3d com = R.transpose() * (robot_->get_com_position() - t);
+  const Eigen::MatrixXd Jcom = R.transpose() * robot_->get_com_jacobian();
+  const double omega =
+      configured_capture_omega(cfg.omega, cfg.gravity_z,
+                               cfg.height > 0.0 ? cfg.height : com.z());
+  if (!(std::isfinite(omega) && omega > 0.0)) {
+    ComConstraintResult fail;
+    fail.jacobian = Eigen::MatrixXd::Zero(1, robot_->nv());
+    fail.lower_bounds = Eigen::VectorXd::Ones(1);
+    fail.upper_bounds = Eigen::VectorXd::Zero(1);
+    fail.violated_rows = Eigen::ArrayXi::Ones(1);
+    return fail;
+  }
   ComConstraintResult result;
-  result.jacobian = (cfg.A * Jcom.topRows(2)) / cfg.omega;
+  result.jacobian = (cfg.A * Jcom.topRows(2)) / omega;
   result.lower_bounds = Eigen::VectorXd::Constant(cfg.A.rows(), -1e100);
   result.upper_bounds = cfg.b - cfg.A * com.head<2>();
   result.violated_rows = Eigen::ArrayXi::Zero(cfg.A.rows());
@@ -981,6 +836,8 @@ KinematicsSolver::compute_velocity_zmp_constraint(
     return std::nullopt;
   }
   const auto &cfg = *velocity_zmp_constraint_;
+  Eigen::Matrix3d R = Eigen::Matrix3d::Identity();
+  Eigen::Vector3d t = Eigen::Vector3d::Zero();
   if (cfg.frame_name != "world") {
     const Matrix6Xd J_frame = robot_->get_frame_jacobian(cfg.frame_name);
     if (J_frame.norm() > 1e-10) {
@@ -991,11 +848,24 @@ KinematicsSolver::compute_velocity_zmp_constraint(
       fail.violated_rows = Eigen::ArrayXi::Ones(1);
       return fail;
     }
+    const auto frame_pose = robot_->get_frame_pose(cfg.frame_name);
+    R = frame_pose.rotation();
+    t = frame_pose.translation();
   }
-  const Eigen::MatrixXd Ag = robot_->get_centroidal_momentum_matrix();
-  const Eigen::VectorXd bias = robot_->get_centroidal_momentum_matrix_bias();
-  const Eigen::Vector3d c = robot_->get_com_position();
-  const double mass_g = robot_->get_total_mass() * std::abs(cfg.gravity_z);
+  const Eigen::VectorXd q = robot_->get_current_configuration();
+  const Eigen::MatrixXd Ag_world =
+      robot_->compute_centroidal_momentum_matrix(q, current_dq);
+  const Eigen::VectorXd bias_world =
+      robot_->compute_centroidal_momentum_matrix_bias(q, current_dq);
+  Eigen::MatrixXd X = Eigen::MatrixXd::Zero(6, 6);
+  X.topLeftCorner<3, 3>() = R.transpose();
+  X.bottomRightCorner<3, 3>() = R.transpose();
+  const Eigen::MatrixXd Ag = X * Ag_world;
+  const Eigen::VectorXd bias = X * bias_world;
+  const Eigen::Vector3d c = R.transpose() * (robot_->get_com_position() - t);
+  const Eigen::Vector3d weight =
+      R.transpose() *
+      Eigen::Vector3d(0.0, 0.0, robot_->get_total_mass() * std::abs(cfg.gravity_z));
   const Eigen::MatrixXd G = Ag / dt_;
   const Eigen::VectorXd k = bias - (Ag * current_dq) / dt_;
 
@@ -1013,13 +883,15 @@ KinematicsSolver::compute_velocity_zmp_constraint(
         ay * (c.y() * G.row(2) + G.row(3) - c.z() * G.row(1)) -
         cfg.b(i) * G.row(2);
     const double constant =
-        ax * (c.x() * (mass_g + k(2)) - k(4) - c.z() * k(0)) +
-        ay * (c.y() * (mass_g + k(2)) + k(3) - c.z() * k(1)) -
-        cfg.b(i) * (mass_g + k(2));
+        ax * (c.x() * (weight.z() + k(2)) - k(4) -
+              c.z() * (weight.x() + k(0))) +
+        ay * (c.y() * (weight.z() + k(2)) + k(3) -
+              c.z() * (weight.y() + k(1))) -
+        cfg.b(i) * (weight.z() + k(2));
     result.upper_bounds(i) = -constant;
   }
   result.jacobian.row(hp) = G.row(2);
-  result.lower_bounds(hp) = cfg.fz_min - mass_g - k(2);
+  result.lower_bounds(hp) = cfg.fz_min - weight.z() - k(2);
   return result;
 }
 
@@ -1043,11 +915,28 @@ KinematicsSolver::evaluate_capture_point_constraint(
     debug.message = "capture-point constraint is not configured";
     return debug;
   }
-  robot_->update_kinematics(current_q);
   const auto &cfg = *capture_point_constraint_;
-  const Eigen::Vector3d com = robot_->get_com_position();
-  const Eigen::MatrixXd Jcom = robot_->get_com_jacobian();
-  debug.point = com.head<2>() + (Jcom.topRows(2) * dq_command) / cfg.omega;
+  detail::GeometricCoordinateDifferential com;
+  try {
+    com = detail::evaluate_com_in_frame_differential_at_state(
+        *robot_, cfg.frame_name, current_q, dq_command);
+  } catch (const std::exception &error) {
+    debug.status = SolverStatus::kNumericalError;
+    debug.message =
+        std::string("capture-point explicit-state evaluation failed: ") +
+        error.what();
+    return debug;
+  }
+  const double omega =
+      configured_capture_omega(cfg.omega, cfg.gravity_z,
+                               cfg.height > 0.0 ? cfg.height : com.value.z());
+  if (!(std::isfinite(omega) && omega > 0.0)) {
+    debug.status = SolverStatus::kInvalidInput;
+    debug.message = "capture-point omega cannot be derived from support-frame "
+                    "CoM height";
+    return debug;
+  }
+  debug.point = com.value.head<2>() + com.rate.head<2>() / omega;
   debug.slacks = cfg.b - cfg.A * debug.point;
   return debug;
 }
@@ -1075,22 +964,43 @@ KinematicsSolver::evaluate_velocity_zmp_constraint(
     debug.message = "velocity-ZMP constraint is not configured";
     return debug;
   }
-  robot_->update_kinematics(current_q);
   const auto &cfg = *velocity_zmp_constraint_;
-  const Eigen::VectorXd hdot =
-      robot_->get_centroidal_momentum_matrix() *
+  Eigen::Matrix3d R = Eigen::Matrix3d::Identity();
+  if (cfg.frame_name != "world") {
+    const auto frame_pose = robot_->get_frame_pose(cfg.frame_name);
+    R = frame_pose.rotation();
+  }
+  detail::GeometricCoordinateDifferential com;
+  try {
+    com = detail::evaluate_com_in_frame_differential_at_state(
+        *robot_, cfg.frame_name, current_q, current_dq);
+  } catch (const std::exception &error) {
+    debug.status = SolverStatus::kNumericalError;
+    debug.message =
+        std::string("velocity-ZMP explicit-state evaluation failed: ") +
+        error.what();
+    return debug;
+  }
+  const Eigen::VectorXd hdot_world =
+      robot_->compute_centroidal_momentum_matrix(current_q, current_dq) *
           ((dq_command - current_dq) / dt_) +
-      robot_->get_centroidal_momentum_matrix_bias();
-  const Eigen::Vector3d c = robot_->get_com_position();
-  const double Fz = robot_->get_total_mass() * std::abs(cfg.gravity_z) + hdot(2);
+      robot_->compute_centroidal_momentum_matrix_bias(current_q, current_dq);
+  const Eigen::Vector3d c = com.value;
+  const Eigen::Vector3d force =
+      R.transpose() *
+      (hdot_world.head<3>() +
+       Eigen::Vector3d(0.0, 0.0,
+                       robot_->get_total_mass() * std::abs(cfg.gravity_z)));
+  const Eigen::Vector3d moment = R.transpose() * hdot_world.tail<3>();
+  const double Fz = force.z();
   debug.force_z = Fz;
   if (Fz <= 0.0 || !std::isfinite(Fz)) {
     debug.status = SolverStatus::kInfeasible;
     debug.message = "velocity-ZMP force denominator is not positive finite";
     return debug;
   }
-  debug.point.x() = c.x() - (hdot(4) + c.z() * hdot(0)) / Fz;
-  debug.point.y() = c.y() + (hdot(3) - c.z() * hdot(1)) / Fz;
+  debug.point.x() = c.x() - (moment.y() + c.z() * force.x()) / Fz;
+  debug.point.y() = c.y() + (moment.x() - c.z() * force.y()) / Fz;
   debug.slacks = cfg.b - cfg.A * debug.point;
   if (Fz < cfg.fz_min || debug.slacks.minCoeff() < -constraint_tolerance_) {
     debug.status = SolverStatus::kInfeasible;

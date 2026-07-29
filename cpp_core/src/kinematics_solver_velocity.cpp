@@ -531,13 +531,6 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
     }
   }
 
-  for (int idx : pending_velocity_lock_indices_) {
-    if (idx >= 0 && idx < robot_->nv()) {
-      excluded_union.insert(idx);
-    }
-  }
-
-
   // Velocity-to-configuration index mapping (cached; used by
   // position-based velocity constraints).
   const std::vector<int> &velocity_to_config_index =
@@ -2311,6 +2304,87 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
           if (dense_pos_upper_sp[k] > -kNoPosBound)
             dq[k] = std::min(dq[k], dense_pos_upper_sp[k]);
         }
+      }
+    }
+
+    Eigen::Map<Eigen::VectorXd> dq_final(result.solution.data(),
+                                         result.solution.size());
+    auto final_centroidal_constraints_acceptable =
+        [&](const Eigen::VectorXd &candidate, std::string *message) {
+          if (candidate.size() != robot_->nv() || !candidate.allFinite()) {
+            if (message != nullptr) {
+              *message = "final centroidal validation found non-finite velocity";
+            }
+            return false;
+          }
+          const double tol = std::max(1e-8, 10.0 * constraint_tolerance_);
+          if (centroidal_momentum_bounds_.has_value() &&
+              centroidal_momentum_bounds_->enabled) {
+            const auto &cfg = *centroidal_momentum_bounds_;
+            const Eigen::VectorXd h =
+                robot_->get_centroidal_momentum_matrix() * candidate;
+            int selected = 0;
+            for (int row = 0; row < 6; ++row) {
+              if (cfg.axis_mask(row) == 0.0) {
+                continue;
+              }
+              if (h(row) < cfg.lower_h(selected) - tol ||
+                  h(row) > cfg.upper_h(selected) + tol) {
+                if (message != nullptr) {
+                  *message =
+                      "final centroidal momentum bound validation failed";
+                }
+                return false;
+              }
+              ++selected;
+            }
+          }
+          if (capture_point_constraint_.has_value() &&
+              capture_point_constraint_->enabled) {
+            const auto debug =
+                evaluate_capture_point_constraint(q_eval, candidate);
+            if (debug.status != SolverStatus::kSuccess ||
+                debug.slacks.size() == 0 || !debug.slacks.allFinite() ||
+                debug.slacks.minCoeff() < -tol) {
+              if (message != nullptr) {
+                *message = "final capture-point validation failed";
+              }
+              return false;
+            }
+          }
+          if (velocity_zmp_constraint_.has_value() &&
+              velocity_zmp_constraint_->enabled) {
+            if (!pending_explicit_current_dq_.has_value()) {
+              if (message != nullptr) {
+                *message = "final velocity-ZMP validation lacks current_dq";
+              }
+              return false;
+            }
+            const auto debug = evaluate_velocity_zmp_constraint(
+                q_eval, *pending_explicit_current_dq_, candidate);
+            if (debug.status != SolverStatus::kSuccess ||
+                debug.slacks.size() == 0 || !debug.slacks.allFinite() ||
+                debug.slacks.minCoeff() < -tol ||
+                debug.force_z <
+                    velocity_zmp_constraint_->fz_min - tol) {
+              if (message != nullptr) {
+                *message = "final velocity-ZMP validation failed";
+              }
+              return false;
+            }
+          }
+          return true;
+        };
+    if ((centroidal_momentum_bounds_.has_value() ||
+         capture_point_constraint_.has_value() ||
+         velocity_zmp_constraint_.has_value())) {
+      std::string validation_message;
+      if (!final_centroidal_constraints_acceptable(dq_final,
+                                                   &validation_message)) {
+        result.status = SolverStatus::kInfeasible;
+        result.status_message = validation_message;
+        dq_final.setZero();
+        std::fill(result.solution.begin(), result.solution.end(), 0.0);
       }
     }
 
