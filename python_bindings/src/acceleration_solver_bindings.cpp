@@ -251,6 +251,25 @@ void bind_acceleration_solver(nb::module_ &m) {
       DEF_VALUE_PROP(ComSupportPolygonAccelerationConstraint, definition)
       DEF_VALUE_PROP(ComSupportPolygonAccelerationConstraint, policy);
 
+  nb::class_<CapturePointAccelerationConstraint>(
+      m, "CapturePointAccelerationConstraint")
+      .def(nb::init<>())
+      .def_rw("source_id", &CapturePointAccelerationConstraint::source_id)
+      DEF_VALUE_PROP(CapturePointAccelerationConstraint, definition)
+      .def_prop_rw(
+          "omega",
+          [](const CapturePointAccelerationConstraint &self) {
+            return self.omega;
+          },
+          [](CapturePointAccelerationConstraint &self,
+             std::optional<double> value) { self.omega = value; });
+
+  nb::class_<ZmpAccelerationConstraint>(m, "ZmpAccelerationConstraint")
+      .def(nb::init<>())
+      .def_rw("source_id", &ZmpAccelerationConstraint::source_id)
+      DEF_VALUE_PROP(ZmpAccelerationConstraint, definition)
+      .def_rw("fz_min", &ZmpAccelerationConstraint::fz_min);
+
   nb::class_<TightPointAccelerationConstraint>(
       m, "TightPointAccelerationConstraint")
       .def(nb::init<>())
@@ -345,6 +364,10 @@ void bind_acceleration_solver(nb::module_ &m) {
               &AccelerationSolveOptions::torso_pose_bound_constraints)
       .def_rw("com_support_polygon_constraints",
               &AccelerationSolveOptions::com_support_polygon_constraints)
+      .def_rw("capture_point_constraints",
+              &AccelerationSolveOptions::capture_point_constraints)
+      .def_rw("zmp_constraints",
+              &AccelerationSolveOptions::zmp_constraints)
       .def_rw("zero_acceleration_joint_indices",
               &AccelerationSolveOptions::zero_acceleration_joint_indices)
       .def_rw("zero_next_velocity_joint_indices",
@@ -467,6 +490,37 @@ void bind_acceleration_solver(nb::module_ &m) {
       .def_ro("used_min_error_fallback",
               &CentroidalMomentumRateDiagnostics::used_min_error_fallback);
 
+  nb::class_<CapturePointAccelerationDiagnostics>(
+      m, "CapturePointAccelerationDiagnostics")
+      .def_ro("source_id", &CapturePointAccelerationDiagnostics::source_id)
+      .def_prop_ro("predicted_point_xy",
+                   [](const CapturePointAccelerationDiagnostics &self) {
+                     return self.predicted_point_xy;
+                   })
+      .def_prop_ro("half_plane_slacks",
+                   [](const CapturePointAccelerationDiagnostics &self) {
+                     return self.half_plane_slacks;
+                   })
+      .def_ro("min_slack", &CapturePointAccelerationDiagnostics::min_slack)
+      .def_ro("frozen_omega",
+              &CapturePointAccelerationDiagnostics::frozen_omega)
+      .def_ro("postvalidated",
+              &CapturePointAccelerationDiagnostics::postvalidated);
+
+  nb::class_<ZmpAccelerationDiagnostics>(m, "ZmpAccelerationDiagnostics")
+      .def_ro("source_id", &ZmpAccelerationDiagnostics::source_id)
+      .def_prop_ro("predicted_point_xy",
+                   [](const ZmpAccelerationDiagnostics &self) {
+                     return self.predicted_point_xy;
+                   })
+      .def_prop_ro("half_plane_slacks",
+                   [](const ZmpAccelerationDiagnostics &self) {
+                     return self.half_plane_slacks;
+                   })
+      .def_ro("min_slack", &ZmpAccelerationDiagnostics::min_slack)
+      .def_ro("force_z", &ZmpAccelerationDiagnostics::force_z)
+      .def_ro("postvalidated", &ZmpAccelerationDiagnostics::postvalidated);
+
   nb::class_<AccelerationAnalyticCollisionPairDiagnostics>(
       m, "AccelerationAnalyticCollisionPairDiagnostics")
       .def_ro("pair_index",
@@ -557,6 +611,10 @@ void bind_acceleration_solver(nb::module_ &m) {
       .def_ro("centroidal_momentum_rate_diagnostics",
               &AccelerationSolverResult::
                   centroidal_momentum_rate_diagnostics)
+      .def_ro("capture_point_diagnostics",
+              &AccelerationSolverResult::capture_point_diagnostics)
+      .def_ro("zmp_diagnostics",
+              &AccelerationSolverResult::zmp_diagnostics)
       .def_ro("velocity_collision_lift_applied",
               &AccelerationSolverResult::velocity_collision_lift_applied)
       .def_ro("collision_endpoint_validated",
@@ -642,6 +700,12 @@ void bind_acceleration_solver(nb::module_ &m) {
       .def_ro("supports_com_support_polygon_constraints",
               &AccelerationSolverCapabilities::
                   supports_com_support_polygon_constraints)
+      .def_ro("supports_fixed_base_capture_point_constraints",
+              &AccelerationSolverCapabilities::
+                  supports_fixed_base_capture_point_constraints)
+      .def_ro("supports_fixed_base_zmp_constraints",
+              &AccelerationSolverCapabilities::
+                  supports_fixed_base_zmp_constraints)
       .def_ro("supports_fixed_base_centroidal_momentum_rate_objective",
               &AccelerationSolverCapabilities::
                   supports_fixed_base_centroidal_momentum_rate_objective)

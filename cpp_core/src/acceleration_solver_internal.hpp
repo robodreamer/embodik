@@ -4,12 +4,14 @@
 
 #include "acceleration_analytic_collision.hpp"
 #include "acceleration_allocation_transform.hpp"
+#include "acceleration_capture_point_constraint.hpp"
 #include "acceleration_com_support_polygon_constraint.hpp"
 #include "acceleration_fixed_frame_pose_constraint.hpp"
 #include "acceleration_relative_pose_constraint.hpp"
 #include "acceleration_state_box.hpp"
 #include "acceleration_task_differential.hpp"
 #include "acceleration_tight_point_constraint.hpp"
+#include "acceleration_zmp_constraint.hpp"
 #include "frame_kinematic_differential.hpp"
 #include "generalized_constraint_set.hpp"
 #include "velocity_collision_constraint_provider.hpp"
@@ -96,6 +98,12 @@ inline const char *constraint_family_name(const TorsoPoseBoundAccelerationConstr
 }
 inline const char *constraint_family_name(const ComSupportPolygonAccelerationConstraint &) {
   return "CoM support-polygon constraint";
+}
+inline const char *constraint_family_name(const CapturePointAccelerationConstraint &) {
+  return "capture-point acceleration constraint";
+}
+inline const char *constraint_family_name(const ZmpAccelerationConstraint &) {
+  return "ZMP acceleration constraint";
 }
 
 template <typename Constraint>

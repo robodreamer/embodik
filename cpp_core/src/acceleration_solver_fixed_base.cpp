@@ -293,6 +293,24 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
     return finish(failure(com_support_polygon_constraints.status,
                           com_support_polygon_constraints.message));
   }
+  detail::CapturePointConstraintAssembly capture_point_constraints;
+  if (!options.capture_point_constraints.empty()) {
+    capture_point_constraints = detail::make_capture_point_constraints(
+        *robot_, options.capture_point_constraints, dt,
+        &constraint_source_ids);
+  }
+  if (capture_point_constraints.status != SolverStatus::kSuccess) {
+    return finish(failure(capture_point_constraints.status,
+                          capture_point_constraints.message));
+  }
+  detail::ZmpConstraintAssembly zmp_constraints;
+  if (!options.zmp_constraints.empty()) {
+    zmp_constraints = detail::make_zmp_constraints(
+        *robot_, options.zmp_constraints, &constraint_source_ids);
+  }
+  if (zmp_constraints.status != SolverStatus::kSuccess) {
+    return finish(failure(zmp_constraints.status, zmp_constraints.message));
+  }
   const bool state_box_task_fallback_applied =
       options.allow_state_box_task_fallback &&
       zero_excluded_by_bounds(state_box.lower, state_box.upper);
@@ -310,6 +328,8 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
       torso_pose_bound_constraints.row_count +
       relative_pose_constraints.row_count +
       com_support_polygon_constraints.row_count +
+      capture_point_constraints.row_count +
+      zmp_constraints.row_count +
       lock_rows.coefficients.rows() +
       native_collision_prepared.physical_constraint.coefficient_matrix.rows() +
       (effort_constraint.has_value() ? robot_->nv() : 0);
@@ -436,6 +456,21 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
     return finish(failure(
         SolverStatus::kNumericalError,
         "failed to assemble CoM support-polygon acceleration constraints"));
+  }
+  if (capture_point_constraints.row_count > 0 &&
+      !constraints->append_block(make_affine_constraint_block(
+          capture_point_constraints.constraints, robot_->nv(),
+          capture_point_constraints.row_count))) {
+    return finish(failure(
+        SolverStatus::kNumericalError,
+        "failed to assemble capture-point acceleration constraints"));
+  }
+  if (zmp_constraints.row_count > 0 &&
+      !constraints->append_block(make_affine_constraint_block(
+          zmp_constraints.constraints, robot_->nv(),
+          zmp_constraints.row_count))) {
+    return finish(failure(SolverStatus::kNumericalError,
+                          "failed to assemble ZMP acceleration constraints"));
   }
   if (!state_box_only && !constraints->finalize()) {
     return finish(failure(SolverStatus::kNumericalError,
@@ -682,6 +717,21 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
         "accepted acceleration violates CoM support-polygon acceleration "
         "constraints")));
   }
+  if (!capture_point_constraints.constraints.empty() &&
+      !accepted_affine_constraints_are_satisfied(
+          capture_point_constraints.constraints, result.joint_accelerations)) {
+    return finish(clear_outputs(failure(
+        SolverStatus::kNumericalError,
+        "accepted acceleration violates capture-point acceleration "
+        "constraints")));
+  }
+  if (!zmp_constraints.constraints.empty() &&
+      !accepted_affine_constraints_are_satisfied(
+          zmp_constraints.constraints, result.joint_accelerations)) {
+    return finish(clear_outputs(failure(
+        SolverStatus::kNumericalError,
+        "accepted acceleration violates ZMP acceleration constraints")));
+  }
   if (effort_constraint.has_value()) {
     auto evaluated =
         evaluate_inverse_dynamics(*robot_, q, dq, result.joint_accelerations);
@@ -737,7 +787,9 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
       !tight_frame_pose_constraints.prepared_constraints.empty() ||
       !torso_pose_bound_constraints.prepared_constraints.empty() ||
       !relative_pose_constraints.prepared_constraints.empty() ||
-      !com_support_polygon_constraints.prepared_constraints.empty();
+      !com_support_polygon_constraints.prepared_constraints.empty() ||
+      !capture_point_constraints.prepared_constraints.empty() ||
+      !zmp_constraints.prepared_constraints.empty();
   std::optional<StateBoxAssembly> predicted_state_box;
   if (has_predicted_geometric_acceptance ||
       native_collision_compiled.has_value()) {
@@ -803,6 +855,30 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
           detail::validate_com_support_polygon_constraint_acceptance(
               prepared, *robot_, q, dq, result.joint_accelerations, dt,
               predicted_state_box->lower, predicted_state_box->upper);
+      if (!acceptance.satisfied()) {
+        return finish(clear_outputs(
+            failure(acceptance.status, acceptance.message)));
+      }
+    }
+    for (const auto &prepared :
+         capture_point_constraints.prepared_constraints) {
+      CapturePointAccelerationDiagnostics diagnostic;
+      const auto acceptance =
+          detail::validate_capture_point_constraint_acceptance(
+              prepared, *robot_, result.q_solution,
+              result.joint_velocities_next, &diagnostic);
+      result.capture_point_diagnostics.push_back(std::move(diagnostic));
+      if (!acceptance.satisfied()) {
+        return finish(clear_outputs(
+            failure(acceptance.status, acceptance.message)));
+      }
+    }
+    for (const auto &prepared : zmp_constraints.prepared_constraints) {
+      ZmpAccelerationDiagnostics diagnostic;
+      const auto acceptance = detail::validate_zmp_constraint_acceptance(
+          prepared, *robot_, result.q_solution, result.joint_velocities_next,
+          result.joint_accelerations, &diagnostic);
+      result.zmp_diagnostics.push_back(std::move(diagnostic));
       if (!acceptance.satisfied()) {
         return finish(clear_outputs(
             failure(acceptance.status, acceptance.message)));

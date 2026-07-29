@@ -121,6 +121,8 @@ add_library(embodik_core SHARED
     cpp_core/src/acceleration_scalar_geometric_constraint.cpp
     cpp_core/src/support_polygon_geometry.cpp
     cpp_core/src/acceleration_com_support_polygon_constraint.cpp
+    cpp_core/src/acceleration_capture_point_constraint.cpp
+    cpp_core/src/acceleration_zmp_constraint.cpp
     cpp_core/src/acceleration_fixed_frame_pose_constraint.cpp
     cpp_core/src/acceleration_relative_pose_constraint.cpp
     cpp_core/src/acceleration_tight_point_constraint.cpp

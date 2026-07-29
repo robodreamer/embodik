@@ -419,6 +419,25 @@ add_test(NAME test_acceleration_solver_com_support_polygon
     COMMAND test_acceleration_solver_com_support_polygon
 )
 
+add_executable(test_acceleration_solver_dynamic_support
+    test_acceleration_solver_dynamic_support.cpp
+)
+
+target_link_libraries(test_acceleration_solver_dynamic_support
+    embodik_core
+    GTest::gtest_main
+    GTest::gtest
+)
+
+target_include_directories(test_acceleration_solver_dynamic_support
+    PRIVATE
+        ${CMAKE_SOURCE_DIR}/cpp_core/src
+)
+
+add_test(NAME test_acceleration_solver_dynamic_support
+    COMMAND test_acceleration_solver_dynamic_support
+)
+
 add_executable(test_geometric_constraint_differential
     test_geometric_constraint_differential.cpp
 )
@@ -509,5 +528,14 @@ add_test(NAME test_centroidal_binding_exports
 )
 
 set_tests_properties(test_centroidal_binding_exports PROPERTIES
+    ENVIRONMENT "PYTHONPATH=${CMAKE_BINARY_DIR}/python_bindings:$ENV{PYTHONPATH}"
+)
+
+add_test(NAME test_acceleration_dynamic_support_exports
+    COMMAND ${Python_EXECUTABLE} -m pytest ${CMAKE_CURRENT_SOURCE_DIR}/test_acceleration_dynamic_support_exports.py -v
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+
+set_tests_properties(test_acceleration_dynamic_support_exports PROPERTIES
     ENVIRONMENT "PYTHONPATH=${CMAKE_BINARY_DIR}/python_bindings:$ENV{PYTHONPATH}"
 )
