@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.21.1] - 2026-07-28
+
 ### Changed
 
 - Modularized the velocity, position-step, and fixed-base acceleration solver
@@ -16,6 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Replaced broad acceleration access to velocity-solver collision internals
   with a source-private provider that preserves collision-row ordering,
   validation, and exact-query accounting.
+- Preserved the public solver declaration and exported-symbol surfaces while
+  keeping modular velocity, position-step, and acceleration dispatch within
+  their established latency budgets.
 
 ## [0.21.0] - 2026-07-23
 
