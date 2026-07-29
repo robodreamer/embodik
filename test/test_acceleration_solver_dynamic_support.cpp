@@ -379,6 +379,35 @@ TEST_F(AccelerationSolverDynamicSupportTest,
 }
 
 TEST_F(AccelerationSolverDynamicSupportTest,
+       StationaryBoundaryDoesNotChatter) {
+  const Eigen::VectorXd zero_dq = Eigen::VectorXd::Zero(robot_->nv());
+  robot_->update_kinematics(q_, zero_dq);
+  const Eigen::Vector2d com = robot_->get_com_position().head<2>();
+  const Eigen::MatrixXd boundary_polygon =
+      square(com + Eigen::Vector2d(0.5, 0.0), 0.5);
+
+  AccelerationSolver solver(robot_);
+  auto options = options_with_limits(20.0, robot_->nv());
+  options.capture_point_constraints.push_back(
+      capture_constraint("cp_boundary", boundary_polygon));
+  options.zmp_constraints.push_back(
+      zmp_constraint("zmp_boundary", boundary_polygon));
+
+  for (int step = 0; step < 50; ++step) {
+    const auto result = solver.solve(q_, zero_dq, 0.01, options);
+    ASSERT_EQ(result.status, SolverStatus::kSuccess)
+        << "step " << step << ": " << result.status_message;
+    EXPECT_LE(result.joint_accelerations.norm(), 1e-12);
+    EXPECT_LE(result.joint_velocities_next.norm(), 1e-12);
+    EXPECT_TRUE(result.q_solution.isApprox(q_, 1e-12));
+    ASSERT_EQ(result.capture_point_diagnostics.size(), 1U);
+    ASSERT_EQ(result.zmp_diagnostics.size(), 1U);
+    EXPECT_GE(result.capture_point_diagnostics[0].min_slack, -kTolerance);
+    EXPECT_GE(result.zmp_diagnostics[0].min_slack, -kTolerance);
+  }
+}
+
+TEST_F(AccelerationSolverDynamicSupportTest,
        DuplicateIdsAreGlobalAndCombinedFamiliesCompose) {
   AccelerationSolver solver(robot_);
   auto options = options_with_limits(50.0, robot_->nv());

@@ -217,6 +217,40 @@ def test_velocity_zmp_repeated_explicit_calls_are_stationary_and_deterministic(
     npt.assert_allclose(second.joint_velocities, first.joint_velocities, rtol=0.0, atol=1e-12)
 
 
+def test_stationary_centroidal_boundary_does_not_chatter(tmp_path: Path) -> None:
+    robot = eik.RobotModel(str(_write_centroidal_urdf(tmp_path)), floating_base=False)
+    solver = eik.KinematicsSolver(robot)
+    solver.dt = 0.01
+    q = np.array([0.2, -0.3])
+    current_dq = np.zeros(robot.nv)
+    robot.update_kinematics(q, current_dq)
+    com = robot.get_com_position()[:2]
+    polygon = np.array(
+        [
+            [com[0], com[1] - 0.5],
+            [com[0] + 1.0, com[1] - 0.5],
+            [com[0] + 1.0, com[1] + 0.5],
+            [com[0], com[1] + 0.5],
+        ]
+    )
+    solver.configure_capture_point_constraint(polygon, omega=3.0)
+    solver.configure_velocity_zmp_constraint(polygon, fz_min=0.1)
+
+    for _ in range(50):
+        result = solver.solve_velocity_with_state(q, current_dq, apply_limits=True)
+        assert result.status == eik.SolverStatus.SUCCESS
+        npt.assert_allclose(
+            result.joint_velocities,
+            np.zeros(robot.nv),
+            rtol=0.0,
+            atol=1e-12,
+        )
+        capture_point = solver.evaluate_capture_point_constraint(q, result.joint_velocities)
+        zmp = solver.evaluate_velocity_zmp_constraint(q, current_dq, result.joint_velocities)
+        assert np.min(capture_point["slacks"]) >= -1e-8
+        assert np.min(zmp["slacks"]) >= -1e-8
+
+
 def test_cleared_centroidal_support_constraints_are_disabled_invariant(
     tmp_path: Path,
 ) -> None:
