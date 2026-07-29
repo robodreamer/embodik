@@ -666,19 +666,10 @@ class TestFrameTransform:
         solver.clear_tasks()
         solver.clear_com_constraint()
 
-    def test_end_effector_frame(self, robot, solver):
-        """Using the end_effector frame (rotated/translated) should not crash."""
-        solver.configure_com_constraint(LARGE_SQUARE, margin=0.0, frame_name="end_effector")
-        task = solver.add_frame_task("ee", "end_effector")
-        ee_pose = robot.get_frame_pose("end_effector")
-        task.set_target_pose(ee_pose.translation, ee_pose.rotation)
-        task.weight = 1.0
-
-        result = solver.solve_velocity()
-        assert result.status == embodik.SolverStatus.SUCCESS
-
-        solver.clear_tasks()
-        solver.clear_com_constraint()
+    def test_moving_end_effector_frame_is_rejected(self, solver):
+        """Moving support frames require frame-motion terms not modeled here."""
+        with pytest.raises((RuntimeError, ValueError), match="world or structurally root-fixed"):
+            solver.configure_com_constraint(LARGE_SQUARE, margin=0.0, frame_name="end_effector")
 
 
 if __name__ == "__main__":

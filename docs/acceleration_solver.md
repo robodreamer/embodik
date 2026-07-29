@@ -179,10 +179,12 @@ rejected until they provide the same predicted-state certificate contract.
 
 ## Build And ABI Notes
 
-The acceleration API is introduced in `0.21.0` on top of the `0.20.x`
-velocity-solver integration baseline. The shared `Task` virtual interface and
-object layout are unchanged, but source builds must rebuild `embodik_core` and
-the Nanobind extension together before using the new Python types.
+The acceleration API was introduced in `0.21.0` on top of the `0.20.x`
+velocity-solver integration baseline. The shared `Task` virtual interface is
+unchanged. The `0.22.0` centroidal additions extend public solver option and
+result layouts, so native consumers must rebuild `embodik_core` and the
+Nanobind extension together. Pre-`1.0` native binaries are not compatible
+across minor releases.
 
 ## API Reference
 

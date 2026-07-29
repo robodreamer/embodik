@@ -32,9 +32,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Reused one support-polygon geometry implementation across CoM, capture-point,
   and ZMP constraints, including margin, half-plane, inradius, and
   root-fixed-frame validation.
+- Rejected moving support frames for velocity CoM polygons because their frame
+  motion is not part of the fixed-frame Jacobian contract.
+- Made native analytic collision certification reject centroidal momentum-rate
+  bounds, capture-point constraints, and ZMP constraints until those combined
+  hard families provide a shared predicted-state certificate.
 - Documented centroidal row ordering, units, gravity and support-plane
   conventions, and the fixed-base capability boundary. Fixed-base ZMP does not
   claim floating-base contact-force feasibility or dynamic balance.
+- Extended native solver option and result layouts; C++ consumers must rebuild
+  `embodik_core` and the Nanobind extension together for `0.22.0`.
 
 ## [0.21.1] - 2026-07-28
 

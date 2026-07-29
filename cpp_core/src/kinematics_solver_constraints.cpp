@@ -646,6 +646,11 @@ void KinematicsSolver::configure_com_constraint(
     throw std::runtime_error("configure_com_constraint: frame '" + frame_name +
                              "' not found in robot model.");
   }
+  if (!detail::is_structurally_fixed_support_frame(*robot_, frame_name)) {
+    throw std::invalid_argument(
+        "configure_com_constraint: support frame must be world or structurally "
+        "root-fixed; moving frames are unsupported.");
+  }
   ComSupportPolygonConstraintDefinition definition;
   definition.support_polygon = vertices_xy;
   definition.margin = margin;

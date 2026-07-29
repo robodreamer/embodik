@@ -35,13 +35,13 @@ struct TaskAccelerationDifferentialAdapter;
  * @brief Task types enumeration
  */
 enum class TaskType {
-    FRAME_POSITION,      // Position only (3 DOF)
-    FRAME_ORIENTATION,   // Orientation only (3 DOF)
-    FRAME_POSE,         // Position + Orientation (6 DOF)
-    COM,                // Center of mass (3 DOF)
-    CENTROIDAL_MOMENTUM, // Centroidal momentum (linear + angular)
-    POSTURE,            // Joint regularization (n DOF)
-    JOINT               // Single joint target (1 DOF)
+    FRAME_POSITION = 0,      // Position only (3 DOF)
+    FRAME_ORIENTATION = 1,   // Orientation only (3 DOF)
+    FRAME_POSE = 2,          // Position + Orientation (6 DOF)
+    COM = 3,                 // Center of mass (3 DOF)
+    POSTURE = 4,             // Joint regularization (n DOF)
+    JOINT = 5,               // Single joint target (1 DOF)
+    CENTROIDAL_MOMENTUM = 6, // Centroidal momentum (linear + angular)
 };
 
 /**

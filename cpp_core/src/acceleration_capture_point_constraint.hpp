@@ -10,6 +10,10 @@
 #include <unordered_set>
 #include <vector>
 
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC visibility push(hidden)
+#endif
+
 namespace embodik::detail {
 
 struct CapturePointConstraintResult {
@@ -43,3 +47,7 @@ CapturePointConstraintResult validate_capture_point_constraint_acceptance(
     CapturePointAccelerationDiagnostics *diagnostic = nullptr);
 
 } // namespace embodik::detail
+
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC visibility pop
+#endif

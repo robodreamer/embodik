@@ -107,8 +107,10 @@ def test_centroidal_stability_guide_defines_physical_contracts() -> None:
         "`solve_velocity_with_state()`",
         "`CapturePointAccelerationConstraint`",
         "`ZmpAccelerationConstraint`",
+        "`compute_centroidal_momentum_matrix_time_variation(q, dq)`",
     ):
         assert required in guide
+    assert "compute_centroidal_momentum_matrix_derivative" not in guide
 
 
 def test_centroidal_release_surface_is_navigable_and_versioned() -> None:

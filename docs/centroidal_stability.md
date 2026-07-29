@@ -37,7 +37,7 @@ structurally root-fixed. Moving support frames fail closed.
 - `get_centroidal_momentum_matrix()`
 - `compute_centroidal_momentum_matrix(q, dq)`
 - `compute_centroidal_momentum(q, dq)`
-- `compute_centroidal_momentum_matrix_derivative(q, dq)`
+- `compute_centroidal_momentum_matrix_time_variation(q, dq)`
 - `compute_centroidal_momentum_matrix_bias(q, dq)`
 
 The state-taking methods do not depend on a prior solve. Wrong-size or
