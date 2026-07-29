@@ -421,6 +421,8 @@ add_test(NAME test_acceleration_solver_com_support_polygon
 
 add_executable(test_acceleration_solver_dynamic_support
     test_acceleration_solver_dynamic_support.cpp
+    ${CMAKE_SOURCE_DIR}/cpp_core/src/acceleration_capture_point_constraint.cpp
+    ${CMAKE_SOURCE_DIR}/cpp_core/src/acceleration_zmp_constraint.cpp
 )
 
 target_link_libraries(test_acceleration_solver_dynamic_support
