@@ -247,6 +247,56 @@ void bind_robot_model(nb::module_ &m) {
       .def("get_com_jacobian", &RobotModel::get_com_jacobian,
            "Get 3xN center of mass Jacobian")
 
+      .def("get_total_mass", &RobotModel::get_total_mass,
+           "Get total model mass in kilograms (kg)")
+
+      .def("get_centroidal_momentum_matrix",
+           &RobotModel::get_centroidal_momentum_matrix,
+           "Get current centroidal momentum matrix Ag(q), row-ordered "
+           "[linear; angular]. Multiplying by generalized velocity returns "
+           "[kg*m/s; kg*m^2/s].")
+
+      .def("get_centroidal_momentum", &RobotModel::get_centroidal_momentum,
+           "Get current centroidal momentum h = Ag(q) @ v, row-ordered "
+           "[linear; angular] with units [kg*m/s; kg*m^2/s].")
+
+      .def("get_centroidal_momentum_matrix_time_variation",
+           &RobotModel::get_centroidal_momentum_matrix_time_variation,
+           "Get current dAg(q, v), row-ordered [linear; angular], used in "
+           "hdot = Ag(q) @ a + dAg(q, v) @ v.")
+
+      .def("get_centroidal_momentum_matrix_bias",
+           &RobotModel::get_centroidal_momentum_matrix_bias,
+           "Get current centroidal bias dAg(q, v) @ v, row-ordered "
+           "[linear; angular] with units [N; N*m].")
+
+      .def("compute_centroidal_momentum_matrix",
+           [](const RobotModel &self, const Eigen::VectorXd &q,
+              const Eigen::VectorXd &v) {
+             return self.compute_centroidal_momentum_matrix(q, v);
+           },
+           nb::arg("q"), nb::arg("v") = Eigen::VectorXd(),
+           "Compute centroidal momentum matrix Ag(q), row-ordered "
+           "[linear; angular]. If v is omitted, zero velocity is used.")
+
+      .def("compute_centroidal_momentum",
+           &RobotModel::compute_centroidal_momentum, nb::arg("q"),
+           nb::arg("v"),
+           "Compute centroidal momentum h = Ag(q) @ v, row-ordered "
+           "[linear; angular] with units [kg*m/s; kg*m^2/s].")
+
+      .def("compute_centroidal_momentum_matrix_time_variation",
+           &RobotModel::compute_centroidal_momentum_matrix_time_variation,
+           nb::arg("q"), nb::arg("v"),
+           "Compute dAg(q, v), row-ordered [linear; angular], used in "
+           "hdot = Ag(q) @ a + dAg(q, v) @ v.")
+
+      .def("compute_centroidal_momentum_matrix_bias",
+           &RobotModel::compute_centroidal_momentum_matrix_bias, nb::arg("q"),
+           nb::arg("v"),
+           "Compute centroidal bias dAg(q, v) @ v, row-ordered "
+           "[linear; angular] with units [N; N*m].")
+
       // Information queries
       .def("get_frame_names", &RobotModel::get_frame_names,
            "Get list of all frame names")

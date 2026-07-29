@@ -17,6 +17,7 @@
 #pragma once
 
 #include <pinocchio/algorithm/center-of-mass.hpp>
+#include <pinocchio/algorithm/centroidal.hpp>
 #include <pinocchio/algorithm/crba.hpp>
 #include <pinocchio/algorithm/frames.hpp>
 #include <pinocchio/algorithm/jacobian.hpp>
@@ -170,6 +171,107 @@ public:
    * @brief Get Jdot_com(q, v) * v at the current state.
    */
   Eigen::Vector3d get_com_jacobian_bias() const;
+
+  /**
+   * @brief Get total model mass.
+   * @return Sum of link inertial masses in kilograms (kg)
+   */
+  double get_total_mass() const;
+
+  /**
+   * @brief Get current centroidal momentum matrix Ag(q).
+   *
+   * Rows are ordered [linear; angular]. Linear rows map to kg*m/s and angular
+   * rows map to kg*m^2/s when multiplied by generalized velocity.
+   *
+   * @return 6xnv centroidal momentum matrix
+   */
+  Eigen::Matrix<double, 6, Eigen::Dynamic>
+  get_centroidal_momentum_matrix() const;
+
+  /**
+   * @brief Get current centroidal momentum h = Ag(q) * v.
+   *
+   * Rows are ordered [linear; angular]. Units are [kg*m/s; kg*m^2/s].
+   *
+   * @return 6D centroidal momentum vector
+   */
+  Eigen::Matrix<double, 6, 1> get_centroidal_momentum() const;
+
+  /**
+   * @brief Get current centroidal momentum matrix time variation dAg(q, v).
+   *
+   * Rows are ordered [linear; angular]. This is the matrix term used in
+   * hdot = Ag(q) * a + dAg(q, v) * v.
+   *
+   * @return 6xnv centroidal momentum matrix time variation
+   */
+  Eigen::Matrix<double, 6, Eigen::Dynamic>
+  get_centroidal_momentum_matrix_time_variation() const;
+
+  /**
+   * @brief Get current centroidal momentum matrix bias dAg(q, v) * v.
+   *
+   * Rows are ordered [linear; angular]. Units are [N; N*m].
+   *
+   * @return 6D centroidal momentum bias vector
+   */
+  Eigen::Matrix<double, 6, 1> get_centroidal_momentum_matrix_bias() const;
+
+  /**
+   * @brief Compute centroidal momentum matrix Ag(q).
+   *
+   * Rows are ordered [linear; angular]. Linear rows map to kg*m/s and angular
+   * rows map to kg*m^2/s when multiplied by generalized velocity.
+   *
+   * @param q Joint configuration vector (size nq)
+   * @param v Optional joint velocity vector (size nv); zero is used when empty
+   * @return 6xnv centroidal momentum matrix
+   */
+  Eigen::Matrix<double, 6, Eigen::Dynamic>
+  compute_centroidal_momentum_matrix(
+      const Eigen::VectorXd &q,
+      const Eigen::VectorXd &v = Eigen::VectorXd()) const;
+
+  /**
+   * @brief Compute centroidal momentum h = Ag(q) * v.
+   *
+   * Rows are ordered [linear; angular]. Units are [kg*m/s; kg*m^2/s].
+   *
+   * @param q Joint configuration vector (size nq)
+   * @param v Joint velocity vector (size nv)
+   * @return 6D centroidal momentum vector
+   */
+  Eigen::Matrix<double, 6, 1>
+  compute_centroidal_momentum(const Eigen::VectorXd &q,
+                              const Eigen::VectorXd &v) const;
+
+  /**
+   * @brief Compute centroidal momentum matrix time variation dAg(q, v).
+   *
+   * Rows are ordered [linear; angular]. This is the matrix term used in
+   * hdot = Ag(q) * a + dAg(q, v) * v.
+   *
+   * @param q Joint configuration vector (size nq)
+   * @param v Joint velocity vector (size nv)
+   * @return 6xnv centroidal momentum matrix time variation
+   */
+  Eigen::Matrix<double, 6, Eigen::Dynamic>
+  compute_centroidal_momentum_matrix_time_variation(
+      const Eigen::VectorXd &q, const Eigen::VectorXd &v) const;
+
+  /**
+   * @brief Compute centroidal momentum matrix bias dAg(q, v) * v.
+   *
+   * Rows are ordered [linear; angular]. Units are [N; N*m].
+   *
+   * @param q Joint configuration vector (size nq)
+   * @param v Joint velocity vector (size nv)
+   * @return 6D centroidal momentum bias vector
+   */
+  Eigen::Matrix<double, 6, 1>
+  compute_centroidal_momentum_matrix_bias(const Eigen::VectorXd &q,
+                                          const Eigen::VectorXd &v) const;
 
   /**
    * @brief Get list of all frame names

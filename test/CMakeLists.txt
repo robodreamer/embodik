@@ -18,6 +18,20 @@ target_link_libraries(test_robot_model
 # Add test
 add_test(NAME test_robot_model COMMAND test_robot_model)
 
+add_executable(test_robot_model_centroidal
+    test_robot_model_centroidal.cpp
+)
+
+target_link_libraries(test_robot_model_centroidal
+    embodik_core
+    GTest::gtest_main
+    GTest::gtest
+)
+
+add_test(NAME test_robot_model_centroidal
+    COMMAND test_robot_model_centroidal
+)
+
 add_executable(test_kinematics_solver_header
     test_kinematics_solver_header.cpp
 )
@@ -467,5 +481,14 @@ add_test(NAME test_python_robot_model
 
 # Set Python path for tests
 set_tests_properties(test_python_robot_model PROPERTIES
+    ENVIRONMENT "PYTHONPATH=${CMAKE_BINARY_DIR}/python_bindings:$ENV{PYTHONPATH}"
+)
+
+add_test(NAME test_centroidal_binding_exports
+    COMMAND ${Python_EXECUTABLE} -m pytest ${CMAKE_CURRENT_SOURCE_DIR}/test_centroidal_binding_exports.py -v
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+
+set_tests_properties(test_centroidal_binding_exports PROPERTIES
     ENVIRONMENT "PYTHONPATH=${CMAKE_BINARY_DIR}/python_bindings:$ENV{PYTHONPATH}"
 )
