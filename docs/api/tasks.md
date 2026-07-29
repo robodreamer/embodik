@@ -1,5 +1,19 @@
 # Tasks
 
+## Centroidal Momentum
+
+`CentroidalMomentumTask` is a velocity-level absolute momentum objective:
+
+```text
+Ag(q) * dq_command ~= h_target
+```
+
+Its six rows are ordered `[linear x, y, z; angular x, y, z]`. Axis masks and
+task-local joint exclusions apply to the objective; solver-owned hard
+centroidal bounds remain independent. See
+[Centroidal Stability](../centroidal_stability.md) for units and support
+constraints.
+
 EmbodiK supports various task types for multi-task inverse kinematics.
 
 ## Task Types

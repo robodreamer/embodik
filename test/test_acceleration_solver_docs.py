@@ -50,12 +50,10 @@ def test_acceleration_page_is_in_navigation_and_release_history() -> None:
 
     assert "Acceleration Solver: acceleration_solver.md" in navigation
     assert f"## [{version}] - " in changelog
-    current_release = changelog.split(f"## [{version}]", maxsplit=1)[1].split(
-        "## [", maxsplit=1
-    )[0]
-    acceleration_release = changelog.split("## [0.21.0]", maxsplit=1)[1].split(
-        "## [", maxsplit=1
-    )[0]
+    current_release = changelog.split(f"## [{version}]", maxsplit=1)[1].split("## [", maxsplit=1)[0]
+    acceleration_release = changelog.split("## [0.21.0]", maxsplit=1)[1].split("## [", maxsplit=1)[
+        0
+    ]
     assert current_release.strip()
     assert "fixed-base acceleration-level eSNS API" in acceleration_release
     assert "non-hard-real-time" in acceleration_release
@@ -90,3 +88,52 @@ def test_example_index_classifies_every_runnable_script() -> None:
     for status in ("Selectable", "Velocity-only", "Unsupported", "Not applicable"):
         assert status in overview
     assert "Velocity remains the default solver for all IK examples" in overview
+
+
+def test_centroidal_stability_guide_defines_physical_contracts() -> None:
+    guide = " ".join((ROOT / "docs" / "centroidal_stability.md").read_text().split())
+
+    for required in (
+        "linear x, y, z; angular x, y, z",
+        "kg m/s",
+        "kg m^2/s",
+        "kg m/s^2",
+        "kg m^2/s^2",
+        "explicit current `dq`",
+        "world or structurally root-fixed",
+        "positive vertical force",
+        "`supports_dynamic_balance = False`",
+        "does not prove contact-force feasibility",
+        "`solve_velocity_with_state()`",
+        "`CapturePointAccelerationConstraint`",
+        "`ZmpAccelerationConstraint`",
+    ):
+        assert required in guide
+
+
+def test_centroidal_release_surface_is_navigable_and_versioned() -> None:
+    navigation = (ROOT / "mkdocs.yml").read_text()
+    acceleration = (ROOT / "docs" / "acceleration_solver.md").read_text()
+    examples = (ROOT / "docs" / "examples" / "index.md").read_text()
+    changelog = (ROOT / "CHANGELOG.md").read_text()
+    with (ROOT / "pyproject.toml").open("rb") as stream:
+        version = tomllib.load(stream)["project"]["version"]
+
+    assert version == "0.22.0"
+    assert "Centroidal Stability: centroidal_stability.md" in navigation
+    assert "Centroidal Stability: examples/centroidal_stability.md" in navigation
+    assert "`10_centroidal_stability.py`" in examples
+    assert "Centroidal momentum-rate objective and bounds" in acceleration
+    assert "Predicted capture point" in acceleration
+    assert "Physical centroidal-rate ZMP" in acceleration
+    assert "supports_dynamic_balance" in acceleration
+    assert "## [0.22.0] - 2026-07-29" in changelog
+    current_release = changelog.split("## [0.22.0]", maxsplit=1)[1].split("## [", maxsplit=1)[0]
+    for required in (
+        "centroidal momentum",
+        "capture point",
+        "ZMP",
+        "explicit current velocity",
+        "fixed-base",
+    ):
+        assert required in current_release

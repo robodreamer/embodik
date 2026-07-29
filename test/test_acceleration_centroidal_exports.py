@@ -7,8 +7,7 @@ import embodik as eik
 
 def _write_urdf(tmp_path: pathlib.Path) -> pathlib.Path:
     path = tmp_path / "acceleration_centroidal_exports.urdf"
-    path.write_text(
-        """<?xml version="1.0"?>
+    path.write_text("""<?xml version="1.0"?>
 <robot name="acceleration_centroidal_exports_robot">
   <link name="base_link">
     <inertial>
@@ -60,8 +59,7 @@ def _write_urdf(tmp_path: pathlib.Path) -> pathlib.Path:
     <limit lower="-1.7" upper="1.8" velocity="50.0" effort="200.0"/>
   </joint>
 </robot>
-"""
-    )
+""")
     return path
 
 

@@ -19,6 +19,25 @@ manipulability metric and does not indicate a separate solver mode. A high but
 finite value can explain weak or unstable-looking motion even when the solve
 returns `SUCCESS`.
 
+## Centroidal Velocity Controls
+
+`add_centroidal_momentum_task()` commands absolute centroidal momentum in row
+order `[linear x, y, z; angular x, y, z]`.
+`configure_centroidal_momentum_bounds()` adds selected-axis hard bounds.
+
+Capture-point constraints use candidate commanded CoM velocity directly.
+Velocity ZMP additionally requires the measured/current generalized velocity:
+
+```python
+solver.configure_velocity_zmp_constraint(support_polygon, fz_min=1.0)
+result = solver.solve_velocity_with_state(q, current_dq, apply_limits=True)
+```
+
+Calling `solve_velocity()` while velocity ZMP is configured fails explicitly;
+the solver does not substitute a previous command. See
+[Centroidal Stability](../centroidal_stability.md) for units, formulas,
+support-frame restrictions, and diagnostics.
+
 ## Runtime Policy
 
 `SolverRuntimeConfig` stores runtime defaults for interactive loops. See

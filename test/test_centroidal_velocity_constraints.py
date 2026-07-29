@@ -173,9 +173,7 @@ def test_velocity_zmp_requires_explicit_current_dq_and_matches_explicit_state(
 
     after_explicit = solver.solve_velocity(q, apply_limits=True)
     assert after_explicit.status == eik.SolverStatus.INVALID_INPUT
-    npt.assert_allclose(
-        after_explicit.joint_velocities, np.zeros(robot.nv), rtol=0.0, atol=0.0
-    )
+    npt.assert_allclose(after_explicit.joint_velocities, np.zeros(robot.nv), rtol=0.0, atol=0.0)
 
 
 def test_velocity_zmp_invalid_explicit_state_clears_and_fails_closed(
@@ -233,9 +231,7 @@ def test_cleared_centroidal_support_constraints_are_disabled_invariant(
 
     constrained_solver = eik.KinematicsSolver(robot)
     constrained_solver.add_centroidal_momentum_task("momentum").set_target_momentum(target)
-    constrained_solver.configure_capture_point_constraint(
-        polygon, frame_name="high_support_frame"
-    )
+    constrained_solver.configure_capture_point_constraint(polygon, frame_name="high_support_frame")
     constrained_solver.clear_capture_point_constraint()
     constrained_solver.configure_velocity_zmp_constraint(polygon, fz_min=1.0)
     constrained_solver.clear_velocity_zmp_constraint()
@@ -334,9 +330,7 @@ def test_moving_support_frames_fail_closed_at_configuration(tmp_path: Path) -> N
     with np.testing.assert_raises(ValueError):
         solver.configure_capture_point_constraint(polygon, frame_name="link1")
     with np.testing.assert_raises(ValueError):
-        solver.configure_velocity_zmp_constraint(
-            polygon, frame_name="link1", fz_min=0.1
-        )
+        solver.configure_velocity_zmp_constraint(polygon, frame_name="link1", fz_min=0.1)
 
 
 def test_position_step_fail_closed_when_support_contract_is_invalid(
@@ -369,9 +363,7 @@ def test_final_acceptance_revalidates_centroidal_bounds_and_zmp(tmp_path: Path) 
     current_dq = np.array([0.1, -0.05])
     task = solver.add_centroidal_momentum_task("momentum")
     task.set_target_momentum(np.ones(6) * 100.0)
-    solver.configure_centroidal_momentum_bounds(
-        lower_h=np.ones(6) * 0.2, upper_h=np.ones(6) * 0.3
-    )
+    solver.configure_centroidal_momentum_bounds(lower_h=np.ones(6) * 0.2, upper_h=np.ones(6) * 0.3)
     solver.configure_velocity_zmp_constraint(
         np.array([[-10.0, -10.0], [10.0, -10.0], [10.0, 10.0], [-10.0, 10.0]]),
         fz_min=0.1,

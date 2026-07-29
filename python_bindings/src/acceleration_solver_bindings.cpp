@@ -166,7 +166,8 @@ void bind_acceleration_solver(nb::module_ &m) {
               &TaskAccelerationBounds::upper_bound_active);
 
   nb::class_<CentroidalMomentumRateObjective>(
-      m, "CentroidalMomentumRateObjective")
+      m, "CentroidalMomentumRateObjective",
+      "Fixed-base physical hdot objective: Ag*ddq + dAg*dq.")
       .def(nb::init<>())
       .def_rw("source_id", &CentroidalMomentumRateObjective::source_id)
       DEF_VALUE_PROP(CentroidalMomentumRateObjective, h_target)
@@ -180,7 +181,8 @@ void bind_acceleration_solver(nb::module_ &m) {
               &CentroidalMomentumRateObjective::allow_min_error_fallback);
 
   nb::class_<CentroidalMomentumRateBounds>(
-      m, "CentroidalMomentumRateBounds")
+      m, "CentroidalMomentumRateBounds",
+      "Selected-axis hard bounds on physical centroidal momentum rate.")
       .def(nb::init<>())
       .def_rw("source_id", &CentroidalMomentumRateBounds::source_id)
       DEF_VALUE_PROP(CentroidalMomentumRateBounds, lower_bounds)
@@ -252,7 +254,8 @@ void bind_acceleration_solver(nb::module_ &m) {
       DEF_VALUE_PROP(ComSupportPolygonAccelerationConstraint, policy);
 
   nb::class_<CapturePointAccelerationConstraint>(
-      m, "CapturePointAccelerationConstraint")
+      m, "CapturePointAccelerationConstraint",
+      "Predicted capture-point polygon constraint with per-solve frozen omega.")
       .def(nb::init<>())
       .def_rw("source_id", &CapturePointAccelerationConstraint::source_id)
       DEF_VALUE_PROP(CapturePointAccelerationConstraint, definition)
@@ -264,7 +267,9 @@ void bind_acceleration_solver(nb::module_ &m) {
           [](CapturePointAccelerationConstraint &self,
              std::optional<double> value) { self.omega = value; });
 
-  nb::class_<ZmpAccelerationConstraint>(m, "ZmpAccelerationConstraint")
+  nb::class_<ZmpAccelerationConstraint>(
+      m, "ZmpAccelerationConstraint",
+      "Physical centroidal-rate ZMP polygon rows with a positive Fz gate.")
       .def(nb::init<>())
       .def_rw("source_id", &ZmpAccelerationConstraint::source_id)
       DEF_VALUE_PROP(ZmpAccelerationConstraint, definition)

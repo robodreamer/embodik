@@ -90,6 +90,7 @@ nav:
     - Overview: guides/index.md
     - Solver Robustness & Recovery: solver_robustness.md
     - Acceleration Solver: acceleration_solver.md
+    - Centroidal Stability: centroidal_stability.md
     - Collision Constraints & Tuning: collision_constraints.md
     - Working with Transforms: transforms.md
     - GPU Batch Solvers: gpu_solvers.md
@@ -100,6 +101,7 @@ nav:
       - Multi-Task Multi-Constraints IK: examples/multi_task_ik.md
       - Collision-Aware IK: examples/collision_aware_ik.md
       - CoM Constraint: examples/com_constraint_ik.md
+      - Centroidal Stability: examples/centroidal_stability.md
       - Dual-Arm ECTS: examples/dual_arm_ects.md
       - Teleop IK: examples/teleop_ik.md
     - Robots:

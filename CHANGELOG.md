@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.22.0] - 2026-07-29
+
+### Added
+
+- Added validated RobotModel centroidal quantities for total mass, centroidal
+  momentum matrix and momentum, matrix derivative, and physical
+  `dAg(q, dq) * dq` bias for fixed- and floating-base models.
+- Added an absolute centroidal momentum task, selected-axis hard momentum
+  bounds, commanded-velocity capture point, and finite-difference ZMP to the
+  velocity solver.
+- Added fixed-base centroidal momentum-rate objectives and bounds, predicted
+  capture-point constraints, physical centroidal-rate ZMP constraints,
+  positive vertical-force gates, and accepted-state diagnostics to the
+  acceleration solver.
+- Added a deterministic headless centroidal-stability example covering both
+  solver levels.
+
+### Changed
+
+- Made velocity ZMP require explicit current velocity through
+  `solve_velocity_with_state()` instead of relying on a previous solver command
+  or other hidden history.
+- Reused one support-polygon geometry implementation across CoM, capture-point,
+  and ZMP constraints, including margin, half-plane, inradius, and
+  root-fixed-frame validation.
+- Documented centroidal row ordering, units, gravity and support-plane
+  conventions, and the fixed-base capability boundary. Fixed-base ZMP does not
+  claim floating-base contact-force feasibility or dynamic balance.
+
 ## [0.21.1] - 2026-07-28
 
 ### Changed

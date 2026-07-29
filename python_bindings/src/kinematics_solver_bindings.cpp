@@ -275,7 +275,8 @@ void bind_kinematics_solver(nb::module_ &m) {
            nb::arg("frame_name") = "world", nb::arg("height") = -1.0,
            nb::arg("omega") = -1.0, nb::arg("gravity_z") = -9.81,
            "Configure capture-point support-polygon constraint on commanded "
-           "CoM velocity")
+           "CoM velocity. The support frame must be world or structurally "
+           "root-fixed.")
       .def("clear_capture_point_constraint",
            &KinematicsSolver::clear_capture_point_constraint,
            "Disable capture-point constraint")
@@ -284,7 +285,9 @@ void bind_kinematics_solver(nb::module_ &m) {
            nb::arg("support_polygon"), nb::arg("margin") = 0.0,
            nb::arg("frame_name") = "world", nb::arg("fz_min") = 1.0,
            nb::arg("gravity_z") = -9.81,
-           "Configure velocity-ZMP support-polygon constraint")
+           "Configure physical finite-difference velocity-ZMP support rows. "
+           "Subsequent solves must use solve_velocity_with_state() with "
+           "explicit current_dq.")
       .def("clear_velocity_zmp_constraint",
            &KinematicsSolver::clear_velocity_zmp_constraint,
            "Disable velocity-ZMP constraint")

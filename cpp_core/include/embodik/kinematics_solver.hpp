@@ -1033,12 +1033,26 @@ public:
   Eigen::VectorXd get_centroidal_momentum_bounds_upper() const;
   Eigen::VectorXd get_centroidal_momentum_bounds_axis_mask() const;
 
+  /**
+   * @brief Constrain capture point from candidate commanded CoM velocity.
+   *
+   * The support frame must be world or structurally root-fixed. Positive omega
+   * overrides height/gravity derivation. Otherwise positive height overrides
+   * the current support-frame CoM height used to derive omega.
+   */
   void configure_capture_point_constraint(
       const Eigen::MatrixXd &support_polygon, double margin = 0.0,
       const std::string &frame_name = "world", double height = -1.0,
       double omega = -1.0, double gravity_z = -9.81);
   void clear_capture_point_constraint();
 
+  /**
+   * @brief Constrain finite-difference physical ZMP from explicit current dq.
+   *
+   * Once configured, callers must use solve_velocity_with_state(). A regular
+   * solve_velocity() call fails closed rather than using command history.
+   * Support frames must be world or structurally root-fixed.
+   */
   void configure_velocity_zmp_constraint(
       const Eigen::MatrixXd &support_polygon, double margin = 0.0,
       const std::string &frame_name = "world", double fz_min = 1.0,

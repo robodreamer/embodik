@@ -30,6 +30,7 @@ the best starting points for users.
 - [`07_unitree_g1_retargeting_ik.py`](unitree_g1_retargeting_ik.md) — Unitree G1 retargeting IK with palm/foot/pelvis targets, CoM visualization, and optional self-collision constraints
 - [`08_spot_full_body_ik_viser.py`](spot_full_body_ik.md) — Spot full-body IK in regular Viser with arm+torso, torso-only, full-body, and two-stage modes
 - [`09_spot_locomanip_mjviser.py`](spot_locomanip_mjviser.md) — Spot locomanipulation ONNX policy rollout in MuJoCo through mjviser
+- [`10_centroidal_stability.py`](centroidal_stability.md) — Headless velocity/acceleration centroidal momentum, capture-point, and ZMP constraints
 
 Highlighted interactive examples use a shared solver runtime policy so example
 code stays focused on tasks, targets, and visualization while robust constraint
@@ -58,6 +59,7 @@ the application to `AccelerationSolver`.
 | `07_unitree_g1_retargeting_ik.py` | Unsupported | Uses a floating-base humanoid model; the acceleration solver accepts fixed-base scalar joints only. |
 | `08_spot_full_body_ik_viser.py` | Unsupported | Uses a floating-base whole-body model and velocity-specific recovery policy. |
 | `09_spot_locomanip_mjviser.py` | Unsupported | Couples floating-base IK to wheel/locomotion policy and MuJoCo runtime state. |
+| `10_centroidal_stability.py` | Selectable | Runs both explicit-state velocity and fixed-base acceleration centroidal constraints headlessly. |
 | `collision_hardening_demo.py` | Velocity-only | Demonstrates velocity position-step collision recovery and non-worsening-floor behavior. |
 | `example_helpers/common_bimanual_teleop_app.py` | Velocity-only | Internal executable behind the bimanual example; it has the same velocity-specific policy dependencies. |
 | `floating_base_torso_hierarchy.py` | Unsupported | Its subject is floating-base hierarchy behavior. |

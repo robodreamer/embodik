@@ -96,9 +96,7 @@ def test_centroidal_methods_are_exported_and_consistent(tmp_path: Path) -> None:
         rtol=0.0,
         atol=1e-12,
     )
-    np.testing.assert_allclose(
-        robot.compute_centroidal_momentum(q, v), h, rtol=0.0, atol=1e-10
-    )
+    np.testing.assert_allclose(robot.compute_centroidal_momentum(q, v), h, rtol=0.0, atol=1e-10)
     np.testing.assert_allclose(
         robot.compute_centroidal_momentum_matrix_time_variation(q, v),
         dag,
@@ -126,6 +124,4 @@ def test_centroidal_bindings_reject_wrong_size_and_nonfinite(tmp_path: Path) -> 
     with pytest.raises(ValueError, match="finite"):
         robot.compute_centroidal_momentum_matrix(np.array([0.0, math.nan, 0.0]))
     with pytest.raises(ValueError, match="finite"):
-        robot.compute_centroidal_momentum_matrix_bias(
-            q, np.array([0.0, math.inf, 0.0])
-        )
+        robot.compute_centroidal_momentum_matrix_bias(q, np.array([0.0, math.inf, 0.0]))

@@ -7,8 +7,7 @@ import embodik as eik
 
 def _write_urdf(tmp_path: pathlib.Path) -> pathlib.Path:
     path = tmp_path / "acceleration_dynamic_support_exports.urdf"
-    path.write_text(
-        """<?xml version="1.0"?>
+    path.write_text("""<?xml version="1.0"?>
 <robot name="acceleration_dynamic_support_exports_robot">
   <link name="base_link">
     <inertial>
@@ -46,8 +45,7 @@ def _write_urdf(tmp_path: pathlib.Path) -> pathlib.Path:
     <limit lower="-3.14" upper="3.14" velocity="500.0" effort="1000.0"/>
   </joint>
 </robot>
-"""
-    )
+""")
     return path
 
 
@@ -123,9 +121,10 @@ def test_dynamic_support_records_export_and_solve(tmp_path):
     assert cp_diag.postvalidated
     assert cp_diag.frozen_omega == 3.0
     robot.update_kinematics(result.q_solution, result.joint_velocities_next)
-    expected_cp = robot.get_com_position()[:2] + (
-        robot.get_com_jacobian() @ result.joint_velocities_next
-    )[:2] / 3.0
+    expected_cp = (
+        robot.get_com_position()[:2]
+        + (robot.get_com_jacobian() @ result.joint_velocities_next)[:2] / 3.0
+    )
     np.testing.assert_allclose(cp_diag.predicted_point_xy, expected_cp, atol=1e-8)
     assert cp_diag.half_plane_slacks.shape == (4,)
     assert np.isclose(cp_diag.min_slack, np.min(cp_diag.half_plane_slacks))
@@ -134,14 +133,10 @@ def test_dynamic_support_records_export_and_solve(tmp_path):
     zmp_diag = result.zmp_diagnostics[0]
     assert zmp_diag.source_id == "python_zmp"
     assert zmp_diag.postvalidated
-    hdot = (
-        robot.compute_centroidal_momentum_matrix(
-            result.q_solution, result.joint_velocities_next
-        )
-        @ result.joint_accelerations
-        + robot.compute_centroidal_momentum_matrix_bias(
-            result.q_solution, result.joint_velocities_next
-        )
+    hdot = robot.compute_centroidal_momentum_matrix(
+        result.q_solution, result.joint_velocities_next
+    ) @ result.joint_accelerations + robot.compute_centroidal_momentum_matrix_bias(
+        result.q_solution, result.joint_velocities_next
     )
     force = hdot[:3] - robot.get_total_mass() * robot.get_gravity()
     expected_force_z = force[2]
