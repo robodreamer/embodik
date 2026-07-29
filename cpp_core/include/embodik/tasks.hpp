@@ -39,6 +39,7 @@ enum class TaskType {
     FRAME_ORIENTATION,   // Orientation only (3 DOF)
     FRAME_POSE,         // Position + Orientation (6 DOF)
     COM,                // Center of mass (3 DOF)
+    CENTROIDAL_MOMENTUM, // Centroidal momentum (linear + angular)
     POSTURE,            // Joint regularization (n DOF)
     JOINT               // Single joint target (1 DOF)
 };
@@ -432,6 +433,53 @@ private:
 
     Eigen::VectorXd referenceRowScale() const;
     Eigen::MatrixXd buildPhysicalJacobian() const;
+};
+
+/**
+ * @brief Task for commanding absolute centroidal momentum h = Ag(q) * dq.
+ */
+class CentroidalMomentumTask : public Task {
+public:
+    CentroidalMomentumTask(const std::string& name,
+                           std::shared_ptr<RobotModel> model,
+                           int priority = 0,
+                           double weight = 1.0);
+
+    void setTargetMomentum(const Eigen::Matrix<double, 6, 1>& momentum);
+    void setAxisMask(const Eigen::Matrix<double, 6, 1>& mask);
+
+    void set_excluded_joint_indices(const std::vector<int>& excluded_indices) override {
+        Task::set_excluded_joint_indices(excluded_indices);
+    }
+
+    void clear_excluded_joint_indices() override {
+        Task::clear_excluded_joint_indices();
+    }
+
+    void update(const RobotModel& model) override;
+    Eigen::VectorXd getError() const override;
+    Eigen::MatrixXd getJacobian() const override;
+    int getDimension() const override;
+    TaskType getType() const override { return TaskType::CENTROIDAL_MOMENTUM; }
+
+    const Eigen::Matrix<double, 6, 1>& getTargetMomentum() const {
+        return target_momentum_;
+    }
+    const Eigen::Matrix<double, 6, 1>& getAxisMask() const {
+        return axis_mask_;
+    }
+
+private:
+    std::shared_ptr<RobotModel> model_;
+    Eigen::Matrix<double, 6, 1> target_momentum_ =
+        Eigen::Matrix<double, 6, 1>::Zero();
+    Eigen::Matrix<double, 6, 1> current_momentum_ =
+        Eigen::Matrix<double, 6, 1>::Zero();
+    Eigen::Matrix<double, 6, 1> axis_mask_ =
+        Eigen::Matrix<double, 6, 1>::Ones();
+    Eigen::MatrixXd centroidal_jacobian_;
+
+    std::vector<int> selectedRows() const;
 };
 
 /**

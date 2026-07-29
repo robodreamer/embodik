@@ -79,6 +79,14 @@ public:
   std::shared_ptr<COMTask> add_com_task(const std::string &name);
 
   /**
+   * @brief Add an absolute centroidal momentum tracking task.
+   * @param name Unique task name
+   * @return Shared pointer to the created task
+   */
+  std::shared_ptr<CentroidalMomentumTask>
+  add_centroidal_momentum_task(const std::string &name);
+
+  /**
    * @brief Add a posture regularization task
    * @param name Unique task name
    * @param controlled_joints Optional list of joint indices to control
@@ -235,6 +243,12 @@ public:
   solve_velocity(const Eigen::VectorXd &current_q = Eigen::VectorXd(),
                  bool apply_limits = true,
                  bool stall_recovery = false);
+
+  VelocitySolverResult
+  solve_velocity_with_state(const Eigen::VectorXd &current_q,
+                            const Eigen::VectorXd &current_dq,
+                            bool apply_limits = true,
+                            bool stall_recovery = false);
 
   /**
    * @brief Enable/disable detailed timing breakdown fields in
@@ -1001,6 +1015,51 @@ public:
   void clear_com_constraint();
 
   /**
+   * @brief Configure hard selected-axis centroidal momentum bounds.
+   *
+   * Enforces lower_h <= Ag(q) * dq_command <= upper_h for selected axes in row
+   * order [linear xyz; angular xyz]. Empty axis_mask selects all axes.
+   */
+  void configure_centroidal_momentum_bounds(
+      const Eigen::VectorXd &lower_h, const Eigen::VectorXd &upper_h,
+      const Eigen::VectorXd &axis_mask = Eigen::VectorXd());
+
+  /**
+   * @brief Disable hard centroidal momentum bounds.
+   */
+  void clear_centroidal_momentum_bounds();
+
+  Eigen::VectorXd get_centroidal_momentum_bounds_lower() const;
+  Eigen::VectorXd get_centroidal_momentum_bounds_upper() const;
+  Eigen::VectorXd get_centroidal_momentum_bounds_axis_mask() const;
+
+  void configure_capture_point_constraint(
+      const Eigen::MatrixXd &support_polygon, double margin = 0.0,
+      const std::string &frame_name = "world", double height = 1.0,
+      double omega = -1.0, double gravity_z = -9.81);
+  void clear_capture_point_constraint();
+
+  void configure_velocity_zmp_constraint(
+      const Eigen::MatrixXd &support_polygon, double margin = 0.0,
+      const std::string &frame_name = "world", double fz_min = 1.0,
+      double gravity_z = -9.81);
+  void clear_velocity_zmp_constraint();
+
+  struct CentroidalSupportDebug {
+    SolverStatus status = SolverStatus::kSuccess;
+    std::string message;
+    Eigen::Vector2d point = Eigen::Vector2d::Zero();
+    Eigen::VectorXd slacks;
+    double force_z = std::numeric_limits<double>::quiet_NaN();
+  };
+
+  CentroidalSupportDebug evaluate_capture_point_constraint(
+      const Eigen::VectorXd &current_q, const Eigen::VectorXd &dq_command);
+  CentroidalSupportDebug evaluate_velocity_zmp_constraint(
+      const Eigen::VectorXd &current_q, const Eigen::VectorXd &current_dq,
+      const Eigen::VectorXd &dq_command);
+
+  /**
    * @brief Replace user-defined linear velocity constraints.
    *
    * Constraints are enforced as:
@@ -1622,6 +1681,35 @@ private:
 
   std::optional<ComConstraintConfig> com_constraint_;
   std::optional<ComConstraintResult> compute_com_constraint();
+
+  struct CentroidalMomentumBoundsConfig {
+    bool enabled = false;
+    Eigen::VectorXd lower_h;
+    Eigen::VectorXd upper_h;
+    Eigen::VectorXd axis_mask;
+  };
+  std::optional<CentroidalMomentumBoundsConfig> centroidal_momentum_bounds_;
+  std::optional<ComConstraintResult>
+  compute_centroidal_momentum_bounds_constraint();
+
+  struct SupportHalfspaceConfig {
+    bool enabled = false;
+    Eigen::MatrixXd support_polygon;
+    double margin = 0.0;
+    std::string frame_name = "world";
+    double height = 1.0;
+    double omega = -1.0;
+    double gravity_z = -9.81;
+    double fz_min = 1.0;
+    Eigen::MatrixXd A;
+    Eigen::VectorXd b;
+  };
+  std::optional<SupportHalfspaceConfig> capture_point_constraint_;
+  std::optional<SupportHalfspaceConfig> velocity_zmp_constraint_;
+  std::optional<Eigen::VectorXd> pending_explicit_current_dq_;
+  std::optional<ComConstraintResult> compute_capture_point_constraint();
+  std::optional<ComConstraintResult> compute_velocity_zmp_constraint(
+      const Eigen::VectorXd &current_dq);
 
   // ---- Relative pose constraint ----
   struct RelativePoseConstraintConfig {

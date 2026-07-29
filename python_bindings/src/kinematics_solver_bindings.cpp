@@ -69,6 +69,10 @@ void bind_kinematics_solver(nb::module_ &m) {
       .def("add_com_task", &KinematicsSolver::add_com_task, nb::arg("name"),
            "Add a center of mass tracking task")
 
+      .def("add_centroidal_momentum_task",
+           &KinematicsSolver::add_centroidal_momentum_task, nb::arg("name"),
+           "Add an absolute centroidal momentum tracking task")
+
       .def(
           "add_posture_task",
           [](KinematicsSolver &self, const std::string &name) {
@@ -170,6 +174,12 @@ void bind_kinematics_solver(nb::module_ &m) {
            "enables automatic stall detection and collision-margin relaxation "
            "/ restoration. The handler stays active across calls so stall "
            "counts accumulate correctly in user loops.")
+      .def("solve_velocity_with_state",
+           &KinematicsSolver::solve_velocity_with_state, nb::arg("current_q"),
+           nb::arg("current_dq"), nb::arg("apply_limits") = true,
+           nb::arg("stall_recovery") = false,
+           "Solve velocity IK with explicit current joint velocity state. "
+           "Required when velocity-ZMP constraints are enabled.")
       .def(
           "solve_velocity_dq",
           [](KinematicsSolver &self, const Eigen::VectorXd &current_q,
@@ -240,6 +250,77 @@ void bind_kinematics_solver(nb::module_ &m) {
 
       .def("clear_base_bounds", &KinematicsSolver::clear_base_bounds,
            "Clear floating-base bounds (use unlimited bounds)")
+
+      .def("configure_centroidal_momentum_bounds",
+           &KinematicsSolver::configure_centroidal_momentum_bounds,
+           nb::arg("lower_h"), nb::arg("upper_h"),
+           nb::arg("axis_mask") = Eigen::VectorXd(),
+           "Configure hard selected-axis bounds on Ag(q) @ dq_command")
+      .def("clear_centroidal_momentum_bounds",
+           &KinematicsSolver::clear_centroidal_momentum_bounds,
+           "Disable hard centroidal momentum bounds")
+      .def(
+          "get_centroidal_momentum_bounds",
+          [](const KinematicsSolver &self) {
+            return nb::make_tuple(
+                self.get_centroidal_momentum_bounds_lower(),
+                self.get_centroidal_momentum_bounds_upper(),
+                self.get_centroidal_momentum_bounds_axis_mask());
+          },
+          "Return (lower_h, upper_h, axis_mask) for configured hard "
+          "centroidal momentum bounds")
+      .def("configure_capture_point_constraint",
+           &KinematicsSolver::configure_capture_point_constraint,
+           nb::arg("support_polygon"), nb::arg("margin") = 0.0,
+           nb::arg("frame_name") = "world", nb::arg("height") = 1.0,
+           nb::arg("omega") = -1.0, nb::arg("gravity_z") = -9.81,
+           "Configure capture-point support-polygon constraint on commanded "
+           "CoM velocity")
+      .def("clear_capture_point_constraint",
+           &KinematicsSolver::clear_capture_point_constraint,
+           "Disable capture-point constraint")
+      .def("configure_velocity_zmp_constraint",
+           &KinematicsSolver::configure_velocity_zmp_constraint,
+           nb::arg("support_polygon"), nb::arg("margin") = 0.0,
+           nb::arg("frame_name") = "world", nb::arg("fz_min") = 1.0,
+           nb::arg("gravity_z") = -9.81,
+           "Configure velocity-ZMP support-polygon constraint")
+      .def("clear_velocity_zmp_constraint",
+           &KinematicsSolver::clear_velocity_zmp_constraint,
+           "Disable velocity-ZMP constraint")
+      .def(
+          "evaluate_capture_point_constraint",
+          [](KinematicsSolver &self, const Eigen::VectorXd &q,
+             const Eigen::VectorXd &dq) {
+            auto debug = self.evaluate_capture_point_constraint(q, dq);
+            nb::dict out;
+            out["status"] = debug.status;
+            out["message"] = debug.message;
+            out["point"] = debug.point;
+            out["slacks"] = debug.slacks;
+            out["force_z"] = debug.force_z;
+            return out;
+          },
+          nb::arg("current_q"), nb::arg("dq_command"),
+          "Evaluate capture-point constraint debug data without mutating "
+          "solver state")
+      .def(
+          "evaluate_velocity_zmp_constraint",
+          [](KinematicsSolver &self, const Eigen::VectorXd &q,
+             const Eigen::VectorXd &current_dq,
+             const Eigen::VectorXd &dq_command) {
+            auto debug =
+                self.evaluate_velocity_zmp_constraint(q, current_dq, dq_command);
+            nb::dict out;
+            out["status"] = debug.status;
+            out["message"] = debug.message;
+            out["point"] = debug.point;
+            out["slacks"] = debug.slacks;
+            out["force_z"] = debug.force_z;
+            return out;
+          },
+          nb::arg("current_q"), nb::arg("current_dq"), nb::arg("dq_command"),
+          "Evaluate velocity-ZMP debug data without mutating solver state")
 
       // Position IK methods
       .def("solve_position", &KinematicsSolver::solve_position,

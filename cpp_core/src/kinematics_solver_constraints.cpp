@@ -4,8 +4,32 @@
  */
 
 #include "kinematics_solver_internal.hpp"
+#include "support_polygon_geometry.hpp"
 
 namespace embodik {
+
+namespace {
+ComSupportPolygonConstraintDefinition
+make_support_definition(const Eigen::MatrixXd &support_polygon, double margin) {
+  ComSupportPolygonConstraintDefinition definition;
+  definition.support_polygon = support_polygon;
+  definition.margin = margin;
+  definition.proximity_fraction = 0.0;
+  return definition;
+}
+
+double configured_capture_omega(double explicit_omega, double gravity_z,
+                                double height) {
+  if (std::isfinite(explicit_omega) && explicit_omega > 0.0) {
+    return explicit_omega;
+  }
+  if (!(std::isfinite(height) && height > 0.0) ||
+      !std::isfinite(gravity_z)) {
+    return std::numeric_limits<double>::quiet_NaN();
+  }
+  return std::sqrt(std::abs(gravity_z) / height);
+}
+} // namespace
 
 void KinematicsSolver::configure_relative_pose_constraint(
     const std::string &frame_a, const std::string &frame_b,
@@ -116,6 +140,150 @@ void KinematicsSolver::append_linear_velocity_constraints(
 
 void KinematicsSolver::clear_linear_velocity_constraints() {
   linear_velocity_constraints_.reset();
+}
+
+void KinematicsSolver::configure_centroidal_momentum_bounds(
+    const Eigen::VectorXd &lower_h, const Eigen::VectorXd &upper_h,
+    const Eigen::VectorXd &axis_mask) {
+  Eigen::VectorXd mask;
+  if (axis_mask.size() == 0) {
+    mask = Eigen::VectorXd::Ones(6);
+  } else if (axis_mask.size() == 6 && axis_mask.allFinite()) {
+    mask = axis_mask;
+  } else {
+    throw std::invalid_argument(
+        "centroidal momentum axis_mask must be empty or finite 6D");
+  }
+
+  int selected = 0;
+  for (Eigen::Index i = 0; i < mask.size(); ++i) {
+    if (mask(i) != 0.0) {
+      ++selected;
+    }
+  }
+  if (selected == 0) {
+    throw std::invalid_argument(
+        "centroidal momentum bounds must select at least one axis");
+  }
+  if (lower_h.size() != selected || upper_h.size() != selected) {
+    throw std::invalid_argument(
+        "centroidal momentum bounds size must match selected axis count");
+  }
+  if (!lower_h.allFinite() || !upper_h.allFinite()) {
+    throw std::invalid_argument("centroidal momentum bounds must be finite");
+  }
+  for (Eigen::Index i = 0; i < lower_h.size(); ++i) {
+    if (lower_h(i) > upper_h(i)) {
+      throw std::invalid_argument(
+          "centroidal momentum lower bound exceeds upper bound");
+    }
+  }
+
+  CentroidalMomentumBoundsConfig cfg;
+  cfg.enabled = true;
+  cfg.lower_h = lower_h;
+  cfg.upper_h = upper_h;
+  cfg.axis_mask = std::move(mask);
+  centroidal_momentum_bounds_ = std::move(cfg);
+}
+
+void KinematicsSolver::clear_centroidal_momentum_bounds() {
+  centroidal_momentum_bounds_.reset();
+}
+
+Eigen::VectorXd KinematicsSolver::get_centroidal_momentum_bounds_lower() const {
+  if (!centroidal_momentum_bounds_.has_value() ||
+      !centroidal_momentum_bounds_->enabled) {
+    return Eigen::VectorXd();
+  }
+  return centroidal_momentum_bounds_->lower_h;
+}
+
+Eigen::VectorXd KinematicsSolver::get_centroidal_momentum_bounds_upper() const {
+  if (!centroidal_momentum_bounds_.has_value() ||
+      !centroidal_momentum_bounds_->enabled) {
+    return Eigen::VectorXd();
+  }
+  return centroidal_momentum_bounds_->upper_h;
+}
+
+Eigen::VectorXd
+KinematicsSolver::get_centroidal_momentum_bounds_axis_mask() const {
+  if (!centroidal_momentum_bounds_.has_value() ||
+      !centroidal_momentum_bounds_->enabled) {
+    return Eigen::VectorXd();
+  }
+  return centroidal_momentum_bounds_->axis_mask;
+}
+
+void KinematicsSolver::configure_capture_point_constraint(
+    const Eigen::MatrixXd &support_polygon, double margin,
+    const std::string &frame_name, double height, double omega,
+    double gravity_z) {
+  if (frame_name != "world" && !robot_->has_frame(frame_name)) {
+    throw std::invalid_argument("unknown capture-point support frame: " +
+                                frame_name);
+  }
+  const auto prepared = detail::prepare_support_polygon_geometry(
+      make_support_definition(support_polygon, margin), "capture-point", "ik");
+  if (!prepared.satisfied()) {
+    throw std::invalid_argument(prepared.message);
+  }
+  const double effective_omega =
+      configured_capture_omega(omega, gravity_z, height);
+  if (!(std::isfinite(effective_omega) && effective_omega > 0.0)) {
+    throw std::invalid_argument(
+        "capture-point omega must be explicit positive or derivable from "
+        "positive height and finite gravity_z");
+  }
+  SupportHalfspaceConfig cfg;
+  cfg.enabled = true;
+  cfg.support_polygon = support_polygon;
+  cfg.margin = margin;
+  cfg.frame_name = frame_name;
+  cfg.height = height;
+  cfg.omega = effective_omega;
+  cfg.gravity_z = gravity_z;
+  cfg.A = prepared.geometry.halfspace_normals;
+  cfg.b = prepared.geometry.halfspace_offsets;
+  capture_point_constraint_ = std::move(cfg);
+}
+
+void KinematicsSolver::clear_capture_point_constraint() {
+  capture_point_constraint_.reset();
+}
+
+void KinematicsSolver::configure_velocity_zmp_constraint(
+    const Eigen::MatrixXd &support_polygon, double margin,
+    const std::string &frame_name, double fz_min, double gravity_z) {
+  if (frame_name != "world" && !robot_->has_frame(frame_name)) {
+    throw std::invalid_argument("unknown velocity-ZMP support frame: " +
+                                frame_name);
+  }
+  if (!(std::isfinite(fz_min) && fz_min > 0.0) ||
+      !std::isfinite(gravity_z)) {
+    throw std::invalid_argument(
+        "velocity-ZMP fz_min must be positive and gravity_z finite");
+  }
+  const auto prepared = detail::prepare_support_polygon_geometry(
+      make_support_definition(support_polygon, margin), "velocity-ZMP", "ik");
+  if (!prepared.satisfied()) {
+    throw std::invalid_argument(prepared.message);
+  }
+  SupportHalfspaceConfig cfg;
+  cfg.enabled = true;
+  cfg.support_polygon = support_polygon;
+  cfg.margin = margin;
+  cfg.frame_name = frame_name;
+  cfg.fz_min = fz_min;
+  cfg.gravity_z = gravity_z;
+  cfg.A = prepared.geometry.halfspace_normals;
+  cfg.b = prepared.geometry.halfspace_offsets;
+  velocity_zmp_constraint_ = std::move(cfg);
+}
+
+void KinematicsSolver::clear_velocity_zmp_constraint() {
+  velocity_zmp_constraint_.reset();
 }
 
 int KinematicsSolver::get_linear_velocity_constraint_rows() const {
@@ -752,5 +920,182 @@ KinematicsSolver::compute_com_constraint() {
   return result;
 }
 
+std::optional<KinematicsSolver::ComConstraintResult>
+KinematicsSolver::compute_centroidal_momentum_bounds_constraint() {
+  if (!centroidal_momentum_bounds_.has_value() ||
+      !centroidal_momentum_bounds_->enabled) {
+    return std::nullopt;
+  }
+  const auto &cfg = *centroidal_momentum_bounds_;
+  const Eigen::MatrixXd Ag = robot_->get_centroidal_momentum_matrix();
+  const int selected = static_cast<int>(cfg.lower_h.size());
+  ComConstraintResult result;
+  result.jacobian.resize(selected, robot_->nv());
+  result.lower_bounds = cfg.lower_h;
+  result.upper_bounds = cfg.upper_h;
+  result.violated_rows = Eigen::ArrayXi::Zero(selected);
+  int out_row = 0;
+  for (int row = 0; row < 6; ++row) {
+    if (cfg.axis_mask(row) == 0.0) {
+      continue;
+    }
+    result.jacobian.row(out_row) = Ag.row(row);
+    ++out_row;
+  }
+  return result;
+}
+
+std::optional<KinematicsSolver::ComConstraintResult>
+KinematicsSolver::compute_capture_point_constraint() {
+  if (!capture_point_constraint_.has_value() ||
+      !capture_point_constraint_->enabled) {
+    return std::nullopt;
+  }
+  const auto &cfg = *capture_point_constraint_;
+  if (cfg.frame_name != "world") {
+    const Matrix6Xd J_frame = robot_->get_frame_jacobian(cfg.frame_name);
+    if (J_frame.norm() > 1e-10) {
+      ComConstraintResult fail;
+      fail.jacobian = Eigen::MatrixXd::Zero(1, robot_->nv());
+      fail.lower_bounds = Eigen::VectorXd::Ones(1);
+      fail.upper_bounds = Eigen::VectorXd::Zero(1);
+      fail.violated_rows = Eigen::ArrayXi::Ones(1);
+      return fail;
+    }
+  }
+  const Eigen::Vector3d com = robot_->get_com_position();
+  const Eigen::MatrixXd Jcom = robot_->get_com_jacobian();
+  ComConstraintResult result;
+  result.jacobian = (cfg.A * Jcom.topRows(2)) / cfg.omega;
+  result.lower_bounds = Eigen::VectorXd::Constant(cfg.A.rows(), -1e100);
+  result.upper_bounds = cfg.b - cfg.A * com.head<2>();
+  result.violated_rows = Eigen::ArrayXi::Zero(cfg.A.rows());
+  return result;
+}
+
+std::optional<KinematicsSolver::ComConstraintResult>
+KinematicsSolver::compute_velocity_zmp_constraint(
+    const Eigen::VectorXd &current_dq) {
+  if (!velocity_zmp_constraint_.has_value() ||
+      !velocity_zmp_constraint_->enabled) {
+    return std::nullopt;
+  }
+  const auto &cfg = *velocity_zmp_constraint_;
+  if (cfg.frame_name != "world") {
+    const Matrix6Xd J_frame = robot_->get_frame_jacobian(cfg.frame_name);
+    if (J_frame.norm() > 1e-10) {
+      ComConstraintResult fail;
+      fail.jacobian = Eigen::MatrixXd::Zero(1, robot_->nv());
+      fail.lower_bounds = Eigen::VectorXd::Ones(1);
+      fail.upper_bounds = Eigen::VectorXd::Zero(1);
+      fail.violated_rows = Eigen::ArrayXi::Ones(1);
+      return fail;
+    }
+  }
+  const Eigen::MatrixXd Ag = robot_->get_centroidal_momentum_matrix();
+  const Eigen::VectorXd bias = robot_->get_centroidal_momentum_matrix_bias();
+  const Eigen::Vector3d c = robot_->get_com_position();
+  const double mass_g = robot_->get_total_mass() * std::abs(cfg.gravity_z);
+  const Eigen::MatrixXd G = Ag / dt_;
+  const Eigen::VectorXd k = bias - (Ag * current_dq) / dt_;
+
+  const int hp = static_cast<int>(cfg.A.rows());
+  ComConstraintResult result;
+  result.jacobian.resize(hp + 1, robot_->nv());
+  result.lower_bounds = Eigen::VectorXd::Constant(hp + 1, -1e100);
+  result.upper_bounds = Eigen::VectorXd::Constant(hp + 1, 1e100);
+  result.violated_rows = Eigen::ArrayXi::Zero(hp + 1);
+  for (int i = 0; i < hp; ++i) {
+    const double ax = cfg.A(i, 0);
+    const double ay = cfg.A(i, 1);
+    result.jacobian.row(i) =
+        ax * (c.x() * G.row(2) - G.row(4) - c.z() * G.row(0)) +
+        ay * (c.y() * G.row(2) + G.row(3) - c.z() * G.row(1)) -
+        cfg.b(i) * G.row(2);
+    const double constant =
+        ax * (c.x() * (mass_g + k(2)) - k(4) - c.z() * k(0)) +
+        ay * (c.y() * (mass_g + k(2)) + k(3) - c.z() * k(1)) -
+        cfg.b(i) * (mass_g + k(2));
+    result.upper_bounds(i) = -constant;
+  }
+  result.jacobian.row(hp) = G.row(2);
+  result.lower_bounds(hp) = cfg.fz_min - mass_g - k(2);
+  return result;
+}
+
+KinematicsSolver::CentroidalSupportDebug
+KinematicsSolver::evaluate_capture_point_constraint(
+    const Eigen::VectorXd &current_q, const Eigen::VectorXd &dq_command) {
+  CentroidalSupportDebug debug;
+  if (current_q.size() != robot_->nq() || dq_command.size() != robot_->nv()) {
+    debug.status = SolverStatus::kInvalidInput;
+    debug.message = "q/dq size mismatch";
+    return debug;
+  }
+  if (!current_q.allFinite() || !dq_command.allFinite()) {
+    debug.status = SolverStatus::kNonFiniteInput;
+    debug.message = "q/dq contains non-finite values";
+    return debug;
+  }
+  if (!capture_point_constraint_.has_value() ||
+      !capture_point_constraint_->enabled) {
+    debug.status = SolverStatus::kInvalidInput;
+    debug.message = "capture-point constraint is not configured";
+    return debug;
+  }
+  robot_->update_kinematics(current_q);
+  const auto &cfg = *capture_point_constraint_;
+  const Eigen::Vector3d com = robot_->get_com_position();
+  const Eigen::MatrixXd Jcom = robot_->get_com_jacobian();
+  debug.point = com.head<2>() + (Jcom.topRows(2) * dq_command) / cfg.omega;
+  debug.slacks = cfg.b - cfg.A * debug.point;
+  return debug;
+}
+
+KinematicsSolver::CentroidalSupportDebug
+KinematicsSolver::evaluate_velocity_zmp_constraint(
+    const Eigen::VectorXd &current_q, const Eigen::VectorXd &current_dq,
+    const Eigen::VectorXd &dq_command) {
+  CentroidalSupportDebug debug;
+  if (current_q.size() != robot_->nq() || current_dq.size() != robot_->nv() ||
+      dq_command.size() != robot_->nv()) {
+    debug.status = SolverStatus::kInvalidInput;
+    debug.message = "q/current_dq/dq_command size mismatch";
+    return debug;
+  }
+  if (!current_q.allFinite() || !current_dq.allFinite() ||
+      !dq_command.allFinite()) {
+    debug.status = SolverStatus::kNonFiniteInput;
+    debug.message = "q/current_dq/dq_command contains non-finite values";
+    return debug;
+  }
+  if (!velocity_zmp_constraint_.has_value() ||
+      !velocity_zmp_constraint_->enabled) {
+    debug.status = SolverStatus::kInvalidInput;
+    debug.message = "velocity-ZMP constraint is not configured";
+    return debug;
+  }
+  robot_->update_kinematics(current_q);
+  const auto &cfg = *velocity_zmp_constraint_;
+  const Eigen::VectorXd hdot =
+      robot_->get_centroidal_momentum_matrix() *
+          ((dq_command - current_dq) / dt_) +
+      robot_->get_centroidal_momentum_matrix_bias();
+  const Eigen::Vector3d c = robot_->get_com_position();
+  const double Fz = robot_->get_total_mass() * std::abs(cfg.gravity_z) + hdot(2);
+  debug.force_z = Fz;
+  if (Fz <= 0.0 || !std::isfinite(Fz)) {
+    debug.status = SolverStatus::kInfeasible;
+    debug.message = "velocity-ZMP force denominator is not positive finite";
+    return debug;
+  }
+  debug.point.x() = c.x() - (hdot(4) + c.z() * hdot(0)) / Fz;
+  debug.point.y() = c.y() + (hdot(3) - c.z() * hdot(1)) / Fz;
+  debug.slacks = cfg.b - cfg.A * debug.point;
+  if (Fz < cfg.fz_min || debug.slacks.minCoeff() < -constraint_tolerance_) {
+    debug.status = SolverStatus::kInfeasible;
+  }
+  return debug;
+}
 
 } // namespace embodik

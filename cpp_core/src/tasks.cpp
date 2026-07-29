@@ -355,6 +355,78 @@ Eigen::MatrixXd COMTask::getJacobian() const {
 int COMTask::getDimension() const { return 3; }
 
 //=============================================================================
+// CentroidalMomentumTask Implementation
+//=============================================================================
+
+CentroidalMomentumTask::CentroidalMomentumTask(
+    const std::string &name, std::shared_ptr<RobotModel> model, int priority,
+    double weight)
+    : Task(name, priority, weight), model_(model) {}
+
+void CentroidalMomentumTask::setTargetMomentum(
+    const Eigen::Matrix<double, 6, 1> &momentum) {
+  if (!momentum.allFinite()) {
+    throw std::invalid_argument("Target centroidal momentum must be finite");
+  }
+  if (!target_momentum_.isApprox(momentum, 0.0)) {
+    target_momentum_ = momentum;
+    markContinuityTargetChanged();
+  }
+}
+
+void CentroidalMomentumTask::setAxisMask(
+    const Eigen::Matrix<double, 6, 1> &mask) {
+  if (!mask.allFinite()) {
+    throw std::invalid_argument("Centroidal momentum axis mask must be finite");
+  }
+  if (!axis_mask_.isApprox(mask, 0.0)) {
+    axis_mask_ = mask;
+    markContinuityStateChanged();
+  }
+}
+
+void CentroidalMomentumTask::update(const RobotModel &model) {
+  current_momentum_ = model.get_centroidal_momentum();
+  centroidal_jacobian_ = model.get_centroidal_momentum_matrix();
+}
+
+std::vector<int> CentroidalMomentumTask::selectedRows() const {
+  std::vector<int> rows;
+  rows.reserve(6);
+  for (int row = 0; row < 6; ++row) {
+    if (axis_mask_(row) != 0.0) {
+      rows.push_back(row);
+    }
+  }
+  return rows;
+}
+
+Eigen::VectorXd CentroidalMomentumTask::getError() const {
+  const auto rows = selectedRows();
+  Eigen::VectorXd error(rows.size());
+  for (std::size_t i = 0; i < rows.size(); ++i) {
+    const int row = rows[i];
+    error(static_cast<Eigen::Index>(i)) =
+        target_momentum_(row) - current_momentum_(row);
+  }
+  return error;
+}
+
+Eigen::MatrixXd CentroidalMomentumTask::getJacobian() const {
+  const auto rows = selectedRows();
+  Eigen::MatrixXd jacobian(rows.size(), centroidal_jacobian_.cols());
+  for (std::size_t i = 0; i < rows.size(); ++i) {
+    jacobian.row(static_cast<Eigen::Index>(i)) =
+        centroidal_jacobian_.row(rows[i]);
+  }
+  return apply_excluded_joint_columns(jacobian);
+}
+
+int CentroidalMomentumTask::getDimension() const {
+  return static_cast<int>(selectedRows().size());
+}
+
+//=============================================================================
 // PostureTask Implementation
 //=============================================================================
 
