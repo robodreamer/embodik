@@ -191,6 +191,25 @@ add_test(NAME test_acceleration_solver_task_bounds
     COMMAND test_acceleration_solver_task_bounds
 )
 
+add_executable(test_acceleration_solver_centroidal_momentum_rate
+    test_acceleration_solver_centroidal_momentum_rate.cpp
+)
+
+target_link_libraries(test_acceleration_solver_centroidal_momentum_rate
+    embodik_core
+    GTest::gtest_main
+    GTest::gtest
+)
+
+target_include_directories(test_acceleration_solver_centroidal_momentum_rate
+    PRIVATE
+        ${CMAKE_SOURCE_DIR}/cpp_core/src
+)
+
+add_test(NAME test_acceleration_solver_centroidal_momentum_rate
+    COMMAND test_acceleration_solver_centroidal_momentum_rate
+)
+
 add_executable(test_acceleration_solver_frozen_locks
     test_acceleration_solver_frozen_locks.cpp
 )

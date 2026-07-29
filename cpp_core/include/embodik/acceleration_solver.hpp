@@ -88,6 +88,46 @@ struct TaskAccelerationBounds {
 };
 
 /**
+ * @brief Per-call fixed-base centroidal momentum-rate objective.
+ *
+ * The physical objective is:
+ *   Ag(q) * ddq + dAg(q, dq) * dq = hdot_feedforward +
+ *       proportional_gain * (h_target - h(q, dq))
+ *
+ * Empty axis_mask means all six centroidal axes are selected. Task-local
+ * exclusions are intentionally not applied because this is a solver-owned
+ * per-call objective, not a registered Task adapter.
+ */
+struct CentroidalMomentumRateObjective {
+  std::string source_id;
+  Eigen::VectorXd h_target;
+  Eigen::VectorXd hdot_feedforward = Eigen::VectorXd::Zero(6);
+  double proportional_gain = 0.0;
+  std::vector<bool> axis_mask;
+  int priority = 0;
+  TaskSolveMode solve_mode = TaskSolveMode::kScale;
+  bool allow_min_error_fallback = false;
+};
+
+/**
+ * @brief Per-call fixed-base centroidal momentum-rate hard bounds.
+ *
+ * Bounds are expressed in physical centroidal momentum-rate coordinates:
+ *   lower_bounds <= Ag(q) * ddq + dAg(q, dq) * dq <= upper_bounds
+ *
+ * Empty axis_mask means all six axes are selected. Empty active-side vectors
+ * mean every selected side is active.
+ */
+struct CentroidalMomentumRateBounds {
+  std::string source_id;
+  Eigen::VectorXd lower_bounds;
+  Eigen::VectorXd upper_bounds;
+  std::vector<bool> axis_mask;
+  std::vector<bool> lower_bound_active;
+  std::vector<bool> upper_bound_active;
+};
+
+/**
  * @brief Optional diagonal metric/reference for generalized acceleration
  * allocation.
  *
@@ -259,6 +299,9 @@ struct AccelerationSolveOptions {
   std::vector<AffineAccelerationConstraint> affine_constraints;
   std::vector<FrozenNextVelocityConstraint> frozen_next_velocity_constraints;
   std::vector<TaskAccelerationBounds> task_acceleration_bounds;
+  std::vector<CentroidalMomentumRateObjective>
+      centroidal_momentum_rate_objectives;
+  std::vector<CentroidalMomentumRateBounds> centroidal_momentum_rate_bounds;
   std::vector<ContactAccelerationConstraint> contact_acceleration_constraints;
   std::vector<TightPointAccelerationConstraint> tight_point_constraints;
   std::vector<TightFramePoseAccelerationConstraint>
@@ -343,6 +386,20 @@ struct AccelerationAllocationDiagnostics {
   double objective_value = 0.0;
 };
 
+struct CentroidalMomentumRateDiagnostics {
+  std::string source_id;
+  Eigen::VectorXd target_momentum;
+  Eigen::VectorXd reference_momentum_rate;
+  Eigen::VectorXd current_momentum;
+  Eigen::VectorXd bias_momentum_rate;
+  Eigen::VectorXd achieved_momentum_rate;
+  Eigen::VectorXd residual;
+  std::vector<bool> selected_axes;
+  double scale = 1.0;
+  TaskSolveMode effective_mode = TaskSolveMode::kScale;
+  bool used_min_error_fallback = false;
+};
+
 struct AccelerationAnalyticCollisionPairDiagnostics {
   std::size_t pair_index = 0;
   std::string pair_key;
@@ -394,6 +451,8 @@ struct AccelerationSolverResult : public SolverResult {
   std::vector<int> saturated_effort_indices;
   std::vector<AccelerationTaskDiagnostics> task_diagnostics;
   AccelerationAllocationDiagnostics allocation_diagnostics;
+  std::vector<CentroidalMomentumRateDiagnostics>
+      centroidal_momentum_rate_diagnostics;
   bool velocity_collision_lift_applied = false;
   bool collision_endpoint_validated = false;
   bool collision_step_certified = false;
@@ -439,12 +498,16 @@ struct AccelerationSolverCapabilities {
   bool supports_relative_pose_constraints = true;
   bool supports_torso_pose_bound_constraints = true;
   bool supports_com_support_polygon_constraints = true;
+  bool supports_fixed_base_centroidal_momentum_rate_objective = true;
+  bool supports_fixed_base_centroidal_momentum_rate_bounds = true;
+  bool supports_floating_base_centroidal_momentum_rate = false;
 #ifdef PINOCCHIO_WITH_HPP_FCL
   bool supports_velocity_collision_lift = true;
 #else
   bool supports_velocity_collision_lift = false;
 #endif
   bool supports_dynamic_contact = false;
+  bool supports_dynamic_balance = false;
 };
 
 /**

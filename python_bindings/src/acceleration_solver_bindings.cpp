@@ -165,6 +165,32 @@ void bind_acceleration_solver(nb::module_ &m) {
       .def_rw("upper_bound_active",
               &TaskAccelerationBounds::upper_bound_active);
 
+  nb::class_<CentroidalMomentumRateObjective>(
+      m, "CentroidalMomentumRateObjective")
+      .def(nb::init<>())
+      .def_rw("source_id", &CentroidalMomentumRateObjective::source_id)
+      DEF_VALUE_PROP(CentroidalMomentumRateObjective, h_target)
+      DEF_VALUE_PROP(CentroidalMomentumRateObjective, hdot_feedforward)
+      .def_rw("proportional_gain",
+              &CentroidalMomentumRateObjective::proportional_gain)
+      .def_rw("axis_mask", &CentroidalMomentumRateObjective::axis_mask)
+      .def_rw("priority", &CentroidalMomentumRateObjective::priority)
+      .def_rw("solve_mode", &CentroidalMomentumRateObjective::solve_mode)
+      .def_rw("allow_min_error_fallback",
+              &CentroidalMomentumRateObjective::allow_min_error_fallback);
+
+  nb::class_<CentroidalMomentumRateBounds>(
+      m, "CentroidalMomentumRateBounds")
+      .def(nb::init<>())
+      .def_rw("source_id", &CentroidalMomentumRateBounds::source_id)
+      DEF_VALUE_PROP(CentroidalMomentumRateBounds, lower_bounds)
+      DEF_VALUE_PROP(CentroidalMomentumRateBounds, upper_bounds)
+      .def_rw("axis_mask", &CentroidalMomentumRateBounds::axis_mask)
+      .def_rw("lower_bound_active",
+              &CentroidalMomentumRateBounds::lower_bound_active)
+      .def_rw("upper_bound_active",
+              &CentroidalMomentumRateBounds::upper_bound_active);
+
   nb::class_<GeneralizedAccelerationAllocation>(
       m, "GeneralizedAccelerationAllocation")
       .def(nb::init<>())
@@ -302,6 +328,11 @@ void bind_acceleration_solver(nb::module_ &m) {
               &AccelerationSolveOptions::frozen_next_velocity_constraints)
       .def_rw("task_acceleration_bounds",
               &AccelerationSolveOptions::task_acceleration_bounds)
+      .def_rw("centroidal_momentum_rate_objectives",
+              &AccelerationSolveOptions::
+                  centroidal_momentum_rate_objectives)
+      .def_rw("centroidal_momentum_rate_bounds",
+              &AccelerationSolveOptions::centroidal_momentum_rate_bounds)
       .def_rw("contact_acceleration_constraints",
               &AccelerationSolveOptions::contact_acceleration_constraints)
       .def_rw("tight_point_constraints",
@@ -401,6 +432,41 @@ void bind_acceleration_solver(nb::module_ &m) {
       .def_ro("objective_value",
               &AccelerationAllocationDiagnostics::objective_value);
 
+  nb::class_<CentroidalMomentumRateDiagnostics>(
+      m, "CentroidalMomentumRateDiagnostics")
+      .def_ro("source_id", &CentroidalMomentumRateDiagnostics::source_id)
+      .def_prop_ro("target_momentum",
+                   [](const CentroidalMomentumRateDiagnostics &self) {
+                     return self.target_momentum;
+                   })
+      .def_prop_ro("reference_momentum_rate",
+                   [](const CentroidalMomentumRateDiagnostics &self) {
+                     return self.reference_momentum_rate;
+                   })
+      .def_prop_ro("current_momentum",
+                   [](const CentroidalMomentumRateDiagnostics &self) {
+                     return self.current_momentum;
+                   })
+      .def_prop_ro("bias_momentum_rate",
+                   [](const CentroidalMomentumRateDiagnostics &self) {
+                     return self.bias_momentum_rate;
+                   })
+      .def_prop_ro("achieved_momentum_rate",
+                   [](const CentroidalMomentumRateDiagnostics &self) {
+                     return self.achieved_momentum_rate;
+                   })
+      .def_prop_ro("residual",
+                   [](const CentroidalMomentumRateDiagnostics &self) {
+                     return self.residual;
+                   })
+      .def_ro("selected_axes",
+              &CentroidalMomentumRateDiagnostics::selected_axes)
+      .def_ro("scale", &CentroidalMomentumRateDiagnostics::scale)
+      .def_ro("effective_mode",
+              &CentroidalMomentumRateDiagnostics::effective_mode)
+      .def_ro("used_min_error_fallback",
+              &CentroidalMomentumRateDiagnostics::used_min_error_fallback);
+
   nb::class_<AccelerationAnalyticCollisionPairDiagnostics>(
       m, "AccelerationAnalyticCollisionPairDiagnostics")
       .def_ro("pair_index",
@@ -488,6 +554,9 @@ void bind_acceleration_solver(nb::module_ &m) {
                    [](const AccelerationSolverResult &self) {
                      return self.allocation_diagnostics;
                    })
+      .def_ro("centroidal_momentum_rate_diagnostics",
+              &AccelerationSolverResult::
+                  centroidal_momentum_rate_diagnostics)
       .def_ro("velocity_collision_lift_applied",
               &AccelerationSolverResult::velocity_collision_lift_applied)
       .def_ro("collision_endpoint_validated",
@@ -573,11 +642,22 @@ void bind_acceleration_solver(nb::module_ &m) {
       .def_ro("supports_com_support_polygon_constraints",
               &AccelerationSolverCapabilities::
                   supports_com_support_polygon_constraints)
+      .def_ro("supports_fixed_base_centroidal_momentum_rate_objective",
+              &AccelerationSolverCapabilities::
+                  supports_fixed_base_centroidal_momentum_rate_objective)
+      .def_ro("supports_fixed_base_centroidal_momentum_rate_bounds",
+              &AccelerationSolverCapabilities::
+                  supports_fixed_base_centroidal_momentum_rate_bounds)
+      .def_ro("supports_floating_base_centroidal_momentum_rate",
+              &AccelerationSolverCapabilities::
+                  supports_floating_base_centroidal_momentum_rate)
       .def_ro("supports_velocity_collision_lift",
               &AccelerationSolverCapabilities::
                   supports_velocity_collision_lift)
       .def_ro("supports_dynamic_contact",
-              &AccelerationSolverCapabilities::supports_dynamic_contact);
+              &AccelerationSolverCapabilities::supports_dynamic_contact)
+      .def_ro("supports_dynamic_balance",
+              &AccelerationSolverCapabilities::supports_dynamic_balance);
 
   nb::class_<AccelerationSolver>(m, "AccelerationSolver")
       .def(nb::init<std::shared_ptr<RobotModel>>(), nb::arg("robot"))
