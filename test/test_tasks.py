@@ -77,6 +77,14 @@ def create_test_urdf():
 
 
 class TestTasks:
+    def test_task_type_numeric_values_preserve_pre_centroidal_contract(self):
+        assert embodik.TaskType.FRAME_POSITION.value == 0
+        assert embodik.TaskType.FRAME_ORIENTATION.value == 1
+        assert embodik.TaskType.FRAME_POSE.value == 2
+        assert embodik.TaskType.COM.value == 3
+        assert embodik.TaskType.POSTURE.value == 4
+        assert embodik.TaskType.JOINT.value == 5
+        assert embodik.TaskType.CENTROIDAL_MOMENTUM.value == 6
 
     @pytest.fixture
     def robot_model(self):

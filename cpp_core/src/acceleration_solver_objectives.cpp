@@ -2,6 +2,126 @@
 
 namespace embodik {
 namespace acceleration_solver_internal {
+namespace {
+
+std::vector<bool> full_axis_mask() {
+  return {true, true, true, true, true, true};
+}
+
+bool axis_mask_valid(const std::vector<bool> &axis_mask) {
+  return axis_mask.empty() || axis_mask.size() == 6U;
+}
+
+bool axis_mask_has_selection(const std::vector<bool> &axis_mask) {
+  if (axis_mask.empty()) {
+    return true;
+  }
+  return std::any_of(axis_mask.begin(), axis_mask.end(), [](bool selected) {
+    return selected;
+  });
+}
+
+std::vector<bool> resolved_axis_mask(const std::vector<bool> &axis_mask) {
+  return axis_mask.empty() ? full_axis_mask() : axis_mask;
+}
+
+Eigen::Index selected_axis_count(const std::vector<bool> &axis_mask) {
+  Eigen::Index rows = 0;
+  for (bool selected : resolved_axis_mask(axis_mask)) {
+    if (selected) {
+      ++rows;
+    }
+  }
+  return rows;
+}
+
+template <typename VectorLike>
+Eigen::VectorXd select_vector_axes(const VectorLike &vector,
+                                   const std::vector<bool> &axis_mask) {
+  Eigen::VectorXd selected(selected_axis_count(axis_mask));
+  Eigen::Index cursor = 0;
+  const auto resolved = resolved_axis_mask(axis_mask);
+  for (Eigen::Index axis = 0; axis < 6; ++axis) {
+    if (resolved[static_cast<std::size_t>(axis)]) {
+      selected(cursor++) = vector(axis);
+    }
+  }
+  return selected;
+}
+
+Eigen::MatrixXd select_matrix_axes(const Eigen::MatrixXd &matrix,
+                                   const std::vector<bool> &axis_mask) {
+  Eigen::MatrixXd selected(selected_axis_count(axis_mask), matrix.cols());
+  Eigen::Index cursor = 0;
+  const auto resolved = resolved_axis_mask(axis_mask);
+  for (Eigen::Index axis = 0; axis < 6; ++axis) {
+    if (resolved[static_cast<std::size_t>(axis)]) {
+      selected.row(cursor++) = matrix.row(axis);
+    }
+  }
+  return selected;
+}
+
+void clear_synthetic_hold(ObjectiveAssembly *assembly) {
+  assembly->matrices.clear();
+  assembly->targets.clear();
+  assembly->biases.clear();
+  assembly->configs.clear();
+  assembly->groups.clear();
+  assembly->differentials.clear();
+  assembly->references.clear();
+  assembly->synthetic_hold_objective = false;
+}
+
+void sort_objective_groups(
+    ObjectiveAssembly *assembly,
+    std::vector<CentroidalMomentumRateObjectiveDiagnosticRecord>
+        *diagnostics) {
+  std::vector<std::size_t> order(assembly->configs.size());
+  for (std::size_t index = 0; index < order.size(); ++index) {
+    order[index] = index;
+  }
+  std::stable_sort(order.begin(), order.end(),
+                   [&assembly](std::size_t lhs, std::size_t rhs) {
+                     return assembly->configs[lhs].priority <
+                            assembly->configs[rhs].priority;
+                   });
+  bool already_sorted = true;
+  for (std::size_t index = 0; index < order.size(); ++index) {
+    if (order[index] != index) {
+      already_sorted = false;
+      break;
+    }
+  }
+  if (already_sorted) {
+    return;
+  }
+
+  auto matrices = assembly->matrices;
+  auto targets = assembly->targets;
+  auto biases = assembly->biases;
+  auto configs = assembly->configs;
+  auto groups = assembly->groups;
+  auto differentials = assembly->differentials;
+  auto references = assembly->references;
+  std::unordered_map<std::size_t, std::size_t> remap;
+  for (std::size_t new_index = 0; new_index < order.size(); ++new_index) {
+    const std::size_t old_index = order[new_index];
+    assembly->matrices[new_index] = std::move(matrices[old_index]);
+    assembly->targets[new_index] = std::move(targets[old_index]);
+    assembly->biases[new_index] = std::move(biases[old_index]);
+    assembly->configs[new_index] = configs[old_index];
+    assembly->groups[new_index] = std::move(groups[old_index]);
+    assembly->differentials[new_index] = std::move(differentials[old_index]);
+    assembly->references[new_index] = std::move(references[old_index]);
+    remap.emplace(old_index, new_index);
+  }
+  for (auto &diagnostic : *diagnostics) {
+    diagnostic.objective_index = remap[diagnostic.objective_index];
+  }
+}
+
+} // namespace
 
 void assemble_objectives(
     ObjectiveAssembly *assembly,
@@ -209,6 +329,145 @@ void assemble_objectives(
   assembly->groups.resize(group_index);
   assembly->differentials.resize(group_index);
   assembly->references.resize(group_index);
+}
+
+CentroidalMomentumRateObjectiveAssembly
+append_centroidal_momentum_rate_objectives(
+    ObjectiveAssembly *objectives,
+    const std::vector<CentroidalMomentumRateObjective> &centroidal_objectives,
+    const RobotModel &robot, std::unordered_set<std::string> *source_ids) {
+  CentroidalMomentumRateObjectiveAssembly assembly;
+  if (centroidal_objectives.empty()) {
+    return assembly;
+  }
+  if (objectives->synthetic_hold_objective) {
+    clear_synthetic_hold(objectives);
+  }
+
+  Eigen::Matrix<double, 6, Eigen::Dynamic> centroidal_matrix;
+  Eigen::Matrix<double, 6, 1> current_momentum;
+  Eigen::Matrix<double, 6, 1> bias;
+  try {
+    centroidal_matrix = robot.get_centroidal_momentum_matrix();
+    current_momentum = robot.get_centroidal_momentum();
+    bias = robot.get_centroidal_momentum_matrix_bias();
+  } catch (const std::exception &error) {
+    assembly.status = SolverStatus::kNumericalError;
+    assembly.message =
+        std::string("centroidal momentum-rate objective failed: ") +
+        error.what();
+    return assembly;
+  }
+  if (centroidal_matrix.rows() != 6 || centroidal_matrix.cols() != robot.nv() ||
+      current_momentum.size() != 6 || bias.size() != 6 ||
+      !centroidal_matrix.allFinite() || !current_momentum.allFinite() ||
+      !bias.allFinite()) {
+    assembly.status = SolverStatus::kNumericalError;
+    assembly.message =
+        "centroidal momentum-rate objective produced non-finite dynamics";
+    return assembly;
+  }
+
+  for (const auto &objective : centroidal_objectives) {
+    if (objective.source_id.empty()) {
+      assembly.status = SolverStatus::kInvalidInput;
+      assembly.message =
+          "centroidal momentum-rate objective source_id must not be empty";
+      return assembly;
+    }
+    if (!source_ids->insert(objective.source_id).second) {
+      assembly.status = SolverStatus::kInvalidInput;
+      assembly.message = "duplicate acceleration constraint source_id '" +
+                         objective.source_id + "'";
+      return assembly;
+    }
+    if (objective.h_target.size() != 6 ||
+        objective.hdot_feedforward.size() != 6) {
+      assembly.status = SolverStatus::kConstraintBoundsMismatch;
+      assembly.message = "centroidal momentum-rate objective '" +
+                         objective.source_id +
+                         "' h_target and hdot_feedforward must have size 6";
+      return assembly;
+    }
+    if (!objective.h_target.allFinite() ||
+        !objective.hdot_feedforward.allFinite() ||
+        !std::isfinite(objective.proportional_gain)) {
+      assembly.status = SolverStatus::kNonFiniteInput;
+      assembly.message = "centroidal momentum-rate objective '" +
+                         objective.source_id +
+                         "' must contain only finite values";
+      return assembly;
+    }
+    if (objective.proportional_gain < 0.0) {
+      assembly.status = SolverStatus::kInvalidInput;
+      assembly.message = "centroidal momentum-rate objective '" +
+                         objective.source_id +
+                         "' proportional_gain must be non-negative";
+      return assembly;
+    }
+    if (!axis_mask_valid(objective.axis_mask)) {
+      assembly.status = SolverStatus::kShapeMismatch;
+      assembly.message = "centroidal momentum-rate objective '" +
+                         objective.source_id +
+                         "' axis_mask must have size 6";
+      return assembly;
+    }
+    if (!axis_mask_has_selection(objective.axis_mask)) {
+      assembly.status = SolverStatus::kInvalidInput;
+      assembly.message = "centroidal momentum-rate objective '" +
+                         objective.source_id +
+                         "' must select at least one axis";
+      return assembly;
+    }
+    if (objective.solve_mode != TaskSolveMode::kScale &&
+        objective.solve_mode != TaskSolveMode::kMinError) {
+      assembly.status = SolverStatus::kInvalidInput;
+      assembly.message = "centroidal momentum-rate objective '" +
+                         objective.source_id +
+                         "' only supports SCALE or MIN_ERROR";
+      return assembly;
+    }
+
+    const Eigen::Matrix<double, 6, 1> reference =
+        objective.hdot_feedforward +
+        objective.proportional_gain *
+            (objective.h_target - current_momentum);
+    if (!reference.allFinite()) {
+      assembly.status = SolverStatus::kNonFiniteInput;
+      assembly.message = "centroidal momentum-rate objective '" +
+                         objective.source_id +
+                         "' reference is not finite";
+      return assembly;
+    }
+
+    const std::size_t index = objectives->configs.size();
+    objectives->matrices.push_back(
+        select_matrix_axes(centroidal_matrix, objective.axis_mask));
+    objectives->targets.push_back(
+        select_vector_axes(reference - bias, objective.axis_mask));
+    objectives->biases.push_back(
+        Eigen::VectorXd::Zero(selected_axis_count(objective.axis_mask)));
+    ObjectiveSolveConfig config;
+    config.priority = objective.priority;
+    config.solve_mode = objective.solve_mode;
+    config.allow_min_error_fallback = objective.allow_min_error_fallback;
+    objectives->configs.push_back(config);
+    objectives->groups.emplace_back();
+    objectives->differentials.emplace_back();
+    objectives->references.emplace_back();
+
+    CentroidalMomentumRateObjectiveDiagnosticRecord diagnostic;
+    diagnostic.source_id = objective.source_id;
+    diagnostic.target_momentum = objective.h_target;
+    diagnostic.reference_momentum_rate = reference;
+    diagnostic.current_momentum = current_momentum;
+    diagnostic.bias_momentum_rate = bias;
+    diagnostic.selected_axes = resolved_axis_mask(objective.axis_mask);
+    diagnostic.objective_index = index;
+    assembly.diagnostics.push_back(std::move(diagnostic));
+  }
+  sort_objective_groups(objectives, &assembly.diagnostics);
+  return assembly;
 }
 
 const detail::AccelerationTaskDifferential *

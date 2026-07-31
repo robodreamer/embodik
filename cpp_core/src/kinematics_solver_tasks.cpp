@@ -39,6 +39,19 @@ KinematicsSolver::add_com_task(const std::string &name) {
   return task;
 }
 
+std::shared_ptr<CentroidalMomentumTask>
+KinematicsSolver::add_centroidal_momentum_task(const std::string &name) {
+  if (task_map_.find(name) != task_map_.end()) {
+    throw std::runtime_error("Task with name '" + name + "' already exists");
+  }
+
+  auto task = std::make_shared<CentroidalMomentumTask>(name, robot_);
+  tasks_.push_back(task);
+  task_map_[name] = task;
+
+  return task;
+}
+
 std::shared_ptr<PostureTask>
 KinematicsSolver::add_posture_task(const std::string &name,
                                    const std::vector<int> &controlled_joints) {

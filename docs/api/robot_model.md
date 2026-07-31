@@ -37,6 +37,20 @@ model = embodik.RobotModel.from_xacro("path/to/robot.xacro", floating_base=False
 | `is_floating_base` | `bool` | Whether the robot has a floating base |
 | `urdf_path` | `str` | Path to the loaded URDF file |
 
+## Centroidal Quantities
+
+`RobotModel` exposes total mass, centroidal momentum matrix `Ag`, momentum
+`h = Ag * dq`, matrix derivative `dAg`, and affine momentum-rate bias
+`dAg * dq`. Centroidal rows are ordered
+`[linear x, y, z; angular x, y, z]`.
+
+Use current-state getters after `update_kinematics()`, or the explicit-state
+`compute_*` methods when evaluation must not depend on the model's held state.
+All explicit state vectors are size- and finiteness-checked.
+
+See [Centroidal Stability](../centroidal_stability.md) for units and solver
+contracts.
+
 ## Configuration-Space Operations
 
 These methods use Pinocchio's Lie-group operations to correctly handle floating-base

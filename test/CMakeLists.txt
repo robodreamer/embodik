@@ -18,6 +18,20 @@ target_link_libraries(test_robot_model
 # Add test
 add_test(NAME test_robot_model COMMAND test_robot_model)
 
+add_executable(test_robot_model_centroidal
+    test_robot_model_centroidal.cpp
+)
+
+target_link_libraries(test_robot_model_centroidal
+    embodik_core
+    GTest::gtest_main
+    GTest::gtest
+)
+
+add_test(NAME test_robot_model_centroidal
+    COMMAND test_robot_model_centroidal
+)
+
 add_executable(test_kinematics_solver_header
     test_kinematics_solver_header.cpp
 )
@@ -175,6 +189,25 @@ target_include_directories(test_acceleration_solver_task_bounds
 
 add_test(NAME test_acceleration_solver_task_bounds
     COMMAND test_acceleration_solver_task_bounds
+)
+
+add_executable(test_acceleration_solver_centroidal_momentum_rate
+    test_acceleration_solver_centroidal_momentum_rate.cpp
+)
+
+target_link_libraries(test_acceleration_solver_centroidal_momentum_rate
+    embodik_core
+    GTest::gtest_main
+    GTest::gtest
+)
+
+target_include_directories(test_acceleration_solver_centroidal_momentum_rate
+    PRIVATE
+        ${CMAKE_SOURCE_DIR}/cpp_core/src
+)
+
+add_test(NAME test_acceleration_solver_centroidal_momentum_rate
+    COMMAND test_acceleration_solver_centroidal_momentum_rate
 )
 
 add_executable(test_acceleration_solver_frozen_locks
@@ -386,6 +419,27 @@ add_test(NAME test_acceleration_solver_com_support_polygon
     COMMAND test_acceleration_solver_com_support_polygon
 )
 
+add_executable(test_acceleration_solver_dynamic_support
+    test_acceleration_solver_dynamic_support.cpp
+    ${CMAKE_SOURCE_DIR}/cpp_core/src/acceleration_capture_point_constraint.cpp
+    ${CMAKE_SOURCE_DIR}/cpp_core/src/acceleration_zmp_constraint.cpp
+)
+
+target_link_libraries(test_acceleration_solver_dynamic_support
+    embodik_core
+    GTest::gtest_main
+    GTest::gtest
+)
+
+target_include_directories(test_acceleration_solver_dynamic_support
+    PRIVATE
+        ${CMAKE_SOURCE_DIR}/cpp_core/src
+)
+
+add_test(NAME test_acceleration_solver_dynamic_support
+    COMMAND test_acceleration_solver_dynamic_support
+)
+
 add_executable(test_geometric_constraint_differential
     test_geometric_constraint_differential.cpp
 )
@@ -467,5 +521,23 @@ add_test(NAME test_python_robot_model
 
 # Set Python path for tests
 set_tests_properties(test_python_robot_model PROPERTIES
+    ENVIRONMENT "PYTHONPATH=${CMAKE_BINARY_DIR}/python_bindings:$ENV{PYTHONPATH}"
+)
+
+add_test(NAME test_centroidal_binding_exports
+    COMMAND ${Python_EXECUTABLE} -m pytest ${CMAKE_CURRENT_SOURCE_DIR}/test_centroidal_binding_exports.py -v
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+
+set_tests_properties(test_centroidal_binding_exports PROPERTIES
+    ENVIRONMENT "PYTHONPATH=${CMAKE_BINARY_DIR}/python_bindings:$ENV{PYTHONPATH}"
+)
+
+add_test(NAME test_acceleration_dynamic_support_exports
+    COMMAND ${Python_EXECUTABLE} -m pytest ${CMAKE_CURRENT_SOURCE_DIR}/test_acceleration_dynamic_support_exports.py -v
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+
+set_tests_properties(test_acceleration_dynamic_support_exports PROPERTIES
     ENVIRONMENT "PYTHONPATH=${CMAKE_BINARY_DIR}/python_bindings:$ENV{PYTHONPATH}"
 )

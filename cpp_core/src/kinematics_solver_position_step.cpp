@@ -29,6 +29,7 @@ KinematicsSolver::apply_position_step_task_metric_projection(
     const std::optional<TorsoPoseConstraintOptions> &torso_constraint,
     const std::vector<PositionStepPriorityConstraintSpec>
         &priority_constraints,
+    const Eigen::VectorXd &current_dq,
     Eigen::VectorXd &q_candidate) {
   if (!acceleration_limits_enabled_ || current_q.size() != robot_->nq() ||
       q_candidate.size() != robot_->nq()) {
@@ -49,6 +50,24 @@ KinematicsSolver::apply_position_step_task_metric_projection(
   }
 
   const double dt_safe = std::max(outer_dt, 1e-9);
+  std::optional<Eigen::VectorXd> previous_position_step_current_dq =
+      position_step_explicit_current_dq_;
+  position_step_explicit_current_dq_ =
+      current_dq.size() == robot_->nv()
+          ? std::optional<Eigen::VectorXd>(current_dq)
+          : std::nullopt;
+  struct RestoreProjectionCurrentVelocity {
+    std::optional<Eigen::VectorXd> *slot;
+    std::optional<Eigen::VectorXd> previous;
+    ~RestoreProjectionCurrentVelocity() {
+      if (slot != nullptr) {
+        *slot = std::move(previous);
+      }
+    }
+  } restore_projection_current_velocity{
+      &position_step_explicit_current_dq_,
+      std::move(previous_position_step_current_dq)};
+  (void)restore_projection_current_velocity;
   const Eigen::VectorXd terminal_predictive_velocity =
       have_terminal_prediction ? predictive_delta / dt_safe
                                : first_tick_velocity;
@@ -2321,6 +2340,57 @@ PositionIKResult KinematicsSolver::solve_position_step(
     return result;
   }
 
+  if (options.current_joint_velocity.size() != 0 &&
+      options.current_joint_velocity.size() != robot_->nv()) {
+    result.status = SolverStatus::kInvalidInput;
+    result.status_message =
+        "PositionStepOptions.current_joint_velocity size does not match robot nv";
+    result.q_solution = current_q;
+    result.joint_velocities = Eigen::VectorXd::Zero(robot_->nv());
+    result.solution.assign(static_cast<std::size_t>(robot_->nv()), 0.0);
+    return result;
+  }
+  if (options.current_joint_velocity.size() != 0 &&
+      !options.current_joint_velocity.allFinite()) {
+    result.status = SolverStatus::kNonFiniteInput;
+    result.status_message =
+        "PositionStepOptions.current_joint_velocity contains non-finite values";
+    result.q_solution = current_q;
+    result.joint_velocities = Eigen::VectorXd::Zero(robot_->nv());
+    result.solution.assign(static_cast<std::size_t>(robot_->nv()), 0.0);
+    return result;
+  }
+  if (velocity_zmp_constraint_.has_value() &&
+      velocity_zmp_constraint_->enabled &&
+      options.current_joint_velocity.size() == 0) {
+    result.status = SolverStatus::kInvalidInput;
+    result.status_message =
+        "velocity-ZMP constraint requires "
+        "PositionStepOptions.current_joint_velocity";
+    result.q_solution = current_q;
+    result.joint_velocities = Eigen::VectorXd::Zero(robot_->nv());
+    result.solution.assign(static_cast<std::size_t>(robot_->nv()), 0.0);
+    return result;
+  }
+  std::optional<Eigen::VectorXd> previous_position_step_current_dq =
+      position_step_explicit_current_dq_;
+  position_step_explicit_current_dq_ =
+      options.current_joint_velocity.size() == robot_->nv()
+          ? std::optional<Eigen::VectorXd>(options.current_joint_velocity)
+          : std::nullopt;
+  struct RestorePositionStepCurrentVelocity {
+    std::optional<Eigen::VectorXd> *slot;
+    std::optional<Eigen::VectorXd> previous;
+    ~RestorePositionStepCurrentVelocity() {
+      if (slot != nullptr) {
+        *slot = std::move(previous);
+      }
+    }
+  } restore_position_step_current_velocity{
+      &position_step_explicit_current_dq_,
+      std::move(previous_position_step_current_dq)};
+  (void)restore_position_step_current_velocity;
+
   {
     std::string opt_err;
     if (!validate_position_step_joint_index_options(
@@ -3197,6 +3267,32 @@ PositionIKResult KinematicsSolver::solve_position_step(
         }
       }
     }
+    if (has_active_velocity_centroidal_hard_constraints()) {
+      const Eigen::VectorXd accepted_velocity =
+          pinocchio::difference(robot_->model(), q_pre_step, q) /
+          std::max(step_dt_eff, 1e-9);
+      std::string validation_message;
+      if (!validate_centroidal_velocity_candidate(
+              q_pre_step, active_explicit_current_dq(), accepted_velocity,
+              &validation_message)) {
+        q = q_pre_step;
+        robot_->update_configuration(q);
+        last_vel_result.status = SolverStatus::kInfeasible;
+        last_vel_result.status_message = validation_message;
+        last_vel_result.joint_velocities =
+            Eigen::VectorXd::Zero(robot_->nv());
+        last_vel_result.solution.assign(
+            static_cast<std::size_t>(robot_->nv()), 0.0);
+        break;
+      }
+      last_vel_result.joint_velocities = accepted_velocity;
+      last_vel_result.solution.assign(
+          accepted_velocity.data(),
+          accepted_velocity.data() + accepted_velocity.size());
+      if (position_step_explicit_current_dq_.has_value()) {
+        position_step_explicit_current_dq_ = accepted_velocity;
+      }
+    }
   }
 
   if (auto retry_result = attempt_min_error_position_step_retry(
@@ -3245,14 +3341,15 @@ PositionIKResult KinematicsSolver::solve_position_step(
         position_step_task_terminal_prediction_weight(*frame_task,
                                                       current_error);
     const auto componentwise_candidate =
-        all_task_blocks_commanded && terminal_prediction_weight > 0.0
+        !has_active_velocity_centroidal_hard_constraints() &&
+                all_task_blocks_commanded && terminal_prediction_weight > 0.0
             ? estimate_position_step_componentwise_outer_candidate(
                   current_q, previous_applied_velocity, options, step_dt,
                   terminal_q)
             : std::nullopt;
     if (auto projected_result = apply_position_step_task_metric_projection(
             current_q, step_dt, first_tick_velocity, step_locked_indices,
-            step_torso_constraint, {}, q);
+            step_torso_constraint, {}, options.current_joint_velocity, q);
         projected_result.has_value()) {
       last_vel_result = std::move(*projected_result);
       have_vel_result = true;
@@ -3343,6 +3440,31 @@ PositionIKResult KinematicsSolver::solve_position_step(
     apply_position_step_outer_acceleration_limit(
         current_q, previous_applied_velocity, options, step_dt, q);
   }
+  if (has_active_velocity_centroidal_hard_constraints()) {
+    const Eigen::VectorXd final_velocity =
+        pinocchio::difference(robot_->model(), current_q, q) /
+        std::max(step_dt, 1e-9);
+    const Eigen::VectorXd *final_current_dq =
+        options.current_joint_velocity.size() == robot_->nv()
+            ? &options.current_joint_velocity
+            : nullptr;
+    std::string validation_message;
+    if (!validate_centroidal_velocity_candidate(
+            current_q, final_current_dq, final_velocity, &validation_message)) {
+      q = current_q;
+      last_vel_result.status = SolverStatus::kInfeasible;
+      last_vel_result.status_message = validation_message;
+      last_vel_result.joint_velocities = Eigen::VectorXd::Zero(robot_->nv());
+      last_vel_result.solution.assign(
+          static_cast<std::size_t>(robot_->nv()), 0.0);
+    } else {
+      last_vel_result.joint_velocities = final_velocity;
+      last_vel_result.solution.assign(
+          final_velocity.data(), final_velocity.data() + final_velocity.size());
+    }
+    have_vel_result = true;
+  }
+  robot_->update_configuration(q);
 
   result.q_solution = q;
   result.achieved_pose = robot_->get_frame_pose(frame_task->getFrameName());
@@ -3515,6 +3637,21 @@ PositionIKResult KinematicsSolver::solve_position_step(
 
   sync_position_result_applied_velocity(result, robot_->model(), current_q,
                                         step_dt);
+  if (!enforce_final_position_step_centroidal_candidate(
+          current_q, options.current_joint_velocity, step_dt, result)) {
+    q = current_q;
+    result.achieved_pose = robot_->get_frame_pose(frame_task->getFrameName());
+    frame_task->update(*robot_);
+    const Eigen::VectorXd &held_error = frame_task->getError();
+    if (held_error.size() == 3) {
+      result.position_error = held_error.head<3>().norm();
+      result.orientation_error = 0.0;
+    } else if (held_error.size() >= 6) {
+      result.position_error = held_error.head<3>().norm();
+      result.orientation_error = held_error.tail<3>().norm();
+    }
+    last_solution_dq_norm_ = 0.0;
+  }
   if (acceleration_limits_enabled_ &&
       result.joint_velocities.size() == robot_->nv()) {
     previous_dq_ = result.joint_velocities;
@@ -3557,6 +3694,56 @@ PositionIKResult KinematicsSolver::solve_position_step(
         "current_q size does not match robot nq in solve_position_step";
     return result;
   }
+  if (options.current_joint_velocity.size() != 0 &&
+      options.current_joint_velocity.size() != robot_->nv()) {
+    result.status = SolverStatus::kInvalidInput;
+    result.status_message =
+        "PositionStepOptions.current_joint_velocity size does not match robot nv";
+    result.q_solution = current_q;
+    result.joint_velocities = Eigen::VectorXd::Zero(robot_->nv());
+    result.solution.assign(static_cast<std::size_t>(robot_->nv()), 0.0);
+    return result;
+  }
+  if (options.current_joint_velocity.size() != 0 &&
+      !options.current_joint_velocity.allFinite()) {
+    result.status = SolverStatus::kNonFiniteInput;
+    result.status_message =
+        "PositionStepOptions.current_joint_velocity contains non-finite values";
+    result.q_solution = current_q;
+    result.joint_velocities = Eigen::VectorXd::Zero(robot_->nv());
+    result.solution.assign(static_cast<std::size_t>(robot_->nv()), 0.0);
+    return result;
+  }
+  if (velocity_zmp_constraint_.has_value() &&
+      velocity_zmp_constraint_->enabled &&
+      options.current_joint_velocity.size() == 0) {
+    result.status = SolverStatus::kInvalidInput;
+    result.status_message =
+        "velocity-ZMP constraint requires "
+        "PositionStepOptions.current_joint_velocity";
+    result.q_solution = current_q;
+    result.joint_velocities = Eigen::VectorXd::Zero(robot_->nv());
+    result.solution.assign(static_cast<std::size_t>(robot_->nv()), 0.0);
+    return result;
+  }
+  std::optional<Eigen::VectorXd> previous_position_step_current_dq =
+      position_step_explicit_current_dq_;
+  position_step_explicit_current_dq_ =
+      options.current_joint_velocity.size() == robot_->nv()
+          ? std::optional<Eigen::VectorXd>(options.current_joint_velocity)
+          : std::nullopt;
+  struct RestorePositionStepCurrentVelocity {
+    std::optional<Eigen::VectorXd> *slot;
+    std::optional<Eigen::VectorXd> previous;
+    ~RestorePositionStepCurrentVelocity() {
+      if (slot != nullptr) {
+        *slot = std::move(previous);
+      }
+    }
+  } restore_position_step_current_velocity{
+      &position_step_explicit_current_dq_,
+      std::move(previous_position_step_current_dq)};
+  (void)restore_position_step_current_velocity;
   if (targets.empty()) {
     result.status = SolverStatus::kInvalidInput;
     result.status_message = "targets must be non-empty in solve_position_step";
@@ -4046,6 +4233,7 @@ PositionIKResult KinematicsSolver::solve_position_step(
       !(collision_constraint_.has_value() &&
         collision_constraint_->enabled) &&
       !(com_constraint_.has_value() && com_constraint_->enabled) &&
+      !has_active_velocity_centroidal_hard_constraints() &&
       !(relative_pose_constraint_.has_value() &&
         relative_pose_constraint_->enabled) &&
       get_linear_velocity_constraint_rows() == 0 &&
@@ -4850,6 +5038,32 @@ PositionIKResult KinematicsSolver::solve_position_step(
         }
       }
     }
+    if (has_active_velocity_centroidal_hard_constraints()) {
+      const Eigen::VectorXd accepted_velocity =
+          pinocchio::difference(robot_->model(), q_pre_step, q) /
+          std::max(step_dt_eff, 1e-9);
+      std::string validation_message;
+      if (!validate_centroidal_velocity_candidate(
+              q_pre_step, active_explicit_current_dq(), accepted_velocity,
+              &validation_message)) {
+        q = q_pre_step;
+        robot_->update_configuration(q);
+        last_vel_result.status = SolverStatus::kInfeasible;
+        last_vel_result.status_message = validation_message;
+        last_vel_result.joint_velocities =
+            Eigen::VectorXd::Zero(robot_->nv());
+        last_vel_result.solution.assign(
+            static_cast<std::size_t>(robot_->nv()), 0.0);
+        break;
+      }
+      last_vel_result.joint_velocities = accepted_velocity;
+      last_vel_result.solution.assign(
+          accepted_velocity.data(),
+          accepted_velocity.data() + accepted_velocity.size());
+      if (position_step_explicit_current_dq_.has_value()) {
+        position_step_explicit_current_dq_ = accepted_velocity;
+      }
+    }
   }
 
   if (auto retry_result = attempt_min_error_position_step_retry(
@@ -4913,7 +5127,9 @@ PositionIKResult KinematicsSolver::solve_position_step(
                        *rt.task, current_error));
     }
     const auto componentwise_candidate =
-        all_target_blocks_commanded && componentwise_prediction_weight > 0.0
+        !has_active_velocity_centroidal_hard_constraints() &&
+                all_target_blocks_commanded &&
+                componentwise_prediction_weight > 0.0
             ? estimate_position_step_componentwise_outer_candidate(
                   current_q, previous_applied_velocity, options, step_dt,
                   terminal_q)
@@ -4922,7 +5138,8 @@ PositionIKResult KinematicsSolver::solve_position_step(
         build_priority_constraint_specs(step_dt);
     if (auto projected_result = apply_position_step_task_metric_projection(
             current_q, step_dt, first_tick_velocity, step_locked_indices,
-            step_torso_constraint, outer_priority_constraint_specs, q);
+            step_torso_constraint, outer_priority_constraint_specs,
+            options.current_joint_velocity, q);
         projected_result.has_value()) {
       last_vel_result = std::move(*projected_result);
       have_vel_result = true;
@@ -5090,6 +5307,7 @@ PositionIKResult KinematicsSolver::solve_position_step(
                       current_q, step_dt, componentwise_velocity,
                       step_locked_indices, step_torso_constraint,
                       outer_priority_constraint_specs,
+                      options.current_joint_velocity,
                       safe_componentwise_candidate);
               if (componentwise_projection.has_value() &&
                   componentwise_projection->joint_velocities.size() ==
@@ -5173,7 +5391,7 @@ PositionIKResult KinematicsSolver::solve_position_step(
       auto projected_result = apply_position_step_task_metric_projection(
           current_q, step_dt, Eigen::VectorXd(), step_locked_indices,
           step_torso_constraint, build_priority_constraint_specs(step_dt),
-          retry_q);
+          options.current_joint_velocity, retry_q);
       const bool retry_has_candidate =
           projected_result.has_value() &&
           projected_result->joint_velocities.size() == robot_->nv() &&
@@ -5246,6 +5464,32 @@ PositionIKResult KinematicsSolver::solve_position_step(
       task->clearPositionStepTargetVelocity();
     }
   }
+
+  if (has_active_velocity_centroidal_hard_constraints()) {
+    const Eigen::VectorXd final_velocity =
+        pinocchio::difference(robot_->model(), current_q, q) /
+        std::max(step_dt, 1e-9);
+    const Eigen::VectorXd *final_current_dq =
+        options.current_joint_velocity.size() == robot_->nv()
+            ? &options.current_joint_velocity
+            : nullptr;
+    std::string validation_message;
+    if (!validate_centroidal_velocity_candidate(
+            current_q, final_current_dq, final_velocity, &validation_message)) {
+      q = current_q;
+      last_vel_result.status = SolverStatus::kInfeasible;
+      last_vel_result.status_message = validation_message;
+      last_vel_result.joint_velocities = Eigen::VectorXd::Zero(robot_->nv());
+      last_vel_result.solution.assign(
+          static_cast<std::size_t>(robot_->nv()), 0.0);
+    } else {
+      last_vel_result.joint_velocities = final_velocity;
+      last_vel_result.solution.assign(
+          final_velocity.data(), final_velocity.data() + final_velocity.size());
+    }
+    have_vel_result = true;
+  }
+  robot_->update_configuration(q);
 
   result.q_solution = q;
   result.iterations_used = steps_used;
@@ -5559,6 +5803,26 @@ PositionIKResult KinematicsSolver::solve_position_step(
 
   sync_position_result_applied_velocity(result, robot_->model(), current_q,
                                         step_dt);
+  if (!enforce_final_position_step_centroidal_candidate(
+          current_q, options.current_joint_velocity, step_dt, result)) {
+    q = current_q;
+    primary.task->update(*robot_);
+    const Eigen::VectorXd &held_error = primary.task->getError();
+    if (held_error.size() == 3) {
+      result.position_error = held_error.head<3>().norm();
+      result.orientation_error = 0.0;
+    } else if (held_error.size() >= 6) {
+      result.position_error = held_error.head<3>().norm();
+      result.orientation_error = held_error.tail<3>().norm();
+    }
+    if (primary.kind == PoseTaskKind::kFrame) {
+      result.achieved_pose = robot_->get_frame_pose(
+          static_cast<FrameTask *>(primary.task.get())->getFrameName());
+    } else {
+      result.achieved_pose = targets.front().target_pose;
+    }
+    last_solution_dq_norm_ = 0.0;
+  }
   if (acceleration_limits_enabled_ &&
       result.joint_velocities.size() == robot_->nv()) {
     previous_dq_ = result.joint_velocities;

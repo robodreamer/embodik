@@ -25,6 +25,7 @@ void bind_tasks(nb::module_ &m) {
       .value("FRAME_ORIENTATION", TaskType::FRAME_ORIENTATION)
       .value("FRAME_POSE", TaskType::FRAME_POSE)
       .value("COM", TaskType::COM)
+      .value("CENTROIDAL_MOMENTUM", TaskType::CENTROIDAL_MOMENTUM)
       .value("POSTURE", TaskType::POSTURE)
       .value("JOINT", TaskType::JOINT);
 
@@ -156,6 +157,22 @@ void bind_tasks(nb::module_ &m) {
            "Set position mask (which axes to control)")
       .def_prop_ro("current_position", &COMTask::getCurrentPosition,
                    "Current COM position");
+
+  nb::class_<CentroidalMomentumTask, Task>(m, "CentroidalMomentumTask")
+      .def(nb::init<const std::string &, std::shared_ptr<RobotModel>, int,
+                    double>(),
+           nb::arg("name"), nb::arg("model"), nb::arg("priority") = 0,
+           nb::arg("weight") = 1.0,
+           "Create an absolute centroidal momentum tracking task")
+      .def("set_target_momentum", &CentroidalMomentumTask::setTargetMomentum,
+           nb::arg("momentum"),
+           "Set target centroidal momentum [linear; angular]")
+      .def("set_axis_mask", &CentroidalMomentumTask::setAxisMask,
+           nb::arg("mask"),
+           "Set selected momentum axes [linear; angular], nonzero = selected")
+      .def_prop_ro("target_momentum",
+                   &CentroidalMomentumTask::getTargetMomentum)
+      .def_prop_ro("axis_mask", &CentroidalMomentumTask::getAxisMask);
 
   // PostureTask
   nb::class_<PostureTask, Task>(m, "PostureTask")

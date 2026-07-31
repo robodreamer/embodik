@@ -9,6 +9,7 @@
 #include <cmath>
 #include <cstdio>
 #include <fstream>
+#include <functional>
 #include <limits>
 #include <memory>
 #include <string>
@@ -764,6 +765,43 @@ TEST_F(AccelerationSolverNativeCollisionTest,
   EXPECT_NE(result.status_message.find("predicted-state certificate"),
             std::string::npos);
   expect_no_executable_outputs(result);
+}
+
+TEST_F(AccelerationSolverNativeCollisionTest,
+       CentroidalHardFamiliesRequireNativeCollisionCertificates) {
+  using OptionMutator = std::function<void(AccelerationSolveOptions *)>;
+  const std::vector<std::pair<std::string, OptionMutator>> cases = {
+      {"centroidal momentum-rate bounds",
+       [](AccelerationSolveOptions *options) {
+         options->centroidal_momentum_rate_bounds.emplace_back();
+       }},
+      {"capture point",
+       [](AccelerationSolveOptions *options) {
+         options->capture_point_constraints.emplace_back();
+       }},
+      {"ZMP",
+       [](AccelerationSolveOptions *options) {
+         options->zmp_constraints.emplace_back();
+       }},
+  };
+
+  for (const auto &[name, mutate] : cases) {
+    SCOPED_TRACE(name);
+    AccelerationSolver solver(robot_);
+    solver.configure_collision_constraint(default_definition(0.01),
+                                          default_policy());
+    auto options = options_with_limits(10.0);
+    mutate(&options);
+
+    const auto result =
+        solver.solve(vector({0.05}), vector({0.0}), 0.01, options);
+
+    EXPECT_EQ(result.status, SolverStatus::kInvalidInput);
+    EXPECT_TRUE(result.native_collision_constraint_applied);
+    EXPECT_NE(result.status_message.find("predicted-state certificate"),
+              std::string::npos);
+    expect_no_executable_outputs(result);
+  }
 }
 
 TEST_F(AccelerationSolverNativeCollisionTest,

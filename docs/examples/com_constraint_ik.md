@@ -1,13 +1,17 @@
-# CoM Constraint Example Overview
+# CoM And Centroidal Support Example
 
 Overview for `examples/04_com_constraint_example.py`.
 
 ## What It Demonstrates
 
 - `configure_com_constraint()` with a 2D support polygon
+- opt-in horizontal `CentroidalMomentumTask` damping
+- commanded-velocity `configure_capture_point_constraint()` enforcement
+- explicit-state `configure_velocity_zmp_constraint()` enforcement through
+  `PositionStepOptions.current_joint_velocity`
 - Safety margin shrinking of the active polygon
 - Optional proximity activation near polygon boundary
-- Visual feedback for CoM status (inside/near/outside)
+- Visual feedback for CoM, capture point, and finite-difference ZMP
 
 ## API Walkthrough
 
@@ -16,10 +20,12 @@ support-polygon constraint:
 
 | Step | API calls | Purpose |
 | --- | --- | --- |
-| Register IK tasks | `add_frame_task("ee_task", target_link)`, `add_posture_task("posture")` | Track the end-effector marker with a posture bias underneath. |
+| Register IK tasks | `add_frame_task(...)`, `add_posture_task(...)`, `add_centroidal_momentum_task(...)` | Track the end-effector, bias posture, and optionally damp horizontal momentum. |
 | Configure support polygon | `configure_com_constraint(...)` | Keep the 2D CoM projection inside the active polygon. |
+| Configure dynamic support | `configure_capture_point_constraint(...)`, `configure_velocity_zmp_constraint(...)` | Keep commanded capture point and finite-difference ZMP inside the same active polygon. |
 | Tune relaxation | `frame_task.solve_mode`, `allow_min_error_fallback`, `posture_task.solve_mode` | Explore strict scaling versus minimum-error fallback near constraints. |
-| Solve update | `solve_position_step(q_current, target_pose, "ee_task", step_opts)` | Apply one IK update using the registered tasks and CoM constraint. |
+| Supply state | `step_opts.current_joint_velocity = dq_current` | Provide the measured or caller-integrated velocity required by physical velocity ZMP. |
+| Solve update | `solve_position_step(q_current, target_pose, "ee_task", step_opts)` | Apply one IK update with all enabled centroidal constraints. |
 | Inspect diagnostics | `result.task_modes_effective`, `result.task_used_fallback`, `result.task_scales` | Display effective mode, fallback use, and scale while the demo runs. |
 
 Use `examples/04_com_constraint_example.py` for the exact slider values,
@@ -43,3 +49,7 @@ pixi run python examples/04_com_constraint_example.py
 
 The example defaults to the Panda preset; pass `--robot <key>` to use another
 configured model.
+
+The capture-point and ZMP disks show accepted-command diagnostics in the
+support frame. This remains a fixed-base velocity IK example; successful ZMP
+rows do not certify floating-base contact forces or friction feasibility.

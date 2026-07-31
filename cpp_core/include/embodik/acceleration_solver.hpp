@@ -88,6 +88,46 @@ struct TaskAccelerationBounds {
 };
 
 /**
+ * @brief Per-call fixed-base centroidal momentum-rate objective.
+ *
+ * The physical objective is:
+ *   Ag(q) * ddq + dAg(q, dq) * dq = hdot_feedforward +
+ *       proportional_gain * (h_target - h(q, dq))
+ *
+ * Empty axis_mask means all six centroidal axes are selected. Task-local
+ * exclusions are intentionally not applied because this is a solver-owned
+ * per-call objective, not a registered Task adapter.
+ */
+struct CentroidalMomentumRateObjective {
+  std::string source_id;
+  Eigen::VectorXd h_target;
+  Eigen::VectorXd hdot_feedforward = Eigen::VectorXd::Zero(6);
+  double proportional_gain = 0.0;
+  std::vector<bool> axis_mask;
+  int priority = 0;
+  TaskSolveMode solve_mode = TaskSolveMode::kScale;
+  bool allow_min_error_fallback = false;
+};
+
+/**
+ * @brief Per-call fixed-base centroidal momentum-rate hard bounds.
+ *
+ * Bounds are expressed in physical centroidal momentum-rate coordinates:
+ *   lower_bounds <= Ag(q) * ddq + dAg(q, dq) * dq <= upper_bounds
+ *
+ * Empty axis_mask means all six axes are selected. Empty active-side vectors
+ * mean every selected side is active.
+ */
+struct CentroidalMomentumRateBounds {
+  std::string source_id;
+  Eigen::VectorXd lower_bounds;
+  Eigen::VectorXd upper_bounds;
+  std::vector<bool> axis_mask;
+  std::vector<bool> lower_bound_active;
+  std::vector<bool> upper_bound_active;
+};
+
+/**
  * @brief Optional diagonal metric/reference for generalized acceleration
  * allocation.
  *
@@ -179,6 +219,36 @@ struct ComSupportPolygonAccelerationConstraint {
 };
 
 /**
+ * @brief Named fixed-base predicted capture-point support-polygon row family.
+ *
+ * The per-call rows freeze omega for this solve and constrain:
+ *   c + dt * v + 0.5 * dt^2 * a + (v + dt * a) / omega
+ *
+ * where a = Jcom(q) * ddq + Jdotcom(q, dq) * dq. If omega is unset, the
+ * solver derives it from current support-frame CoM height and gravity. Support
+ * frames must be world or structurally root-fixed; moving frames fail closed.
+ */
+struct CapturePointAccelerationConstraint {
+  std::string source_id;
+  ComSupportPolygonConstraintDefinition definition;
+  std::optional<double> omega;
+};
+
+/**
+ * @brief Named fixed-base physical centroidal-rate ZMP support-polygon family.
+ *
+ * The rows use hdot = Ag(q) * ddq + dAg(q, dq) * dq and the support-frame net
+ * vertical force Fz = hdot_z - mass * gravity_z. Fz must be at least fz_min.
+ * Half-plane rows are exact cross-multiplied affine ZMP inequalities with no
+ * centroidal-angular-momentum correction term.
+ */
+struct ZmpAccelerationConstraint {
+  std::string source_id;
+  ComSupportPolygonConstraintDefinition definition;
+  double fz_min = 1.0;
+};
+
+/**
  * @brief Named caller-owned acceleration-level tight point constraint.
  *
  * The physical coordinate is the named frame origin in world coordinates minus
@@ -259,6 +329,9 @@ struct AccelerationSolveOptions {
   std::vector<AffineAccelerationConstraint> affine_constraints;
   std::vector<FrozenNextVelocityConstraint> frozen_next_velocity_constraints;
   std::vector<TaskAccelerationBounds> task_acceleration_bounds;
+  std::vector<CentroidalMomentumRateObjective>
+      centroidal_momentum_rate_objectives;
+  std::vector<CentroidalMomentumRateBounds> centroidal_momentum_rate_bounds;
   std::vector<ContactAccelerationConstraint> contact_acceleration_constraints;
   std::vector<TightPointAccelerationConstraint> tight_point_constraints;
   std::vector<TightFramePoseAccelerationConstraint>
@@ -268,6 +341,9 @@ struct AccelerationSolveOptions {
       torso_pose_bound_constraints;
   std::vector<ComSupportPolygonAccelerationConstraint>
       com_support_polygon_constraints;
+  std::vector<CapturePointAccelerationConstraint>
+      capture_point_constraints;
+  std::vector<ZmpAccelerationConstraint> zmp_constraints;
   std::vector<int> zero_acceleration_joint_indices;
   std::vector<int> zero_next_velocity_joint_indices;
   std::vector<int> fixed_current_position_joint_indices;
@@ -343,6 +419,40 @@ struct AccelerationAllocationDiagnostics {
   double objective_value = 0.0;
 };
 
+struct CentroidalMomentumRateDiagnostics {
+  std::string source_id;
+  Eigen::VectorXd target_momentum;
+  Eigen::VectorXd reference_momentum_rate;
+  Eigen::VectorXd current_momentum;
+  Eigen::VectorXd bias_momentum_rate;
+  Eigen::VectorXd achieved_momentum_rate;
+  Eigen::VectorXd residual;
+  std::vector<bool> selected_axes;
+  double scale = 1.0;
+  TaskSolveMode effective_mode = TaskSolveMode::kScale;
+  bool used_min_error_fallback = false;
+};
+
+struct CapturePointAccelerationDiagnostics {
+  std::string source_id;
+  Eigen::Vector2d predicted_point_xy =
+      Eigen::Vector2d::Constant(std::numeric_limits<double>::quiet_NaN());
+  Eigen::VectorXd half_plane_slacks;
+  double min_slack = std::numeric_limits<double>::quiet_NaN();
+  double frozen_omega = std::numeric_limits<double>::quiet_NaN();
+  bool postvalidated = false;
+};
+
+struct ZmpAccelerationDiagnostics {
+  std::string source_id;
+  Eigen::Vector2d predicted_point_xy =
+      Eigen::Vector2d::Constant(std::numeric_limits<double>::quiet_NaN());
+  Eigen::VectorXd half_plane_slacks;
+  double min_slack = std::numeric_limits<double>::quiet_NaN();
+  double force_z = std::numeric_limits<double>::quiet_NaN();
+  bool postvalidated = false;
+};
+
 struct AccelerationAnalyticCollisionPairDiagnostics {
   std::size_t pair_index = 0;
   std::string pair_key;
@@ -394,6 +504,11 @@ struct AccelerationSolverResult : public SolverResult {
   std::vector<int> saturated_effort_indices;
   std::vector<AccelerationTaskDiagnostics> task_diagnostics;
   AccelerationAllocationDiagnostics allocation_diagnostics;
+  std::vector<CentroidalMomentumRateDiagnostics>
+      centroidal_momentum_rate_diagnostics;
+  std::vector<CapturePointAccelerationDiagnostics>
+      capture_point_diagnostics;
+  std::vector<ZmpAccelerationDiagnostics> zmp_diagnostics;
   bool velocity_collision_lift_applied = false;
   bool collision_endpoint_validated = false;
   bool collision_step_certified = false;
@@ -439,12 +554,18 @@ struct AccelerationSolverCapabilities {
   bool supports_relative_pose_constraints = true;
   bool supports_torso_pose_bound_constraints = true;
   bool supports_com_support_polygon_constraints = true;
+  bool supports_fixed_base_capture_point_constraints = true;
+  bool supports_fixed_base_zmp_constraints = true;
+  bool supports_fixed_base_centroidal_momentum_rate_objective = true;
+  bool supports_fixed_base_centroidal_momentum_rate_bounds = true;
+  bool supports_floating_base_centroidal_momentum_rate = false;
 #ifdef PINOCCHIO_WITH_HPP_FCL
   bool supports_velocity_collision_lift = true;
 #else
   bool supports_velocity_collision_lift = false;
 #endif
   bool supports_dynamic_contact = false;
+  bool supports_dynamic_balance = false;
 };
 
 /**
