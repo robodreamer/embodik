@@ -10,6 +10,7 @@ from pathlib import Path
 
 import numpy as np
 import numpy.testing as npt
+import pytest
 
 import embodik as eik
 
@@ -386,6 +387,269 @@ def test_position_step_fail_closed_when_support_contract_is_invalid(
 
     result = solver.solve_position_step(q, target, "tip")
     assert result.status != eik.SolverStatus.SUCCESS
+    npt.assert_allclose(result.q_solution, q, rtol=0.0, atol=0.0)
+    npt.assert_allclose(result.joint_velocities, np.zeros(robot.nv), rtol=0.0, atol=0.0)
+
+
+def test_position_step_enforces_all_velocity_centroidal_families_with_explicit_state(
+    tmp_path: Path,
+) -> None:
+    robot = eik.RobotModel(str(_write_centroidal_urdf(tmp_path)), floating_base=False)
+    solver = eik.KinematicsSolver(robot)
+    solver.dt = 0.01
+    q = np.array([0.2, -0.3])
+    current_dq = np.zeros(robot.nv)
+    robot.update_kinematics(q, current_dq)
+    pose = robot.get_frame_pose("link2")
+    target = np.eye(4)
+    target[:3, :3] = np.asarray(pose.rotation)
+    target[:3, 3] = np.asarray(pose.translation)
+    solver.add_frame_task("tip", "link2", eik.TaskType.FRAME_POSE)
+    momentum = solver.add_centroidal_momentum_task("momentum")
+    momentum.set_target_momentum(np.zeros(6))
+    solver.configure_centroidal_momentum_bounds(np.full(6, -5.0), np.full(6, 5.0))
+    com = robot.get_com_position()[:2]
+    polygon = np.array(
+        [
+            [com[0] - 0.5, com[1] - 0.5],
+            [com[0] + 0.5, com[1] - 0.5],
+            [com[0] + 0.5, com[1] + 0.5],
+            [com[0] - 0.5, com[1] + 0.5],
+        ]
+    )
+    solver.configure_capture_point_constraint(polygon, omega=3.0)
+    solver.configure_velocity_zmp_constraint(polygon, fz_min=1.0)
+
+    missing_state = solver.solve_position_step(q, target, "tip")
+    assert missing_state.status is eik.SolverStatus.INVALID_INPUT
+    npt.assert_allclose(missing_state.q_solution, q, rtol=0.0, atol=0.0)
+    npt.assert_allclose(missing_state.joint_velocities, np.zeros(robot.nv), rtol=0.0, atol=0.0)
+
+    options = eik.PositionStepOptions()
+    options.current_joint_velocity = current_dq
+    result = solver.solve_position_step(q, target, "tip", options)
+
+    assert result.status is eik.SolverStatus.SUCCESS
+    npt.assert_allclose(result.q_solution, q, rtol=0.0, atol=1e-12)
+    npt.assert_allclose(result.joint_velocities, np.zeros(robot.nv), rtol=0.0, atol=1e-12)
+    cp = solver.evaluate_capture_point_constraint(q, result.joint_velocities)
+    zmp = solver.evaluate_velocity_zmp_constraint(q, current_dq, result.joint_velocities)
+    assert np.min(cp["slacks"]) >= -1e-8
+    assert np.min(zmp["slacks"]) >= -1e-8
+    assert zmp["force_z"] >= 1.0
+
+    after_position_step = solver.solve_velocity(q, apply_limits=True)
+    assert after_position_step.status is eik.SolverStatus.INVALID_INPUT
+    npt.assert_allclose(
+        after_position_step.joint_velocities,
+        np.zeros(robot.nv),
+        rtol=0.0,
+        atol=0.0,
+    )
+
+
+def test_multi_target_position_step_enforces_velocity_centroidal_constraints(
+    tmp_path: Path,
+) -> None:
+    robot = eik.RobotModel(str(_write_centroidal_urdf(tmp_path)), floating_base=False)
+    solver = eik.KinematicsSolver(robot)
+    solver.dt = 0.01
+    q = np.array([0.2, -0.3])
+    current_dq = np.zeros(robot.nv)
+    robot.update_kinematics(q, current_dq)
+    pose = robot.get_frame_pose("link2")
+    target = np.eye(4)
+    target[:3, :3] = np.asarray(pose.rotation)
+    target[:3, 3] = np.asarray(pose.translation)
+    solver.add_frame_task("tip_position", "link2", eik.TaskType.FRAME_POSITION)
+    solver.add_frame_task("tip_orientation", "link2", eik.TaskType.FRAME_ORIENTATION)
+    com = robot.get_com_position()[:2]
+    polygon = np.array(
+        [
+            [com[0] - 0.5, com[1] - 0.5],
+            [com[0] + 0.5, com[1] - 0.5],
+            [com[0] + 0.5, com[1] + 0.5],
+            [com[0] - 0.5, com[1] + 0.5],
+        ]
+    )
+    solver.configure_capture_point_constraint(polygon, omega=3.0)
+    solver.configure_velocity_zmp_constraint(polygon, fz_min=1.0)
+    options = eik.PositionStepOptions()
+    options.current_joint_velocity = current_dq
+
+    result = solver.solve_position_step(
+        q,
+        [
+            eik.TaskTarget("tip_position", target),
+            eik.TaskTarget("tip_orientation", target),
+        ],
+        options,
+    )
+
+    assert result.status is eik.SolverStatus.SUCCESS
+    npt.assert_allclose(result.q_solution, q, rtol=0.0, atol=1e-12)
+    npt.assert_allclose(result.joint_velocities, np.zeros(robot.nv), rtol=0.0, atol=1e-12)
+    cp = solver.evaluate_capture_point_constraint(q, result.joint_velocities)
+    zmp = solver.evaluate_velocity_zmp_constraint(q, current_dq, result.joint_velocities)
+    assert np.min(cp["slacks"]) >= -1e-8
+    assert np.min(zmp["slacks"]) >= -1e-8
+
+
+def test_position_step_explicit_velocity_is_invariant_when_zmp_is_disabled(
+    tmp_path: Path,
+) -> None:
+    robot = eik.RobotModel(str(_write_centroidal_urdf(tmp_path)), floating_base=False)
+    solver = eik.KinematicsSolver(robot)
+    q = np.array([0.2, -0.3])
+    robot.update_configuration(q)
+    pose = robot.get_frame_pose("link2")
+    target = np.eye(4)
+    target[:3, :3] = np.asarray(pose.rotation)
+    target[:3, 3] = np.asarray(pose.translation) + np.array([0.01, 0.0, 0.0])
+    solver.add_frame_task("tip", "link2", eik.TaskType.FRAME_POSE)
+
+    baseline = solver.solve_position_step(q, target, "tip")
+    options = eik.PositionStepOptions()
+    options.current_joint_velocity = np.array([0.4, -0.2])
+    explicit = solver.solve_position_step(q, target, "tip", options)
+
+    assert explicit.status is baseline.status
+    npt.assert_allclose(explicit.q_solution, baseline.q_solution, rtol=0.0, atol=1e-12)
+    npt.assert_allclose(
+        explicit.joint_velocities,
+        baseline.joint_velocities,
+        rtol=0.0,
+        atol=1e-12,
+    )
+
+
+@pytest.mark.parametrize("multi_target", [False, True])
+def test_position_step_revalidates_final_configuration_cap_against_centroidal_bounds(
+    tmp_path: Path,
+    multi_target: bool,
+) -> None:
+    robot = eik.RobotModel(str(_write_centroidal_urdf(tmp_path)), floating_base=False)
+    solver = eik.KinematicsSolver(robot)
+    solver.dt = 0.01
+    q = np.array([0.2, -0.3])
+    robot.update_configuration(q)
+    pose = robot.get_frame_pose("link2")
+    target = np.eye(4)
+    target[:3, :3] = np.asarray(pose.rotation)
+    target[:3, 3] = np.asarray(pose.translation)
+    solver.add_frame_task("tip", "link2", eik.TaskType.FRAME_POSE)
+
+    momentum_matrix = robot.get_centroidal_momentum_matrix()
+    row = int(np.argmax(np.linalg.norm(momentum_matrix, axis=1)))
+    axis_mask = np.zeros(6)
+    axis_mask[row] = 1.0
+    target_momentum = np.zeros(6)
+    target_momentum[row] = 1.0
+    momentum = solver.add_centroidal_momentum_task("momentum")
+    momentum.set_axis_mask(axis_mask)
+    momentum.set_target_momentum(target_momentum)
+    solver.configure_centroidal_momentum_bounds(
+        lower_h=np.array([0.1]),
+        upper_h=np.array([0.2]),
+        axis_mask=axis_mask,
+    )
+
+    options = eik.PositionStepOptions()
+    options.max_configuration_step_norm = 1e-8
+    if multi_target:
+        result = solver.solve_position_step(
+            q,
+            [eik.TaskTarget("tip", target)],
+            options,
+        )
+    else:
+        result = solver.solve_position_step(q, target, "tip", options)
+
+    assert result.status is eik.SolverStatus.INFEASIBLE
+    npt.assert_allclose(result.q_solution, q, rtol=0.0, atol=0.0)
+    npt.assert_allclose(result.joint_velocities, np.zeros(robot.nv), rtol=0.0, atol=0.0)
+
+
+@pytest.mark.parametrize("multi_target", [False, True])
+def test_position_step_revalidates_continuity_brake_against_centroidal_bounds(
+    tmp_path: Path,
+    multi_target: bool,
+) -> None:
+    robot = eik.RobotModel(str(_write_centroidal_urdf(tmp_path)), floating_base=False)
+    solver = eik.KinematicsSolver(robot)
+    solver.dt = 0.01
+    q = np.array([0.2, -0.3])
+    robot.update_configuration(q)
+    pose = robot.get_frame_pose("link2")
+    target = np.eye(4)
+    target[:3, :3] = np.asarray(pose.rotation)
+    target[:3, 3] = np.asarray(pose.translation)
+    solver.add_frame_task("tip", "link2", eik.TaskType.FRAME_POSE)
+
+    momentum_matrix = robot.get_centroidal_momentum_matrix()
+    row = int(np.argmax(np.linalg.norm(momentum_matrix, axis=1)))
+    axis_mask = np.zeros(6)
+    axis_mask[row] = 1.0
+    previous_velocity = momentum_matrix[row] / np.linalg.norm(momentum_matrix[row])
+    previous_velocity *= 0.4
+    solver.set_acceleration_limits(np.full(robot.nv, 1.0))
+    solver.enable_acceleration_limits(True)
+    solver.set_previous_joint_velocities(previous_velocity)
+    solver.configure_centroidal_momentum_bounds(
+        lower_h=np.array([-1e-12]),
+        upper_h=np.array([1e-12]),
+        axis_mask=axis_mask,
+    )
+
+    options = eik.PositionStepOptions()
+    options.current_joint_velocity = previous_velocity
+    if multi_target:
+        result = solver.solve_position_step(
+            q,
+            [eik.TaskTarget("tip", target)],
+            options,
+        )
+    else:
+        result = solver.solve_position_step(q, target, "tip", options)
+
+    assert result.status is eik.SolverStatus.INFEASIBLE
+    npt.assert_allclose(result.q_solution, q, rtol=0.0, atol=0.0)
+    npt.assert_allclose(result.joint_velocities, np.zeros(robot.nv), rtol=0.0, atol=0.0)
+    npt.assert_allclose(
+        solver.get_previous_joint_velocities(),
+        np.zeros(robot.nv),
+        rtol=0.0,
+        atol=0.0,
+    )
+
+
+@pytest.mark.parametrize(
+    "current_dq, expected_status",
+    [
+        (np.zeros(1), eik.SolverStatus.INVALID_INPUT),
+        (np.array([np.nan, 0.0]), eik.SolverStatus.NON_FINITE_INPUT),
+    ],
+)
+def test_position_step_rejects_invalid_explicit_velocity_state(
+    tmp_path: Path,
+    current_dq: np.ndarray,
+    expected_status: eik.SolverStatus,
+) -> None:
+    robot = eik.RobotModel(str(_write_centroidal_urdf(tmp_path)), floating_base=False)
+    solver = eik.KinematicsSolver(robot)
+    q = np.array([0.0, 0.0])
+    robot.update_configuration(q)
+    pose = robot.get_frame_pose("link2")
+    target = np.eye(4)
+    target[:3, :3] = np.asarray(pose.rotation)
+    target[:3, 3] = np.asarray(pose.translation)
+    solver.add_frame_task("tip", "link2", eik.TaskType.FRAME_POSE)
+    options = eik.PositionStepOptions()
+    options.current_joint_velocity = current_dq
+
+    result = solver.solve_position_step(q, target, "tip", options)
+
+    assert result.status is expected_status
     npt.assert_allclose(result.q_solution, q, rtol=0.0, atol=0.0)
     npt.assert_allclose(result.joint_velocities, np.zeros(robot.nv), rtol=0.0, atol=0.0)
 

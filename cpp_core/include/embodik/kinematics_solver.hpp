@@ -1413,6 +1413,18 @@ private:
   /// One-shot integration dt used by solve_position_step so solve_velocity()
   /// can validate fallback candidates against the actual accepted step length.
   std::optional<double> pending_step_validation_dt_;
+  /// Call-scoped explicit velocity state supplied through PositionStepOptions.
+  /// It is restored on every solve_position_step exit and updated only between
+  /// accepted inner integration steps.
+  std::optional<Eigen::VectorXd> position_step_explicit_current_dq_;
+  const Eigen::VectorXd *active_explicit_current_dq() const {
+    if (pending_explicit_current_dq_.has_value()) {
+      return &pending_explicit_current_dq_.value();
+    }
+    return position_step_explicit_current_dq_.has_value()
+               ? &position_step_explicit_current_dq_.value()
+               : nullptr;
+  }
   /// One-shot request for the first physical position-step solve to include the
   /// caller-visible acceleration corridor. Later inner refinements are only
   /// predictive and must not consume another physical acceleration interval.
@@ -1494,6 +1506,14 @@ private:
   void apply_position_step_primary_task_options(const PositionStepOptions &options,
                                                 Task *task);
 
+  bool has_active_velocity_centroidal_hard_constraints() const;
+  bool validate_centroidal_velocity_candidate(
+      const Eigen::VectorXd &q, const Eigen::VectorXd *current_dq,
+      const Eigen::VectorXd &candidate, std::string *message);
+  bool enforce_final_position_step_centroidal_candidate(
+      const Eigen::VectorXd &current_q, const Eigen::VectorXd &current_dq,
+      double outer_dt, PositionIKResult &result);
+
   std::optional<VelocitySolverResult>
   apply_position_step_task_metric_projection(
       const Eigen::VectorXd &current_q, double outer_dt,
@@ -1502,6 +1522,7 @@ private:
       const std::optional<TorsoPoseConstraintOptions> &torso_constraint,
       const std::vector<PositionStepPriorityConstraintSpec>
           &priority_constraints,
+      const Eigen::VectorXd &current_dq,
       Eigen::VectorXd &q_candidate);
 
   std::optional<Eigen::VectorXd>

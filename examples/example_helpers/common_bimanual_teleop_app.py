@@ -3,7 +3,7 @@
 
 This module is shared by the public ROBOTIS AI Worker assets and the RB-Y1
 entrypoint. Model-specific scripts resolve URDFs and then delegate here for the
-common Viser UI, solver setup, collision/CoM controls, and runtime loop.
+common Viser UI, solver setup, collision/centroidal controls, and runtime loop.
 """
 
 from __future__ import annotations
@@ -34,6 +34,13 @@ try:
         reset_adaptive_gain_state,
     )
     from example_helpers.bimanual_seer_teleop import BimanualSeerTeleop
+    from example_helpers.centroidal_support import (
+        configure_capture_point_constraint,
+        configure_centroidal_diagnostic_solver,
+        configure_horizontal_momentum_damping,
+        configure_velocity_zmp_constraint,
+        evaluate_centroidal_diagnostics,
+    )
     from example_helpers.common_bimanual_model_utils import (
         default_common_bimanual_ik_joint_names,
         resolve_common_bimanual_frames,
@@ -59,6 +66,13 @@ except ModuleNotFoundError as exc:
         reset_adaptive_gain_state,
     )
     from examples.example_helpers.bimanual_seer_teleop import BimanualSeerTeleop
+    from examples.example_helpers.centroidal_support import (
+        configure_capture_point_constraint,
+        configure_centroidal_diagnostic_solver,
+        configure_horizontal_momentum_damping,
+        configure_velocity_zmp_constraint,
+        evaluate_centroidal_diagnostics,
+    )
     from examples.example_helpers.common_bimanual_model_utils import (
         default_common_bimanual_ik_joint_names,
         resolve_common_bimanual_frames,
@@ -169,6 +183,8 @@ COLOR_CONTACT_POINT = (0.98, 0.90, 0.18)
 COLOR_COM_INSIDE = (0.12, 0.78, 0.32)
 COLOR_COM_NEAR = (1.00, 0.68, 0.10)
 COLOR_COM_OUTSIDE = (0.92, 0.20, 0.24)
+COLOR_CAPTURE_POINT = (0.14, 0.68, 1.00)
+COLOR_ZMP = (0.92, 0.25, 0.70)
 DEFAULT_COMMON_BIMANUAL_SEED = {
     "lift_joint": -0.1,
     "head_joint1": 0.0,
@@ -348,9 +364,7 @@ def _torso_arm_contribution_metric_weights(
     return weights
 
 
-def _effective_torso_contribution(
-    contribution: float, *, torso_prefer_locked: bool
-) -> float:
+def _effective_torso_contribution(contribution: float, *, torso_prefer_locked: bool) -> float:
     """Return the contribution value actually applied to the solver metric."""
     value = float(np.clip(contribution, 0.0, 1.0))
     if torso_prefer_locked:
@@ -1438,6 +1452,7 @@ def main() -> None:
     ]
     q = _apply_named_joint_seed(q, joint_name_to_cfg, q_lo, q_hi, default_joint_seed)
     q = _apply_soft_lift_margin(q, joint_name_to_cfg=joint_name_to_cfg, q_lo=q_lo, q_hi=q_hi)
+    current_dq = np.zeros(robot.nv, dtype=float)
     nullspace_bias_q = np.asarray(q, dtype=float).copy()
     robot.update_configuration(q)
     support_polygon = _compute_support_polygon_from_contacts(
@@ -1515,6 +1530,17 @@ def main() -> None:
         arm_nullspace_local.set_target_configuration(
             np.asarray(nullspace_bias_q, dtype=float).copy()
         )
+        momentum_task_local = solver_local.add_centroidal_momentum_task(
+            "horizontal_momentum_damping"
+        )
+        momentum_task_local.solve_mode = embodik.TaskSolveMode.MIN_ERROR
+        momentum_task_local.allow_min_error_fallback = False
+        configure_horizontal_momentum_damping(
+            momentum_task_local,
+            enabled=False,
+            weight=0.01,
+            priority=2,
+        )
         return (
             solver_local,
             right_task_local,
@@ -1522,9 +1548,20 @@ def main() -> None:
             torso_task_local,
             posture_local,
             arm_nullspace_local,
+            momentum_task_local,
         )
 
-    solver, right_task, left_task, torso_task, posture, arm_nullspace = _build_solver(q)
+    (
+        solver,
+        right_task,
+        left_task,
+        torso_task,
+        posture,
+        arm_nullspace,
+        momentum_task,
+    ) = _build_solver(q)
+    centroidal_observer = embodik.KinematicsSolver(robot)
+    centroidal_observer.dt = solver.dt
 
     allowed_joint_names = set(ik_joint_names)
     lock_joint_name_set = set(_resolve_lock_joint_names(joint_names, joint_name_to_cfg))
@@ -1972,7 +2009,7 @@ def main() -> None:
             ),
         )
 
-    with server.gui.add_folder("CoM Constraint"):
+    with server.gui.add_folder("Centroidal Support"):
         enable_com_constraint = server.gui.add_checkbox(
             "Enable CoM Constraint",
             initial_value=_initial_enable_com(
@@ -1980,6 +2017,28 @@ def main() -> None:
                 com_inside_support=initial_com_inside_support,
             ),
             disabled=not hasattr(solver, "configure_com_constraint"),
+        )
+        enable_capture_point = server.gui.add_checkbox(
+            "Enable Capture Point Constraint",
+            initial_value=False,
+            disabled=not hasattr(solver, "configure_capture_point_constraint"),
+        )
+        enable_velocity_zmp = server.gui.add_checkbox(
+            "Enable Velocity ZMP Constraint",
+            initial_value=False,
+            disabled=not hasattr(solver, "configure_velocity_zmp_constraint"),
+        )
+        enable_momentum_damping = server.gui.add_checkbox(
+            "Damp Horizontal Momentum",
+            initial_value=False,
+            disabled=not hasattr(solver, "add_centroidal_momentum_task"),
+        )
+        momentum_damping_weight = server.gui.add_slider(
+            "Momentum Damping Weight",
+            min=0.0,
+            max=0.2,
+            initial_value=0.01,
+            step=0.005,
         )
         com_margin_pct = server.gui.add_slider(
             "Safety margin (%)", min=0.0, max=40.0, initial_value=5.0, step=1.0
@@ -2006,6 +2065,9 @@ def main() -> None:
         show_support_contacts = server.gui.add_checkbox("Show support contacts", initial_value=True)
         show_com_viz = server.gui.add_checkbox("Show CoM", initial_value=True)
         show_drop_line = server.gui.add_checkbox("Show CoM drop line", initial_value=True)
+        show_centroidal_points = server.gui.add_checkbox(
+            "Show Capture Point and ZMP", initial_value=False
+        )
 
     posture_sliders = []
     with server.gui.add_folder("Whole-Body Posture"):
@@ -2064,6 +2126,7 @@ def main() -> None:
         solve_ms = server.gui.add_text("Solve time (ms)", initial_value="--")
         right_err = server.gui.add_text("Right err", initial_value="--")
         left_err = server.gui.add_text("Left err", initial_value="--")
+        centroidal_diag = server.gui.add_text("Centroidal", initial_value="CP=off | ZMP=off")
 
     debug_colors = (
         ((1.0, 0.2, 0.2), (0.2, 0.8, 0.2)),
@@ -2121,6 +2184,20 @@ def main() -> None:
         line_width=2.0,
         visible=bool(show_com_viz.value and show_drop_line.value),
     )
+    capture_point_handle = server.scene.add_icosphere(
+        "/com_viz/capture_point",
+        radius=0.018,
+        color=COLOR_CAPTURE_POINT,
+        position=(0.0, 0.0, 0.006),
+        visible=False,
+    )
+    zmp_handle = server.scene.add_icosphere(
+        "/com_viz/zmp",
+        radius=0.014,
+        color=COLOR_ZMP,
+        position=(0.0, 0.0, 0.009),
+        visible=False,
+    )
     contact_point_handles = {
         frame_name: server.scene.add_icosphere(
             f"/com_viz/support_contact/{frame_name}",
@@ -2141,9 +2218,15 @@ def main() -> None:
     def _configure_com_constraint_if_needed(force: bool = False) -> None:
         nonlocal com_cfg, support_polygon_cache
         support_polygon_now = _current_support_polygon()
-        enabled = bool(enable_com_constraint.value) and hasattr(solver, "configure_com_constraint")
+        com_enabled = bool(enable_com_constraint.value) and hasattr(
+            solver, "configure_com_constraint"
+        )
         next_cfg = (
-            enabled,
+            com_enabled,
+            bool(enable_capture_point.value),
+            bool(enable_velocity_zmp.value),
+            bool(enable_momentum_damping.value),
+            round(float(momentum_damping_weight.value), 6),
             round(_margin_frac(), 6),
             bool(com_use_proximity.value),
             round(float(com_vel_max.value), 6),
@@ -2154,35 +2237,87 @@ def main() -> None:
         if not force and next_cfg == com_cfg:
             return
         support_polygon_cache = support_polygon_now
-        if not enabled:
+        if not com_enabled:
             if hasattr(solver, "clear_com_constraint"):
                 try:
                     solver.clear_com_constraint()
                 except Exception:
                     pass
             com_prox_display.value = 0.0
-            com_cfg = next_cfg
-            return
+        else:
+            try:
+                solver.configure_com_constraint(
+                    support_polygon=support_polygon_now,
+                    margin=_margin_frac(),
+                    frame_name=frame_map["base"],
+                    com_vel_max=float(com_vel_max.value),
+                    com_acc_max=float(com_acc_max.value),
+                    use_acceleration_limits=bool(com_use_acc_limits.value),
+                    proximity_fraction=0.05 if bool(com_use_proximity.value) else 0.0,
+                )
+                if hasattr(solver, "get_com_proximity_threshold"):
+                    com_prox_display.value = round(float(solver.get_com_proximity_threshold()), 4)
+            except Exception:
+                if hasattr(solver, "clear_com_constraint"):
+                    try:
+                        solver.clear_com_constraint()
+                    except Exception:
+                        pass
+                enable_com_constraint.value = False
+                com_prox_display.value = 0.0
+
         try:
-            solver.configure_com_constraint(
+            configure_capture_point_constraint(
+                solver,
+                enabled=bool(enable_capture_point.value),
                 support_polygon=support_polygon_now,
                 margin=_margin_frac(),
                 frame_name=frame_map["base"],
-                com_vel_max=float(com_vel_max.value),
-                com_acc_max=float(com_acc_max.value),
-                use_acceleration_limits=bool(com_use_acc_limits.value),
-                proximity_fraction=0.05 if bool(com_use_proximity.value) else 0.0,
             )
-            if hasattr(solver, "get_com_proximity_threshold"):
-                com_prox_display.value = round(float(solver.get_com_proximity_threshold()), 4)
+            configure_velocity_zmp_constraint(
+                solver,
+                enabled=bool(enable_velocity_zmp.value),
+                support_polygon=support_polygon_now,
+                margin=_margin_frac(),
+                frame_name=frame_map["base"],
+            )
+            configure_horizontal_momentum_damping(
+                momentum_task,
+                enabled=bool(enable_momentum_damping.value),
+                weight=float(momentum_damping_weight.value),
+                priority=2,
+            )
+            configure_centroidal_diagnostic_solver(
+                centroidal_observer,
+                support_polygon=support_polygon_now,
+                margin=_margin_frac(),
+                frame_name=frame_map["base"],
+                dt=solver.dt,
+            )
         except Exception:
-            if hasattr(solver, "clear_com_constraint"):
-                try:
-                    solver.clear_com_constraint()
-                except Exception:
-                    pass
-            enable_com_constraint.value = False
-            com_prox_display.value = 0.0
+            configure_capture_point_constraint(
+                solver,
+                enabled=False,
+                support_polygon=support_polygon_now,
+                margin=0.0,
+                frame_name=frame_map["base"],
+            )
+            configure_velocity_zmp_constraint(
+                solver,
+                enabled=False,
+                support_polygon=support_polygon_now,
+                margin=0.0,
+                frame_name=frame_map["base"],
+            )
+            configure_horizontal_momentum_damping(
+                momentum_task,
+                enabled=False,
+                weight=0.0,
+                priority=2,
+            )
+            enable_capture_point.value = False
+            enable_velocity_zmp.value = False
+            enable_momentum_damping.value = False
         com_cfg = next_cfg
 
     def _configure_acceleration_limits_if_needed(force: bool = False) -> None:
@@ -2245,6 +2380,55 @@ def main() -> None:
             dtype=float,
         )
         com_drop_line.visible = bool(show_com_viz.value) and bool(show_drop_line.value)
+
+    def _support_point_world(point_xy: np.ndarray, z_offset: float) -> tuple[float, float, float]:
+        support_pose = robot.get_frame_pose(frame_map["base"])
+        point_world = np.asarray(support_pose.rotation, dtype=float) @ np.array(
+            [float(point_xy[0]), float(point_xy[1]), float(z_offset)],
+            dtype=float,
+        ) + np.asarray(support_pose.translation, dtype=float)
+        return tuple(float(value) for value in point_world)
+
+    def _update_centroidal_visualization(
+        q_eval: np.ndarray,
+        current_velocity: np.ndarray,
+        command_velocity: np.ndarray,
+    ) -> None:
+        if not bool(show_centroidal_points.value):
+            capture_point_handle.visible = False
+            zmp_handle.visible = False
+            centroidal_diag.value = "CP=hidden | ZMP=hidden"
+            return
+        try:
+            diagnostics = evaluate_centroidal_diagnostics(
+                centroidal_observer,
+                q_eval,
+                current_velocity,
+                command_velocity,
+            )
+        except Exception:
+            capture_point_handle.visible = False
+            zmp_handle.visible = False
+            centroidal_diag.value = "CP=invalid | ZMP=invalid"
+            return
+
+        capture_point_handle.visible = diagnostics.capture_point is not None
+        zmp_handle.visible = diagnostics.zmp is not None
+        if diagnostics.capture_point is not None:
+            capture_point_handle.position = _support_point_world(diagnostics.capture_point, 0.006)
+        if diagnostics.zmp is not None:
+            zmp_handle.position = _support_point_world(diagnostics.zmp, 0.009)
+        cp_text = (
+            f"{diagnostics.capture_point_min_slack:.4f} m"
+            if diagnostics.capture_point_min_slack is not None
+            else "invalid"
+        )
+        zmp_text = (
+            f"{diagnostics.zmp_min_slack:.4f} m"
+            if diagnostics.zmp_min_slack is not None
+            else "invalid"
+        )
+        centroidal_diag.value = f"CP slack={cp_text} | ZMP slack={zmp_text}"
 
     def _clear_collision_debug() -> None:
         nonlocal dbg_lines
@@ -2383,10 +2567,17 @@ def main() -> None:
         left_err.value = "0.0000 m"
 
     def _reset_solver_state(reason: str) -> None:
-        nonlocal solver, right_task, left_task, torso_task, posture, arm_nullspace, collision_cfg, com_cfg, accel_cfg
-        solver, right_task, left_task, torso_task, posture, arm_nullspace = _build_solver(
-            posture_target
-        )
+        nonlocal solver, right_task, left_task, torso_task, posture, arm_nullspace
+        nonlocal momentum_task, collision_cfg, com_cfg, accel_cfg
+        (
+            solver,
+            right_task,
+            left_task,
+            torso_task,
+            posture,
+            arm_nullspace,
+            momentum_task,
+        ) = _build_solver(posture_target)
         if hasattr(arm_nullspace, "set_controlled_joint_indices"):
             arm_nullspace.set_controlled_joint_indices(list(arm_controlled_indices))
         collision_cfg = None
@@ -2441,12 +2632,14 @@ def main() -> None:
     def _reset_robot_and_targets(
         *, status_message: str = "Status: Robot and targets reset"
     ) -> None:
-        nonlocal q, posture_target, nullspace_bias_q, prev_right_target_pose, prev_left_target_pose
+        nonlocal q, current_dq, posture_target, nullspace_bias_q
+        nonlocal prev_right_target_pose, prev_left_target_pose
         reset_adaptive_gain_state(_adaptive_gain_state)
         q = robot.neutral_configuration()
         q = _apply_named_joint_seed(q, joint_name_to_cfg, q_lo, q_hi, default_joint_seed)
         q = np.clip(q, np.asarray(q_lo, dtype=float), np.asarray(q_hi, dtype=float))
         q = _apply_soft_lift_margin(q, joint_name_to_cfg=joint_name_to_cfg, q_lo=q_lo, q_hi=q_hi)
+        current_dq = np.zeros(robot.nv, dtype=float)
         posture_target = np.asarray(q, dtype=float).copy()
         # Posture + arm-nullspace tasks read this every IK tick; keep it aligned with q
         # or reset will drift back toward the pre-reset configuration.
@@ -2458,6 +2651,7 @@ def main() -> None:
         _sync_posture_sliders_from_q(q)
         _update_collision_debug()
         _update_com_visualization()
+        _update_centroidal_visualization(q, current_dq, current_dq)
         timing_handle.value = 0.0
         solve_ms.value = "--"
         status.value = status_message
@@ -2496,6 +2690,7 @@ def main() -> None:
     _sync_joint_sliders_from_q(q)
     _sync_posture_sliders_from_q(q)
     _sync_targets_from_robot()
+    _update_centroidal_visualization(q, current_dq, current_dq)
     prev_manual_state = False
     prev_torso_marker_on = False
     # Held-arm protection state: remember last frame's EE target poses so the
@@ -2605,6 +2800,7 @@ def main() -> None:
             right_ctrl.visible = False
             left_ctrl.visible = False
             q = _apply_manual_joint_configuration(q)
+            current_dq = np.zeros(robot.nv, dtype=float)
             posture_target = q.copy()
             posture.weight = float(posture_weight.value)
             posture.set_target_configuration(posture_target)
@@ -2614,6 +2810,7 @@ def main() -> None:
             _sync_posture_sliders_from_q(q)
             _update_collision_debug()
             _update_com_visualization()
+            _update_centroidal_visualization(q, current_dq, current_dq)
             right_now = np.asarray(
                 robot.get_frame_pose(frame_map["right_tool"]).translation, dtype=float
             )
@@ -2868,12 +3065,14 @@ def main() -> None:
         if _seg_player is not None and _seg_player.state not in ("idle", "hold"):
             streaming_active = True
         if settled and not streaming_active and not (left_target_moved or right_target_moved):
+            current_dq = np.zeros(robot.nv, dtype=float)
             robot.update_configuration(q)
             _update_robot_visuals(q)
             _sync_joint_sliders_from_q(q)
             _sync_posture_sliders_from_q(q)
             _update_collision_debug()
             _update_com_visualization()
+            _update_centroidal_visualization(q, current_dq, current_dq)
             right_err.value = f"{right_pos_err:.4f} m"
             left_err.value = f"{left_pos_err:.4f} m"
             status.value = "Status: Holding target"
@@ -2884,10 +3083,12 @@ def main() -> None:
             continue
 
         if not bool(auto_ik_solve.value):
+            current_dq = np.zeros(robot.nv, dtype=float)
             robot.update_configuration(q)
             _update_robot_visuals(q)
             _update_collision_debug()
             _update_com_visualization()
+            _update_centroidal_visualization(q, current_dq, current_dq)
             _sync_joint_sliders_from_q(q)
             _sync_posture_sliders_from_q(q)
             right_err.value = f"{right_pos_err:.4f} m"
@@ -2956,6 +3157,7 @@ def main() -> None:
             opts.max_steps = min(opts.max_steps, 1)
         opts.position_gain = float(eff_pos_gain)
         opts.orientation_gain = float(eff_rot_gain)
+        opts.current_joint_velocity = np.asarray(current_dq, dtype=float)
         opts.adaptive_dt = bool(adaptive_dt.value) and not bool(auto_tune_gains.value)
         opts.adaptive_dt_max_scale = float(adaptive_dt_max_scale.value)
         opts.adaptive_dt_reference_distance = float(adaptive_dt_ref_dist.value)
@@ -2965,7 +3167,12 @@ def main() -> None:
             max_angular_speed=float(max_angular_speed.value),
         )
         if hasattr(opts, "stall_recovery"):
-            opts.stall_recovery = bool(enable_collision.value or enable_com_constraint.value)
+            opts.stall_recovery = bool(
+                enable_collision.value
+                or enable_com_constraint.value
+                or enable_capture_point.value
+                or enable_velocity_zmp.value
+            )
         if hasattr(opts, "no_progress_max_steps"):
             opts.no_progress_max_steps = 5
         if hasattr(opts, "no_progress_error_tolerance"):
@@ -3037,10 +3244,19 @@ def main() -> None:
             opts.integration_zero_velocity_indices = sorted(set(dynamic_freeze_indices))
 
         step = _solve_position_step(targets, q)
-        q = step.q_next
         result = step.solver_result
+        dq_command = np.asarray(
+            getattr(result, "joint_velocities", np.zeros(robot.nv)), dtype=float
+        )
+        if dq_command.shape != (robot.nv,) or not np.all(np.isfinite(dq_command)):
+            dq_command = np.zeros(robot.nv, dtype=float)
+        _update_centroidal_visualization(q_prev, current_dq, dq_command)
+        q = step.q_next
         if not np.all(np.isfinite(q)):
             q = q_prev
+            current_dq = np.zeros(robot.nv, dtype=float)
+        else:
+            current_dq = dq_command
         result_status_name = getattr(
             getattr(result, "status", None), "name", str(getattr(result, "status", ""))
         )
@@ -3074,7 +3290,10 @@ def main() -> None:
                 f" | {result.status_message}" if getattr(result, "status_message", "") else ""
             )
         elif result_status_name == "INFEASIBLE" and (
-            bool(enable_collision.value) or bool(enable_com_constraint.value)
+            bool(enable_collision.value)
+            or bool(enable_com_constraint.value)
+            or bool(enable_capture_point.value)
+            or bool(enable_velocity_zmp.value)
         ):
             status.value = "Status: constrained solve saturated" + (
                 f" | {result.status_message}" if getattr(result, "status_message", "") else ""

@@ -123,8 +123,8 @@ def test_centroidal_release_surface_is_navigable_and_versioned() -> None:
 
     assert version == "0.22.0"
     assert "Centroidal Stability: centroidal_stability.md" in navigation
-    assert "Centroidal Stability: examples/centroidal_stability.md" in navigation
-    assert "`10_centroidal_stability.py`" in examples
+    assert "`04_com_constraint_example.py`" in examples
+    assert "`06_bimanual_whole_body_ik.py`" in examples
     assert "Centroidal momentum-rate objective and bounds" in acceleration
     assert "Predicted capture point" in acceleration
     assert "Physical centroidal-rate ZMP" in acceleration

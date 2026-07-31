@@ -296,13 +296,13 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
     last_solution_dq_norm_ = 0.0;
     return result;
   }
+  const Eigen::VectorXd *explicit_current_dq = active_explicit_current_dq();
   if (velocity_zmp_constraint_.has_value() &&
-      velocity_zmp_constraint_->enabled &&
-      !pending_explicit_current_dq_.has_value()) {
+      velocity_zmp_constraint_->enabled && explicit_current_dq == nullptr) {
     result.status = SolverStatus::kInvalidInput;
     result.status_message =
         "velocity-ZMP constraint requires explicit current_dq; use "
-        "solve_velocity_with_state";
+        "solve_velocity_with_state or PositionStepOptions.current_joint_velocity";
     result.solution.assign(static_cast<std::size_t>(robot_->nv()), 0.0);
     result.joint_velocities = Eigen::VectorXd::Zero(robot_->nv());
     result.limits_applied = apply_limits;
@@ -718,9 +718,9 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
   }
   std::optional<ComConstraintResult> velocity_zmp_constraint_result =
       std::nullopt;
-  if (pending_explicit_current_dq_.has_value()) {
+  if (explicit_current_dq != nullptr) {
     velocity_zmp_constraint_result =
-        compute_velocity_zmp_constraint(*pending_explicit_current_dq_);
+        compute_velocity_zmp_constraint(*explicit_current_dq);
     if (use_contact_projection && velocity_zmp_constraint_result.has_value()) {
       velocity_zmp_constraint_result->jacobian =
           velocity_zmp_constraint_result->jacobian * contact_P_c;
@@ -2309,78 +2309,10 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
 
     Eigen::Map<Eigen::VectorXd> dq_final(result.solution.data(),
                                          result.solution.size());
-    auto final_centroidal_constraints_acceptable =
-        [&](const Eigen::VectorXd &candidate, std::string *message) {
-          if (candidate.size() != robot_->nv() || !candidate.allFinite()) {
-            if (message != nullptr) {
-              *message = "final centroidal validation found non-finite velocity";
-            }
-            return false;
-          }
-          const double tol = std::max(1e-8, 10.0 * constraint_tolerance_);
-          if (centroidal_momentum_bounds_.has_value() &&
-              centroidal_momentum_bounds_->enabled) {
-            const auto &cfg = *centroidal_momentum_bounds_;
-            const Eigen::VectorXd h =
-                robot_->get_centroidal_momentum_matrix() * candidate;
-            int selected = 0;
-            for (int row = 0; row < 6; ++row) {
-              if (cfg.axis_mask(row) == 0.0) {
-                continue;
-              }
-              if (h(row) < cfg.lower_h(selected) - tol ||
-                  h(row) > cfg.upper_h(selected) + tol) {
-                if (message != nullptr) {
-                  *message =
-                      "final centroidal momentum bound validation failed";
-                }
-                return false;
-              }
-              ++selected;
-            }
-          }
-          if (capture_point_constraint_.has_value() &&
-              capture_point_constraint_->enabled) {
-            const auto debug =
-                evaluate_capture_point_constraint(q_eval, candidate);
-            if (debug.status != SolverStatus::kSuccess ||
-                debug.slacks.size() == 0 || !debug.slacks.allFinite() ||
-                debug.slacks.minCoeff() < -tol) {
-              if (message != nullptr) {
-                *message = "final capture-point validation failed";
-              }
-              return false;
-            }
-          }
-          if (velocity_zmp_constraint_.has_value() &&
-              velocity_zmp_constraint_->enabled) {
-            if (!pending_explicit_current_dq_.has_value()) {
-              if (message != nullptr) {
-                *message = "final velocity-ZMP validation lacks current_dq";
-              }
-              return false;
-            }
-            const auto debug = evaluate_velocity_zmp_constraint(
-                q_eval, *pending_explicit_current_dq_, candidate);
-            if (debug.status != SolverStatus::kSuccess ||
-                debug.slacks.size() == 0 || !debug.slacks.allFinite() ||
-                debug.slacks.minCoeff() < -tol ||
-                debug.force_z <
-                    velocity_zmp_constraint_->fz_min - tol) {
-              if (message != nullptr) {
-                *message = "final velocity-ZMP validation failed";
-              }
-              return false;
-            }
-          }
-          return true;
-        };
-    if ((centroidal_momentum_bounds_.has_value() ||
-         capture_point_constraint_.has_value() ||
-         velocity_zmp_constraint_.has_value())) {
+    if (has_active_velocity_centroidal_hard_constraints()) {
       std::string validation_message;
-      if (!final_centroidal_constraints_acceptable(dq_final,
-                                                   &validation_message)) {
+      if (!validate_centroidal_velocity_candidate(
+              q_eval, explicit_current_dq, dq_final, &validation_message)) {
         result.status = SolverStatus::kInfeasible;
         result.status_message = validation_message;
         dq_final.setZero();

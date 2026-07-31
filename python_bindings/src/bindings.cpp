@@ -421,6 +421,11 @@ NB_MODULE(_embodik_impl, m) {
               "Number of velocity-IK iterations per call (default 1)")
       .def_rw("dt", &eik::PositionStepOptions::dt,
               "Integration timestep per step; <=0 uses solver.dt (default -1)")
+      .def_rw("current_joint_velocity",
+              &eik::PositionStepOptions::current_joint_velocity,
+              "Optional caller-owned current generalized velocity (size nv). "
+              "Required when velocity-ZMP constraints are enabled; empty "
+              "keeps the legacy stateless position-step path.")
       .def_rw("max_linear_speed", &eik::PositionStepOptions::max_linear_speed,
               "Maximum linear speed magnitude in solve_position_step (m/s); <=0 means unlimited")
       .def_rw("max_angular_speed", &eik::PositionStepOptions::max_angular_speed,

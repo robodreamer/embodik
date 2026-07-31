@@ -21,14 +21,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   capture-point constraints, physical centroidal-rate ZMP constraints,
   positive vertical-force gates, and accepted-state diagnostics to the
   acceleration solver.
-- Added a deterministic headless centroidal-stability example covering both
-  solver levels.
+- Added visual centroidal momentum, capture-point, and velocity-ZMP controls to
+  the Panda CoM and bimanual whole-body IK examples, with non-visual velocity
+  and acceleration composition checks retained as tests.
 
 ### Changed
 
 - Made velocity ZMP require explicit current velocity through
   `solve_velocity_with_state()` instead of relying on a previous solver command
   or other hidden history.
+- Extended `solve_position_step()` with caller-owned
+  `PositionStepOptions.current_joint_velocity`, allowing its main interactive
+  path to enforce velocity ZMP alongside momentum and capture-point controls.
 - Reused one support-polygon geometry implementation across CoM, capture-point,
   and ZMP constraints, including margin, half-plane, inradius, and
   root-fixed-frame validation.

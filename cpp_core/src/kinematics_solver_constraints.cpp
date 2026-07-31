@@ -302,6 +302,110 @@ void KinematicsSolver::clear_velocity_zmp_constraint() {
   velocity_zmp_constraint_.reset();
 }
 
+bool KinematicsSolver::has_active_velocity_centroidal_hard_constraints() const {
+  return (centroidal_momentum_bounds_.has_value() &&
+          centroidal_momentum_bounds_->enabled) ||
+         (capture_point_constraint_.has_value() &&
+          capture_point_constraint_->enabled) ||
+         (velocity_zmp_constraint_.has_value() &&
+          velocity_zmp_constraint_->enabled);
+}
+
+bool KinematicsSolver::validate_centroidal_velocity_candidate(
+    const Eigen::VectorXd &q, const Eigen::VectorXd *current_dq,
+    const Eigen::VectorXd &candidate, std::string *message) {
+  if (candidate.size() != robot_->nv() || !candidate.allFinite()) {
+    if (message != nullptr) {
+      *message = "final centroidal validation found non-finite velocity";
+    }
+    return false;
+  }
+
+  const double tol = std::max(1e-8, 10.0 * constraint_tolerance_);
+  if (centroidal_momentum_bounds_.has_value() &&
+      centroidal_momentum_bounds_->enabled) {
+    const auto &cfg = *centroidal_momentum_bounds_;
+    const Eigen::VectorXd h =
+        robot_->compute_centroidal_momentum_matrix(q) * candidate;
+    int selected = 0;
+    for (int row = 0; row < 6; ++row) {
+      if (cfg.axis_mask(row) == 0.0) {
+        continue;
+      }
+      if (h(row) < cfg.lower_h(selected) - tol ||
+          h(row) > cfg.upper_h(selected) + tol) {
+        if (message != nullptr) {
+          *message = "final centroidal momentum bound validation failed";
+        }
+        return false;
+      }
+      ++selected;
+    }
+  }
+  if (capture_point_constraint_.has_value() &&
+      capture_point_constraint_->enabled) {
+    const auto debug = evaluate_capture_point_constraint(q, candidate);
+    if (debug.status != SolverStatus::kSuccess || debug.slacks.size() == 0 ||
+        !debug.slacks.allFinite() || debug.slacks.minCoeff() < -tol) {
+      if (message != nullptr) {
+        *message = "final capture-point validation failed";
+      }
+      return false;
+    }
+  }
+  if (velocity_zmp_constraint_.has_value() &&
+      velocity_zmp_constraint_->enabled) {
+    if (current_dq == nullptr) {
+      if (message != nullptr) {
+        *message = "final velocity-ZMP validation lacks current_dq";
+      }
+      return false;
+    }
+    const auto debug =
+        evaluate_velocity_zmp_constraint(q, *current_dq, candidate);
+    if (debug.status != SolverStatus::kSuccess || debug.slacks.size() == 0 ||
+        !debug.slacks.allFinite() || debug.slacks.minCoeff() < -tol ||
+        debug.force_z < velocity_zmp_constraint_->fz_min - tol) {
+      if (message != nullptr) {
+        *message = "final velocity-ZMP validation failed";
+      }
+      return false;
+    }
+  }
+  return true;
+}
+
+bool KinematicsSolver::enforce_final_position_step_centroidal_candidate(
+    const Eigen::VectorXd &current_q, const Eigen::VectorXd &current_dq,
+    double outer_dt, PositionIKResult &result) {
+  if (!has_active_velocity_centroidal_hard_constraints()) {
+    return true;
+  }
+
+  const Eigen::VectorXd final_velocity =
+      pinocchio::difference(robot_->model(), current_q, result.q_solution) /
+      std::max(outer_dt, 1e-9);
+  const Eigen::VectorXd *final_current_dq =
+      current_dq.size() == robot_->nv() ? &current_dq : nullptr;
+  std::string validation_message;
+  if (validate_centroidal_velocity_candidate(
+          current_q, final_current_dq, final_velocity, &validation_message)) {
+    result.joint_velocities = final_velocity;
+    result.solution.assign(final_velocity.data(),
+                           final_velocity.data() + final_velocity.size());
+    return true;
+  }
+
+  robot_->update_configuration(current_q);
+  result.q_solution = current_q;
+  result.joint_velocities = Eigen::VectorXd::Zero(robot_->nv());
+  result.solution.assign(static_cast<std::size_t>(robot_->nv()), 0.0);
+  result.status = SolverStatus::kInfeasible;
+  result.status_message = validation_message;
+  result.position_step_hold_active = true;
+  return false;
+}
+
 int KinematicsSolver::get_linear_velocity_constraint_rows() const {
   if (!linear_velocity_constraints_.has_value() ||
       !linear_velocity_constraints_->enabled) {

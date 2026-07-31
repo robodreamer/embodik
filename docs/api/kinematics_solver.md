@@ -31,10 +31,15 @@ Velocity ZMP additionally requires the measured/current generalized velocity:
 ```python
 solver.configure_velocity_zmp_constraint(support_polygon, fz_min=1.0)
 result = solver.solve_velocity_with_state(q, current_dq, apply_limits=True)
+
+step_options = embodik.PositionStepOptions()
+step_options.current_joint_velocity = current_dq
+step_result = solver.solve_position_step(q, target_pose, "tool", step_options)
 ```
 
-Calling `solve_velocity()` while velocity ZMP is configured fails explicitly;
-the solver does not substitute a previous command. See
+Calling `solve_velocity()` without explicit state, or calling
+`solve_position_step()` without `current_joint_velocity`, while velocity ZMP is
+configured fails explicitly. The solver does not substitute a previous command. See
 [Centroidal Stability](../centroidal_stability.md) for units, formulas,
 support-frame restrictions, and diagnostics.
 

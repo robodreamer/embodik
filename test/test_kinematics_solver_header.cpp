@@ -2,5 +2,10 @@
 
 int main() {
   embodik::AccelerationSolver *solver = nullptr;
-  return solver == nullptr ? 0 : 1;
+  embodik::PositionStepOptions position_step_options;
+  position_step_options.current_joint_velocity = Eigen::VectorXd::Zero(1);
+  return solver == nullptr &&
+                 position_step_options.current_joint_velocity.size() == 1
+             ? 0
+             : 1;
 }

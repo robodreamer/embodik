@@ -16,7 +16,7 @@ reduced collision assets for AI Worker collision-aware IK, and
 - Passive-joint locking so wheel/drive joints stay quiet during arm teleoperation
 - Support for AI Worker `sg2` / `bg2` and RB-Y1 via `--robot rby1`
 - Optional Seer/xvisio controller input through the same IK target path
-- Collision debug controls, CoM support visualization, and adaptive gain tuning
+- Collision debug controls, centroidal support visualization, and adaptive gain tuning
 
 ## Run It
 
@@ -78,13 +78,21 @@ The example exposes the solver knobs that matter most for whole-body teleop:
 - self-collision constraint enable, minimum distance, active-row cap, and tuning
   mode (`speed`, `balanced`, `precise`)
 - non-worsening collision recovery floor for structurally close link pairs
-- CoM support-polygon constraint and visualization
+- CoM, capture-point, and velocity-ZMP support-polygon constraints
+- optional horizontal centroidal-momentum damping
+- capture-point and ZMP markers computed from explicit caller-owned velocity state
 - adaptive dt for large target jumps
 - optional adaptive position/orientation gain tuning
 
 New `KinematicsSolver` instances default to the balanced collision preset. The
 example still keeps the collision controls visible so you can reproduce precise
 or speed-oriented behavior when comparing robot models.
+
+The new capture-point, velocity-ZMP, momentum-damping, and centroidal-marker
+controls are opt-in, preserving the default bimanual tracking and latency. When
+velocity ZMP is enabled, the shared runtime passes its current generalized
+velocity through `PositionStepOptions.current_joint_velocity`; no previous
+solver command is read implicitly by the core.
 
 ## Asset Resolution
 

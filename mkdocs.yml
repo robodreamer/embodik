@@ -101,7 +101,6 @@ nav:
       - Multi-Task Multi-Constraints IK: examples/multi_task_ik.md
       - Collision-Aware IK: examples/collision_aware_ik.md
       - CoM Constraint: examples/com_constraint_ik.md
-      - Centroidal Stability: examples/centroidal_stability.md
       - Dual-Arm ECTS: examples/dual_arm_ects.md
       - Teleop IK: examples/teleop_ik.md
     - Robots:

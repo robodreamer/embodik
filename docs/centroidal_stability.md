@@ -60,8 +60,9 @@ xi = com_xy + (Jcom_xy * dq_command) / omega
 ```
 
 Velocity ZMP uses a finite difference from an explicit current `dq` to the
-candidate command. Call `solve_velocity_with_state()` whenever
-`configure_velocity_zmp_constraint()` is active:
+candidate command. Call `solve_velocity_with_state()`, or set
+`PositionStepOptions.current_joint_velocity` before `solve_position_step()`,
+whenever `configure_velocity_zmp_constraint()` is active:
 
 ```text
 ddq_fd = (dq_command - current_dq) / dt
@@ -72,6 +73,19 @@ Calling `solve_velocity()` without that explicit state is rejected. The solver
 does not seed the next call from a previous command, an EMA, or other hidden
 history. `evaluate_capture_point_constraint()` and
 `evaluate_velocity_zmp_constraint()` expose accepted-point and slack evidence.
+
+For the primary interactive API:
+
+```python
+options = embodik.PositionStepOptions()
+options.current_joint_velocity = current_dq
+result = solver.solve_position_step(q, target_pose, "tool", options)
+current_dq = result.joint_velocities
+```
+
+The position-step path propagates the explicit state through inner iterations
+and retries, then revalidates commands changed by integration masks, joint-limit
+projection, collision backoff, or recovery before accepting them.
 
 ## Acceleration Solver
 
@@ -119,14 +133,17 @@ model unilateral contacts, or support floating-base contact dynamics. A caller
 that needs those guarantees must use a contact-dynamics solver rather than
 interpreting fixed-base ZMP success as a dynamic-balance certificate.
 
-## Example
+## Examples And Tests
 
-Run the deterministic public example:
+Run the visual Panda support example or the opt-in bimanual integration:
 
 ```bash
-pixi run python examples/10_centroidal_stability.py
-pixi run python examples/10_centroidal_stability.py --json
+pixi run python examples/04_com_constraint_example.py --robot panda
+pixi run python examples/06_bimanual_whole_body_ik.py
 ```
 
-See [Centroidal Stability Example](examples/centroidal_stability.md) for the
-configuration and output fields.
+The non-visual velocity/acceleration composition checks live in
+`test/test_centroidal_stability_integration.py` rather than a public script.
+See [CoM And Centroidal Support](examples/com_constraint_ik.md) and
+[Bimanual Whole-Body IK](examples/bimanual_whole_body_ik.md) for the visual
+controls.
