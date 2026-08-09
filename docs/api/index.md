@@ -126,3 +126,7 @@ Result from velocity IK solving:
 - `task_scales`: Task scaling factors for multi-task problems
 - `computation_time_ms`: Computation time in milliseconds
 - `condition_number`: Worst Jacobian condition number observed during the solve
+- `task_level_diagnostics`: Per-level explicit-stack diagnostics when one named level maps to one SNS objective
+- `hierarchy_solve_path`: Whether the accepted velocity came from legacy priority, explicit SNS hierarchy, or weighted fallback
+- `higher_level_preservation_active`: Whether the accepted velocity preserves higher-priority achieved outputs
+- `prioritized_status`: Prioritized hierarchy outcome before any weighted fallback replacement

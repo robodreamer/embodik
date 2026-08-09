@@ -75,6 +75,14 @@ NB_MODULE(_embodik_impl, m) {
              eik::SolverRecoveryStage::kWeightedFallback)
       .export_values();
 
+  nb::enum_<eik::HierarchySolvePath>(
+      m, "HierarchySolvePath",
+      "Registered-task hierarchy path that supplied the accepted velocity")
+      .value("LEGACY_PRIORITY", eik::HierarchySolvePath::kLegacyPriority)
+      .value("EXPLICIT_SNS", eik::HierarchySolvePath::kExplicitSns)
+      .value("WEIGHTED_FALLBACK",
+             eik::HierarchySolvePath::kWeightedFallback);
+
   // Types
   nb::class_<eik::BasicSolverConfig>(m, "BasicSolverConfig",
                                      "Basic configuration for solver")
@@ -115,6 +123,18 @@ NB_MODULE(_embodik_impl, m) {
               &eik::VelocitySolverResult::task_level_diagnostics,
               "Per-level SNS diagnostics for an explicit task stack. Empty "
               "for legacy mode or when weighted fallback replaced hierarchy.")
+      .def_ro("hierarchy_solve_path",
+              &eik::VelocitySolverResult::hierarchy_solve_path,
+              "Registered-task hierarchy path that supplied the accepted velocity")
+      .def_ro("higher_level_preservation_active",
+              &eik::VelocitySolverResult::higher_level_preservation_active,
+              "Whether the accepted velocity came from the prioritized hierarchy and therefore preserves higher-level achieved outputs")
+      .def_ro("prioritized_status",
+              &eik::VelocitySolverResult::prioritized_status,
+              "Outcome of the prioritized hierarchy solve before any weighted fallback replacement")
+      .def_ro("prioritized_status_message",
+              &eik::VelocitySolverResult::prioritized_status_message,
+              "Status detail from the prioritized hierarchy solve before any weighted fallback replacement")
       .def_ro("pinocchio_kinematics_time_ms",
               &eik::VelocitySolverResult::pinocchio_kinematics_time_ms,
               "Time spent in Pinocchio forward kinematics (ms)")
@@ -611,6 +631,14 @@ NB_MODULE(_embodik_impl, m) {
               &eik::SolveDiagnostics::weighted_advisory_available)
       .def_ro("weighted_fallback_used",
               &eik::SolveDiagnostics::weighted_fallback_used)
+      .def_ro("hierarchy_solve_path",
+              &eik::SolveDiagnostics::hierarchy_solve_path)
+      .def_ro("higher_level_preservation_active",
+              &eik::SolveDiagnostics::higher_level_preservation_active)
+      .def_ro("prioritized_status",
+              &eik::SolveDiagnostics::prioritized_status)
+      .def_ro("prioritized_status_message",
+              &eik::SolveDiagnostics::prioritized_status_message)
       .def_ro("weighted_advisory_v_norm",
               &eik::SolveDiagnostics::weighted_advisory_v_norm)
       .def_ro("weighted_advisory_pos_task_error_norm",
@@ -736,6 +764,11 @@ NB_MODULE(_embodik_impl, m) {
                                  r.preferred_lock_fallback_used;
             d.weighted_advisory_available = r.weighted_advisory_available;
             d.weighted_fallback_used = r.weighted_fallback_used;
+            d.hierarchy_solve_path = r.hierarchy_solve_path;
+            d.higher_level_preservation_active =
+                r.higher_level_preservation_active;
+            d.prioritized_status = r.prioritized_status;
+            d.prioritized_status_message = r.prioritized_status_message;
             d.weighted_advisory_v_norm = r.weighted_advisory_v_norm;
             d.weighted_advisory_pos_task_error_norm =
                 r.weighted_advisory_pos_task_error_norm;

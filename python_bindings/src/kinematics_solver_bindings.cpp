@@ -66,7 +66,10 @@ void bind_kinematics_solver(nb::module_ &m) {
       .def_ro("used_min_error_fallback",
               &TaskLevelDiagnostics::used_min_error_fallback)
       .def_ro("scale", &TaskLevelDiagnostics::scale)
-      .def_ro("residual_norm", &TaskLevelDiagnostics::residual_norm);
+      .def_ro("residual_norm", &TaskLevelDiagnostics::residual_norm)
+      .def_ro("target_norm", &TaskLevelDiagnostics::target_norm)
+      .def_ro("normalized_residual",
+              &TaskLevelDiagnostics::normalized_residual);
 
   nb::class_<KinematicsSolver::CollisionDebugInfo>(m, "CollisionDebugInfo")
       .def_prop_ro("object_a",
