@@ -174,6 +174,29 @@ Typical use:
 - Priority `1`: secondary balance/posture frame objective (for example torso upright)
 - Priority `2`: nullspace posture bias (`PostureTask`)
 
+This integer-priority API remains the default. For an inspectable, named
+hierarchy, configure an explicit `TaskStackConfig` after registering tasks:
+
+```python
+solver.configure_task_stack(
+    embodik.TaskStackConfig(
+        [
+            embodik.TaskLevelSpec("tracking", ["ee_task"]),
+            embodik.TaskLevelSpec(
+                "posture",
+                ["posture_task"],
+                embodik.TaskSolveMode.MIN_ERROR,
+            ),
+        ]
+    )
+)
+```
+
+Explicit level order overrides task priority without mutating task objects, and
+all members of one level are assembled as one objective. See
+[Explicit Task Stacks](../task_stacks.md) for validation, diagnostics, and
+backward-compatibility details.
+
 ## Task Solve Modes
 
 Each task can be solved in one of two modes:

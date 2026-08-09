@@ -181,6 +181,32 @@ public:
   pose_task_group(const std::string &name) const;
 
   /**
+   * @brief Configure an explicit hierarchy over registered tasks.
+   *
+   * Levels are solved in the supplied order. Member names within each level
+   * are canonicalized lexicographically and assembled into one joint SNS
+   * objective using the level solve policy. The configuration is additive and
+   * does not mutate Task::priority, Task::solve_mode, or task fallback flags.
+   *
+   * Throws std::invalid_argument for empty/duplicate names, missing or inactive
+   * tasks, duplicate membership, empty levels, and incompatible level policy.
+   */
+  void configure_task_stack(const TaskStackConfig &config);
+
+  /** @brief Clear the explicit stack and restore legacy priority behavior. */
+  void clear_task_stack();
+
+  /** @brief Whether an explicit registered-task stack is configured. */
+  bool has_explicit_task_stack() const {
+    return task_stack_config_.has_value();
+  }
+
+  /** @brief Inspect the normalized explicit stack, if configured. */
+  const std::optional<TaskStackConfig> &task_stack_config() const {
+    return task_stack_config_;
+  }
+
+  /**
    * @brief Configure a relative pose inequality constraint between two frames
    *
    * Constrains each masked axis of the relative pose (T_a^{-1} * T_b) to stay
@@ -1312,6 +1338,7 @@ private:
   std::shared_ptr<RobotModel> robot_;
   std::vector<std::shared_ptr<Task>> tasks_;
   std::unordered_map<std::string, std::shared_ptr<Task>> task_map_;
+  std::optional<TaskStackConfig> task_stack_config_;
   std::unordered_map<std::string, std::shared_ptr<PoseTaskGroup>>
       pose_task_groups_;
   std::vector<ContactFrameConfig> contact_frames_;
@@ -1494,6 +1521,8 @@ private:
   std::vector<Eigen::MatrixXd> scratch_jacobians_;
   std::vector<ObjectiveSolveConfig> scratch_objective_configs_;
   std::vector<std::shared_ptr<Task>> scratch_objective_tasks_;
+  std::vector<std::vector<std::shared_ptr<Task>>>
+      scratch_objective_task_groups_;
   std::vector<std::shared_ptr<Task>> scratch_group_tasks_;
   std::unordered_set<int> scratch_excluded_union_;
 
@@ -1563,6 +1592,9 @@ private:
 
   // Sort tasks by priority
   void sort_tasks_by_priority();
+
+  std::optional<std::string>
+  task_stack_validation_error(const TaskStackConfig &config) const;
 
   /// Rebuild ``velocity_to_config_index_cache_`` if needed; return reference.
   const std::vector<int> &velocity_to_config_index_cache();

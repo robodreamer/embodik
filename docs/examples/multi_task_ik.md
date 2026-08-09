@@ -34,6 +34,11 @@ Tasks are solved hierarchically:
 - Lower priority tasks are satisfied in the null space of higher priority tasks
 - `configure_com_constraint` adds inequality constraints that the solver enforces regardless of task priorities
 
+This example uses the backward-compatible integer-priority API. Applications
+that need named, inspectable levels can place `ee_task` and `posture` in an
+explicit `TaskStackConfig`; see [Explicit Task Stacks](../task_stacks.md). Both
+forms use the same SNS backend and global constraint machinery.
+
 ## Next Steps
 
 - [Basic IK Example](basic_ik.md) — Simpler example
