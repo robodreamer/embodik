@@ -1,14 +1,98 @@
-# GPU Batch Solvers
+# GPU Solvers
 
 > **Experimental:** GPU solvers are under active development and need more validation. Use with caution in production systems.
 
 !!! tip "When to read this guide"
-    Use GPU solvers for **offline batch throughput** (thousands of independent velocity IK solves).
-    Real-time teleop and WBC use the CPU [KinematicsSolver](api/kinematics_solver.md) with
-    [Solver Robustness](solver_robustness.md) and [Collision Constraints](collision_constraints.md).
-    See the [Guides overview](guides/index.md) for how batch and interactive paths differ.
+    Use the model-derived WBC API for interactive GPU IK or many independent
+    device-resident worlds. The CPU [KinematicsSolver](api/kinematics_solver.md)
+    remains the stable production API.
 
-EmbodiK provides two GPU-optimized velocity IK solvers for massive parallelism via CusADi:
+## Model-derived whole-body GPU IK
+
+`embodik.gpu.wbc` contains the Newton/Warp runtime used by the public Panda,
+bimanual, G1, and Spot examples. Native Torch, Warp, and cuSOLVER backends do
+not require a pre-generated CusADi manifest.
+
+```python
+from pathlib import Path
+
+import torch
+import embodik
+from embodik.gpu.wbc import GpuWbcMultiFrameSolver
+
+urdf = Path("robot.urdf")
+robot = embodik.RobotModel(str(urdf), floating_base=False)
+q0 = robot.neutral_configuration()
+
+solver = GpuWbcMultiFrameSolver.from_robot(
+    urdf,
+    Path("build/gpu-wbc-cache"),
+    robot=robot,
+    robot_name="my_robot",       # cache/diagnostic label, not dispatch
+    frames=("tool_frame",),
+    frame_task_dimensions=(6,),
+    default_configuration=q0,
+    solver_backend="warp_srinv",
+    batch_size=1024,
+)
+
+# Keep simulation state and targets resident on CUDA.
+q_cuda = torch.as_tensor(q_batch, dtype=torch.float32, device="cuda")
+target_cuda = torch.as_tensor(target_batch_wxyz, dtype=torch.float32, device="cuda")
+result = solver.solve_device_batch(q_cuda, target_cuda)
+q_next_cuda = result.q_solution
+```
+
+The factory includes every supported movable joint by default so collision,
+posture, CoM, torso, and secondary tasks do not silently lose authority. Pass
+`active_joint_names` or `active_velocity_indices` explicitly to request a
+smaller specialization.
+
+Current model envelope:
+
+- fixed-base models with scalar one-DoF joints;
+- floating-base models with one standard 7-coordinate/6-velocity free root
+  plus scalar joints;
+- body/link frame position or pose tasks, including overdetermined layouts;
+- arbitrary batch sizes with `warp_srinv`; `cusolver_srinv` is currently B=1.
+
+Unsupported joint manifolds and backend capacities fail explicitly during
+construction. Internal kernels are fixed-shape for CUDA graph performance, but
+their dimensions are derived from the model and task specification rather than
+from a robot-family table.
+
+### Feature parity
+
+Applications can inspect `GPU_WBC_CAPABILITIES` before exposing a control. A
+false capability must be disabled or rejected; GPU mode never silently invokes
+the CPU implementation.
+
+| Feature | GPU status |
+|---|---|
+| Pose tasks and two-level primary/secondary priority | Supported |
+| Joint position/velocity bounds and contact-frame constraints | Supported |
+| Self-collision constraints and lazy collision debug | Supported |
+| Posture/nullspace, torso bounds, and torso staging | Supported |
+| Adaptive dt and velocity-solver acceleration-history limits | Supported |
+| CoM support-polygon constraints | Supported |
+| Device-resident multi-world solve | Supported with Warp |
+| Capture-point and velocity-ZMP constraints | Planned |
+| Centroidal momentum tasks | Planned |
+| Acceleration-level task solver | Planned |
+| General task axis masks and joint metrics | Planned |
+| Exact CPU collision tuning/certification policy | Planned |
+
+The acceleration limit above bounds changes in the velocity command using
+device-resident history. It is not the acceleration-level eSNS API exposed by
+the CPU solver.
+
+Install the optional Python dependencies with `embodik[gpu-wbc]`. The validated
+Newton 1.6 development build must currently be installed from the
+`newton-physics/newton` source repository.
+
+## Legacy CusADi velocity solvers
+
+EmbodiK also retains two earlier GPU-optimized velocity IK experiments via CusADi:
 
 - **FI-PeSNS** (Fixed-Iteration Penalized eSNS) — primary solver
 - **PPH-SNS** (Parallel Penalized Hierarchical SNS) — alternative formulation

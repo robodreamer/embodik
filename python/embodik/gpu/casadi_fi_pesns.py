@@ -24,8 +24,9 @@ except ImportError:
 
 from embodik.gpu.casadi_srinv import srinv as _casadi_srinv
 
-# Default parameters matching C++ VelocitySolverConfig
-DEFAULT_EPSILON = 1e-6
+# Match the public KinematicsSolver SRINV defaults. Its 1e-6 constraint
+# tolerance is a separate parameter and must not be reused as this threshold.
+DEFAULT_EPSILON = 0.1
 DEFAULT_DAMPING = 0.1
 DEFAULT_MU0 = 1e-3  # Initial penalty weight (softer start)
 DEFAULT_GAMMA = 2.5  # Penalty growth factor per iteration
@@ -121,18 +122,23 @@ def build_fi_pesns_velocity_solve(
     """
     Build FI-PeSNS velocity solver with penalty-based constraint enforcement.
 
-    Algorithm per iteration:
-    1. For each task (hierarchically):
+    Algorithm:
+    1. For each task, once and in hierarchy order:
        a. Compute projected Jacobian J_P = J @ P
        b. Compute SRINV: J_pinv = srinv(J_P)
        c. Compute delta: Δdq = J_pinv @ (target - J @ dq)
        d. Compute feasible scale: s = get_feasible_task_scale(...)
        e. Apply scaled delta: dq += s * Δdq
        f. Update projector: P -= J_pinv @ J_P
-    2. Compute violation residuals
-    3. Apply penalty gradient: dq += eta * mu * C.T @ violation
-    4. Ramp penalty: mu *= gamma
-    5. Final clamp: Ensure hard constraint satisfaction
+    2. For a fixed number of feasibility-refinement iterations:
+       a. Compute violation residuals
+       b. Apply penalty gradient: dq += eta * mu * C.T @ violation
+       c. Ramp penalty: mu *= gamma
+    3. Final clamp: Ensure hard constraint satisfaction
+
+    The hierarchical task pass is deliberately not repeated. A damped SRINV is
+    not a Moore-Penrose inverse, so repeatedly applying it to the residual would
+    progressively undo the CPU solver's singular-direction damping.
 
     Args:
         n_dof: Degrees of freedom
@@ -176,48 +182,49 @@ def build_fi_pesns_velocity_solve(
     task_scales = ca.SX.zeros(n_tasks)
     mu = mu0
 
-    # Fixed-iteration outer loop
-    for k_iter in range(k_max):
-        # Reset projector for each outer iteration (tasks processed sequentially)
-        P = ca.SX.eye(n_dof)
+    # Jacobians and their hierarchy projectors are fixed inputs. Prepare each
+    # regularized inverse once rather than repeating the spectral work in every
+    # penalty iteration.
+    prepared_tasks = []
+    projector = ca.SX.eye(n_dof)
+    target_offset = 0
+    jacobian_offset = 0
+    for task_idx in range(n_tasks):
+        task_dim = task_dims[task_idx]
+        target = targets[target_offset : target_offset + task_dim]
+        target_offset += task_dim
 
-        target_offset = 0
-        jacobian_offset = 0
+        jac_size = task_dim * n_dof
+        jac_flat = jacobians_flat[jacobian_offset : jacobian_offset + jac_size]
+        jacobian_offset += jac_size
+        # Row-major flat -> (task_dim, n_dof)
+        jacobian = ca.reshape(jac_flat, n_dof, task_dim).T
 
-        for task_idx in range(n_tasks):
-            task_dim = task_dims[task_idx]
-            target = targets[target_offset : target_offset + task_dim]
-            target_offset += task_dim
+        projected_jacobian = jacobian @ projector
+        jacobian_inverse = srinv(projected_jacobian, tol, damping)
+        prepared_tasks.append((task_idx, target, jacobian, jacobian_inverse))
 
-            jac_size = task_dim * n_dof
-            jac_flat = jacobians_flat[jacobian_offset : jacobian_offset + jac_size]
-            jacobian_offset += jac_size
-            # Row-major flat -> (task_dim, n_dof)
-            J = ca.reshape(jac_flat, n_dof, task_dim).T
+        projector = projector - jacobian_inverse @ projected_jacobian
+        projector = ca.if_else(ca.fabs(projector) < tol, 0.0, projector)
 
-            # Projected Jacobian
-            JP = J @ P
-            J_pinv = srinv(JP, tol, damping)
+    # Apply each hierarchical task exactly once, as in the CPU eSNS task pass.
+    # Only feasibility penalties are fixed-iteration refinements.
+    for task_idx, target, jacobian, jacobian_inverse in prepared_tasks:
+        residual = target - jacobian @ dq
+        delta_dq = jacobian_inverse @ residual
 
-            # Residual: target - J @ dq
-            residual = target - J @ dq
-            delta_dq = J_pinv @ residual
+        # Analytical feasible scale
+        # a = contribution from delta_dq, b = current constraint value
+        a = C @ delta_dq  # Scaled contribution
+        b = C @ dq  # Unscaled (current)
+        scale = get_feasible_task_scale(a, b, lower, upper, n_constraints)
 
-            # Analytical feasible scale
-            # a = contribution from delta_dq, b = current constraint value
-            a = C @ delta_dq  # Scaled contribution
-            b = C @ dq  # Unscaled (current)
-            scale = get_feasible_task_scale(a, b, lower, upper, n_constraints)
+        # Apply scaled delta
+        dq = dq + scale * delta_dq
+        task_scales[task_idx] = scale
 
-            # Apply scaled delta
-            dq = dq + scale * delta_dq
-            task_scales[task_idx] = scale
-
-            # Update projector for next task
-            P = P - J_pinv @ JP
-            # Threshold small values
-            P = ca.if_else(ca.fabs(P) < tol, 0.0, P)
-
+    # Fixed-iteration penalty loop. Only feasibility corrections evolve.
+    for _ in range(k_max):
         # Violation residuals after all tasks
         constraint_val = C @ dq
         r_low = lower - constraint_val  # Positive if below lower bound

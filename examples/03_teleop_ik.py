@@ -34,6 +34,9 @@ import numpy as np
 import viser
 from embodik import r2q
 from example_helpers.ik_common import DEFAULT_VISER_PORT, quiet_websocket_handshake_logs
+from embodik.gpu.wbc import (
+    GpuWbcMultiFrameSolver,
+)
 from example_helpers.seer_teleop import (
     DEFAULT_TELEOP_SCALE_FACTOR,
     SeerController,
@@ -49,6 +52,7 @@ from viser.extras import ViserUrdf
 quiet_websocket_handshake_logs()
 
 DEFAULT_SCALE_FACTOR = DEFAULT_TELEOP_SCALE_FACTOR
+_basic_gpu = importlib.import_module("01_basic_ik_simple")
 
 
 def resolve_robot_configuration(robot_key: str) -> Any:
@@ -82,6 +86,13 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--scale", type=float, default=DEFAULT_SCALE_FACTOR)
     parser.add_argument("--no-collision", action="store_true")
+    parser.add_argument("--gpu-wbc", action="store_true")
+    parser.add_argument("--gpu-wbc-manifest", type=Path)
+    parser.add_argument(
+        "--gpu-wbc-cache-dir",
+        type=Path,
+        default=Path("build/gpu-wbc-newton-cache"),
+    )
     return parser.parse_args()
 
 
@@ -90,6 +101,25 @@ def main() -> None:
     cfg = resolve_robot_configuration(args.robot)
 
     backend = TeleopIKBackend(cfg, enable_collision=not args.no_collision)
+    gpu_solver: GpuWbcMultiFrameSolver | None = None
+    gpu_target_offset = None
+    gpu_fault: str | None = None
+    if args.gpu_wbc:
+        gpu_solver, gpu_indices, gpu_collision_supported = _basic_gpu.create_gpu_solver(
+            args,
+            backend.robot,
+            cfg.urdf_path,
+            cfg.key,
+            cfg.target_link,
+            backend.default_full,
+            exclusions=cfg.collision_exclusions,
+            collision_enabled=not args.no_collision,
+            min_distance=0.05,
+        )
+        visible_pose = backend.get_pose()
+        solver_pose = backend.robot.get_frame_pose(gpu_solver.frames[0])
+        gpu_target_offset = visible_pose.inverse() * solver_pose
+        gpu_solver.warm_up(backend.q[list(gpu_indices)], (visible_pose * gpu_target_offset,))
     controller = SeerController(args.controller_port if args.enable_teleop else None)
     controller_connected = controller.connect()
 
@@ -120,6 +150,11 @@ def main() -> None:
     )
 
     with server.gui.add_folder("Teleop"):
+        backend_select = server.gui.add_dropdown(
+            "Solver Backend",
+            options=("CPU EmbodiK",) + (("GPU Newton/Warp",) if gpu_solver is not None else ()),
+            initial_value="CPU EmbodiK",
+        )
         streaming_text = server.gui.add_text("Streaming", initial_value="OFF")
         gripper_text = server.gui.add_text("Gripper", initial_value="OPEN")
         reset_hint = server.gui.add_text("Reset", initial_value="Button B")
@@ -133,11 +168,20 @@ def main() -> None:
         )
         reset_button = server.gui.add_button("Reset Robot & Controller")
 
+    gpu_controls = (
+        _basic_gpu.GpuControls(
+            server.gui, server.scene, gpu_collision_supported, not args.no_collision, 0.05
+        )
+        if gpu_solver is not None
+        else None
+    )
+
     arm_stream_start_pose = backend.get_pose()
     goal_pose = current_pose
 
     def reset_session() -> None:
-        nonlocal arm_stream_start_pose, goal_pose
+        nonlocal arm_stream_start_pose, goal_pose, gpu_fault
+        gpu_fault = None
         pose = backend.reset()
         controller.reset_reference()
         arm_stream_start_pose = pose
@@ -145,6 +189,9 @@ def main() -> None:
         set_transform_control_pose(target_control, pose)
         urdf_vis.update_cfg(make_visual_config(backend.get_q()))
         status_text.value = "Reset"
+        if gpu_solver is not None:
+            gpu_solver.reset_state()
+            gpu_controls.show_debug()
 
     def start_streaming() -> None:
         nonlocal arm_stream_start_pose
@@ -162,6 +209,14 @@ def main() -> None:
     @reset_button.on_click
     def _(_) -> None:
         reset_session()
+
+    @backend_select.on_update
+    def _(_) -> None:
+        nonlocal gpu_fault
+        gpu_fault = None
+        if gpu_solver is not None:
+            gpu_solver.reset_state()
+            gpu_controls.show_debug()
 
     urdf_vis.update_cfg(make_visual_config(backend.get_q()))
 
@@ -194,7 +249,39 @@ def main() -> None:
                     set_transform_control_pose(target_control, goal_pose)
 
             if controller.streaming or manual_mode.value:
-                result = backend.solve_step(goal_pose)
+                if backend_select.value == "GPU Newton/Warp":
+                    assert gpu_solver is not None
+                    assert gpu_target_offset is not None
+                    if gpu_fault is None:
+                        try:
+                            gpu_result = gpu_controls.solve(
+                                gpu_solver,
+                                backend.q[list(gpu_indices)],
+                                goal_pose * gpu_target_offset,
+                            )
+                        except Exception as exc:
+                            gpu_fault = f"{type(exc).__name__}: {exc}"
+                            status_text.value = f"GPU FAULT — SAFE HOLD: {gpu_fault}"
+                            gpu_controls.show_debug()
+                            time.sleep(0.001)
+                            continue
+                        else:
+                            backend.q[list(gpu_indices)] = gpu_result.joints
+                            backend.robot.update_configuration(backend.q)
+                            from example_helpers.teleop_ik_backend import IKResult
+
+                            result = IKResult(
+                                joints=backend.get_q(),
+                                status=gpu_result.status,
+                                position_error=max(gpu_result.position_errors),
+                                rotation_error=max(gpu_result.rotation_errors),
+                                elapsed_ms=gpu_result.elapsed_ms,
+                            )
+                    else:
+                        time.sleep(0.001)
+                        continue
+                else:
+                    result = backend.solve_step(goal_pose)
                 urdf_vis.update_cfg(make_visual_config(result.joints))
                 timing_ms.value = 0.9 * timing_ms.value + 0.1 * result.elapsed_ms
                 if frame_count % 50 == 0:

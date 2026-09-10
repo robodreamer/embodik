@@ -323,6 +323,7 @@ def resolve_robot_configuration(robot_key: str) -> Dict[str, Any]:
 
     return {
         "robot": robot,
+        "urdf_path": urdf_path,
         "target_link": preset.get("target_link", "end_effector"),
         "display_name": preset.get("display_name", robot_key),
         "default_configuration": q_default,

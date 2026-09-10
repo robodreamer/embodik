@@ -168,6 +168,15 @@ pixi run -e cuda demo-ik-gpu
 pixi run -e cuda python examples/02_collision_aware_IK.py --gpu
 ```
 
+### Model-derived GPU WBC
+
+Launch with `--gpu-wbc` to enable the native Newton/Warp backend. The solver
+now ships under `embodik.gpu.wbc` and derives its dimensions, active-coordinate
+mapping, task frames, and collision geometry from the loaded `RobotModel`.
+A generated CusADi manifest is no longer required for native Warp or Torch
+SRINV backends; `--gpu-wbc-manifest` is retained only as an optional contract
+validation input.
+
 ## Next Steps
 
 - [Basic IK Example](basic_ik.md) — minimal bring-up without collision UI

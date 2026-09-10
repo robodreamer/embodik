@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Added an experimental model-derived Newton/Warp whole-body GPU API with
+  fixed- and floating-base adapters, device-resident batching, collision and
+  CoM constraints, torso bounds/staging, posture, secondary priorities,
+  adaptive time steps, and acceleration-history limits.
+- Added explicit GPU capability discovery and CPU/GPU selectors across the
+  public Panda, IIWA, bimanual, Unitree G1, and Spot examples.
+
+### Fixed
+
+- Aligned the experimental CasADi FI-PeSNS and PPH-SNS SRINV defaults with
+  `KinematicsSolver`: singular-value tolerance `0.1` and damping `0.1`. The
+  generated GPU path continues to reproduce the CPU extended-SRINV formula,
+  including its global and per-singular-direction damping terms.
+- Kept FI-PeSNS feasibility refinement from reapplying damped task corrections,
+  so multiple fixed penalty iterations preserve the CPU extended-SRINV result
+  instead of progressively weakening singular-direction damping.
+
 ## [0.22.0] - 2026-07-29
 
 ### Added
