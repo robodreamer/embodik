@@ -160,22 +160,23 @@ pixi run python examples/02_collision_aware_IK.py
 The example defaults to the Panda preset; pass `--robot <key>` to use another
 configured model.
 
-Optional GPU benchmark panel:
+Optional model-derived GPU backend:
 
 ```bash
-pixi run -e cuda demo-ik-gpu
-# or
-pixi run -e cuda python examples/02_collision_aware_IK.py --gpu
+pixi run -e cuda python examples/02_collision_aware_IK.py --gpu-wbc
 ```
+
+Complete the [GPU WBC setup and CUDA kernel check](../gpu_solvers.md#requirements)
+before launching this mode.
 
 ### Model-derived GPU WBC
 
 Launch with `--gpu-wbc` to enable the native Newton/Warp backend. The solver
 now ships under `embodik.gpu.wbc` and derives its dimensions, active-coordinate
 mapping, task frames, and collision geometry from the loaded `RobotModel`.
-A generated CusADi manifest is no longer required for native Warp or Torch
-SRINV backends; `--gpu-wbc-manifest` is retained only as an optional contract
-validation input.
+No generated solver artifact is required for native Warp or Torch SRINV
+backends; `--gpu-wbc-manifest` is retained only as an optional contract
+validation input for compatibility.
 
 ## Next Steps
 

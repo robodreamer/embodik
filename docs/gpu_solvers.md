@@ -37,13 +37,36 @@ copies, target generation, or physics stepping free.
 - `torch`, `warp-lang`, and a compatible Newton installation;
 - Viser, yourdfpy, and robot descriptions for the visual examples.
 
-From a repository checkout:
+With pip or a virtual environment:
 
 ```bash
 python -m pip install -e ".[examples,gpu-wbc]"
 git clone --depth 1 https://github.com/newton-physics/newton.git ../newton
 python -m pip install -e ../newton
 ```
+
+For a repository checkout managed by Pixi, create the CUDA environment and
+install both editable source trees once:
+
+```bash
+git clone --depth 1 https://github.com/newton-physics/newton.git ../newton
+pixi run -e cuda install
+pixi run -e cuda python -m pip install -e ../newton
+pixi run -e cuda check-cuda
+```
+
+Skip the clone command when the sibling `../newton` checkout already exists.
+`check-cuda` verifies both CUDA visibility and execution of a real kernel for
+the device architecture. If it reports that Torch lacks `sm_120`, repair that
+Pixi environment and check again:
+
+```bash
+pixi run -e cuda setup-cuda-sm120
+pixi run -e cuda check-cuda
+```
+
+The repair task installs the CUDA 12.9 Torch wheel used for `sm_120`; it does
+not modify the system Python environment.
 
 The current integration was validated against the Newton 1.6 development
 line. The first run builds and caches Newton/Warp kernels for the selected
@@ -55,15 +78,16 @@ The same script supports three materially different model and task shapes:
 
 ```bash
 # The interactive viewer defaults to 512 solved and rendered CUDA worlds.
-python examples/10_parallel_trajectory_tracking.py --robot panda
-python examples/10_parallel_trajectory_tracking.py --robot ai-worker
-python examples/10_parallel_trajectory_tracking.py --robot g1
+pixi run -e cuda demo-parallel-tracking
+pixi run -e cuda python examples/10_parallel_trajectory_tracking.py --robot ai-worker
+pixi run -e cuda python examples/10_parallel_trajectory_tracking.py --robot g1
 
 # Reproduce the 1,024-world solve-only reference profile.
-python examples/10_parallel_trajectory_tracking.py \
-  --robot panda --worlds 1024 --headless \
-  --warmup-steps 20 --steps 50 --output-json build/panda-gpu-wbc.json
+pixi run -e cuda demo-parallel-tracking-benchmark
 ```
+
+The viewer listens on `http://localhost:8080` by default and runs until
+`Ctrl+C`. Pass `--port` when another process already uses that address.
 
 Worlds rotate through circle, figure-eight, helix, and sweep targets with
 independent phases and speeds. The viewer renders all 512 default worlds through
@@ -71,6 +95,8 @@ shared per-link mesh instances. Four colored world bands make the motion
 families easy to distinguish at field scale. `--show` controls only browser
 visualization; every run still solves the full `--worlds` batch. When omitted,
 `--show` follows `--worlds`, so `--worlds 1024` solves and renders all 1,024.
+To solve 1,024 worlds while publishing only 512 robots to the browser, pass
+`--worlds 1024 --show 512`.
 
 ## Model-derived API
 
@@ -111,6 +137,54 @@ The public adapter rejects non-CUDA execution or backend fallback.
 The factory includes every supported movable joint by default. Pass
 `active_joint_names` or `active_velocity_indices` only when deliberately
 building a reduced specialization.
+
+## RL and simulator integration
+
+Treat GPU WBC as a device-resident control layer between policy outputs and
+simulator actuator commands. The scalable path keeps simulator state, targets,
+solver results, and reset masks on CUDA for the entire control tick:
+
+```python
+q_index = torch.tensor(
+    solver.active_configuration_indices, device=q_sim.device
+)
+dq_index = torch.tensor(solver.active_velocity_indices, device=dq_sim.device)
+q_active = q_sim.index_select(1, q_index)
+dq_active = dq_sim.index_select(1, dq_index)
+
+# Shape: [num_envs, num_frames, 7], encoded as xyz + WXYZ quaternion.
+result = solver.solve_device_batch(
+    q_active,
+    policy_targets,
+    current_velocity=dq_active,
+)
+sim.set_joint_position_targets(result.q_solution)
+```
+
+Build one solver at the training batch size, warm it before collecting timing
+or rollouts, and reuse it across episode resets. Reset state and enable masks
+in place; rebuilding the solver or changing tensor shapes forces compilation
+and CUDA-graph setup back onto the critical path. For velocity-controlled
+actuators, consume `result.accepted_velocity` instead of `q_solution`.
+
+The exact transport depends on the simulator:
+
+- A GPU-native simulator can gather active joints, solve, and apply commands
+  without a host synchronization.
+- CPU MuJoCo with mjviser requires a host/device boundary. Batch one state
+  upload and one command download per control tick rather than copying each
+  world independently.
+- Run WBC at the control cadence, which may be decimated from physics, and hold
+  or interpolate commands between control ticks. Measure policy inference,
+  WBC, transfers, and physics together when setting the environment rate.
+- Publish only selected environments at a decimated rate. mjviser is a viewer
+  and MuJoCo integration surface, not the transport for a 512-world training
+  batch; rendering every environment every physics step can dominate runtime.
+
+Example 10 demonstrates the batched control and selective-publication pattern.
+The [Spot locomanipulation example](examples/spot_locomanip_mjviser.md) shows a
+MuJoCo/mjviser application loop; combine the two patterns when bringing GPU WBC
+into an RL environment.
 
 ## Model envelope
 
@@ -213,11 +287,3 @@ Frame and CoM tasks, multiple acceleration priorities, `SCALE`, floating bases,
 centroidal, contact, effort, and geometric constraints are not yet part of this
 acceleration slice. Inspect `GPU_ACCELERATION_CAPABILITIES` before exposing
 them.
-
-## Legacy CusADi experiments
-
-The repository retains FI-PeSNS and PPH-SNS/CusADi experiments for historical
-comparison. They require generated, shape-specific artifacts and are not the
-recommended path for new GPU WBC integrations. New applications should begin
-with the model-derived Newton/Warp API and use the legacy examples only when
-reproducing earlier benchmark work.

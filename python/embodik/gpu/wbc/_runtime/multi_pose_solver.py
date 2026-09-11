@@ -1470,8 +1470,8 @@ class DeviceResidentMultiFramePoseSolver:
             warnings.warn(
                 "Python development headers are unavailable; disabling optional "
                 "torch.compile kernels and retaining the eager CUDA solver. Install "
-                "Python.h or use toolchains/sm120/ensure_python_dev_headers.sh to "
-                "restore compiled performance.",
+                "the Python development headers for this interpreter to restore "
+                "compiled performance.",
                 RuntimeWarning,
                 stacklevel=2,
             )

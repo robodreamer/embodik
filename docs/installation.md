@@ -232,7 +232,6 @@ used by this repository's development builds.
 | Direct visualization | `python -m pip install "embodik[visualization]"` | Viser, mesh loading, and URDF parsing without adding Python Pinocchio |
 | Pinocchio visualization | `python -m pip install "embodik[visualization-pinocchio]"` | Pinocchio's Python ViserVisualizer |
 | Model-derived GPU WBC | `python -m pip install "embodik[gpu-wbc]"` | Torch + Warp; also install a compatible Newton build as described below |
-| Legacy CusADi solvers | `python -m pip install "embodik[gpu]"` | Shape-specific experimental kernels retained for comparison |
 | GPU collision | `python -m pip install "embodik[gpu-collision]"` | NVIDIA Warp collision experiments |
 
 The model-derived WBC examples also need Newton. The current integration is
@@ -248,6 +247,22 @@ GPU WBC requires a CUDA device recognized by Torch, Warp, and Newton. Kernel
 compilation and graph capture happen on first use for each model/layout; measure
 performance only after warm-up. See [GPU WBC](gpu_solvers.md) for the model
 envelope, capability matrix, and fail-closed behavior.
+
+For the repository's Pixi CUDA environment, the equivalent one-time setup and
+smoke check are:
+
+```bash
+pixi run -e cuda install
+pixi run -e cuda python -m pip install -e ../newton
+pixi run -e cuda check-cuda
+```
+
+If the check reports that the installed Torch wheel lacks `sm_120`, run
+`pixi run -e cuda setup-cuda-sm120` and repeat `check-cuda`. The repair is
+contained inside `.pixi/envs/cuda`.
+
+Then run numbered public Example 10 with
+`pixi run -e cuda demo-parallel-tracking`.
 
 Teleop controller setup and legacy CUDA/CusADi build steps are intentionally
 kept out of the core install path. See the [Examples Guide](examples/index.md)

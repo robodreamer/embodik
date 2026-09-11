@@ -62,9 +62,7 @@ the application to `AccelerationSolver`.
 | `collision_hardening_demo.py` | Velocity-only | Demonstrates velocity position-step collision recovery and non-worsening-floor behavior. |
 | `example_helpers/common_bimanual_teleop_app.py` | Velocity-only | Internal executable behind the bimanual example; it has the same velocity-specific policy dependencies. |
 | `floating_base_torso_hierarchy.py` | Unsupported | Its subject is floating-base hierarchy behavior. |
-| `gpu_batch_ik.py` | Not applicable | Benchmarks the separate batched velocity GPU API. |
 | `gpu_collision_batch.py` | Not applicable | Benchmarks collision-distance queries, not an IK solver loop. |
-| `gpu_solver_demo.py` | Not applicable | Compares CPU/GPU batched velocity kernels. |
 | `harnesses/ai_worker_weighted_fallback_harness.py` | Not applicable | Measures the velocity solver's weighted-fallback policy, which the acceleration API does not import. |
 | `harnesses/g1_four_gizmo_ik_benchmark.py` | Unsupported | Exercises the same floating-base G1 runtime as example 07. |
 | `10_parallel_trajectory_tracking.py` | Not applicable | Exercises the model-derived parallel velocity WBC pipeline. |
@@ -80,9 +78,7 @@ These scripts remain available in a repository checkout or copied example
 bundle, but they are narrower benchmarks or API walkthroughs rather than the
 main demo path.
 
-- [`gpu_batch_ik.py`](gpu_batch_ik.md) — Legacy artifact-backed GPU batched velocity IK benchmark
 - [`gpu_collision_batch.py`](gpu_collision_batch.md) — GPU batch collision detection benchmark
-- [`gpu_solver_demo.py`](gpu_solver_demo.md) — Legacy CPU vs GPU solver scaling experiment
 - [`robot_model_example.py`](robot_model_usage.md) — RobotModel API walkthrough (FK/Jacobians/CoM)
 - [`visualization_example.py`](visualization_examples.md) — Visualization and interactive marker usage
 

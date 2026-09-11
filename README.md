@@ -48,6 +48,26 @@ by default with shared per-link mesh instances. Four colored world bands follow
 circle, figure-eight, helix, or sweep targets, with independent phases and
 speeds inside each band. Pass `--worlds 1024` for the full reference scale.
 
+From a source checkout with a sibling Newton clone, the one-time setup and
+default launch are:
+
+```bash
+pixi run -e cuda install
+pixi run -e cuda python -m pip install -e ../newton
+pixi run -e cuda check-cuda
+pixi run -e cuda demo-parallel-tracking
+```
+
+If the check reports that the installed Torch wheel lacks `sm_120`, run
+`pixi run -e cuda setup-cuda-sm120`, then repeat the check. This replaces only
+Torch's CUDA wheel inside the Pixi environment with an architecture-compatible
+build.
+
+The viewer is available at `http://localhost:8080`. See the
+[parallel example guide](https://robodreamer.github.io/embodik/examples/parallel_trajectory_tracking/)
+for model switches, 1,024-world runs, headless profiling, RL integration, and
+first-run notes.
+
 On a CUDA-capable NVIDIA GPU with approximately 24 GB of device memory, 1,024
 device-resident worlds measured the following warm solve-only latency (50
 samples after 20 warm-up steps, two solver iterations):
@@ -69,7 +89,8 @@ joint manifolds fail explicitly. There is no silent CPU fallback.
 These numbers time the CUDA solve only; target generation, browser rendering,
 collision, and host publication are excluded. Read the [GPU WBC guide](https://robodreamer.github.io/embodik/gpu_solvers/)
 for supported constraints, requirements, single-world tradeoffs, and a
-reproducible headless command.
+reproducible headless command. It also covers device-resident integration with
+batched RL simulators and selective mjviser publication.
 
 ## 🚀 Quick Start
 

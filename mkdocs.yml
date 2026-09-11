@@ -111,8 +111,6 @@ nav:
     - GPU & batch:
       - 10. Parallel GPU WBC: examples/parallel_trajectory_tracking.md
       - GPU Collision Batch: examples/gpu_collision_batch.md
-      - Legacy GPU Batch IK: examples/gpu_batch_ik.md
-      - Legacy GPU Solver Demo: examples/gpu_solver_demo.md
     - API walkthroughs:
       - RobotModel Usage: examples/robot_model_usage.md
       - Visualization: examples/visualization_examples.md

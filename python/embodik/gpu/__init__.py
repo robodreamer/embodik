@@ -1,19 +1,12 @@
 """GPU-accelerated solvers for EmbodiK.
 
-**Experimental:** These solvers are under active development and need more validation.
+The recommended model-derived velocity and acceleration APIs live in
+``embodik.gpu.wbc``. They derive solver shapes from ``RobotModel`` and use
+Newton, Warp, Torch CUDA tensors, and fixed-shape CUDA graph execution.
 
-This package provides GPU-parallel velocity IK solving using CusADi.
-Two solvers are available:
-
-- **FI-PeSNS** (Fixed-Iteration Penalized eSNS): Primary solver, penalty-based
-- **PPH-SNS** (Parallel Penalized Hierarchical SNS): Alternative with soft top-k selection
-
-Setup (one-time):
-    1. Clone and install cusadi: git clone https://github.com/se-hwan/cusadi && pip install -e cusadi
-    2. Export the CasADi velocity solve function:
-       pixi run -e cuda export-casadi   # FI-PeSNS
-       pixi run -e cuda export-pph-sns  # PPH-SNS
-    3. Compile: cd ~/.local/cusadi && python run_codegen.py --fn=fn_velocity_solve
+The FI-PeSNS and PPH-SNS CasADi/CusADi builders exported here remain available
+for compatibility with earlier shape-specific experiments. New applications
+should start with ``embodik.gpu.wbc``.
 """
 
 from __future__ import annotations
