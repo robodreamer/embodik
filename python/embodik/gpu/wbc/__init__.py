@@ -9,6 +9,13 @@ Heavy optional dependencies are imported only when a solver is constructed,
 so importing :mod:`embodik` remains CPU-only and lightweight.
 """
 
+from .acceleration import (
+    GPU_ACCELERATION_CAPABILITIES,
+    GpuAccelerationBatchResult,
+    GpuAccelerationCapabilities,
+    GpuAccelerationResult,
+    GpuAccelerationSolver,
+)
 from .contracts import ContractViolation, RobotSolveSpec
 from .model_spec import (
     PoseModelParameters,
@@ -32,7 +39,12 @@ from .solver import (
 
 __all__ = [
     "ContractViolation",
+    "GPU_ACCELERATION_CAPABILITIES",
     "GPU_WBC_CAPABILITIES",
+    "GpuAccelerationBatchResult",
+    "GpuAccelerationCapabilities",
+    "GpuAccelerationResult",
+    "GpuAccelerationSolver",
     "GpuWbcCollisionDebug",
     "GpuWbcCapabilities",
     "GpuWbcFloatingMultiFrameSolver",

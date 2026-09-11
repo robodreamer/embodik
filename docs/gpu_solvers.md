@@ -78,7 +78,7 @@ the CPU implementation.
 | Device-resident multi-world solve | Supported with Warp |
 | Capture-point and velocity-ZMP constraints | Supported in the world support frame |
 | Centroidal momentum tasks and hard momentum bounds | Supported |
-| Acceleration-level task solver | Planned |
+| Acceleration-level generalized-joint `MIN_ERROR` slice | Supported for fixed-base scalar joints |
 | General task axis masks and joint metrics | Planned |
 | Exact CPU collision tuning/certification policy | Planned |
 
@@ -98,6 +98,42 @@ solver.
 Install the optional Python dependencies with `embodik[gpu-wbc]`. The validated
 Newton 1.6 development build must currently be installed from the
 `newton-physics/newton` source repository.
+
+## Acceleration-level GPU slice
+
+`GpuAccelerationSolver` is a separate acceleration-level API for fixed-base
+models whose movable joints each have `nq == nv == 1`. Its dimensions and
+position/velocity limits come from `RobotModel`; acceleration limits remain an
+explicit actuator policy.
+
+```python
+import numpy as np
+import torch
+
+from embodik.gpu.wbc import GpuAccelerationSolver
+
+solver = GpuAccelerationSolver(robot, acceleration_limits=np.full(robot.nv, 8.0))
+q = torch.zeros((1024, robot.nq), dtype=torch.float64, device="cuda")
+dq = torch.zeros((1024, robot.nv), dtype=torch.float64, device="cuda")
+reference = torch.zeros_like(dq)
+
+result = solver.solve_device_batch(q, dq, 0.01, reference)
+safe_worlds = result.success
+q_next = result.q_solution  # unsuccessful worlds contain NaN
+```
+
+The reference is an already-assembled generalized acceleration. It matches a
+CPU posture `MIN_ERROR` task with feed-forward desired acceleration and
+`proportional_gain = derivative_gain = 0`. The solver applies the same joint
+acceleration, one-step velocity, position endpoint, continuous-path, and
+braking-viability state-box equations as the CPU acceleration solver. It also
+supports zero-acceleration, zero-next-velocity, and fixed-current-position
+locks. CUDA graph capture and independent per-world failure are supported.
+
+Inspect `GPU_ACCELERATION_CAPABILITIES` before exposing other controls. Frame
+and CoM tasks, multiple priorities, `SCALE`, floating bases, centroidal,
+contact, effort, collision, and other geometric constraints are currently
+rejected by capability rather than delegated to CPU.
 
 ## Legacy CusADi velocity solvers
 
