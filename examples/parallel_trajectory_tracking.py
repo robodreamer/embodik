@@ -29,6 +29,12 @@ import numpy as np
 import embodik
 from embodik.gpu.wbc import GpuWbcMultiFrameSolver, derive_frames_active_joint_names
 
+MOTION_NAMES = ("circle", "figure-eight", "helix", "sweep")
+MOTION_COLORS = np.asarray(
+    ((44, 164, 255), (255, 111, 78), (77, 201, 138), (177, 106, 255)),
+    dtype=np.uint8,
+)
+
 try:
     from example_helpers.common_bimanual_model_utils import (
         default_common_bimanual_ik_joint_names,
@@ -231,28 +237,103 @@ def _initial_targets(profile: RobotProfile) -> np.ndarray:
         pose = profile.robot.get_frame_pose(frame)
         xyzw = np.asarray(embodik.r2q(pose.rotation, order="xyzs"), dtype=np.float32)
         rows.append(
-            np.concatenate(
-                (np.asarray(pose.translation, dtype=np.float32), xyzw[[3, 0, 1, 2]])
-            )
+            np.concatenate((np.asarray(pose.translation, dtype=np.float32), xyzw[[3, 0, 1, 2]]))
         )
     return np.asarray(rows, dtype=np.float32)
 
 
-def _make_targets(torch, base_targets, phase, profile: RobotProfile, elapsed_s: float):
+def _trajectory_offsets(torch, angle, pattern, frame_index: int):
+    """Return visibly distinct device-side motion families for each world."""
+    circle = (
+        torch.sin(angle),
+        0.75 * torch.cos(angle),
+        0.20 * torch.sin(2.0 * angle),
+    )
+    figure_eight = (
+        torch.sin(angle),
+        0.70 * torch.sin(2.0 * angle),
+        0.18 * torch.cos(angle),
+    )
+    helix = (
+        0.72 * torch.cos(angle),
+        0.72 * torch.sin(angle),
+        0.55 * torch.sin(2.0 * angle + 0.4),
+    )
+    sweep = (
+        torch.sin(2.0 * angle),
+        0.28 * torch.sin(3.0 * angle),
+        0.45 * torch.cos(angle),
+    )
+    coordinates = []
+    for axis in range(3):
+        value = torch.where(pattern == 0, circle[axis], figure_eight[axis])
+        value = torch.where(pattern == 2, helix[axis], value)
+        value = torch.where(pattern == 3, sweep[axis], value)
+        coordinates.append(value)
+    if frame_index % 2:
+        coordinates[1] = -coordinates[1]
+    return coordinates
+
+
+def _make_targets(
+    torch, base_targets, phase, pattern, speed_scale, profile: RobotProfile, elapsed_s: float
+):
     targets = base_targets.unsqueeze(0).expand(phase.shape[0], -1, -1).clone()
     for frame_index, moving in enumerate(profile.moving_frames):
         if not moving:
             continue
-        angle = phase + float(elapsed_s) * (0.65 + 0.11 * frame_index)
-        side = -1.0 if frame_index % 2 else 1.0
-        targets[:, frame_index, 0] += profile.motion_scale_m * torch.sin(angle)
-        targets[:, frame_index, 1] += (
-            side * profile.motion_scale_m * 0.65 * torch.cos(angle * 1.3)
-        )
-        targets[:, frame_index, 2] += profile.motion_scale_m * 0.45 * torch.sin(
-            angle * 0.7 + frame_index
-        )
+        angle = phase + float(elapsed_s) * (0.58 + 0.10 * frame_index) * speed_scale
+        offsets = _trajectory_offsets(torch, angle, pattern, frame_index)
+        for axis, offset in enumerate(offsets):
+            targets[:, frame_index, axis] += profile.motion_scale_m * offset
     return targets
+
+
+def _batch_motion_state(torch, worlds: int, device):
+    world_index = torch.arange(worlds, dtype=torch.int64, device=device)
+    phase = world_index.to(torch.float32) * (2.0 * math.pi / float(worlds))
+    pattern = torch.remainder(world_index, len(MOTION_NAMES))
+    speed_scale = 0.84 + 0.08 * torch.remainder(world_index, 5).to(torch.float32)
+    return phase, pattern, speed_scale
+
+
+def _visible_world_indices(worlds: int, visible_worlds: int) -> np.ndarray:
+    """Sample across the batch while rotating through all motion families."""
+    if visible_worlds == 1:
+        return np.zeros(1, dtype=np.int64)
+    indices: list[int] = []
+    for visible_index in range(visible_worlds):
+        base = int(round(visible_index * (worlds - 1) / (visible_worlds - 1)))
+        desired_pattern = visible_index % len(MOTION_NAMES)
+        upward = base + ((desired_pattern - base) % len(MOTION_NAMES))
+        downward = base - ((base - desired_pattern) % len(MOTION_NAMES))
+        candidate = upward if upward < worlds else downward
+        if candidate in indices:
+            candidate = next(index for index in range(worlds) if index not in indices)
+        indices.append(candidate)
+    return np.asarray(indices, dtype=np.int64)
+
+
+def _trajectory_points(
+    base_position: np.ndarray, pattern: int, scale: float, frame_index: int
+) -> np.ndarray:
+    angle = np.linspace(0.0, 2.0 * math.pi, 80, endpoint=True)
+    if pattern == 0:
+        offsets = (np.sin(angle), 0.75 * np.cos(angle), 0.20 * np.sin(2.0 * angle))
+    elif pattern == 1:
+        offsets = (np.sin(angle), 0.70 * np.sin(2.0 * angle), 0.18 * np.cos(angle))
+    elif pattern == 2:
+        offsets = (
+            0.72 * np.cos(angle),
+            0.72 * np.sin(angle),
+            0.55 * np.sin(2.0 * angle + 0.4),
+        )
+    else:
+        offsets = (np.sin(2.0 * angle), 0.28 * np.sin(3.0 * angle), 0.45 * np.cos(angle))
+    points = np.asarray(base_position, dtype=float)[None, :] + scale * np.column_stack(offsets)
+    if frame_index % 2:
+        points[:, 1] = 2.0 * base_position[1] - points[:, 1]
+    return points.astype(np.float32)
 
 
 def _active_configuration(profile: RobotProfile, active_names: tuple[str, ...]) -> np.ndarray:
@@ -326,7 +407,7 @@ def _summary(
         "features": [
             "model-derived dimensions",
             "device-resident batch state",
-            "independent target phase per world",
+            "four independent motion families with per-world phase and speed",
             "joint position and velocity bounds",
         ],
     }
@@ -341,11 +422,13 @@ def run_headless(profile: RobotProfile, args: argparse.Namespace) -> dict[str, o
     device = torch.device(solver.device_label)
     q = torch.as_tensor(q0, dtype=torch.float32, device=device).repeat(args.worlds, 1)
     base_targets = torch.as_tensor(_initial_targets(profile), device=device)
-    phase = torch.linspace(0.0, 2.0 * math.pi, args.worlds + 1, device=device)[:-1]
+    phase, pattern, speed_scale = _batch_motion_state(torch, args.worlds, device)
     timings: list[float] = []
     total_steps = args.warmup_steps + args.steps
     for step in range(total_steps):
-        targets = _make_targets(torch, base_targets, phase, profile, step * args.dt)
+        targets = _make_targets(
+            torch, base_targets, phase, pattern, speed_scale, profile, step * args.dt
+        )
         start = torch.cuda.Event(enable_timing=True)
         end = torch.cuda.Event(enable_timing=True)
         start.record()
@@ -395,21 +478,45 @@ def run_visualization(profile: RobotProfile, args: argparse.Namespace) -> None:
     device = torch.device(solver.device_label)
     q = torch.as_tensor(q0, dtype=torch.float32, device=device).repeat(args.worlds, 1)
     base_targets = torch.as_tensor(_initial_targets(profile), device=device)
-    phase = torch.linspace(0.0, 2.0 * math.pi, args.worlds + 1, device=device)[:-1]
+    phase, pattern, speed_scale = _batch_motion_state(torch, args.worlds, device)
 
     visible_worlds = min(args.show, args.worlds)
+    visible_indices = _visible_world_indices(args.worlds, visible_worlds)
+    visible_index_tensor = torch.as_tensor(visible_indices, dtype=torch.int64, device=device)
     spacing = args.spacing or {"panda": 1.25, "ai-worker": 2.2, "g1": 1.35}[profile.key]
     positions = _grid_positions(visible_worlds, spacing, profile.root_height_m)
     server = viser.ViserServer(port=args.port)
     width = max(4.0, spacing * math.ceil(math.sqrt(visible_worlds)) + 1.5)
     server.scene.add_grid("/ground", width=width, height=width)
+    map_positions = np.asarray(_grid_positions(args.worlds, width / 36.0, 0.015))
+    map_patterns = np.arange(args.worlds, dtype=np.int64) % len(MOTION_NAMES)
+    server.scene.add_point_cloud(
+        "/all_cuda_worlds",
+        points=map_positions,
+        colors=MOTION_COLORS[map_patterns],
+        point_size=max(0.018, width / 420.0),
+        point_shape="circle",
+    )
 
     urdf = yourdfpy.URDF.load(str(profile.visual_urdf), mesh_dir=profile.visual_mesh_dir)
     visuals: list[tuple[ViserUrdf, object]] = []
     target_handles: list[list[object]] = []
+    initial_targets = _initial_targets(profile)
+    label_height = {"panda": 1.0, "ai-worker": 1.75, "g1": 1.05}[profile.key]
     for index, position in enumerate(positions):
-        root = f"/worlds/{index:03d}"
+        world_index = int(visible_indices[index])
+        motion_index = world_index % len(MOTION_NAMES)
+        root = f"/sampled_worlds/{world_index:04d}"
         server.scene.add_frame(root, position=tuple(position), show_axes=False)
+        server.scene.add_label(
+            f"{root}/label",
+            f"world {world_index:04d} · {MOTION_NAMES[motion_index]}",
+            position=(0.0, 0.0, label_height),
+            anchor="bottom-center",
+            font_size_mode="scene",
+            font_scene_height=0.055,
+            depth_test=True,
+        )
         visual = ViserUrdf(server, urdf, root_node_name=f"{root}/robot")
         mapper = make_visual_config_mapper(profile.robot, visual)
         visual.update_cfg(mapper(profile.default_configuration))
@@ -417,12 +524,24 @@ def run_visualization(profile: RobotProfile, args: argparse.Namespace) -> None:
         handles = []
         for frame_index, _frame in enumerate(profile.frames):
             if profile.moving_frames[frame_index]:
+                color = tuple(int(value) for value in MOTION_COLORS[motion_index])
                 handles.append(
                     server.scene.add_icosphere(
                         f"{root}/targets/{frame_index}",
                         radius=0.028 if profile.key == "panda" else 0.04,
-                        color=(35, 168, 255) if frame_index % 2 == 0 else (255, 116, 74),
+                        color=color,
                     )
+                )
+                server.scene.add_spline_catmull_rom(
+                    f"{root}/paths/{frame_index}",
+                    positions=_trajectory_points(
+                        initial_targets[frame_index, :3],
+                        motion_index,
+                        profile.motion_scale_m,
+                        frame_index,
+                    ),
+                    color=color,
+                    line_width=1.5,
                 )
             else:
                 handles.append(None)
@@ -430,19 +549,21 @@ def run_visualization(profile: RobotProfile, args: argparse.Namespace) -> None:
 
     server.gui.add_markdown(
         "## GPU WBC parallel worlds\n"
-        "Newton kinematics + Warp directional SRINV. The browser renders only "
-        "a sample; every listed world is solved on CUDA."
+        "Newton kinematics + Warp directional SRINV. Colored dots map every CUDA "
+        "world; detailed robots are sampled across the complete batch."
     )
     server.gui.add_text("Robot", initial_value=profile.label, disabled=True)
     server.gui.add_text("CUDA worlds", initial_value=f"{args.worlds:,}", disabled=True)
     server.gui.add_text(
-        "Pose tasks / world", initial_value=str(len(profile.frames)), disabled=True
+        "Detailed samples", initial_value=f"{visible_worlds} across full batch", disabled=True
     )
+    server.gui.add_text(
+        "Motion families", initial_value="circle · figure-8 · helix · sweep", disabled=True
+    )
+    server.gui.add_text("Pose tasks / world", initial_value=str(len(profile.frames)), disabled=True)
     p50_text = server.gui.add_text("Solve p50", initial_value="warming up", disabled=True)
     p95_text = server.gui.add_text("Solve p95", initial_value="warming up", disabled=True)
-    throughput_text = server.gui.add_text(
-        "Throughput", initial_value="warming up", disabled=True
-    )
+    throughput_text = server.gui.add_text("Throughput", initial_value="warming up", disabled=True)
     server.gui.add_text("Timing scope", initial_value="CUDA solve only", disabled=True)
 
     timings: deque[float] = deque(maxlen=max(30, args.stats_window))
@@ -457,7 +578,9 @@ def run_visualization(profile: RobotProfile, args: argparse.Namespace) -> None:
         while args.steps <= 0 or step < args.steps:
             frame_started = time.perf_counter()
             elapsed = time.perf_counter() - started
-            targets = _make_targets(torch, base_targets, phase, profile, elapsed)
+            targets = _make_targets(
+                torch, base_targets, phase, pattern, speed_scale, profile, elapsed
+            )
             begin = torch.cuda.Event(enable_timing=True)
             end = torch.cuda.Event(enable_timing=True)
             begin.record()
@@ -469,8 +592,10 @@ def run_visualization(profile: RobotProfile, args: argparse.Namespace) -> None:
             q = result.q_solution
             timings.append(float(begin.elapsed_time(end)))
 
-            q_host = q[:visible_worlds].detach().cpu().numpy()
-            target_host = targets[:visible_worlds, :, :3].detach().cpu().numpy()
+            q_host = q.index_select(0, visible_index_tensor).detach().cpu().numpy()
+            target_host = (
+                targets.index_select(0, visible_index_tensor)[:, :, :3].detach().cpu().numpy()
+            )
             for index, (visual, mapper) in enumerate(visuals):
                 merged = solver.merge_active_configuration(
                     profile.default_configuration, q_host[index]
