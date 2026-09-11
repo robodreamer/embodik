@@ -66,9 +66,10 @@ python examples/parallel_trajectory_tracking.py \
 ```
 
 Worlds rotate through circle, figure-eight, helix, and sweep targets with
-independent phases and speeds. The viewer maps all worlds as colored points;
-only `--show` detailed URDFs cross the device boundary, sampled across the full
-batch rather than clustered at adjacent indices.
+independent phases and speeds. The viewer renders all 1,024 articulated robots
+by default through shared per-link mesh instances. Four colored world bands make
+the motion families easy to distinguish at field scale. `--show` controls only
+browser visualization; every run still solves the full `--worlds` batch.
 
 ## Model-derived API
 

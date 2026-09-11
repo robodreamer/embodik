@@ -14,8 +14,8 @@ earlier Panda-only synthetic-Jacobian/CusADi demo.
 - dimensions and active joints derived from `RobotModel`, not hard-coded DoF;
 - circle, figure-eight, helix, and sweep targets with independent per-world
   phases and speeds;
-- a live 32×32 point map for all 1,024 worlds plus detailed robots sampled
-  across the full solve batch;
+- all 1,024 live articulated robots rendered through shared per-link mesh
+  instances;
 - CUDA-event timing with explicit no-fallback attribution checks.
 
 The profiles intentionally differ: Panda has one moving 6D hand task, AI
@@ -33,11 +33,14 @@ python examples/parallel_trajectory_tracking.py --robot ai-worker --worlds 1024
 python examples/parallel_trajectory_tracking.py --robot g1 --worlds 1024
 ```
 
-The default viewer renders a colored point for every world and nine detailed
-URDFs sampled across the full batch. Labels and trajectory splines identify the
-motion family assigned to each detailed world. Change the detailed count with
-`--show`; reducing it improves browser responsiveness without changing the
-solver batch or the all-world map.
+The default viewer renders all 1,024 live robots. It reuses each link mesh in a
+single batched Viser object, then updates the per-world link transforms from the
+device-resident Newton body poses. This keeps the browser scene proportional to
+the number of unique link meshes rather than robots times links. Four colored
+world bands identify the motion families, while phase and speed still vary per
+world. Use `--show` to cap rendering on constrained browsers without changing
+the CUDA solve batch; for example, `--worlds 1024 --show 256` still solves all
+1,024 worlds.
 
 The AI Worker viewer resolves its visual URDF from an explicit
 `--ai-worker-root`, `--urdf`, or the cached public ROBOTIS repository. If none

@@ -9,9 +9,12 @@ instead of the older Panda-only synthetic-Jacobian/CusADi demonstration.
 Panda, ROBOTIS AI Worker, and Unitree G1. Active coordinates and task rows are
 derived from each loaded `RobotModel`; the common solve and visualization loop
 contains no robot-specific DoF constants. The viewer maps all 1,024 worlds as a
-32×32 colored point field, samples detailed robots across the complete batch,
-and assigns circle, figure-eight, helix, and sweep motion families with
-independent phase and speed.
+CUDA solve batch and renders every articulated robot. It publishes one shared
+instance batch per link mesh instead of creating a browser scene tree per URDF,
+keeping the scene compact at full scale. Four colored world bands use circle,
+figure-eight, helix, and sweep motion families; worlds retain independent phase
+and speed within each band, and larger target excursions make the differences
+visible at field scale.
 
 ## Reference profile
 
@@ -39,6 +42,8 @@ whole-body profile is sub-millisecond.
   legacy CusADi experiments.
 - the parallel example page documents viewer and machine-readable headless use.
 - media provenance records source revision, assets, hardware, scope, and edits.
+- the hero clip uses 512 fully articulated worlds for legibility and smooth
+  capture, while the public example continues to default to 1,024 worlds.
 
 ## Remaining boundaries
 

@@ -36,14 +36,17 @@ stay focused on targets and visualization.
 
 ## GPU WBC: 1,024 Independent Worlds
 
-<video autoplay muted loop playsinline controls width="100%" aria-label="Panda, ROBOTIS AI Worker, and Unitree G1 moving in parallel Viser worlds while EmbodiK solves 1,024 independently targeted worlds on CUDA" src="assets/media/gpu_wbc_parallel_showcase.mp4"></video>
+<video autoplay muted loop playsinline controls width="100%" aria-label="Panda, ROBOTIS AI Worker, and Unitree G1 moving through distinct trajectories across 512 fully articulated CUDA worlds" src="assets/media/gpu_wbc_parallel_showcase.mp4"></video>
 
 The experimental model-derived GPU path uses Newton for batched kinematics and
 Warp directional SRINV for prioritized velocity IK. A single public example
 selects Panda, AI Worker, or G1 and derives the active joints and task shape from
-the loaded model. Its 32×32 colored world map exposes all 1,024 solved instances,
-while detailed robots sampled across the batch follow four distinct motion
-families with independent phases and speeds.
+the loaded model. Its viewer renders all 1,024 articulated robots using shared
+per-link mesh instances. Four colored world bands follow distinct motion
+families, with independent phases and speeds inside each band.
+
+The video uses 512 visible worlds so individual motion remains legible at page
+scale. The example itself renders and solves 1,024 worlds by default.
 
 | Model | Active DoF | 6D tasks / world | Solve-only p50 |
 | --- | ---: | ---: | ---: |

@@ -37,15 +37,19 @@ https://robodreamer.github.io/embodik/
 ## ⚡ GPU WBC at 1,024 Worlds
 
 <a href="https://robodreamer.github.io/embodik/examples/parallel_trajectory_tracking/">
-  <img src="docs/assets/media/gpu_wbc_parallel_showcase_preview.gif?raw=true" alt="Panda, ROBOTIS AI Worker, and Unitree G1 moving in parallel Viser worlds while EmbodiK solves 1,024 independently targeted worlds on CUDA" width="960">
+  <img src="docs/assets/media/gpu_wbc_parallel_showcase_preview.gif?raw=true" alt="Panda, ROBOTIS AI Worker, and Unitree G1 moving through distinct trajectories across 512 fully articulated CUDA worlds" width="960">
 </a>
 
 The experimental `embodik.gpu.wbc` path combines model-derived Newton
 kinematics with Warp directional SRINV. The same batch API above derives its
 joint and task dimensions from Panda, AI Worker, and G1 models—there is no
-robot-family DoF table in the solver. The 32×32 colored map represents every
-solved world; detailed robots are sampled across the batch and follow circle,
-figure-eight, helix, or sweep targets with independent phases and speeds.
+robot-family DoF table in the solver. The viewer renders all 1,024 articulated
+robots with shared per-link mesh instances. Four colored world bands follow
+circle, figure-eight, helix, or sweep targets, with independent phases and
+speeds inside each band.
+
+The hero capture renders 512 robots for clearer motion at README scale; the
+same example renders and solves 1,024 worlds by default.
 
 On a CUDA-capable NVIDIA GPU with approximately 24 GB of device memory, 1,024
 device-resident worlds measured the following warm solve-only latency (50
