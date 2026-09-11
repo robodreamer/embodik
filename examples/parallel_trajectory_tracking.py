@@ -488,16 +488,6 @@ def run_visualization(profile: RobotProfile, args: argparse.Namespace) -> None:
     server = viser.ViserServer(port=args.port)
     width = max(4.0, spacing * math.ceil(math.sqrt(visible_worlds)) + 1.5)
     server.scene.add_grid("/ground", width=width, height=width)
-    map_positions = np.asarray(_grid_positions(args.worlds, width / 36.0, 0.015))
-    map_patterns = np.arange(args.worlds, dtype=np.int64) % len(MOTION_NAMES)
-    server.scene.add_point_cloud(
-        "/all_cuda_worlds",
-        points=map_positions,
-        colors=MOTION_COLORS[map_patterns],
-        point_size=max(0.018, width / 420.0),
-        point_shape="circle",
-    )
-
     urdf = yourdfpy.URDF.load(str(profile.visual_urdf), mesh_dir=profile.visual_mesh_dir)
     visuals: list[tuple[ViserUrdf, object]] = []
     target_handles: list[list[object]] = []
@@ -508,15 +498,16 @@ def run_visualization(profile: RobotProfile, args: argparse.Namespace) -> None:
         motion_index = world_index % len(MOTION_NAMES)
         root = f"/sampled_worlds/{world_index:04d}"
         server.scene.add_frame(root, position=tuple(position), show_axes=False)
-        server.scene.add_label(
-            f"{root}/label",
-            f"world {world_index:04d} · {MOTION_NAMES[motion_index]}",
-            position=(0.0, 0.0, label_height),
-            anchor="bottom-center",
-            font_size_mode="scene",
-            font_scene_height=0.055,
-            depth_test=True,
-        )
+        if visible_worlds <= 32:
+            server.scene.add_label(
+                f"{root}/label",
+                f"world {world_index:04d} · {MOTION_NAMES[motion_index]}",
+                position=(0.0, 0.0, label_height),
+                anchor="bottom-center",
+                font_size_mode="scene",
+                font_scene_height=0.055,
+                depth_test=True,
+            )
         visual = ViserUrdf(server, urdf, root_node_name=f"{root}/robot")
         mapper = make_visual_config_mapper(profile.robot, visual)
         visual.update_cfg(mapper(profile.default_configuration))
@@ -549,13 +540,13 @@ def run_visualization(profile: RobotProfile, args: argparse.Namespace) -> None:
 
     server.gui.add_markdown(
         "## GPU WBC parallel worlds\n"
-        "Newton kinematics + Warp directional SRINV. Colored dots map every CUDA "
-        "world; detailed robots are sampled across the complete batch."
+        "Newton kinematics + Warp directional SRINV. Every visible model is a live "
+        "robot sampled across the complete CUDA batch."
     )
     server.gui.add_text("Robot", initial_value=profile.label, disabled=True)
     server.gui.add_text("CUDA worlds", initial_value=f"{args.worlds:,}", disabled=True)
     server.gui.add_text(
-        "Detailed samples", initial_value=f"{visible_worlds} across full batch", disabled=True
+        "Rendered robots", initial_value=f"{visible_worlds} across full batch", disabled=True
     )
     server.gui.add_text(
         "Motion families", initial_value="circle · figure-8 · helix · sweep", disabled=True
@@ -623,7 +614,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--robot", choices=("panda", "ai-worker", "g1"), default="panda")
     parser.add_argument("--worlds", type=int, default=1024)
-    parser.add_argument("--show", type=int, default=9, help="Worlds rendered in Viser")
+    parser.add_argument("--show", type=int, default=48, help="Live robots rendered in Viser")
     parser.add_argument("--headless", action="store_true")
     parser.add_argument("--steps", type=int, default=0, help="0 runs the viewer until Ctrl+C")
     parser.add_argument("--warmup-steps", type=int, default=20)
