@@ -2,8 +2,9 @@
 """Model-derived GPU WBC across many independently targeted robot worlds.
 
 This showcase uses EmbodiK's Newton kinematics and Warp SRINV backend for the
-actual solve. It visualizes only a small sample of the solved worlds so browser
-rendering does not hide solver throughput.
+actual solve. Shared per-link mesh instances let the viewer display the full
+batch without creating one browser scene tree per robot. Visualization remains
+outside the reported CUDA solve timing.
 
 Examples:
     python examples/parallel_trajectory_tracking.py --robot panda --worlds 1024
@@ -55,7 +56,6 @@ try:
         resolve_g1_urdf_path,
     )
     from example_helpers.public_ai_worker_paths import resolve_public_ai_worker_urdf_paths
-    from example_helpers.visualization_helpers import make_visual_config_mapper
 except ModuleNotFoundError as exc:
     if exc.name != "example_helpers" and not str(exc.name).startswith("example_helpers."):
         raise
@@ -80,7 +80,6 @@ except ModuleNotFoundError as exc:
     from examples.example_helpers.public_ai_worker_paths import (
         resolve_public_ai_worker_urdf_paths,
     )
-    from examples.example_helpers.visualization_helpers import make_visual_config_mapper
 
 
 @dataclass(frozen=True)
@@ -130,7 +129,7 @@ def _panda_profile() -> RobotProfile:
         default_configuration=q,
         frames=("panda_hand",),
         moving_frames=(True,),
-        motion_scale_m=0.045,
+        motion_scale_m=0.14,
         root_height_m=0.0,
     )
 
@@ -188,7 +187,7 @@ def _ai_worker_profile(args: argparse.Namespace) -> RobotProfile:
         default_configuration=q,
         frames=frames,
         moving_frames=(True, True),
-        motion_scale_m=0.035,
+        motion_scale_m=0.12,
         root_height_m=0.0,
     )
 
@@ -215,7 +214,7 @@ def _g1_profile() -> RobotProfile:
         default_configuration=np.asarray(q, dtype=float),
         frames=frames,
         moving_frames=(True, True, False, False),
-        motion_scale_m=0.025,
+        motion_scale_m=0.10,
         root_height_m=0.82,
     )
 
@@ -291,9 +290,13 @@ def _make_targets(
 
 def _batch_motion_state(torch, worlds: int, device):
     world_index = torch.arange(worlds, dtype=torch.int64, device=device)
-    phase = world_index.to(torch.float32) * (2.0 * math.pi / float(worlds))
-    pattern = torch.remainder(world_index, len(MOTION_NAMES))
-    speed_scale = 0.84 + 0.08 * torch.remainder(world_index, 5).to(torch.float32)
+    family_size = math.ceil(worlds / len(MOTION_NAMES))
+    pattern = torch.div(world_index, family_size, rounding_mode="floor").clamp_max(
+        len(MOTION_NAMES) - 1
+    )
+    family_index = torch.remainder(world_index, family_size)
+    phase = family_index.to(torch.float32) * (2.0 * math.pi / float(family_size))
+    speed_scale = 0.82 + 0.10 * torch.remainder(family_index, 5).to(torch.float32)
     return phase, pattern, speed_scale
 
 
@@ -312,28 +315,6 @@ def _visible_world_indices(worlds: int, visible_worlds: int) -> np.ndarray:
             candidate = next(index for index in range(worlds) if index not in indices)
         indices.append(candidate)
     return np.asarray(indices, dtype=np.int64)
-
-
-def _trajectory_points(
-    base_position: np.ndarray, pattern: int, scale: float, frame_index: int
-) -> np.ndarray:
-    angle = np.linspace(0.0, 2.0 * math.pi, 80, endpoint=True)
-    if pattern == 0:
-        offsets = (np.sin(angle), 0.75 * np.cos(angle), 0.20 * np.sin(2.0 * angle))
-    elif pattern == 1:
-        offsets = (np.sin(angle), 0.70 * np.sin(2.0 * angle), 0.18 * np.cos(angle))
-    elif pattern == 2:
-        offsets = (
-            0.72 * np.cos(angle),
-            0.72 * np.sin(angle),
-            0.55 * np.sin(2.0 * angle + 0.4),
-        )
-    else:
-        offsets = (np.sin(2.0 * angle), 0.28 * np.sin(3.0 * angle), 0.45 * np.cos(angle))
-    points = np.asarray(base_position, dtype=float)[None, :] + scale * np.column_stack(offsets)
-    if frame_index % 2:
-        points[:, 1] = 2.0 * base_position[1] - points[:, 1]
-    return points.astype(np.float32)
 
 
 def _active_configuration(profile: RobotProfile, active_names: tuple[str, ...]) -> np.ndarray:
@@ -466,11 +447,70 @@ def _grid_positions(count: int, spacing: float, root_height: float) -> list[np.n
     ]
 
 
+def _body_index(body_names: tuple[str, ...], link_name: str) -> int:
+    matches = [
+        index
+        for index, label in enumerate(body_names)
+        if label == link_name or label.endswith(f"/{link_name}") or label.endswith(f"::{link_name}")
+    ]
+    if len(matches) != 1:
+        raise ValueError(
+            f"visual link {link_name!r} must match exactly one Newton body; "
+            f"found {len(matches)}"
+        )
+    return matches[0]
+
+
+class _BatchedUrdfVisualizer:
+    """Render many articulated URDFs with one Viser instance batch per mesh."""
+
+    def __init__(self, server, urdf, body_names: tuple[str, ...], world_offsets: np.ndarray):
+        self._server = server
+        self._world_offsets = world_offsets.astype(np.float32, copy=False)
+        self._mesh_handles: list[tuple[object, int]] = []
+        if urdf.scene is None:
+            raise ValueError("visual URDF has no scene geometry")
+        scene = urdf.scene
+        identity = np.zeros((len(world_offsets), 4), dtype=np.float32)
+        identity[:, 0] = 1.0
+        for geometry_index, (geometry_name, source_mesh) in enumerate(scene.geometry.items()):
+            parent = scene.graph.transforms.parents[geometry_name]
+            link_name = parent
+            while True:
+                try:
+                    index = _body_index(body_names, link_name)
+                    break
+                except ValueError:
+                    if link_name == scene.graph.base_frame:
+                        raise
+                    link_name = scene.graph.transforms.parents[link_name]
+            mesh = source_mesh.copy()
+            mesh.apply_transform(urdf.get_transform(geometry_name, link_name))
+            lod_ratio = 1000.0 / max(1, mesh.vertices.shape[0])
+            handle = server.scene.add_batched_meshes_trimesh(
+                f"/robots/{link_name}/visual_{geometry_index}",
+                mesh,
+                batched_wxyzs=identity,
+                batched_positions=self._world_offsets,
+                lod=((2.0, lod_ratio),) if lod_ratio < 0.5 else "off",
+            )
+            self._mesh_handles.append((handle, index))
+
+    def update(self, body_poses_xyzw: np.ndarray) -> None:
+        """Update all instances from ``[world, body, xyz+xyzw]`` poses."""
+
+        with self._server.atomic():
+            for handle, body_index in self._mesh_handles:
+                pose = body_poses_xyzw[:, body_index]
+                handle.batched_positions = pose[:, :3] + self._world_offsets
+                handle.batched_wxyzs = pose[:, [6, 3, 4, 5]]
+
+
 def run_visualization(profile: RobotProfile, args: argparse.Namespace) -> None:
     import torch
+    import trimesh
     import viser
     import yourdfpy
-    from viser.extras import ViserUrdf
 
     if not torch.cuda.is_available():
         raise RuntimeError("this showcase requires CUDA; there is no CPU fallback")
@@ -483,74 +523,57 @@ def run_visualization(profile: RobotProfile, args: argparse.Namespace) -> None:
     visible_worlds = min(args.show, args.worlds)
     visible_indices = _visible_world_indices(args.worlds, visible_worlds)
     visible_index_tensor = torch.as_tensor(visible_indices, dtype=torch.int64, device=device)
-    spacing = args.spacing or {"panda": 1.25, "ai-worker": 2.2, "g1": 1.35}[profile.key]
-    positions = _grid_positions(visible_worlds, spacing, profile.root_height_m)
+    spacing = args.spacing or {"panda": 1.0, "ai-worker": 2.0, "g1": 1.2}[profile.key]
+    positions = np.asarray(
+        _grid_positions(visible_worlds, spacing, profile.root_height_m),
+        dtype=np.float32,
+    )
     server = viser.ViserServer(port=args.port)
     width = max(4.0, spacing * math.ceil(math.sqrt(visible_worlds)) + 1.5)
     server.scene.add_grid("/ground", width=width, height=width)
     urdf = yourdfpy.URDF.load(str(profile.visual_urdf), mesh_dir=profile.visual_mesh_dir)
-    visuals: list[tuple[ViserUrdf, object]] = []
-    target_handles: list[list[object]] = []
-    initial_targets = _initial_targets(profile)
-    label_height = {"panda": 1.0, "ai-worker": 1.75, "g1": 1.05}[profile.key]
-    for index, position in enumerate(positions):
-        world_index = int(visible_indices[index])
-        motion_index = world_index % len(MOTION_NAMES)
-        root = f"/sampled_worlds/{world_index:04d}"
-        server.scene.add_frame(root, position=tuple(position), show_axes=False)
-        if visible_worlds <= 32:
-            server.scene.add_label(
-                f"{root}/label",
-                f"world {world_index:04d} · {MOTION_NAMES[motion_index]}",
-                position=(0.0, 0.0, label_height),
-                anchor="bottom-center",
-                font_size_mode="scene",
-                font_scene_height=0.055,
-                depth_test=True,
+    visual = _BatchedUrdfVisualizer(server, urdf, solver.body_names, positions)
+    family_size = math.ceil(args.worlds / len(MOTION_NAMES))
+    visible_patterns = np.minimum(visible_indices // family_size, len(MOTION_NAMES) - 1)
+    target_mesh = trimesh.creation.icosphere(
+        subdivisions=1, radius=0.065 if profile.key == "panda" else 0.09
+    )
+    target_handles: list[object | None] = []
+    identity = np.zeros((visible_worlds, 4), dtype=np.float32)
+    identity[:, 0] = 1.0
+    for frame_index, moving in enumerate(profile.moving_frames):
+        if not moving:
+            target_handles.append(None)
+            continue
+        target_handles.append(
+            server.scene.add_batched_meshes_simple(
+                f"/targets/frame_{frame_index}",
+                target_mesh.vertices.astype(np.float32),
+                target_mesh.faces.astype(np.int32),
+                batched_wxyzs=identity,
+                batched_positions=positions,
+                batched_colors=MOTION_COLORS[visible_patterns],
+                cast_shadow=False,
+                receive_shadow=False,
             )
-        visual = ViserUrdf(server, urdf, root_node_name=f"{root}/robot")
-        mapper = make_visual_config_mapper(profile.robot, visual)
-        visual.update_cfg(mapper(profile.default_configuration))
-        visuals.append((visual, mapper))
-        handles = []
-        for frame_index, _frame in enumerate(profile.frames):
-            if profile.moving_frames[frame_index]:
-                color = tuple(int(value) for value in MOTION_COLORS[motion_index])
-                handles.append(
-                    server.scene.add_icosphere(
-                        f"{root}/targets/{frame_index}",
-                        radius=0.028 if profile.key == "panda" else 0.04,
-                        color=color,
-                    )
-                )
-                server.scene.add_spline_catmull_rom(
-                    f"{root}/paths/{frame_index}",
-                    positions=_trajectory_points(
-                        initial_targets[frame_index, :3],
-                        motion_index,
-                        profile.motion_scale_m,
-                        frame_index,
-                    ),
-                    color=color,
-                    line_width=1.5,
-                )
-            else:
-                handles.append(None)
-        target_handles.append(handles)
+        )
 
     server.gui.add_markdown(
         "## GPU WBC parallel worlds\n"
-        "Newton kinematics + Warp directional SRINV. Every visible model is a live "
-        "robot sampled across the complete CUDA batch."
+        "Newton kinematics + Warp directional SRINV. Shared link meshes are GPU-"
+        "instanced so every visible model is a live articulated robot."
     )
     server.gui.add_text("Robot", initial_value=profile.label, disabled=True)
     server.gui.add_text("CUDA worlds", initial_value=f"{args.worlds:,}", disabled=True)
     server.gui.add_text(
-        "Rendered robots", initial_value=f"{visible_worlds} across full batch", disabled=True
+        "Rendered robots",
+        initial_value=f"{visible_worlds:,} of {args.worlds:,}",
+        disabled=True,
     )
     server.gui.add_text(
         "Motion families", initial_value="circle · figure-8 · helix · sweep", disabled=True
     )
+    server.gui.add_text("Motion layout", initial_value="four colored world bands", disabled=True)
     server.gui.add_text("Pose tasks / world", initial_value=str(len(profile.frames)), disabled=True)
     p50_text = server.gui.add_text("Solve p50", initial_value="warming up", disabled=True)
     p95_text = server.gui.add_text("Solve p95", initial_value="warming up", disabled=True)
@@ -583,18 +606,21 @@ def run_visualization(profile: RobotProfile, args: argparse.Namespace) -> None:
             q = result.q_solution
             timings.append(float(begin.elapsed_time(end)))
 
-            q_host = q.index_select(0, visible_index_tensor).detach().cpu().numpy()
+            body_poses_host = (
+                solver.evaluate_body_poses_device(q)
+                .index_select(0, visible_index_tensor)
+                .detach()
+                .cpu()
+                .numpy()
+            )
             target_host = (
                 targets.index_select(0, visible_index_tensor)[:, :, :3].detach().cpu().numpy()
             )
-            for index, (visual, mapper) in enumerate(visuals):
-                merged = solver.merge_active_configuration(
-                    profile.default_configuration, q_host[index]
-                )
-                visual.update_cfg(mapper(merged))
-                for frame_index, handle in enumerate(target_handles[index]):
+            visual.update(body_poses_host)
+            with server.atomic():
+                for frame_index, handle in enumerate(target_handles):
                     if handle is not None:
-                        handle.position = tuple(target_host[index, frame_index])
+                        handle.batched_positions = target_host[:, frame_index] + positions
 
             ordered = sorted(timings)
             p50 = statistics.median(ordered)
@@ -614,7 +640,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--robot", choices=("panda", "ai-worker", "g1"), default="panda")
     parser.add_argument("--worlds", type=int, default=1024)
-    parser.add_argument("--show", type=int, default=48, help="Live robots rendered in Viser")
+    parser.add_argument("--show", type=int, default=1024, help="Live robots rendered in Viser")
     parser.add_argument("--headless", action="store_true")
     parser.add_argument("--steps", type=int, default=0, help="0 runs the viewer until Ctrl+C")
     parser.add_argument("--warmup-steps", type=int, default=20)

@@ -275,6 +275,23 @@ def test_device_batch_routes_measured_velocity_separately_from_history():
     assert calls[0][1] is measured
 
 
+@pytest.mark.parametrize("adapter_type", (GpuWbcMultiFrameSolver, GpuWbcFloatingMultiFrameSolver))
+def test_device_body_pose_api_preserves_device_tensor(adapter_type):
+    torch = pytest.importorskip("torch")
+
+    q = torch.zeros((8, 4), dtype=torch.float32)
+    poses = torch.zeros((8, 6, 7), dtype=torch.float32)
+    kinematics = SimpleNamespace(
+        body_names=("base", "shoulder", "tool"),
+        evaluate_body_poses=lambda value: poses if value is q else None,
+    )
+    adapter = adapter_type.__new__(adapter_type)
+    adapter._solver = SimpleNamespace(kinematics=kinematics)
+
+    assert adapter.body_names == ("base", "shoulder", "tool")
+    assert adapter.evaluate_body_poses_device(q) is poses
+
+
 def test_runtime_routes_centroidal_controls_without_cpu_fallback():
     calls = {}
 

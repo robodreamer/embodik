@@ -94,13 +94,9 @@ class NewtonModelKinematics:
         missing_frames = sorted(set(frames) - set(robot_spec.task_frames))
         if missing_frames:
             raise ValueError(
-                "frames are absent from RobotSolveSpec.task_frames: "
-                + ", ".join(missing_frames)
+                "frames are absent from RobotSolveSpec.task_frames: " + ", ".join(missing_frames)
             )
-        if (
-            not robot_spec.floating_base
-            and robot_spec.configuration_dim != robot_spec.velocity_dim
-        ):
+        if not robot_spec.floating_base and robot_spec.configuration_dim != robot_spec.velocity_dim:
             raise RuntimeError(
                 "generic Newton kinematics currently requires one coordinate per velocity"
             )
@@ -116,9 +112,7 @@ class NewtonModelKinematics:
                 robot_spec.joint_velocity_sizes,
             )
         ):
-            raise RuntimeError(
-                "floating-base Newton kinematics requires model-derived joint spans"
-            )
+            raise RuntimeError("floating-base Newton kinematics requires model-derived joint spans")
 
         import newton
         import torch
@@ -133,9 +127,7 @@ class NewtonModelKinematics:
         self.frame = frames[0] if len(frames) == 1 else None
         self.active_dim = len(robot_spec.active_velocity_indices)
         self.input_configuration_dim = (
-            robot_spec.configuration_dim
-            if robot_spec.floating_base
-            else self.active_dim
+            robot_spec.configuration_dim if robot_spec.floating_base else self.active_dim
         )
         self.device = torch.device(device)
         self.torch = torch
@@ -168,13 +160,9 @@ class NewtonModelKinematics:
         q_starts = wp.to_torch(self.model.joint_q_start).cpu().tolist()
         qd_starts = wp.to_torch(self.model.joint_qd_start).cpu().tolist()
         if robot_spec.floating_base:
-            q_indices, qd_indices, source_q_indices = self._floating_mappings(
-                q_starts, qd_starts
-            )
+            q_indices, qd_indices, source_q_indices = self._floating_mappings(q_starts, qd_starts)
         else:
-            q_indices, qd_indices, source_q_indices = self._fixed_mappings(
-                q_starts, qd_starts
-            )
+            q_indices, qd_indices, source_q_indices = self._fixed_mappings(q_starts, qd_starts)
         if (
             len(set(q_indices)) != len(q_indices)
             or len(set(source_q_indices)) != len(source_q_indices)
@@ -187,9 +175,7 @@ class NewtonModelKinematics:
             for value in frames
         )
         self.ee_index = self.ee_indices[0] if len(self.ee_indices) == 1 else None
-        self._ee_body_indices = torch.tensor(
-            self.ee_indices, dtype=torch.long, device=self.device
-        )
+        self._ee_body_indices = torch.tensor(self.ee_indices, dtype=torch.long, device=self.device)
         self._jacobian_signs = torch.tensor(
             (-1.0, -1.0, -1.0, 1.0, 1.0, 1.0) * len(self.ee_indices),
             dtype=torch.float32,
@@ -201,9 +187,7 @@ class NewtonModelKinematics:
             else tuple(default_configuration)
         )
         if len(active_defaults) != robot_spec.configuration_dim:
-            raise ValueError(
-                "default_configuration must match RobotSolveSpec.configuration_dim"
-            )
+            raise ValueError("default_configuration must match RobotSolveSpec.configuration_dim")
         defaults = [0.0] * self.model.joint_coord_count
         for newton_index, input_index in zip(
             self._mapped_newton_q_indices, source_q_indices, strict=True
@@ -220,9 +204,7 @@ class NewtonModelKinematics:
         self._source_q_indices = torch.tensor(
             source_q_indices, dtype=torch.long, device=self.device
         )
-        self._active_qd_indices = torch.tensor(
-            qd_indices, dtype=torch.long, device=self.device
-        )
+        self._active_qd_indices = torch.tensor(qd_indices, dtype=torch.long, device=self.device)
         self._floating_base_active_indices_tensor = (
             torch.tensor(
                 self._floating_base_active_indices,
@@ -294,6 +276,12 @@ class NewtonModelKinematics:
         self._q_integrated_warp = wp.from_torch(self._q_integrated)
         self._qd_scratch_warp = wp.from_torch(self._qd_scratch)
 
+    @property
+    def body_names(self) -> tuple[str, ...]:
+        """Return Newton body labels in the order used by body pose tensors."""
+
+        return tuple(str(label) for label in self.model.body_label)
+
     def _fixed_mappings(
         self, q_starts: list[int], qd_starts: list[int]
     ) -> tuple[list[int], list[int], list[int]]:
@@ -312,9 +300,7 @@ class NewtonModelKinematics:
         q_indices: list[int] = []
         qd_indices: list[int] = []
         for joint_name in active_joint_names:
-            joint_index = _unique_suffix_index(
-                self.model.joint_label, joint_name, kind="joint"
-            )
+            joint_index = _unique_suffix_index(self.model.joint_label, joint_name, kind="joint")
             if (
                 _span(q_starts, joint_index, self.model.joint_coord_count) != 1
                 or _span(qd_starts, joint_index, self.model.joint_dof_count) != 1
@@ -345,9 +331,7 @@ class NewtonModelKinematics:
             spec.joint_velocity_sizes,
         )
         if not all(span_fields):
-            raise RuntimeError(
-                "floating-base Newton kinematics requires model-derived joint spans"
-            )
+            raise RuntimeError("floating-base Newton kinematics requires model-derived joint spans")
         free_candidates = [
             index
             for index in range(self.model.joint_count)
@@ -378,18 +362,14 @@ class NewtonModelKinematics:
         newton_v_start = int(qd_starts[free_joint])
         mapped_newton_q = [newton_q_start + offset for offset in range(7)]
         mapped_source_q = [source_q_start + offset for offset in range(7)]
-        velocity_map = {
-            source_v_start + offset: newton_v_start + offset for offset in range(6)
-        }
+        velocity_map = {source_v_start + offset: newton_v_start + offset for offset in range(6)}
         active_lookup = {
             source_index: active_index
             for active_index, source_index in enumerate(spec.active_velocity_indices)
         }
         base_source_velocities = tuple(range(source_v_start, source_v_start + 6))
         if not all(index in active_lookup for index in base_source_velocities):
-            raise RuntimeError(
-                "floating-base solve must include all six root tangent velocities"
-            )
+            raise RuntimeError("floating-base solve must include all six root tangent velocities")
         self._floating_source_q_start = source_q_start
         self._floating_base_active_indices = tuple(
             active_lookup[index] for index in base_source_velocities
@@ -407,9 +387,7 @@ class NewtonModelKinematics:
                     f"floating model joint {joint_name!r} has unsupported nq/nv="
                     f"{q_size}/{v_size}; only a free root plus scalar joints are supported"
                 )
-            newton_joint = _unique_suffix_index(
-                self.model.joint_label, joint_name, kind="joint"
-            )
+            newton_joint = _unique_suffix_index(self.model.joint_label, joint_name, kind="joint")
             if (
                 _span(q_starts, newton_joint, self.model.joint_coord_count) != 1
                 or _span(qd_starts, newton_joint, self.model.joint_dof_count) != 1
@@ -417,19 +395,13 @@ class NewtonModelKinematics:
                 raise RuntimeError(f"Newton joint {joint_name!r} is not scalar")
             mapped_newton_q.append(int(q_starts[newton_joint]))
             mapped_source_q.append(spec.joint_configuration_indices[joint_index])
-            velocity_map[spec.joint_velocity_indices[joint_index]] = int(
-                qd_starts[newton_joint]
-            )
+            velocity_map[spec.joint_velocity_indices[joint_index]] = int(qd_starts[newton_joint])
             source_velocity = spec.joint_velocity_indices[joint_index]
             if source_velocity in active_lookup:
-                active_scalar_q_indices.append(
-                    spec.joint_configuration_indices[joint_index]
-                )
+                active_scalar_q_indices.append(spec.joint_configuration_indices[joint_index])
                 active_scalar_velocity_indices.append(active_lookup[source_velocity])
 
-        missing = [
-            index for index in spec.active_velocity_indices if index not in velocity_map
-        ]
+        missing = [index for index in spec.active_velocity_indices if index not in velocity_map]
         if missing:
             raise RuntimeError(f"active velocity mappings are missing: {missing}")
         qd_indices = [velocity_map[index] for index in spec.active_velocity_indices]
@@ -483,16 +455,12 @@ class NewtonModelKinematics:
         else:
             self.wp.capture_launch(self._evaluate_graph, stream=stream)
         pose = self._body_torch.index_select(1, self._ee_body_indices)
-        residual_jacobian = self._jacobian_torch.index_select(
-            2, self._active_qd_indices
-        )
+        residual_jacobian = self._jacobian_torch.index_select(2, self._active_qd_indices)
         physical_jacobian = residual_jacobian * self._jacobian_signs[None, :, None]
         if self.robot_spec.floating_base:
             base_start = self._floating_source_q_start
             position = q_active[:, base_start : base_start + 3]
-            rotation = _quat_xyzw_to_matrix(
-                torch, q_active[:, base_start + 3 : base_start + 7]
-            )
+            rotation = _quat_xyzw_to_matrix(torch, q_active[:, base_start + 3 : base_start + 7])
             tangent_transform = torch.zeros(
                 (self.batch_size, 6, 6),
                 dtype=torch.float32,
@@ -533,6 +501,13 @@ class NewtonModelKinematics:
         pose = self._body_torch.index_select(1, self._ee_body_indices)
         return pose[:, 0] if len(self.ee_indices) == 1 else pose
 
+    def evaluate_body_poses(self, q_active: Any) -> Any:
+        """Evaluate every model body pose as CUDA ``[xyz, xyzw]`` rows."""
+
+        self._validate(q_active)
+        self._evaluate_pose_trusted(q_active)
+        return self._body_torch
+
     def integrate(self, q: Any, velocity: Any, dt: float) -> Any:
         """Integrate active tangent velocities with Newton's manifold kernel."""
 
@@ -543,9 +518,7 @@ class NewtonModelKinematics:
             or velocity.device != self.device
             or velocity.dtype is not self.torch.float32
         ):
-            raise ValueError(
-                "velocity must be CUDA float32 with the active velocity shape"
-            )
+            raise ValueError("velocity must be CUDA float32 with the active velocity shape")
         if not isinstance(dt, (float, int)) or not float(dt) > 0.0:
             raise ValueError("dt must be positive")
         return self._integrate_trusted(q, velocity, float(dt))
@@ -577,9 +550,7 @@ class NewtonModelKinematics:
         torch = self.torch
         output = q.clone()
         base_start = self._floating_source_q_start
-        base_velocity = velocity.index_select(
-            1, self._floating_base_active_indices_tensor
-        )
+        base_velocity = velocity.index_select(1, self._floating_base_active_indices_tensor)
         linear = base_velocity[:, :3]
         angular = base_velocity[:, 3:]
         quaternion = q[:, base_start + 3 : base_start + 7]
@@ -604,12 +575,8 @@ class NewtonModelKinematics:
         identity = torch.eye(3, dtype=torch.float32, device=self.device).expand(
             self.batch_size, -1, -1
         )
-        translation_jacobian = (
-            identity + a[:, None] * phi_skew + b[:, None] * (phi_skew_squared)
-        )
-        local_translation = (
-            translation_jacobian @ (linear * dt).unsqueeze(-1)
-        ).squeeze(-1)
+        translation_jacobian = identity + a[:, None] * phi_skew + b[:, None] * (phi_skew_squared)
+        local_translation = (translation_jacobian @ (linear * dt).unsqueeze(-1)).squeeze(-1)
         output[:, base_start : base_start + 3] = q[:, base_start : base_start + 3] + (
             rotation @ local_translation.unsqueeze(-1)
         ).squeeze(-1)
@@ -632,8 +599,7 @@ class NewtonModelKinematics:
                 1,
                 self._floating_scalar_q_indices_tensor,
                 q.index_select(1, self._floating_scalar_q_indices_tensor)
-                + dt
-                * velocity.index_select(1, self._floating_scalar_active_indices_tensor),
+                + dt * velocity.index_select(1, self._floating_scalar_active_indices_tensor),
             )
         return output
 

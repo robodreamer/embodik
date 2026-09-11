@@ -81,7 +81,7 @@ benchmark-fi-pesns = "python scripts/benchmark_fi_pesns.py"
 benchmark-collision = "python examples/gpu_collision_batch.py"
 benchmark-transforms = "python scripts/benchmark_transforms.py"
 # Model-derived Newton/Warp GPU WBC showcase.
-demo-parallel-tracking = "python examples/parallel_trajectory_tracking.py --robot panda --worlds 1024 --show 48"
+demo-parallel-tracking = "python examples/parallel_trajectory_tracking.py --robot panda --worlds 1024"
 demo-parallel-tracking-benchmark = "python examples/parallel_trajectory_tracking.py --robot panda --worlds 1024 --headless --warmup-steps 20 --steps 50"
 # Export CasADi function for GPU solver
 export-casadi = "python -m embodik.gpu.export_casadi_velocity_solve --robot panda --out build/casadi/fn_velocity_solve.casadi"

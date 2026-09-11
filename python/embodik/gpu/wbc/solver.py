@@ -746,6 +746,22 @@ class GpuWbcMultiFrameSolver:
     def device_label(self) -> str:
         return str(self._solver.device)
 
+    @property
+    def body_names(self) -> tuple[str, ...]:
+        """Model body names corresponding to :meth:`evaluate_body_poses_device`."""
+
+        return self._solver.kinematics.body_names
+
+    def evaluate_body_poses_device(self, q):
+        """Evaluate all model body poses for an existing CUDA configuration batch.
+
+        The returned tensor has shape ``[batch_size, body_count, 7]`` and stores
+        position followed by an XYZW quaternion. This is intended for batched
+        visualization and diagnostics; it does not synchronize or copy to host.
+        """
+
+        return self._solver.kinematics.evaluate_body_poses(q)
+
     def reset_state(self) -> None:
         self._previous_velocity.zero_()
         self._last_target = None
@@ -1145,6 +1161,22 @@ class GpuWbcFloatingMultiFrameSolver:
     @property
     def device_label(self) -> str:
         return str(self._solver.device)
+
+    @property
+    def body_names(self) -> tuple[str, ...]:
+        """Model body names corresponding to :meth:`evaluate_body_poses_device`."""
+
+        return self._solver.kinematics.body_names
+
+    def evaluate_body_poses_device(self, q):
+        """Evaluate all model body poses for an existing CUDA configuration batch.
+
+        The returned tensor has shape ``[batch_size, body_count, 7]`` and stores
+        position followed by an XYZW quaternion. This is intended for batched
+        visualization and diagnostics; it does not synchronize or copy to host.
+        """
+
+        return self._solver.kinematics.evaluate_body_poses(q)
 
     @property
     def collision_supported(self) -> bool:
