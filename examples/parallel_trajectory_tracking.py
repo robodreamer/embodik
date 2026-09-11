@@ -7,9 +7,9 @@ batch without creating one browser scene tree per robot. Visualization remains
 outside the reported CUDA solve timing.
 
 Examples:
-    python examples/parallel_trajectory_tracking.py --robot panda --worlds 1024
-    python examples/parallel_trajectory_tracking.py --robot ai-worker --worlds 1024
-    python examples/parallel_trajectory_tracking.py --robot g1 --worlds 1024
+    python examples/parallel_trajectory_tracking.py --robot panda
+    python examples/parallel_trajectory_tracking.py --robot ai-worker
+    python examples/parallel_trajectory_tracking.py --robot g1
     python examples/parallel_trajectory_tracking.py --robot panda --headless --steps 100
 """
 
@@ -520,7 +520,10 @@ def run_visualization(profile: RobotProfile, args: argparse.Namespace) -> None:
     base_targets = torch.as_tensor(_initial_targets(profile), device=device)
     phase, pattern, speed_scale = _batch_motion_state(torch, args.worlds, device)
 
-    visible_worlds = min(args.show, args.worlds)
+    visible_worlds = min(
+        args.show if args.show is not None else args.worlds,
+        args.worlds,
+    )
     visible_indices = _visible_world_indices(args.worlds, visible_worlds)
     visible_index_tensor = torch.as_tensor(visible_indices, dtype=torch.int64, device=device)
     spacing = args.spacing or {"panda": 1.0, "ai-worker": 2.0, "g1": 1.2}[profile.key]
@@ -639,8 +642,12 @@ def run_visualization(profile: RobotProfile, args: argparse.Namespace) -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--robot", choices=("panda", "ai-worker", "g1"), default="panda")
-    parser.add_argument("--worlds", type=int, default=1024)
-    parser.add_argument("--show", type=int, default=1024, help="Live robots rendered in Viser")
+    parser.add_argument("--worlds", type=int, default=512)
+    parser.add_argument(
+        "--show",
+        type=int,
+        help="Live robots rendered in Viser (defaults to --worlds)",
+    )
     parser.add_argument("--headless", action="store_true")
     parser.add_argument("--steps", type=int, default=0, help="0 runs the viewer until Ctrl+C")
     parser.add_argument("--warmup-steps", type=int, default=20)
@@ -657,7 +664,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--urdf", type=Path)
     parser.add_argument("--collision-urdf", type=Path)
     args = parser.parse_args()
-    if args.worlds < 1 or args.show < 1:
+    if args.worlds < 1 or (args.show is not None and args.show < 1):
         parser.error("--worlds and --show must be positive")
     if args.steps < 0 or args.warmup_steps < 0 or args.iterations < 1:
         parser.error("steps/warmup must be nonnegative and iterations must be positive")
