@@ -41,7 +41,9 @@ stay focused on targets and visualization.
 The experimental model-derived GPU path uses Newton for batched kinematics and
 Warp directional SRINV for prioritized velocity IK. A single public example
 selects Panda, AI Worker, or G1 and derives the active joints and task shape from
-the loaded model.
+the loaded model. Its 32×32 colored world map exposes all 1,024 solved instances,
+while detailed robots sampled across the batch follow four distinct motion
+families with independent phases and speeds.
 
 | Model | Active DoF | 6D tasks / world | Solve-only p50 |
 | --- | ---: | ---: | ---: |
@@ -50,7 +52,8 @@ the loaded model.
 | Unitree G1 | 29 | 4 | 20.295 ms |
 
 Profile: 1,024 CUDA-resident worlds, two solver iterations, 50 measured steps
-after 20 warm-up steps, NVIDIA RTX PRO 5000 Blackwell Generation Laptop GPU.
+after 20 warm-up steps, CUDA-capable NVIDIA GPU with approximately 24 GB of
+device memory.
 Target generation, visualization, collision, and host publication are excluded.
 See [GPU WBC](gpu_solvers.md) for the full capability matrix and
 [Parallel GPU WBC](examples/parallel_trajectory_tracking.md) to reproduce it.

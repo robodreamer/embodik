@@ -8,13 +8,16 @@ instead of the older Panda-only synthetic-Jacobian/CusADi demonstration.
 `examples/parallel_trajectory_tracking.py` uses the same solver factory for
 Panda, ROBOTIS AI Worker, and Unitree G1. Active coordinates and task rows are
 derived from each loaded `RobotModel`; the common solve and visualization loop
-contains no robot-specific DoF constants.
+contains no robot-specific DoF constants. The viewer maps all 1,024 worlds as a
+32×32 colored point field, samples detailed robots across the complete batch,
+and assigns circle, figure-eight, helix, and sweep motion families with
+independent phase and speed.
 
 ## Reference profile
 
-Hardware: NVIDIA RTX PRO 5000 Blackwell Generation Laptop GPU. Each run used
-1,024 device-resident worlds, two solver iterations, 20 warm-up steps, and 50
-measured CUDA-event samples.
+Hardware: CUDA-capable NVIDIA GPU with approximately 24 GB of device memory.
+Each run used 1,024 device-resident worlds, two solver iterations, 20 warm-up
+steps, and 50 measured CUDA-event samples.
 
 | Model | Active DoF | 6D tasks / world | p50 | p95 | Mean throughput |
 | --- | ---: | ---: | ---: | ---: | ---: |

@@ -43,11 +43,13 @@ https://robodreamer.github.io/embodik/
 The experimental `embodik.gpu.wbc` path combines model-derived Newton
 kinematics with Warp directional SRINV. The same batch API above derives its
 joint and task dimensions from Panda, AI Worker, and G1 models—there is no
-robot-family DoF table in the solver.
+robot-family DoF table in the solver. The 32×32 colored map represents every
+solved world; detailed robots are sampled across the batch and follow circle,
+figure-eight, helix, or sweep targets with independent phases and speeds.
 
-On an NVIDIA RTX PRO 5000 Blackwell Generation Laptop GPU, 1,024 device-resident
-worlds measured the following warm solve-only latency (50 samples after 20
-warm-up steps, two solver iterations):
+On a CUDA-capable NVIDIA GPU with approximately 24 GB of device memory, 1,024
+device-resident worlds measured the following warm solve-only latency (50
+samples after 20 warm-up steps, two solver iterations):
 
 | Model | Active DoF | 6D tasks / world | p50 | Throughput |
 | --- | ---: | ---: | ---: | ---: |

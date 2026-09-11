@@ -12,8 +12,10 @@ earlier Panda-only synthetic-Jacobian/CusADi demo.
 - Warp directional SRINV with joint position and velocity bounds;
 - one generalized solver surface for Panda, AI Worker, and G1;
 - dimensions and active joints derived from `RobotModel`, not hard-coded DoF;
-- independent target phases with state retained on CUDA;
-- a render sample separated from the full solve batch;
+- circle, figure-eight, helix, and sweep targets with independent per-world
+  phases and speeds;
+- a live 32×32 point map for all 1,024 worlds plus detailed robots sampled
+  across the full solve batch;
 - CUDA-event timing with explicit no-fallback attribution checks.
 
 The profiles intentionally differ: Panda has one moving 6D hand task, AI
@@ -31,9 +33,11 @@ python examples/parallel_trajectory_tracking.py --robot ai-worker --worlds 1024
 python examples/parallel_trajectory_tracking.py --robot g1 --worlds 1024
 ```
 
-The default viewer renders nine detailed URDFs while solving all worlds. Change
-that independently with `--show`; reducing it improves browser responsiveness
-without changing the solver batch.
+The default viewer renders a colored point for every world and nine detailed
+URDFs sampled across the full batch. Labels and trajectory splines identify the
+motion family assigned to each detailed world. Change the detailed count with
+`--show`; reducing it improves browser responsiveness without changing the
+solver batch or the all-world map.
 
 The AI Worker viewer resolves its visual URDF from an explicit
 `--ai-worker-root`, `--urdf`, or the cached public ROBOTIS repository. If none
@@ -59,8 +63,9 @@ publication, and physics stepping.
 
 ## Reference profile
 
-NVIDIA RTX PRO 5000 Blackwell Generation Laptop GPU, 1,024 CUDA-resident
-worlds, two solver iterations, 20 warm-up steps, 50 measured steps:
+CUDA-capable NVIDIA GPU with approximately 24 GB of device memory, 1,024
+CUDA-resident worlds, two solver iterations, 20 warm-up steps, 50 measured
+steps:
 
 | Model | Active DoF | 6D tasks / world | p50 | p95 | Mean throughput |
 | --- | ---: | ---: | ---: | ---: | ---: |

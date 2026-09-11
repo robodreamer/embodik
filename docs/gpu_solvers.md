@@ -65,9 +65,10 @@ python examples/parallel_trajectory_tracking.py \
   --warmup-steps 20 --steps 50 --output-json build/panda-gpu-wbc.json
 ```
 
-Each world follows a different target phase. Only `--show` worlds cross the
-device boundary for rendering, so the visualization remains a sample rather
-than pretending to render 1,024 detailed URDFs.
+Worlds rotate through circle, figure-eight, helix, and sweep targets with
+independent phases and speeds. The viewer maps all worlds as colored points;
+only `--show` detailed URDFs cross the device boundary, sampled across the full
+batch rather than clustered at adjacent indices.
 
 ## Model-derived API
 
@@ -171,9 +172,9 @@ kernel warm-up and should not be treated as steady-state solve latency.
 
 ## Measured scale-out profile
 
-The following profile was captured on an NVIDIA RTX PRO 5000 Blackwell
-Generation Laptop GPU with 1,024 CUDA-resident worlds, two solver iterations,
-20 warm-up steps, and 50 measured steps:
+The following profile was captured on a CUDA-capable NVIDIA GPU with
+approximately 24 GB of device memory, 1,024 CUDA-resident worlds, two solver
+iterations, 20 warm-up steps, and 50 measured steps:
 
 | Model | Active DoF | 6D tasks / world | p50 | p95 | Mean throughput |
 | --- | ---: | ---: | ---: | ---: | ---: |
