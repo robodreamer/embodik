@@ -54,22 +54,23 @@ model and shape; benchmark only after warm-up.
 The same script supports three materially different model and task shapes:
 
 ```bash
-# Viser renders 9 samples while all 1,024 worlds are solved on CUDA.
-python examples/parallel_trajectory_tracking.py --robot panda --worlds 1024
-python examples/parallel_trajectory_tracking.py --robot ai-worker --worlds 1024
-python examples/parallel_trajectory_tracking.py --robot g1 --worlds 1024
+# The interactive viewer defaults to 512 solved and rendered CUDA worlds.
+python examples/10_parallel_trajectory_tracking.py --robot panda
+python examples/10_parallel_trajectory_tracking.py --robot ai-worker
+python examples/10_parallel_trajectory_tracking.py --robot g1
 
-# Reproducible solve-only profile, including machine-readable output.
-python examples/parallel_trajectory_tracking.py \
+# Reproduce the 1,024-world solve-only reference profile.
+python examples/10_parallel_trajectory_tracking.py \
   --robot panda --worlds 1024 --headless \
   --warmup-steps 20 --steps 50 --output-json build/panda-gpu-wbc.json
 ```
 
 Worlds rotate through circle, figure-eight, helix, and sweep targets with
-independent phases and speeds. The viewer renders all 1,024 articulated robots
-by default through shared per-link mesh instances. Four colored world bands make
-the motion families easy to distinguish at field scale. `--show` controls only
-browser visualization; every run still solves the full `--worlds` batch.
+independent phases and speeds. The viewer renders all 512 default worlds through
+shared per-link mesh instances. Four colored world bands make the motion
+families easy to distinguish at field scale. `--show` controls only browser
+visualization; every run still solves the full `--worlds` batch. When omitted,
+`--show` follows `--worlds`, so `--worlds 1024` solves and renders all 1,024.
 
 ## Model-derived API
 

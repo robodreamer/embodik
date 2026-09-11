@@ -41,12 +41,10 @@ stay focused on targets and visualization.
 The experimental model-derived GPU path uses Newton for batched kinematics and
 Warp directional SRINV for prioritized velocity IK. A single public example
 selects Panda, AI Worker, or G1 and derives the active joints and task shape from
-the loaded model. Its viewer renders all 1,024 articulated robots using shared
-per-link mesh instances. Four colored world bands follow distinct motion
-families, with independent phases and speeds inside each band.
-
-The video uses 512 visible worlds so individual motion remains legible at page
-scale. The example itself renders and solves 1,024 worlds by default.
+the loaded model. Its viewer renders 512 articulated robots by default using
+shared per-link mesh instances. Four colored world bands follow distinct motion
+families, with independent phases and speeds inside each band. Pass
+`--worlds 1024` to reproduce the full reference scale.
 
 | Model | Active DoF | 6D tasks / world | Solve-only p50 |
 | --- | ---: | ---: | ---: |

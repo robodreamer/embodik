@@ -1,10 +1,10 @@
-# Parallel GPU WBC Showcase
+# Example 10: Parallel GPU WBC Showcase
 
-`examples/parallel_trajectory_tracking.py` solves many independently targeted
+`examples/10_parallel_trajectory_tracking.py` solves many independently targeted
 robot worlds through the public model-derived GPU WBC API. It replaces the
 earlier Panda-only synthetic-Jacobian/CusADi demo.
 
-<video autoplay muted loop playsinline controls width="100%" aria-label="Panda, ROBOTIS AI Worker, and Unitree G1 moving in parallel Viser worlds while 1,024 independent worlds are solved on CUDA" src="../../assets/media/gpu_wbc_parallel_showcase.mp4"></video>
+<video autoplay muted loop playsinline controls width="100%" aria-label="Panda, ROBOTIS AI Worker, and Unitree G1 moving through distinct trajectories across 512 fully articulated CUDA worlds" src="../../assets/media/gpu_wbc_parallel_showcase.mp4"></video>
 
 ## What it demonstrates
 
@@ -14,8 +14,8 @@ earlier Panda-only synthetic-Jacobian/CusADi demo.
 - dimensions and active joints derived from `RobotModel`, not hard-coded DoF;
 - circle, figure-eight, helix, and sweep targets with independent per-world
   phases and speeds;
-- all 1,024 live articulated robots rendered through shared per-link mesh
-  instances;
+- 512 live articulated robots by default, with a tested 1,024-world scale mode,
+  rendered through shared per-link mesh instances;
 - CUDA-event timing with explicit no-fallback attribution checks.
 
 The profiles intentionally differ: Panda has one moving 6D hand task, AI
@@ -28,19 +28,19 @@ Install the [GPU WBC requirements](../gpu_solvers.md#requirements), then select
 a model:
 
 ```bash
-python examples/parallel_trajectory_tracking.py --robot panda --worlds 1024
-python examples/parallel_trajectory_tracking.py --robot ai-worker --worlds 1024
-python examples/parallel_trajectory_tracking.py --robot g1 --worlds 1024
+python examples/10_parallel_trajectory_tracking.py --robot panda
+python examples/10_parallel_trajectory_tracking.py --robot ai-worker
+python examples/10_parallel_trajectory_tracking.py --robot g1
 ```
 
-The default viewer renders all 1,024 live robots. It reuses each link mesh in a
+The default viewer solves and renders all 512 live robots. It reuses each link mesh in a
 single batched Viser object, then updates the per-world link transforms from the
 device-resident Newton body poses. This keeps the browser scene proportional to
 the number of unique link meshes rather than robots times links. Four colored
 world bands identify the motion families, while phase and speed still vary per
-world. Use `--show` to cap rendering on constrained browsers without changing
-the CUDA solve batch; for example, `--worlds 1024 --show 256` still solves all
-1,024 worlds.
+world. `--show` follows `--worlds` when omitted, so `--worlds 1024` solves and
+renders all 1,024 robots. Set `--show 256` with that command to cap browser
+rendering without changing the CUDA solve batch.
 
 The AI Worker viewer resolves its visual URDF from an explicit
 `--ai-worker-root`, `--urdf`, or the cached public ROBOTIS repository. If none
@@ -50,7 +50,7 @@ profile uses EmbodiK's bundled reduced model and needs no visual assets.
 ## Run a headless profile
 
 ```bash
-python examples/parallel_trajectory_tracking.py \
+python examples/10_parallel_trajectory_tracking.py \
   --robot panda \
   --worlds 1024 \
   --headless \

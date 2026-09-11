@@ -43,13 +43,10 @@ https://robodreamer.github.io/embodik/
 The experimental `embodik.gpu.wbc` path combines model-derived Newton
 kinematics with Warp directional SRINV. The same batch API above derives its
 joint and task dimensions from Panda, AI Worker, and G1 models—there is no
-robot-family DoF table in the solver. The viewer renders all 1,024 articulated
-robots with shared per-link mesh instances. Four colored world bands follow
+robot-family DoF table in the solver. The viewer renders 512 articulated robots
+by default with shared per-link mesh instances. Four colored world bands follow
 circle, figure-eight, helix, or sweep targets, with independent phases and
-speeds inside each band.
-
-The hero capture renders 512 robots for clearer motion at README scale; the
-same example renders and solves 1,024 worlds by default.
+speeds inside each band. Pass `--worlds 1024` for the full reference scale.
 
 On a CUDA-capable NVIDIA GPU with approximately 24 GB of device memory, 1,024
 device-resident worlds measured the following warm solve-only latency (50
@@ -123,7 +120,7 @@ The pip-facing examples are intentionally split by purpose:
 | `07_unitree_g1_retargeting_ik.py` | Unitree G1 whole-body retargeting IK with CoM and optional collision handling. |
 | `08_spot_full_body_ik_viser.py` | Spot full-body IK in regular Viser with arm+torso, torso-only, full-body, and two-stage modes. |
 | `09_spot_locomanip_mjviser.py` | Spot locomanipulation ONNX policy rollout in MuJoCo through mjviser. |
-| `parallel_trajectory_tracking.py` | Model-derived Newton/Warp GPU WBC over independently targeted Panda, AI Worker, or G1 worlds. |
+| `10_parallel_trajectory_tracking.py` | Model-derived Newton/Warp GPU WBC over independently targeted Panda, AI Worker, or G1 worlds. |
 
 Run them from a copied example directory:
 

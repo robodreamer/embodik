@@ -7,10 +7,10 @@ batch without creating one browser scene tree per robot. Visualization remains
 outside the reported CUDA solve timing.
 
 Examples:
-    python examples/parallel_trajectory_tracking.py --robot panda
-    python examples/parallel_trajectory_tracking.py --robot ai-worker
-    python examples/parallel_trajectory_tracking.py --robot g1
-    python examples/parallel_trajectory_tracking.py --robot panda --headless --steps 100
+    python examples/10_parallel_trajectory_tracking.py --robot panda
+    python examples/10_parallel_trajectory_tracking.py --robot ai-worker
+    python examples/10_parallel_trajectory_tracking.py --robot g1
+    python examples/10_parallel_trajectory_tracking.py --robot panda --headless --steps 100
 """
 
 from __future__ import annotations

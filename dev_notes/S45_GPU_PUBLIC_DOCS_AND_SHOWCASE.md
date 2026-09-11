@@ -8,8 +8,9 @@ instead of the older Panda-only synthetic-Jacobian/CusADi demonstration.
 `examples/parallel_trajectory_tracking.py` uses the same solver factory for
 Panda, ROBOTIS AI Worker, and Unitree G1. Active coordinates and task rows are
 derived from each loaded `RobotModel`; the common solve and visualization loop
-contains no robot-specific DoF constants. The viewer maps all 1,024 worlds as a
-CUDA solve batch and renders every articulated robot. It publishes one shared
+contains no robot-specific DoF constants. The viewer defaults to 512 CUDA worlds
+and renders every articulated robot; 1,024 remains the explicit reference scale.
+It publishes one shared
 instance batch per link mesh instead of creating a browser scene tree per URDF,
 keeping the scene compact at full scale. Four colored world bands use circle,
 figure-eight, helix, and sweep motion families; worlds retain independent phase
@@ -42,8 +43,8 @@ whole-body profile is sub-millisecond.
   legacy CusADi experiments.
 - the parallel example page documents viewer and machine-readable headless use.
 - media provenance records source revision, assets, hardware, scope, and edits.
-- the hero clip uses 512 fully articulated worlds for legibility and smooth
-  capture, while the public example continues to default to 1,024 worlds.
+- the hero clip and public viewer default use 512 fully articulated worlds for
+  legibility and smooth interaction; the reference benchmark stays at 1,024.
 
 ## Remaining boundaries
 

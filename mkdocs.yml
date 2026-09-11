@@ -109,7 +109,7 @@ nav:
       - Spot Full-Body IK: examples/spot_full_body_ik.md
       - Spot Locomanipulation mjviser: examples/spot_locomanip_mjviser.md
     - GPU & batch:
-      - Parallel GPU WBC: examples/parallel_trajectory_tracking.md
+      - 10. Parallel GPU WBC: examples/parallel_trajectory_tracking.md
       - GPU Collision Batch: examples/gpu_collision_batch.md
       - Legacy GPU Batch IK: examples/gpu_batch_ik.md
       - Legacy GPU Solver Demo: examples/gpu_solver_demo.md

@@ -6,7 +6,7 @@ claims can be reproduced.
 
 ## `gpu_wbc_parallel_showcase.mp4`
 
-- **Source:** `examples/parallel_trajectory_tracking.py` at commit `25af1aa`
+- **Source:** `examples/10_parallel_trajectory_tracking.py` at commit `809dfaf`
 - **Capture date:** 2026-09-11
 - **Capture owner and permission:** captured locally by the EmbodiK maintainer
   from repository-owned example code and redistributable public robot assets;
@@ -16,8 +16,8 @@ claims can be reproduced.
 - **Profile:** 512 CUDA-resident worlds, two solver iterations, all 512
   articulated robots rendered through shared per-link mesh instances; four
   high-amplitude colored motion bands; Panda then ROBOTIS AI Worker SG2 then
-  Unitree G1. The public example defaults to 1,024 worlds; 512 was selected for
-  the hero capture so individual robot motion remains legible at page scale.
+  Unitree G1. The public example also defaults to 512 worlds; the explicit
+  reference benchmark remains at 1,024 worlds.
 - **Solver scope:** Newton batched kinematics plus Warp directional SRINV;
   collision disabled; target generation, Viser rendering, host publication,
   and physics stepping excluded from displayed solve time
