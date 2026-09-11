@@ -1464,9 +1464,7 @@ class DeviceResidentMultiFramePoseSolver:
         self.collision_convex_envelope = None
         self._compiled_collision_constraint = None
         self._compiled_collision_rows = None
-        compile_requested = self.config.collision_enabled or (
-            self.config.velocity_solver == "torch_srinv" and self.config.native_compile_enabled
-        )
+        compile_requested = self.config.collision_enabled or self.config.native_compile_enabled
         compile_available = not compile_requested or _python_extension_headers_available()
         if compile_requested and not compile_available:
             warnings.warn(
