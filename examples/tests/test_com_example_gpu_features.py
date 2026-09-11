@@ -24,9 +24,7 @@ def run_step(gpu, **overrides):
         dt=0.02,
     )
     options.update(overrides)
-    return example.gpu_step(
-        gpu, np.array([4.0, 5.0, 6.0, 7.0]), (2, 0), "pose", **options
-    )
+    return example.gpu_step(gpu, np.array([4.0, 5.0, 6.0, 7.0]), (2, 0), "pose", **options)
 
 
 def test_com_enabled_configures_and_solves():
@@ -43,9 +41,7 @@ def test_com_enabled_configures_and_solves():
     "collision,debug,expected",
     [(True, True, True), (True, False, False), (False, True, False)],
 )
-def test_runtime_controls_lazy_debug_and_noncontiguous_joint_merge(
-    collision, debug, expected
-):
+def test_runtime_controls_lazy_debug_and_noncontiguous_joint_merge(collision, debug, expected):
     gpu = Mock(collision_supported=True)
     gpu.solve_step.return_value = SimpleNamespace(joints=np.array([8.0, 9.0]))
     q, result = run_step(gpu, collision_enabled=collision, show_debug=debug)
@@ -69,6 +65,16 @@ def test_runtime_controls_lazy_debug_and_noncontiguous_joint_merge(
         com_acc_max=0.1,
         com_use_acceleration_limits=True,
         com_proximity_fraction=0.05,
+        capture_point_enabled=False,
+        capture_point_support_polygon_xy=example.DEFAULT_POLYGON,
+        capture_point_margin=0.0,
+        velocity_zmp_enabled=False,
+        velocity_zmp_support_polygon_xy=example.DEFAULT_POLYGON,
+        velocity_zmp_margin=0.0,
+        centroidal_momentum_enabled=False,
+        centroidal_momentum_target=(0.0,) * 6,
+        centroidal_momentum_axis_mask=(True, True, False, False, False, False),
+        centroidal_momentum_weight=0.01,
     )
     assert result is gpu.solve_step.return_value
 
@@ -84,6 +90,34 @@ def test_missing_collision_is_explicit_failure_and_disabled_collision_runs():
     assert gpu.configure_runtime.call_args.kwargs["collision_min_distance_m"] is None
 
 
+def test_centroidal_gpu_controls_route_measured_velocity():
+    gpu = Mock(collision_supported=False)
+    gpu.extract_active_velocity.return_value = np.array([0.2, -0.1])
+    gpu.solve_step.return_value = SimpleNamespace(joints=np.array([6.0, 4.0]))
+    measured = np.array([0.1, 0.2, 0.3, 0.4])
+
+    run_step(
+        gpu,
+        collision_enabled=False,
+        capture_point_enabled=True,
+        velocity_zmp_enabled=True,
+        momentum_enabled=True,
+        momentum_weight=0.025,
+        current_velocity=measured,
+    )
+
+    np.testing.assert_array_equal(gpu.extract_active_velocity.call_args.args[0], measured)
+    assert (
+        gpu.solve_step.call_args.kwargs["current_velocity"]
+        is gpu.extract_active_velocity.return_value
+    )
+    updates = gpu.configure_runtime.call_args.kwargs
+    assert updates["capture_point_enabled"] is True
+    assert updates["velocity_zmp_enabled"] is True
+    assert updates["centroidal_momentum_enabled"] is True
+    assert updates["centroidal_momentum_weight"] == 0.025
+
+
 def test_gpu_fault_propagates_without_modifying_configuration():
     gpu = Mock(collision_supported=True)
     gpu.solve_step.side_effect = RuntimeError("CUDA fault")
@@ -93,9 +127,7 @@ def test_gpu_fault_propagates_without_modifying_configuration():
 
 def test_collision_pairs_follow_topology_and_order_independent_exclusions(tmp_path):
     urdf = tmp_path / "robot.urdf"
-    urdf.write_text(
-        '<robot><joint><parent link="root"/><child link="arm"/></joint></robot>'
-    )
+    urdf.write_text('<robot><joint><parent link="root"/><child link="arm"/></joint></robot>')
     robot = SimpleNamespace(
         get_collision_geometries=lambda: [
             {"name": name, "parent_frame": parent}
@@ -126,9 +158,7 @@ def test_constructor_derives_layout_from_model(monkeypatch, count):
     monkeypatch.setattr(example, "derive_frame_active_joint_names", lambda *args: names)
     monkeypatch.setattr(example.embodik, "RobotModel", Mock(return_value=gpu_robot))
     monkeypatch.setattr(example, "load_robot_presets", lambda: {"custom": {}})
-    monkeypatch.setattr(
-        example, "gpu_collision_pairs", lambda *args, **kwargs: (("a", "b"),)
-    )
+    monkeypatch.setattr(example, "gpu_collision_pairs", lambda *args, **kwargs: (("a", "b"),))
     monkeypatch.setattr(example, "GpuWbcMultiFrameSolver", factory)
     args = SimpleNamespace(gpu_wbc_manifest="spec", gpu_wbc_cache_dir="cache")
     config = dict(
@@ -146,7 +176,26 @@ def test_constructor_derives_layout_from_model(monkeypatch, count):
     assert options["posture_target_configuration"] == indices
     assert options["posture_weights"] == (1.0,) * count
     assert options["solver_backend"] == "torch_srinv"
-    gpu.configure_runtime.assert_called_once_with(collision_enabled=False)
+    np.testing.assert_array_equal(
+        options["capture_point_support_polygon_xy"], example.DEFAULT_POLYGON
+    )
+    np.testing.assert_array_equal(
+        options["velocity_zmp_support_polygon_xy"], example.DEFAULT_POLYGON
+    )
+    assert options["centroidal_momentum_axis_mask"] == (
+        True,
+        True,
+        False,
+        False,
+        False,
+        False,
+    )
+    gpu.configure_runtime.assert_called_once_with(
+        collision_enabled=False,
+        capture_point_enabled=False,
+        velocity_zmp_enabled=False,
+        centroidal_momentum_enabled=False,
+    )
     assert gpu is factory.return_value
 
 

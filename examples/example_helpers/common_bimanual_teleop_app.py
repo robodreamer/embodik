@@ -18,11 +18,11 @@ from __future__ import annotations
 import argparse
 import collections
 import hashlib
-from functools import partial
 import sys
 import tempfile
 import time
 import xml.etree.ElementTree as ET
+from functools import partial
 from pathlib import Path
 from typing import Iterable
 
@@ -48,9 +48,7 @@ def _gpu_cached_urdf(source: Path, cache_dir: Path) -> Path:
     )
     if has_relative_assets:
         return source.resolve()
-    destination = (
-        cache_dir / "models" / hashlib.sha256(payload).hexdigest() / "robot.urdf"
-    )
+    destination = cache_dir / "models" / hashlib.sha256(payload).hexdigest() / "robot.urdf"
     destination.parent.mkdir(parents=True, exist_ok=True)
     if not destination.exists() or destination.read_bytes() != payload:
         destination.write_bytes(payload)
@@ -76,9 +74,7 @@ def _gpu_regularizer_weights(kinds, posture_weight, arm_weight):
     # Do not collapse duplicate CPU task rows: doing so can change SRINV's
     # singular spectrum and damping even when ordinary least squares agrees.
     if posture_weight > 0 and arm_weight > 0 and any(p and a for p, a in kinds):
-        raise ValueError(
-            "overlapping posture and arm bias rows require separate GPU tasks"
-        )
+        raise ValueError("overlapping posture and arm bias rows require separate GPU tasks")
     return tuple(
         float((posture_weight if posture else 0.0) + (arm_weight if arm else 0.0))
         for posture, arm in kinds
@@ -123,14 +119,17 @@ def _configure_gpu_bimanual_features(
     com_acc_max=0.1,
     com_use_acceleration_limits=True,
     com_proximity_fraction=0.05,
+    capture_point_enabled=False,
+    velocity_zmp_enabled=False,
+    momentum_enabled=False,
+    momentum_weight=0.01,
 ):
     """Configure EE/torso band 1 and posture band 2 without CPU queries."""
     secondary_poses = (*secondary_targets, torso_target)
     updates = dict(
         iterations=int(options.max_steps),
         frame_position_gains=(float(options.position_gain),) * len(gpu_solver.frames),
-        frame_orientation_gains=(float(options.orientation_gain),)
-        * len(gpu_solver.frames),
+        frame_orientation_gains=(float(options.orientation_gain),) * len(gpu_solver.frames),
         adaptive_dt=bool(options.adaptive_dt),
         adaptive_dt_max_scale=float(options.adaptive_dt_max_scale),
         adaptive_dt_reference_distance=float(options.adaptive_dt_reference_distance),
@@ -144,16 +143,22 @@ def _configure_gpu_bimanual_features(
         com_acc_max=float(com_acc_max),
         com_use_acceleration_limits=bool(com_use_acceleration_limits),
         com_proximity_fraction=float(com_proximity_fraction),
+        capture_point_enabled=bool(capture_point_enabled),
+        capture_point_support_polygon_xy=com_support_polygon,
+        capture_point_margin=float(com_margin),
+        velocity_zmp_enabled=bool(velocity_zmp_enabled),
+        velocity_zmp_support_polygon_xy=com_support_polygon,
+        velocity_zmp_margin=float(com_margin),
+        centroidal_momentum_enabled=bool(momentum_enabled),
+        centroidal_momentum_target=(0.0,) * 6,
+        centroidal_momentum_axis_mask=(True, True, False, False, False, False),
+        centroidal_momentum_weight=float(momentum_weight),
         secondary_frame_target_poses_wxyz=tuple(
-            tuple(pose[:3, 3]) + tuple(r2q(pose[:3, :3], order="sxyz"))
-            for pose in secondary_poses
+            tuple(pose[:3, 3]) + tuple(r2q(pose[:3, :3], order="sxyz")) for pose in secondary_poses
         ),
-        secondary_frame_position_gains=(float(options.position_gain),)
-        * len(secondary_poses),
-        secondary_frame_orientation_gains=(float(options.orientation_gain),)
-        * len(secondary_poses),
-        secondary_frame_weights=(1.0,) * len(secondary_targets)
-        + (float(torso_enabled),),
+        secondary_frame_position_gains=(float(options.position_gain),) * len(secondary_poses),
+        secondary_frame_orientation_gains=(float(options.orientation_gain),) * len(secondary_poses),
+        secondary_frame_weights=(1.0,) * len(secondary_targets) + (float(torso_enabled),),
     )
     if gpu_solver.collision_supported:
         updates["collision_min_distance_m"] = float(collision_distance)
@@ -162,9 +167,7 @@ def _configure_gpu_bimanual_features(
             posture_target_configuration=tuple(
                 gpu_solver.extract_active_configuration(posture_target)
             ),
-            posture_weights=_gpu_regularizer_weights(
-                posture_kinds, posture_weight, arm_weight
-            ),
+            posture_weights=_gpu_regularizer_weights(posture_kinds, posture_weight, arm_weight),
         )
     gpu_solver.configure_runtime(**updates)
 
@@ -173,20 +176,14 @@ def _gpu_bimanual_task_layout(active, priorities):
     """Return source tool slots for the two pose bands; posture stays at two."""
     if any(priority not in (0, 1) for priority in priorities):
         raise ValueError("GPU tool tasks support priority 0 or 1 only")
-    primary = tuple(
-        i for i, enabled in enumerate(active) if enabled and priorities[i] == 0
-    )
-    secondary = tuple(
-        i for i, enabled in enumerate(active) if enabled and priorities[i] == 1
-    )
+    primary = tuple(i for i, enabled in enumerate(active) if enabled and priorities[i] == 0)
+    secondary = tuple(i for i, enabled in enumerate(active) if enabled and priorities[i] == 1)
     if not primary:
         raise ValueError("GPU requires at least one active primary tool task")
     return primary, secondary
 
 
-def _gpu_bimanual_posture_kinds(
-    rows, kinds, *, torso_enabled, lift_rows, active_arm_rows
-):
+def _gpu_bimanual_posture_kinds(rows, kinds, *, torso_enabled, lift_rows, active_arm_rows):
     """Mirror CPU controlled-row selection without relying on model dimensions."""
     lift_rows, active_arm_rows = set(lift_rows), set(active_arm_rows)
     return tuple(
@@ -222,10 +219,6 @@ try:
         DEFAULT_VISER_PORT,
         configure_solver_runtime_policy,
     )
-    from embodik.gpu.wbc import (
-        GpuWbcMultiFrameSolver,
-        derive_frames_active_joint_names,
-    )
     from example_helpers.seer_teleop import (
         DEFAULT_SEER_CONTROLLER_PORT,
         DEFAULT_TELEOP_SCALE_FACTOR,
@@ -233,11 +226,18 @@ try:
         set_transform_control_pose,
     )
     from example_helpers.visualization_helpers import make_visual_config_mapper
+
+    from embodik.gpu.wbc import (
+        GpuWbcMultiFrameSolver,
+        derive_frames_active_joint_names,
+    )
 except ModuleNotFoundError as exc:
-    if exc.name != "example_helpers" and not str(exc.name).startswith(
-        "example_helpers."
-    ):
+    if exc.name != "example_helpers" and not str(exc.name).startswith("example_helpers."):
         raise
+    from embodik.gpu.wbc import (
+        GpuWbcMultiFrameSolver,
+        derive_frames_active_joint_names,
+    )
     from examples.example_helpers.adaptive_gain_tuning import (
         AdaptiveGainTuningConfig,
         AdaptiveGainTuningState,
@@ -259,10 +259,6 @@ except ModuleNotFoundError as exc:
     from examples.example_helpers.ik_common import (
         DEFAULT_VISER_PORT,
         configure_solver_runtime_policy,
-    )
-    from embodik.gpu.wbc import (
-        GpuWbcMultiFrameSolver,
-        derive_frames_active_joint_names,
     )
     from examples.example_helpers.seer_teleop import (
         DEFAULT_SEER_CONTROLLER_PORT,
@@ -310,9 +306,7 @@ def _gpu_bimanual_policy_holds(torso_policy, contribution, solve_mode, active_fa
             }.get(torso_policy, "unknown torso policy")
         )
     if abs(float(contribution) - 0.5) >= 1e-6:
-        reasons.append(
-            "torso contribution requires a weighted joint metric before SRINV"
-        )
+        reasons.append("torso contribution requires a weighted joint metric before SRINV")
     if solve_mode != "SCALE":
         reasons.append(f"GPU has no matching CPU {solve_mode} solve policy")
     if active_fallback:
@@ -386,9 +380,7 @@ COMMON_BIMANUAL_DEFAULT_LOCK_TORSO: bool | None = None
 COMMON_BIMANUAL_DEFAULT_COLLISION_MAX_CONSTRAINTS: int | None = None
 COMMON_BIMANUAL_POSTURE_JOINT_NAMES: list[str] | None = None
 COMMON_BIMANUAL_INITIAL_TARGET_WXYZ: tuple[float, float, float, float] | None = None
-_SolverStep = collections.namedtuple(
-    "_SolverStep", ("q_next", "solver_result", "elapsed_ms")
-)
+_SolverStep = collections.namedtuple("_SolverStep", ("q_next", "solver_result", "elapsed_ms"))
 _GpuUiResult = collections.namedtuple("_GpuUiResult", ("status", "status_message"))
 COMMON_BIMANUAL_SUPPORT_CONTACT_FRAMES = (
     "left_wheel_drive_link",
@@ -469,9 +461,7 @@ POSTURE_JOINT_CANDIDATES = (
 
 def resolve_ffw_urdf_path(_variant: str) -> Path:
     """Injected by thin entrypoints to keep this module source-agnostic."""
-    raise FileNotFoundError(
-        "resolve_ffw_urdf_path was not configured by the entrypoint"
-    )
+    raise FileNotFoundError("resolve_ffw_urdf_path was not configured by the entrypoint")
 
 
 def resolve_generated_ffw_collision_urdf_path(_variant: str) -> Path | None:
@@ -507,9 +497,7 @@ def _is_left_arm_joint(joint_name: str) -> bool:
 
 
 def _is_right_arm_joint(joint_name: str) -> bool:
-    if joint_name.startswith(
-        ("arm_r_", "gripper_r_", "right_arm_", "gripper_finger_r")
-    ):
+    if joint_name.startswith(("arm_r_", "gripper_r_", "right_arm_", "gripper_finger_r")):
         return True
     return joint_name.startswith("right_") and any(
         token in joint_name for token in _ARM_SEGMENT_TOKENS
@@ -520,9 +508,7 @@ def _is_arm_joint(joint_name: str) -> bool:
     return _is_left_arm_joint(joint_name) or _is_right_arm_joint(joint_name)
 
 
-def _is_torso_contribution_joint(
-    joint_name: str, lock_joint_names: set[str] | None = None
-) -> bool:
+def _is_torso_contribution_joint(joint_name: str, lock_joint_names: set[str] | None = None) -> bool:
     """Return True for the mobile-base / torso chain used by the contribution knob."""
     if lock_joint_names is not None and joint_name in lock_joint_names:
         return True
@@ -686,16 +672,12 @@ def _apply_torso_control_priority_policy(
         controlled_indices = list(posture_controlled_indices)
         if torso_secondary:
             lift_indices = set(lift_posture_indices)
-            controlled_indices = [
-                idx for idx in controlled_indices if idx not in lift_indices
-            ]
+            controlled_indices = [idx for idx in controlled_indices if idx not in lift_indices]
         posture_task.set_controlled_joint_indices(controlled_indices)
     return torso_secondary
 
 
-def _resolve_torso_marker_frame(
-    frame_map: dict[str, str], frame_names: Iterable[str]
-) -> str:
+def _resolve_torso_marker_frame(frame_map: dict[str, str], frame_names: Iterable[str]) -> str:
     """Choose a visible upper-body frame for the optional torso gizmo."""
     frame_name_set = set(frame_names)
     for frame_name in (
@@ -721,12 +703,7 @@ def _resolve_torso_marker_z_bounds(
 ) -> tuple[float, float] | None:
     """Return reachable torso-marker z bounds for simple vertical lift chains."""
     lift_idx = joint_name_to_cfg.get("lift_joint")
-    if (
-        lift_idx is None
-        or lift_idx >= q_ref.size
-        or lift_idx >= q_lo.size
-        or lift_idx >= q_hi.size
-    ):
+    if lift_idx is None or lift_idx >= q_ref.size or lift_idx >= q_lo.size or lift_idx >= q_hi.size:
         return None
     original_q = np.asarray(q_ref, dtype=float).copy()
     samples = []
@@ -736,9 +713,7 @@ def _resolve_torso_marker_z_bounds(
             q_sample[lift_idx] = lift_value
             robot.update_configuration(q_sample)
             samples.append(
-                float(
-                    np.asarray(robot.get_frame_pose(torso_marker_frame).translation)[2]
-                )
+                float(np.asarray(robot.get_frame_pose(torso_marker_frame).translation)[2])
             )
     except Exception:
         return None
@@ -761,24 +736,14 @@ def _resolve_lock_joint_names(
     entrypoint; otherwise falls back to the FFW lift axis (``lift_`` prefix).
     """
     if COMMON_BIMANUAL_LOCK_JOINT_NAMES is not None:
-        return [
-            name
-            for name in COMMON_BIMANUAL_LOCK_JOINT_NAMES
-            if name in joint_name_to_cfg
-        ]
-    return [
-        name
-        for name in joint_names
-        if name.startswith("lift_") and name in joint_name_to_cfg
-    ]
+        return [name for name in COMMON_BIMANUAL_LOCK_JOINT_NAMES if name in joint_name_to_cfg]
+    return [name for name in joint_names if name.startswith("lift_") and name in joint_name_to_cfg]
 
 
 def _posture_control_joint_names(joint_names: list[str]) -> list[str]:
     available = set(joint_names)
     if COMMON_BIMANUAL_POSTURE_JOINT_NAMES is not None:
-        return [
-            name for name in COMMON_BIMANUAL_POSTURE_JOINT_NAMES if name in available
-        ]
+        return [name for name in COMMON_BIMANUAL_POSTURE_JOINT_NAMES if name in available]
     return [name for name in POSTURE_JOINT_CANDIDATES if name in available]
 
 
@@ -873,9 +838,7 @@ def _pose_from_ctrl(ctrl) -> np.ndarray:
         wxyz = np.array([1.0, 0.0, 0.0, 0.0], dtype=float)
     else:
         wxyz = wxyz / n
-    pose[:3, :3] = q2r(
-        np.array([wxyz[1], wxyz[2], wxyz[3], wxyz[0]], dtype=float), order="xyzs"
-    )
+    pose[:3, :3] = q2r(np.array([wxyz[1], wxyz[2], wxyz[3], wxyz[0]], dtype=float), order="xyzs")
     return pose
 
 
@@ -901,9 +864,7 @@ def _rotation_from_wxyz(
     wxyz: tuple[float, float, float, float] | np.ndarray,
 ) -> np.ndarray:
     quat_wxyz = _normalized_wxyz(wxyz)
-    quat_xyzw = np.array(
-        [quat_wxyz[1], quat_wxyz[2], quat_wxyz[3], quat_wxyz[0]], dtype=float
-    )
+    quat_xyzw = np.array([quat_wxyz[1], quat_wxyz[2], quat_wxyz[3], quat_wxyz[0]], dtype=float)
     return q2r(quat_xyzw, order="xyzs")
 
 
@@ -913,9 +874,7 @@ def _target_display_offset_for_initial_pose(
 ) -> np.ndarray:
     if display_wxyz is None:
         return np.eye(3, dtype=float)
-    return np.asarray(solver_pose[:3, :3], dtype=float).T @ _rotation_from_wxyz(
-        display_wxyz
-    )
+    return np.asarray(solver_pose[:3, :3], dtype=float).T @ _rotation_from_wxyz(display_wxyz)
 
 
 def _display_pose_from_solver_pose_with_offset(
@@ -1035,9 +994,7 @@ def _com_color(
     return COLOR_COM_INSIDE
 
 
-def _compute_support_polygon_from_contacts(
-    robot, frame_names: tuple[str, ...]
-) -> np.ndarray:
+def _compute_support_polygon_from_contacts(robot, frame_names: tuple[str, ...]) -> np.ndarray:
     points_xy: list[np.ndarray] = []
     for frame_name in frame_names:
         pose = robot.get_frame_pose(frame_name)
@@ -1046,9 +1003,7 @@ def _compute_support_polygon_from_contacts(
     return _convex_hull_2d(np.asarray(points_xy, dtype=float))
 
 
-def _support_contact_points(
-    robot, frame_names: tuple[str, ...]
-) -> dict[str, np.ndarray]:
+def _support_contact_points(robot, frame_names: tuple[str, ...]) -> dict[str, np.ndarray]:
     points: dict[str, np.ndarray] = {}
     for frame_name in frame_names:
         pose = robot.get_frame_pose(frame_name)
@@ -1082,12 +1037,7 @@ def _apply_soft_lift_margin(
 ) -> np.ndarray:
     q_out = np.asarray(q_in, dtype=float).copy()
     lift_idx = joint_name_to_cfg.get("lift_joint")
-    if (
-        lift_idx is None
-        or lift_idx >= q_out.size
-        or lift_idx >= q_lo.size
-        or lift_idx >= q_hi.size
-    ):
+    if lift_idx is None or lift_idx >= q_out.size or lift_idx >= q_lo.size or lift_idx >= q_hi.size:
         return q_out
     lo = float(q_lo[lift_idx])
     hi = float(q_hi[lift_idx])
@@ -1260,9 +1210,7 @@ def _build_link_adjacency_graph(urdf_path: Path) -> dict[str, set[str]]:
     return graph
 
 
-def _collision_object_to_link_name(
-    collision_name: str, link_names: set[str]
-) -> str | None:
+def _collision_object_to_link_name(collision_name: str, link_names: set[str]) -> str | None:
     name = str(collision_name)
     if name in link_names:
         return name
@@ -1439,9 +1387,7 @@ def _common_bimanual_manual_curated_link_pairs() -> list[tuple[str, str]]:
     return sorted(pairs)
 
 
-def _generate_consecutive_collision_exclusions(
-    robot, urdf_path: Path
-) -> list[tuple[str, str]]:
+def _generate_consecutive_collision_exclusions(robot, urdf_path: Path) -> list[tuple[str, str]]:
     """Exclude structurally adjacent link pairs using the URDF link graph."""
     if not hasattr(robot, "get_collision_pair_names") or not hasattr(
         robot, "get_collision_geometries"
@@ -1477,9 +1423,7 @@ def _generate_consecutive_collision_exclusions(
             group_b = _common_bimanual_collision_group(link_b)
             if {group_a, group_b}.issubset({"core", "head"}):
                 max_allowed_distance = 4
-            elif "core" in {group_a, group_b} and (
-                {group_a, group_b} & {"left", "right"}
-            ):
+            elif "core" in {group_a, group_b} and ({group_a, group_b} & {"left", "right"}):
                 max_allowed_distance = 2
             elif group_a == group_b:
                 max_allowed_distance = 2
@@ -1488,9 +1432,7 @@ def _generate_consecutive_collision_exclusions(
             distance = _shortest_link_distance(
                 link_graph, link_a, link_b, max_hops=max_allowed_distance + 1
             )
-        if (fa and fb and fa == fb) or (
-            distance is not None and distance <= max_allowed_distance
-        ):
+        if (fa and fb and fa == fb) or (distance is not None and distance <= max_allowed_distance):
             exclusions.append((a, b))
     return exclusions
 
@@ -1529,9 +1471,7 @@ def _generate_common_bimanual_collision_include_pairs(
 
 def _apply_collision_tuning_mode(solver, mode_label: str) -> None:
     label = str(mode_label).lower()
-    if hasattr(solver, "set_collision_tuning_mode") and hasattr(
-        embodik, "CollisionTuningMode"
-    ):
+    if hasattr(solver, "set_collision_tuning_mode") and hasattr(embodik, "CollisionTuningMode"):
         mode_map = {
             "precise": embodik.CollisionTuningMode.PRECISE,
             "balanced": embodik.CollisionTuningMode.BALANCED,
@@ -1540,9 +1480,7 @@ def _apply_collision_tuning_mode(solver, mode_label: str) -> None:
             # fast UI mode on the lower-latency backend path.
             "speed": embodik.CollisionTuningMode.BALANCED,
         }
-        solver.set_collision_tuning_mode(
-            mode_map.get(label, embodik.CollisionTuningMode.BALANCED)
-        )
+        solver.set_collision_tuning_mode(mode_map.get(label, embodik.CollisionTuningMode.BALANCED))
     if hasattr(solver, "set_proximity_gated_collision_activation_enabled"):
         solver.set_proximity_gated_collision_activation_enabled(label != "precise")
     if hasattr(solver, "set_collision_constraint_activation_multiplier"):
@@ -1639,18 +1577,14 @@ def _configure_acceleration_limit_constraint(
         return True
     if not hasattr(solver, "set_acceleration_limits"):
         return False
-    solver.set_acceleration_limits(
-        np.full(int(nv), float(max_acceleration), dtype=float)
-    )
+    solver.set_acceleration_limits(np.full(int(nv), float(max_acceleration), dtype=float))
     return True
 
 
 def main() -> None:
     args = parse_args()
     urdf_path = resolve_ffw_urdf_path(args.variant)
-    collision_urdf_path = (
-        resolve_generated_ffw_collision_urdf_path(args.variant) or urdf_path
-    )
+    collision_urdf_path = resolve_generated_ffw_collision_urdf_path(args.variant) or urdf_path
     from utils.robot_models import ensure_ros_package_path
 
     ensure_ros_package_path(Path(collision_urdf_path))
@@ -1664,9 +1598,7 @@ def main() -> None:
     from viser.extras import ViserUrdf
 
     full_robot = embodik.RobotModel(str(collision_urdf_path), floating_base=False)
-    ik_joint_names = default_common_bimanual_ik_joint_names(
-        full_robot.get_joint_names()
-    )
+    ik_joint_names = default_common_bimanual_ik_joint_names(full_robot.get_joint_names())
     robot = embodik.RobotModel(
         str(collision_urdf_path),
         actuated_joint_names=ik_joint_names,
@@ -1677,8 +1609,7 @@ def main() -> None:
 
     viewer_urdf_path = _prepare_viewer_urdf_path(
         urdf_path,
-        allow_recursive_mesh_fallback=urdf_path.resolve()
-        != collision_urdf_path.resolve(),
+        allow_recursive_mesh_fallback=urdf_path.resolve() != collision_urdf_path.resolve(),
     )
     collision_viewer_urdf_path = _prepare_viewer_urdf_path(
         collision_urdf_path,
@@ -1745,22 +1676,16 @@ def main() -> None:
         if "lift" in name and (idx := joint_name_to_cfg.get(name)) is not None
     ]
     q = _apply_named_joint_seed(q, joint_name_to_cfg, q_lo, q_hi, default_joint_seed)
-    q = _apply_soft_lift_margin(
-        q, joint_name_to_cfg=joint_name_to_cfg, q_lo=q_lo, q_hi=q_hi
-    )
+    q = _apply_soft_lift_margin(q, joint_name_to_cfg=joint_name_to_cfg, q_lo=q_lo, q_hi=q_hi)
     current_dq = np.zeros(robot.nv, dtype=float)
     nullspace_bias_q = np.asarray(q, dtype=float).copy()
     robot.update_configuration(q)
     available_frame_names = set(robot.get_frame_names())
     support_contact_frames = tuple(
-        frame
-        for frame in COMMON_BIMANUAL_SUPPORT_CONTACT_FRAMES
-        if frame in available_frame_names
+        frame for frame in COMMON_BIMANUAL_SUPPORT_CONTACT_FRAMES if frame in available_frame_names
     )
     if len(support_contact_frames) >= 3:
-        support_polygon = _compute_support_polygon_from_contacts(
-            robot, support_contact_frames
-        )
+        support_polygon = _compute_support_polygon_from_contacts(robot, support_contact_frames)
     else:
         base_frame = next(
             (
@@ -1770,9 +1695,7 @@ def main() -> None:
             ),
             next(iter(available_frame_names)),
         )
-        base_xy = np.asarray(robot.get_frame_pose(base_frame).translation, dtype=float)[
-            :2
-        ]
+        base_xy = np.asarray(robot.get_frame_pose(base_frame).translation, dtype=float)[:2]
         support_polygon = base_xy + np.asarray(
             ((-0.25, -0.20), (0.25, -0.20), (0.25, 0.20), (-0.25, 0.20)),
             dtype=float,
@@ -1809,25 +1732,20 @@ def main() -> None:
             for name in gpu_active_names
             for row in range(
                 robot.get_joint_velocity_index(name),
-                robot.get_joint_velocity_index(name)
-                + robot.get_joint_velocity_size(name),
+                robot.get_joint_velocity_index(name) + robot.get_joint_velocity_size(name),
             )
         }
         gpu_posture_indices, gpu_posture_kinds = _gpu_posture_rows(
             robot, gpu_active_names, set(posture_control_joint_names)
         )
-        gpu_exclusions = _generate_consecutive_collision_exclusions(
-            robot, collision_urdf_path
-        )
+        gpu_exclusions = _generate_consecutive_collision_exclusions(robot, collision_urdf_path)
         gpu_pairs = _generate_common_bimanual_collision_include_pairs(
             robot, collision_urdf_path, gpu_exclusions
         )
         gpu_pair_options = {
             True: tuple(gpu_pairs),
             False: tuple(
-                _generate_common_bimanual_collision_include_pairs(
-                    robot, collision_urdf_path, []
-                )
+                _generate_common_bimanual_collision_include_pairs(robot, collision_urdf_path, [])
             ),
         }
         gpu_torso_pose = robot.get_frame_pose(torso_marker_frame)
@@ -1855,14 +1773,18 @@ def main() -> None:
             com_support_polygon_xy=support_polygon,
             com_full_robot=robot,
             com_full_default_configuration=q,
+            capture_point_support_polygon_xy=support_polygon,
+            velocity_zmp_support_polygon_xy=support_polygon,
+            centroidal_momentum_target=(0.0,) * 6,
+            centroidal_momentum_axis_mask=(True, True, False, False, False, False),
+            centroidal_momentum_weight=0.01,
+            centroidal_momentum_priority=2,
             posture_target_configuration=(
                 tuple(
                     float(value)
                     for name in gpu_active_names
                     for value in q[
-                        robot.get_joint_config_index(
-                            name
-                        ) : robot.get_joint_config_index(name)
+                        robot.get_joint_config_index(name) : robot.get_joint_config_index(name)
                         + robot.get_joint_config_size(name)
                     ]
                 )
@@ -1883,7 +1805,12 @@ def main() -> None:
         gpu_solver = gpu_solver_factory(
             collision_max_constraints=_default_collision_max_constraints(args.variant)
         )
-        gpu_solver.configure_runtime(collision_enabled=False)
+        gpu_solver.configure_runtime(
+            collision_enabled=False,
+            capture_point_enabled=False,
+            velocity_zmp_enabled=False,
+            centroidal_momentum_enabled=False,
+        )
         gpu_solver.warm_up(
             gpu_solver.extract_active_configuration(q),
             tuple(robot.get_frame_pose(frame) for frame in gpu_frames),
@@ -1933,9 +1860,7 @@ def main() -> None:
         posture_local = solver_local.add_posture_task("bimanual_posture")
         posture_local.priority = 2
         posture_local.weight = _default_posture_weight()
-        posture_local.set_target_configuration(
-            np.asarray(q_posture_seed, dtype=float).copy()
-        )
+        posture_local.set_target_configuration(np.asarray(q_posture_seed, dtype=float).copy())
         if hasattr(posture_local, "set_controlled_joint_indices"):
             posture_local.set_controlled_joint_indices(list(posture_controlled_indices))
         arm_nullspace_local = solver_local.add_posture_task("arm_nullspace")
@@ -2015,9 +1940,7 @@ def main() -> None:
     arm_controlled_indices = sorted(set(arm_controlled_indices))
     if hasattr(arm_nullspace, "set_controlled_joint_indices"):
         arm_nullspace.set_controlled_joint_indices(list(arm_controlled_indices))
-    collision_exclusions = _generate_consecutive_collision_exclusions(
-        robot, collision_urdf_path
-    )
+    collision_exclusions = _generate_consecutive_collision_exclusions(robot, collision_urdf_path)
     collision_include_pairs = _generate_common_bimanual_collision_include_pairs(
         robot, collision_urdf_path, collision_exclusions
     )
@@ -2030,9 +1953,7 @@ def main() -> None:
     collision_available = False
     if hasattr(robot, "has_collision_geometry"):
         try:
-            collision_available = (
-                bool(robot.has_collision_geometry()) and total_collision_pairs > 0
-            )
+            collision_available = bool(robot.has_collision_geometry()) and total_collision_pairs > 0
         except Exception:
             collision_available = False
 
@@ -2059,16 +1980,10 @@ def main() -> None:
         ),
     }
 
-    def _display_pose_from_solver_pose(
-        side: str, solver_pose: np.ndarray
-    ) -> np.ndarray:
-        return _display_pose_from_solver_pose_with_offset(
-            solver_pose, target_display_offsets[side]
-        )
+    def _display_pose_from_solver_pose(side: str, solver_pose: np.ndarray) -> np.ndarray:
+        return _display_pose_from_solver_pose_with_offset(solver_pose, target_display_offsets[side])
 
-    def _solver_pose_from_display_pose(
-        side: str, display_pose: np.ndarray
-    ) -> np.ndarray:
+    def _solver_pose_from_display_pose(side: str, display_pose: np.ndarray) -> np.ndarray:
         return _solver_pose_from_display_pose_with_offset(
             display_pose, target_display_offsets[side]
         )
@@ -2142,9 +2057,7 @@ def main() -> None:
     def _torso_target_matrix() -> np.ndarray:
         pose = np.eye(4)
         w = torso_ctrl.wxyz  # (w, x, y, z)
-        pose[:3, :3] = q2r(
-            np.array([w[1], w[2], w[3], w[0]], dtype=float), order="xyzs"
-        )
+        pose[:3, :3] = q2r(np.array([w[1], w[2], w[3], w[0]], dtype=float), order="xyzs")
         target_position = np.asarray(torso_ctrl.position, dtype=float)
         if torso_marker_z_bounds is not None:
             z_min, z_max = torso_marker_z_bounds
@@ -2162,9 +2075,7 @@ def main() -> None:
             return default
         return float(q[idx])
 
-    def _joint_limits(
-        name: str, default_lo: float, default_hi: float
-    ) -> tuple[float, float]:
+    def _joint_limits(name: str, default_lo: float, default_hi: float) -> tuple[float, float]:
         idx = joint_name_to_cfg.get(name)
         if idx is None or idx >= q_lo.size or idx >= q_hi.size:
             return float(default_lo), float(default_hi)
@@ -2174,8 +2085,7 @@ def main() -> None:
         timing_handle = server.gui.add_number("Elapsed (ms)", 0.001, disabled=True)
         backend_select = server.gui.add_dropdown(
             "Solver Backend",
-            options=("CPU EmbodiK",)
-            + (("GPU Newton/Warp",) if gpu_solver is not None else ()),
+            options=("CPU EmbodiK",) + (("GPU Newton/Warp",) if gpu_solver is not None else ()),
             initial_value="CPU EmbodiK",
         )
         auto_ik_solve = server.gui.add_checkbox("Auto IK Solve", initial_value=True)
@@ -2183,15 +2093,11 @@ def main() -> None:
         enable_right_ee = server.gui.add_checkbox("Enable Right EE", initial_value=True)
         # Torso interactive marker, grouped with the arm enables. Visibility is
         # driven each tick in the solve loop (robust to on_update quirks).
-        enable_torso_marker = server.gui.add_checkbox(
-            "Enable torso marker", initial_value=False
-        )
+        enable_torso_marker = server.gui.add_checkbox("Enable torso marker", initial_value=False)
         torso_policy = server.gui.add_dropdown(
             "Torso Policy",
             options=_torso_policy_options(has_lock_joints=bool(lift_velocity_indices)),
-            initial_value=_initial_torso_policy(
-                has_lock_joints=bool(lift_velocity_indices)
-            ),
+            initial_value=_initial_torso_policy(has_lock_joints=bool(lift_velocity_indices)),
         )
         pos_gain = server.gui.add_slider(
             "Position Gain",
@@ -2214,17 +2120,11 @@ def main() -> None:
         torso_contribution = server.gui.add_slider(
             "Torso contribution", min=0.0, max=1.0, step=0.05, initial_value=0.5
         )
-        _contrib_torso_vi, _contrib_arm_vi, _contrib_nv = (
-            _collect_torso_arm_contribution_indices(
-                robot, joint_names, lock_joint_names=lock_joint_name_set
-            )
+        _contrib_torso_vi, _contrib_arm_vi, _contrib_nv = _collect_torso_arm_contribution_indices(
+            robot, joint_names, lock_joint_names=lock_joint_name_set
         )
-        auto_tune_gains = server.gui.add_checkbox(
-            "Auto-tune gains", initial_value=False
-        )
-        ik_steps = server.gui.add_slider(
-            "IK Iterations", min=1, max=20, initial_value=2, step=1
-        )
+        auto_tune_gains = server.gui.add_checkbox("Auto-tune gains", initial_value=False)
+        ik_steps = server.gui.add_slider("IK Iterations", min=1, max=20, initial_value=2, step=1)
         adaptive_dt = server.gui.add_checkbox("Adaptive dt", initial_value=True)
         adaptive_dt_max_scale = server.gui.add_slider(
             "Adaptive dt Max Scale",
@@ -2278,9 +2178,7 @@ def main() -> None:
         # the torso/CoM shift to serve the moving arm. Demoting the actively
         # dragged arm to a lower priority plants the held arm (the moving arm then
         # works in its nullspace). Default on; disable for symmetric bimanual moves.
-        hold_inactive_arm = server.gui.add_checkbox(
-            "Hold the non-dragged arm", initial_value=True
-        )
+        hold_inactive_arm = server.gui.add_checkbox("Hold the non-dragged arm", initial_value=True)
         seer_teleop = None
         seer_gui = {}
         if COMMON_BIMANUAL_ENABLE_SEER_TELEOP:
@@ -2307,9 +2205,7 @@ def main() -> None:
                 seer_gui["streaming"] = server.gui.add_text(
                     "Streaming", initial_value="L=OFF R=OFF"
                 )
-                seer_gui["gripper"] = server.gui.add_text(
-                    "Gripper", initial_value="L=OPEN R=OPEN"
-                )
+                seer_gui["gripper"] = server.gui.add_text("Gripper", initial_value="L=OPEN R=OPEN")
                 seer_gui["reset"] = server.gui.add_button("Reset Controller Reference")
                 seer_gui["reset"].disabled = True
                 seer_gui["reset_robot"] = server.gui.add_button("Reset Robot + Targets")
@@ -2321,15 +2217,11 @@ def main() -> None:
                     initial_value=DEFAULT_TELEOP_SCALE_FACTOR,
                 )
                 with server.gui.add_folder("Controller Info", expand_by_default=False):
-                    seer_gui["pos"] = server.gui.add_text(
-                        "Position", initial_value="L=n/a | R=n/a"
-                    )
+                    seer_gui["pos"] = server.gui.add_text("Position", initial_value="L=n/a | R=n/a")
                     seer_gui["buttons"] = server.gui.add_text(
                         "Buttons", initial_value="L n/a | R n/a"
                     )
-                    seer_gui["solver_status"] = server.gui.add_text(
-                        "Solver", initial_value="Ready"
-                    )
+                    seer_gui["solver_status"] = server.gui.add_text("Solver", initial_value="Ready")
 
             def _reset_seer_status_display() -> None:
                 seer_gui["streaming"].value = "L=OFF R=OFF"
@@ -2355,13 +2247,9 @@ def main() -> None:
                 seer_gui["status"].value = "Connecting..."
                 ok = seer_teleop.connect()
                 if ok:
-                    seer_gui["status"].value = (
-                        f"Connected ({seer_teleop.controller.port})"
-                    )
+                    seer_gui["status"].value = f"Connected ({seer_teleop.controller.port})"
                 else:
-                    err = (
-                        seer_teleop.controller.last_connect_error or "Connection failed"
-                    )
+                    err = seer_teleop.controller.last_connect_error or "Connection failed"
                     seer_gui["status"].value = err
                 _sync_seer_connection_gui(connected=ok)
                 if not ok:
@@ -2396,9 +2284,7 @@ def main() -> None:
             initial_value=DEFAULT_JOINT_ACCEL_LIMIT,
             disabled=not hasattr(solver, "set_acceleration_limits"),
         )
-        lock_passive = server.gui.add_checkbox(
-            "Lock passive joints", initial_value=True
-        )
+        lock_passive = server.gui.add_checkbox("Lock passive joints", initial_value=True)
         arm_nullspace_enable = server.gui.add_checkbox(
             "Enable Arm Nullspace Bias",
             initial_value=_initial_arm_nullspace_enabled(),
@@ -2417,15 +2303,12 @@ def main() -> None:
             initial_value=_default_posture_weight(),
             step=0.01,
         )
-        manual_control = server.gui.add_checkbox(
-            "Manual Joint Control", initial_value=False
-        )
+        manual_control = server.gui.add_checkbox("Manual Joint Control", initial_value=False)
 
     with server.gui.add_folder("Collision"):
         enable_collision = server.gui.add_checkbox(
             "Enable self-collision constraint",
-            initial_value=hasattr(solver, "configure_collision_constraint")
-            and collision_available,
+            initial_value=hasattr(solver, "configure_collision_constraint") and collision_available,
             disabled=not hasattr(solver, "configure_collision_constraint")
             or not collision_available,
         )
@@ -2457,12 +2340,9 @@ def main() -> None:
         show_collision_debug = server.gui.add_checkbox(
             "Show collision debug",
             initial_value=True,
-            disabled=gpu_solver is None
-            and not hasattr(solver, "get_last_collision_debug"),
+            disabled=gpu_solver is None and not hasattr(solver, "get_last_collision_debug"),
         )
-        collision_debug_text = server.gui.add_text(
-            "Collision Debug", initial_value="Collision: --"
-        )
+        collision_debug_text = server.gui.add_text("Collision Debug", initial_value="Collision: --")
         collision_pairs_stats = server.gui.add_text(
             "Collision Pairs",
             initial_value=(
@@ -2507,9 +2387,7 @@ def main() -> None:
         com_margin_pct = server.gui.add_slider(
             "Safety margin (%)", min=0.0, max=40.0, initial_value=5.0, step=1.0
         )
-        com_use_proximity = server.gui.add_checkbox(
-            "Use proximity activation", initial_value=True
-        )
+        com_use_proximity = server.gui.add_checkbox("Use proximity activation", initial_value=True)
         com_prox_display = server.gui.add_number(
             "Proximity threshold (m)", initial_value=0.0, disabled=True
         )
@@ -2519,9 +2397,7 @@ def main() -> None:
         com_acc_max = server.gui.add_slider(
             "com_acc_max (m/s²)", min=0.01, max=0.5, initial_value=0.1, step=0.01
         )
-        com_use_acc_limits = server.gui.add_checkbox(
-            "Acceleration limits", initial_value=True
-        )
+        com_use_acc_limits = server.gui.add_checkbox("Acceleration limits", initial_value=True)
 
     with server.gui.add_folder("Visualization"):
         geometry_view = server.gui.add_dropdown(
@@ -2529,12 +2405,8 @@ def main() -> None:
             options=GEOMETRY_VIEW_OPTIONS,
             initial_value=default_geometry_view,
         )
-        show_support_polygon = server.gui.add_checkbox(
-            "Show support polygon", initial_value=True
-        )
-        show_support_contacts = server.gui.add_checkbox(
-            "Show support contacts", initial_value=True
-        )
+        show_support_polygon = server.gui.add_checkbox("Show support polygon", initial_value=True)
+        show_support_contacts = server.gui.add_checkbox("Show support contacts", initial_value=True)
         show_com_viz = server.gui.add_checkbox("Show CoM", initial_value=True)
         show_drop_line = server.gui.add_checkbox("Show CoM drop line", initial_value=True)
         show_centroidal_points = server.gui.add_checkbox(
@@ -2828,12 +2700,8 @@ def main() -> None:
         )
         com_outer_poly.visible = bool(show_support_polygon.value)
         com_inner_poly.points = _polygon_edge_pts(inner_polygon, z=0.003)
-        com_inner_poly.colors = np.repeat(
-            COLOR_INNER_POLY, max(len(inner_polygon), 1), axis=0
-        )
-        com_inner_poly.visible = bool(show_support_polygon.value) and (
-            _margin_frac() > 0.0
-        )
+        com_inner_poly.colors = np.repeat(COLOR_INNER_POLY, max(len(inner_polygon), 1), axis=0)
+        com_inner_poly.visible = bool(show_support_polygon.value) and (_margin_frac() > 0.0)
 
         for frame_name, handle in contact_point_handles.items():
             point = support_contacts[frame_name]
@@ -2992,10 +2860,7 @@ def main() -> None:
         gpu_active = backend_select.value == "GPU Newton/Warp"
         if gpu_solver is not None:
             gpu_solver.reset_state()
-        collision_tuning.disabled = (
-            gpu_active
-            or not hasattr(solver, "set_collision_tuning_mode")
-        )
+        collision_tuning.disabled = gpu_active or not hasattr(solver, "set_collision_tuning_mode")
         enable_capture_point.disabled = (
             gpu_active and not GPU_WBC_CAPABILITIES.capture_point_constraints
         ) or not hasattr(solver, "configure_capture_point_constraint")
@@ -3053,9 +2918,7 @@ def main() -> None:
             idx = joint_name_to_cfg.get(joint_name)
             if idx is not None and idx < q_manual.size:
                 q_manual[idx] = float(slider.value)
-        q_manual = np.clip(
-            q_manual, np.asarray(q_lo, dtype=float), np.asarray(q_hi, dtype=float)
-        )
+        q_manual = np.clip(q_manual, np.asarray(q_lo, dtype=float), np.asarray(q_hi, dtype=float))
         return _apply_soft_lift_margin(
             q_manual, joint_name_to_cfg=joint_name_to_cfg, q_lo=q_lo, q_hi=q_hi
         )
@@ -3113,9 +2976,7 @@ def main() -> None:
         _configure_com_constraint_if_needed(force=True)
         status.value = f"Status: solver reset after {reason}"
 
-    def _solve_position_step(
-        active_targets: list[object], q_seed: np.ndarray
-    ) -> _SolverStep:
+    def _solve_position_step(active_targets: list[object], q_seed: np.ndarray) -> _SolverStep:
         """Execute one solver-owned position step."""
         # Guarded; survives solver rebuilds because it is set each step.
         _apply_torso_arm_contribution_metric(
@@ -3163,13 +3024,9 @@ def main() -> None:
         nonlocal prev_right_target_pose, prev_left_target_pose
         reset_adaptive_gain_state(_adaptive_gain_state)
         q = robot.neutral_configuration()
-        q = _apply_named_joint_seed(
-            q, joint_name_to_cfg, q_lo, q_hi, default_joint_seed
-        )
+        q = _apply_named_joint_seed(q, joint_name_to_cfg, q_lo, q_hi, default_joint_seed)
         q = np.clip(q, np.asarray(q_lo, dtype=float), np.asarray(q_hi, dtype=float))
-        q = _apply_soft_lift_margin(
-            q, joint_name_to_cfg=joint_name_to_cfg, q_lo=q_lo, q_hi=q_hi
-        )
+        q = _apply_soft_lift_margin(q, joint_name_to_cfg=joint_name_to_cfg, q_lo=q_lo, q_hi=q_hi)
         current_dq = np.zeros(robot.nv, dtype=float)
         posture_target = np.asarray(q, dtype=float).copy()
         # Posture + arm-nullspace tasks read this every IK tick; keep it aligned with q
@@ -3252,18 +3109,10 @@ def main() -> None:
         left_pose_now = frame_pose(frame_map["left_tool"])
         right_target_pose = _target_pose_matrix("right")
         left_target_pose = _target_pose_matrix("left")
-        right_pos_err = float(
-            np.linalg.norm(right_target_pose[:3, 3] - right_pose_now[:3, 3])
-        )
-        left_pos_err = float(
-            np.linalg.norm(left_target_pose[:3, 3] - left_pose_now[:3, 3])
-        )
-        right_rot_err = _rotation_error_rad(
-            right_target_pose[:3, :3], right_pose_now[:3, :3]
-        )
-        left_rot_err = _rotation_error_rad(
-            left_target_pose[:3, :3], left_pose_now[:3, :3]
-        )
+        right_pos_err = float(np.linalg.norm(right_target_pose[:3, 3] - right_pose_now[:3, 3]))
+        left_pos_err = float(np.linalg.norm(left_target_pose[:3, 3] - left_pose_now[:3, 3]))
+        right_rot_err = _rotation_error_rad(right_target_pose[:3, :3], right_pose_now[:3, :3])
+        left_rot_err = _rotation_error_rad(left_target_pose[:3, :3], left_pose_now[:3, :3])
         return right_pos_err, left_pos_err, right_rot_err, left_rot_err
 
     def _format_seer_pos(side: str, ctrl) -> str:
@@ -3308,7 +3157,9 @@ def main() -> None:
             if hasattr(robot, "get_collision_pair_names")
             else 0
         )
-        collision_pairs_stats.value = f"total={total_pairs}, included={len(include_pairs)}, excluded={len(exclusion_pairs)}"
+        collision_pairs_stats.value = (
+            f"total={total_pairs}, included={len(include_pairs)}, excluded={len(exclusion_pairs)}"
+        )
         next_collision_cfg = (
             bool(enable_collision.value),
             float(collision_min_dist_mm.value),
@@ -3355,8 +3206,12 @@ def main() -> None:
             left_now = np.asarray(
                 robot.get_frame_pose(frame_map["left_tool"]).translation, dtype=float
             )
-            right_err.value = f"{np.linalg.norm(np.asarray(right_ctrl.position, dtype=float) - right_now):.4f} m"
-            left_err.value = f"{np.linalg.norm(np.asarray(left_ctrl.position, dtype=float) - left_now):.4f} m"
+            right_err.value = (
+                f"{np.linalg.norm(np.asarray(right_ctrl.position, dtype=float) - right_now):.4f} m"
+            )
+            left_err.value = (
+                f"{np.linalg.norm(np.asarray(left_ctrl.position, dtype=float) - left_now):.4f} m"
+            )
             status.value = "Status: Manual joint control active"
             timing_handle.value = 0.0
             solve_ms.value = "--"
@@ -3434,9 +3289,7 @@ def main() -> None:
                     active_arm_indices.extend(left_arm_velocity_indices)
                 if bool(enable_right_ee.value):
                     active_arm_indices.extend(right_arm_velocity_indices)
-                arm_nullspace.set_controlled_joint_indices(
-                    sorted(set(active_arm_indices))
-                )
+                arm_nullspace.set_controlled_joint_indices(sorted(set(active_arm_indices)))
             arm_nullspace.weight = float(arm_nullspace_weight.value)
         else:
             arm_nullspace.weight = 0.0
@@ -3461,10 +3314,8 @@ def main() -> None:
                 else:
                     seer_target_poses[_side] = None
             _seer_states = seer_teleop.step(
-                left_target=seer_target_poses["left"]
-                or pose_from_transform_control(left_ctrl),
-                right_target=seer_target_poses["right"]
-                or pose_from_transform_control(right_ctrl),
+                left_target=seer_target_poses["left"] or pose_from_transform_control(left_ctrl),
+                right_target=seer_target_poses["right"] or pose_from_transform_control(right_ctrl),
                 now=time.time(),
             )
             for _side, _ctrl in (("right", right_ctrl), ("left", left_ctrl)):
@@ -3479,9 +3330,7 @@ def main() -> None:
             seer_target_poses["left"] = None
             seer_target_poses["right"] = None
 
-        right_pos_err, left_pos_err, right_rot_err, left_rot_err = (
-            _current_task_errors()
-        )
+        right_pos_err, left_pos_err, right_rot_err, left_rot_err = _current_task_errors()
         if posture_controlled_indices:
             posture_err = float(
                 np.linalg.norm(
@@ -3498,9 +3347,7 @@ def main() -> None:
         cur_right_target_pose = _target_pose_matrix("right")
         cur_left_target_pose = _target_pose_matrix("left")
         if _seer_side_active("right") and _seer_states is not None:
-            right_target_moved = bool(
-                _seer_states["right"].streaming
-            ) or _target_pose_moved(
+            right_target_moved = bool(_seer_states["right"].streaming) or _target_pose_moved(
                 cur_right_target_pose,
                 prev_right_target_pose,
                 pos_eps=1e-4,
@@ -3514,9 +3361,7 @@ def main() -> None:
                 rot_eps=1e-3,
             )
         if _seer_side_active("left") and _seer_states is not None:
-            left_target_moved = bool(
-                _seer_states["left"].streaming
-            ) or _target_pose_moved(
+            left_target_moved = bool(_seer_states["left"].streaming) or _target_pose_moved(
                 cur_left_target_pose,
                 prev_left_target_pose,
                 pos_eps=1e-4,
@@ -3553,9 +3398,7 @@ def main() -> None:
                 _seg_state = _seg_tick["state"]
                 _seg_elapsed = _seg_tick["elapsed"]
                 _seg_dur = _seg_tick["duration"]
-                _seg_name = (
-                    _seg_player._spec.name if _seg_player._spec is not None else "?"
-                )
+                _seg_name = _seg_player._spec.name if _seg_player._spec is not None else "?"
                 _seg_mean_err = 0.0
                 _seg_lt = _seg_tick.get("left_target")
                 _seg_rt = _seg_tick.get("right_target")
@@ -3572,9 +3415,7 @@ def main() -> None:
                         dtype=float,
                     )
                     _rt_tgt = np.asarray(_seg_rt.translation, dtype=float)
-                    _seg_mean_err = max(
-                        _seg_mean_err, float(np.linalg.norm(_rt_now - _rt_tgt))
-                    )
+                    _seg_mean_err = max(_seg_mean_err, float(np.linalg.norm(_rt_now - _rt_tgt)))
                 _seg_idx = int(_seg_tick.get("index", -1))
                 _seg_n = len(getattr(_seg_player, "_segments", ()))
                 _sample_i = int(_seg_tick.get("sample_index", 0))
@@ -3588,9 +3429,7 @@ def main() -> None:
                 if _seg_tick.get("done") and _seg_state == "hold":
                     _seg_player.stop()
                     if _seg_gui.get("status") is not None:
-                        _seg_gui["status"].value = (
-                            "Idle (segment finished — ready for teleop)"
-                        )
+                        _seg_gui["status"].value = "Idle (segment finished — ready for teleop)"
                     _set_ctrl_from_solver_rt(
                         "left", left_ctrl, robot.get_frame_pose(frame_map["left_tool"])
                     )
@@ -3601,19 +3440,14 @@ def main() -> None:
                     )
 
         right_settled = (not right_active) or (
-            right_pos_err <= EE_POSITION_DEADBAND
-            and right_rot_err <= EE_ROTATION_DEADBAND
+            right_pos_err <= EE_POSITION_DEADBAND and right_rot_err <= EE_ROTATION_DEADBAND
         )
         left_settled = (not left_active) or (
-            left_pos_err <= EE_POSITION_DEADBAND
-            and left_rot_err <= EE_ROTATION_DEADBAND
+            left_pos_err <= EE_POSITION_DEADBAND and left_rot_err <= EE_ROTATION_DEADBAND
         )
-        settled = (
-            right_settled and left_settled and posture_err < POSTURE_SLIDER_DEADBAND
-        )
+        settled = right_settled and left_settled and posture_err < POSTURE_SLIDER_DEADBAND
         streaming_active = _seer_states is not None and (
-            bool(_seer_states["left"].streaming)
-            or bool(_seer_states["right"].streaming)
+            bool(_seer_states["left"].streaming) or bool(_seer_states["right"].streaming)
         )
         # Segment replay is treated as streaming so the settled early-exit doesn't
         # swallow its gizmo updates.
@@ -3859,9 +3693,9 @@ def main() -> None:
                     secondary_frames = tuple(gpu_frames[i] for i in secondary_slots) + (
                         torso_marker_frame,
                     )
-                    secondary_targets = tuple(
-                        tool_targets[i] for i in secondary_slots
-                    ) + (_torso_target_matrix(),)
+                    secondary_targets = tuple(tool_targets[i] for i in secondary_slots) + (
+                        _torso_target_matrix(),
+                    )
                     locked_rows = tuple(
                         row
                         for row in opts.excluded_joint_indices
@@ -3882,11 +3716,9 @@ def main() -> None:
                             task_dimensions=(6 * len(primary_slots),),
                             locked_velocity_indices=locked_rows,
                             secondary_frame_names=secondary_frames,
-                            secondary_frame_task_dimensions=(6,)
-                            * len(secondary_frames),
+                            secondary_frame_task_dimensions=(6,) * len(secondary_frames),
                             secondary_frame_target_poses_wxyz=tuple(
-                                tuple(pose[:3, 3])
-                                + tuple(r2q(pose[:3, :3], order="sxyz"))
+                                tuple(pose[:3, 3]) + tuple(r2q(pose[:3, :3], order="sxyz"))
                                 for pose in secondary_targets
                             ),
                             secondary_frame_weights=(0.0,) * len(secondary_frames),
@@ -3909,30 +3741,29 @@ def main() -> None:
                         torso_enabled=_torso_marker_on,
                         acceleration_limits_enabled=bool(enable_accel_limits.value),
                         max_joint_acceleration=float(joint_accel_limit.value),
-                        secondary_targets=tuple(
-                            tool_targets[i] for i in secondary_slots
-                        ),
+                        secondary_targets=tuple(tool_targets[i] for i in secondary_slots),
                         com_enabled=bool(enable_com_constraint.value),
                         com_support_polygon=_current_support_polygon(),
                         com_margin=_margin_frac(),
                         com_vel_max=float(com_vel_max.value),
                         com_acc_max=float(com_acc_max.value),
                         com_use_acceleration_limits=bool(com_use_acc_limits.value),
-                        com_proximity_fraction=(
-                            0.05 if bool(com_use_proximity.value) else 0.0
-                        ),
+                        com_proximity_fraction=(0.05 if bool(com_use_proximity.value) else 0.0),
+                        capture_point_enabled=bool(enable_capture_point.value),
+                        velocity_zmp_enabled=bool(enable_velocity_zmp.value),
+                        momentum_enabled=bool(enable_momentum_damping.value),
+                        momentum_weight=float(momentum_damping_weight.value),
                     )
                     gpu_result = gpu_solver.solve_step(
                         gpu_solver.extract_active_configuration(q),
                         tuple(
-                            embodik.Rt(
-                                R=tool_targets[i][:3, :3], t=tool_targets[i][:3, 3]
-                            )
+                            embodik.Rt(R=tool_targets[i][:3, :3], t=tool_targets[i][:3, 3])
                             for i in primary_slots
                         ),
                         include_collision_debug=bool(
                             enable_collision.value and show_collision_debug.value
                         ),
+                        current_velocity=gpu_solver.extract_active_velocity(current_dq),
                     )
                 except Exception as exc:
                     gpu_fault = f"{type(exc).__name__}: {exc}"
@@ -3943,9 +3774,7 @@ def main() -> None:
                     )
                 else:
                     step = _SolverStep(
-                        q_next=gpu_solver.merge_active_configuration(
-                            q, gpu_result.joints
-                        ),
+                        q_next=gpu_solver.merge_active_configuration(q, gpu_result.joints),
                         solver_result=_GpuUiResult(
                             f"GPU_{gpu_result.status}",
                             f"max position error={max(gpu_result.position_errors)*1e3:.2f} mm",
@@ -3988,9 +3817,7 @@ def main() -> None:
         right_now = np.asarray(
             robot.get_frame_pose(frame_map["right_tool"]).translation, dtype=float
         )
-        left_now = np.asarray(
-            robot.get_frame_pose(frame_map["left_tool"]).translation, dtype=float
-        )
+        left_now = np.asarray(robot.get_frame_pose(frame_map["left_tool"]).translation, dtype=float)
         right_tgt = _target_pose_matrix("right")[:3, 3]
         left_tgt = _target_pose_matrix("left")[:3, 3]
         right_err.value = f"{np.linalg.norm(right_tgt - right_now):.4f} m"
@@ -4002,17 +3829,11 @@ def main() -> None:
             status.value = "Status: Holding target"
         elif result_status_name == "NO_PROGRESS":
             status.value = "Status: weak progress" + (
-                f" | {result.status_message}"
-                if getattr(result, "status_message", "")
-                else ""
+                f" | {result.status_message}" if getattr(result, "status_message", "") else ""
             )
-        elif (
-            bool(enable_collision.value) and result_status_name == "COLLISION_VIOLATED"
-        ):
+        elif bool(enable_collision.value) and result_status_name == "COLLISION_VIOLATED":
             status.value = "Status: collision limited" + (
-                f" | {result.status_message}"
-                if getattr(result, "status_message", "")
-                else ""
+                f" | {result.status_message}" if getattr(result, "status_message", "") else ""
             )
         elif result_status_name == "INFEASIBLE" and (
             bool(enable_collision.value)
@@ -4021,15 +3842,11 @@ def main() -> None:
             or bool(enable_velocity_zmp.value)
         ):
             status.value = "Status: constrained solve saturated" + (
-                f" | {result.status_message}"
-                if getattr(result, "status_message", "")
-                else ""
+                f" | {result.status_message}" if getattr(result, "status_message", "") else ""
             )
         else:
             status.value = f"Status: {result_status_name}" + (
-                f" | {result.status_message}"
-                if getattr(result, "status_message", "")
-                else ""
+                f" | {result.status_message}" if getattr(result, "status_message", "") else ""
             )
         timing_handle.value = float(step.elapsed_ms)
         solve_ms.value = f"{step.elapsed_ms:.2f}"

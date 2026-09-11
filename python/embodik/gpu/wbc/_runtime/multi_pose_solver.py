@@ -11,16 +11,19 @@ from pathlib import Path
 from typing import Any
 
 from ..contracts import RobotSolveSpec
+from ._pose_math import _clamp_norm, _orientation_error
 from .cusadi_sm120 import StrictCusadiFunction
 from .gpu_constraints import (
     CPU_MARGIN_THRESHOLD,
     CPU_MIN_BOUND_FRACTION,
     CPU_TORSO_BOUND_SLACK_EPS_ROT,
     CPU_TORSO_BOUND_SLACK_EPS_TRANS,
+    _capture_point_constraint_rows_trusted,
+    _velocity_zmp_constraint_rows_trusted,
     bounded_cyclic_row_projection,
     com_halfspace_velocity_bounds,
-    support_polygon_halfplanes,
     relative_pose_state,
+    support_polygon_halfplanes,
     torso_pose_bound_rows,
 )
 from .gpu_priority import (
@@ -29,7 +32,6 @@ from .gpu_priority import (
     ordered_priority_velocity,
 )
 from .newton_model import NewtonModelKinematics
-from ._pose_math import _clamp_norm, _orientation_error
 
 
 def _python_extension_headers_available() -> bool:
@@ -145,31 +147,20 @@ class MultiFramePoseSolveConfig:
             "cusolver_srinv",
         }:
             raise ValueError(
-                "velocity_solver must be fi_pesns, torch_srinv, warp_srinv, "
-                "or cusolver_srinv"
+                "velocity_solver must be fi_pesns, torch_srinv, warp_srinv, " "or cusolver_srinv"
             )
         if self.velocity_solver == "torch_srinv" and self.standalone_cuda_graph_enabled:
-            raise ValueError(
-                "torch_srinv does not support standalone CUDA Graph capture"
-            )
+            raise ValueError("torch_srinv does not support standalone CUDA Graph capture")
         if (
             self.cusolver_reuse_locked_primary_inverse_enabled
             and self.velocity_solver != "cusolver_srinv"
         ):
-            raise ValueError(
-                "locked primary inverse reuse requires the cusolver_srinv backend"
-            )
+            raise ValueError("locked primary inverse reuse requires the cusolver_srinv backend")
         if (
-            not math.isfinite(
-                self.cusolver_locked_primary_reuse_min_singular_ratio
-            )
-            or not 0.0
-            < self.cusolver_locked_primary_reuse_min_singular_ratio
-            <= 1.0
+            not math.isfinite(self.cusolver_locked_primary_reuse_min_singular_ratio)
+            or not 0.0 < self.cusolver_locked_primary_reuse_min_singular_ratio <= 1.0
         ):
-            raise ValueError(
-                "locked primary reuse singular ratio must be in (0, 1]"
-            )
+            raise ValueError("locked primary reuse singular ratio must be in (0, 1]")
         if self.collision_query_distance_m <= self.collision_min_distance_m:
             raise ValueError("collision query distance must exceed minimum distance")
         if self.collision_repulsion_deadband_m < 0.0:
@@ -188,9 +179,7 @@ class MultiFramePoseSolveConfig:
             type(self.collision_graph_repair_iterations) is not int
             or self.collision_graph_repair_iterations < 0
         ):
-            raise ValueError(
-                "collision_graph_repair_iterations must be a nonnegative integer"
-            )
+            raise ValueError("collision_graph_repair_iterations must be a nonnegative integer")
         if self.collision_clear_state_fast_path_enabled and (
             not self.collision_enabled
             or not self.standalone_cuda_graph_enabled
@@ -210,16 +199,12 @@ class MultiFramePoseSolveConfig:
         if self.collision_current_convex_certificate_enabled and (
             not self.collision_clear_state_fast_path_enabled
         ):
-            raise ValueError(
-                "current convex certification requires the collision clear-state path"
-            )
+            raise ValueError("current convex certification requires the collision clear-state path")
         if (
             self.torso_projection_noop_fast_path_enabled
             and not self.collision_clear_state_fast_path_enabled
         ):
-            raise ValueError(
-                "torso no-op fast path requires the certified collision fast path"
-            )
+            raise ValueError("torso no-op fast path requires the certified collision fast path")
 
 
 @dataclass(frozen=True)
@@ -248,6 +233,17 @@ class MultiFramePoseBatchResult:
     com_constraint_applied: Any = None
     com_constraint_feasible: Any = None
     minimum_com_slack_m: Any = None
+    capture_point_constraint_enabled: bool = False
+    capture_point_constraint_applied: Any = None
+    capture_point_constraint_feasible: Any = None
+    minimum_capture_point_slack_m: Any = None
+    velocity_zmp_constraint_enabled: bool = False
+    velocity_zmp_constraint_applied: Any = None
+    velocity_zmp_constraint_feasible: Any = None
+    minimum_velocity_zmp_slack_m: Any = None
+    minimum_zmp_normal_force_n: Any = None
+    centroidal_momentum_task_enabled: bool = False
+    centroidal_momentum_task_applied: Any = None
     torso_constraint_enabled: bool = False
     torso_constraint_applied: Any = None
     torso_constraint_feasible: Any = None
@@ -290,6 +286,14 @@ COMPACT_PUBLICATION_SCALARS = (
     "secondary_residual_after",
     "spectral_solve_ok",
     "collision_clear_state_certified",
+    "capture_point_constraint_applied",
+    "capture_point_constraint_feasible",
+    "minimum_capture_point_slack_m",
+    "velocity_zmp_constraint_applied",
+    "velocity_zmp_constraint_feasible",
+    "minimum_velocity_zmp_slack_m",
+    "minimum_zmp_normal_force_n",
+    "centroidal_momentum_task_applied",
 )
 
 
@@ -315,9 +319,7 @@ def _floating_position_limits_valid(
     ]
     if not rows:
         return q_position.new_tensor(True, dtype=q_position.dtype).bool()
-    return (
-        (q_position[:, rows] >= lower[rows]) & (q_position[:, rows] <= upper[rows])
-    ).all()
+    return ((q_position[:, rows] >= lower[rows]) & (q_position[:, rows] <= upper[rows])).all()
 
 
 def _validate_fi_function(function: Any, velocity_dim: int, frame_count: int) -> None:
@@ -332,13 +334,10 @@ def _validate_fi_function(function: Any, velocity_dim: int, frame_count: int) ->
     actual = tuple(function.nnz_in(index) for index in range(function.n_in()))
     if actual != expected or function.n_out() < 1:
         raise ValueError(
-            f"multi-frame pose solver requires FI inputs with nnz {expected}; "
-            f"received {actual}"
+            f"multi-frame pose solver requires FI inputs with nnz {expected}; " f"received {actual}"
         )
     if function.nnz_out(0) != velocity_dim:
-        raise ValueError(
-            f"multi-frame pose solver requires {velocity_dim} velocity outputs"
-        )
+        raise ValueError(f"multi-frame pose solver requires {velocity_dim} velocity outputs")
 
 
 def _directional_srinv(torch: Any, matrix: Any, tolerance: float, damping: float):
@@ -352,15 +351,11 @@ def _directional_srinv(torch: Any, matrix: Any, tolerance: float, damping: float
         (1.0 - (determinant / threshold_squared) ** 2) * threshold_squared,
         torch.zeros_like(determinant),
     )
-    left, singular_values, right_transpose = torch.linalg.svd(
-        matrix, full_matrices=False
-    )
+    left, singular_values, right_transpose = torch.linalg.svd(matrix, full_matrices=False)
     normalized = torch.clamp(singular_values / tolerance, max=1.0)
     per_value_damping = damping * torch.clamp(1.0 - normalized * normalized, min=0.0)
     denominator = (
-        singular_values * singular_values
-        + global_regularization[:, None]
-        + per_value_damping
+        singular_values * singular_values + global_regularization[:, None] + per_value_damping
     )
     inverse_spectrum = singular_values / denominator
     return (right_transpose.transpose(-2, -1) * inverse_spectrum[:, None, :]) @ (
@@ -379,9 +374,7 @@ def _multi_frame_nonworsening(
 ):
     """Accept improvement without penalizing errors already inside deadbands."""
 
-    position_ok = (position <= initial_position + 1e-6) | (
-        position <= position_tolerance_m
-    )
+    position_ok = (position <= initial_position + 1e-6) | (position <= position_tolerance_m)
     orientation_ok = (orientation <= initial_orientation + 1e-6) | (
         orientation <= orientation_tolerance_rad
     )
@@ -506,9 +499,7 @@ def _validate_torso_configuration(
         torso_velocity_limits,
         torso_acceleration_limits,
     )
-    if not all(
-        math.isfinite(float(value)) for values in numeric_vectors for value in values
-    ):
+    if not all(math.isfinite(float(value)) for values in numeric_vectors for value in values):
         raise ValueError("torso pose and limits must be finite")
     if math.sqrt(sum(value * value for value in torso_reference_pose_xyzw[3:])) <= 1e-8:
         raise ValueError("torso reference quaternion must be nonzero")
@@ -527,9 +518,7 @@ def _validate_torso_configuration(
     if len(set(excluded)) != len(excluded) or any(
         index < 0 or index >= velocity_dim for index in excluded
     ):
-        raise ValueError(
-            "torso excluded active velocity indices must be unique and valid"
-        )
+        raise ValueError("torso excluded active velocity indices must be unique and valid")
     scalar_values = (
         torso_headroom_fraction,
         torso_headroom_activation_margin,
@@ -560,17 +549,11 @@ def _validate_posture_configuration(
     locked = tuple(int(index) for index in locked_velocity_indices)
     active_set = set(active)
     for name, values in (("posture", selected), ("locked", locked)):
-        if len(values) != len(set(values)) or any(
-            value not in active_set for value in values
-        ):
-            raise ValueError(
-                f"{name} velocity indices must be unique active model indices"
-            )
+        if len(values) != len(set(values)) or any(value not in active_set for value in values):
+            raise ValueError(f"{name} velocity indices must be unique active model indices")
     if posture_target_configuration is None:
         if selected or posture_weights:
-            raise ValueError(
-                "posture target configuration is required for posture rows"
-            )
+            raise ValueError("posture target configuration is required for posture rows")
         return False
     if len(posture_target_configuration) != configuration_dim or not all(
         math.isfinite(float(value)) for value in posture_target_configuration
@@ -580,9 +563,7 @@ def _validate_posture_configuration(
         )
     if not selected or len(posture_weights) != len(selected):
         raise ValueError("posture weights must match a nonempty velocity selection")
-    if not all(
-        math.isfinite(float(value)) and float(value) >= 0.0 for value in posture_weights
-    ):
+    if not all(math.isfinite(float(value)) and float(value) >= 0.0 for value in posture_weights):
         raise ValueError("posture weights must be finite and nonnegative")
     if not math.isfinite(posture_gain) or posture_gain < 0.0:
         raise ValueError("posture gain must be finite and nonnegative")
@@ -669,6 +650,25 @@ class DeviceResidentMultiFramePoseSolver:
         com_proximity_fraction: float = 0.2,
         com_excluded_velocity_indices: tuple[int, ...] = (),
         com_projection_iterations: int = 16,
+        capture_point_support_polygon_xy: Any = None,
+        capture_point_max_constraints: int = 8,
+        capture_point_margin: float = 0.0,
+        capture_point_omega: float | None = None,
+        capture_point_height: float | None = None,
+        capture_point_gravity_z: float = -9.81,
+        velocity_zmp_support_polygon_xy: Any = None,
+        velocity_zmp_max_constraints: int = 8,
+        velocity_zmp_margin: float = 0.0,
+        velocity_zmp_fz_min: float = 1.0,
+        velocity_zmp_gravity_z: float = -9.81,
+        centroidal_momentum_target: tuple[float, ...] | None = None,
+        centroidal_momentum_axis_mask: tuple[bool, ...] = (),
+        centroidal_momentum_weight: float = 1.0,
+        centroidal_momentum_priority: int = 1,
+        centroidal_momentum_excluded_velocity_indices: tuple[int, ...] = (),
+        centroidal_momentum_lower: tuple[float, ...] | None = None,
+        centroidal_momentum_upper: tuple[float, ...] | None = None,
+        centroidal_projection_iterations: int = 24,
         torso_frame_name: str | None = None,
         torso_reference_pose_xyzw: tuple[float, ...] | None = None,
         torso_lower_relative_limits: tuple[float, ...] | None = None,
@@ -737,9 +737,7 @@ class DeviceResidentMultiFramePoseSolver:
             len(position_gains) != self.frame_count
             or len(orientation_gains) != self.frame_count
             or not all(math.isfinite(value) and value > 0.0 for value in position_gains)
-            or not all(
-                math.isfinite(value) and value >= 0.0 for value in orientation_gains
-            )
+            or not all(math.isfinite(value) and value >= 0.0 for value in orientation_gains)
         ):
             raise ValueError("per-frame gains must match frames and be finite")
         self.configuration_dim = (
@@ -769,9 +767,7 @@ class DeviceResidentMultiFramePoseSolver:
             if len(sequence) != self.velocity_dim or not all(
                 math.isfinite(value) for value in sequence
             ):
-                raise ValueError(
-                    f"{name} must contain {self.velocity_dim} finite values"
-                )
+                raise ValueError(f"{name} must contain {self.velocity_dim} finite values")
         if any(lower >= upper for lower, upper in zip(joint_lower, joint_upper)):
             raise ValueError("joint lower limits must be below upper limits")
         if any(limit <= 0 for limit in joint_velocity_limits):
@@ -785,9 +781,7 @@ class DeviceResidentMultiFramePoseSolver:
             torso_axis_mask=torso_axis_mask,
             torso_velocity_limits=torso_velocity_limits,
             torso_acceleration_limits=torso_acceleration_limits,
-            torso_excluded_active_velocity_indices=(
-                torso_excluded_active_velocity_indices
-            ),
+            torso_excluded_active_velocity_indices=(torso_excluded_active_velocity_indices),
             torso_headroom_fraction=torso_headroom_fraction,
             torso_headroom_activation_margin=torso_headroom_activation_margin,
             torso_projection_iterations=torso_projection_iterations,
@@ -816,9 +810,7 @@ class DeviceResidentMultiFramePoseSolver:
         )
         active_lookup = {
             source_index: active_index
-            for active_index, source_index in enumerate(
-                robot_spec.active_velocity_indices
-            )
+            for active_index, source_index in enumerate(robot_spec.active_velocity_indices)
         }
         self._locked_active_columns = tuple(
             active_lookup[int(source_index)] for source_index in locked_velocity_indices
@@ -870,9 +862,7 @@ class DeviceResidentMultiFramePoseSolver:
             self._locked_velocity_mask[list(self._locked_active_columns)] = True
         if not torch.cuda.is_available():
             raise RuntimeError("DeviceResidentMultiFramePoseSolver requires CUDA")
-        self._fi_dtype = (
-            torch.float64 if self.config.fi_scalar_type == "float64" else torch.float32
-        )
+        self._fi_dtype = torch.float64 if self.config.fi_scalar_type == "float64" else torch.float32
         self.kinematics = NewtonModelKinematics(
             batch_size,
             urdf_path,
@@ -884,20 +874,48 @@ class DeviceResidentMultiFramePoseSolver:
         )
         self.com = None
         self.com_constraint_enabled = com_support_polygon_xy is not None
-        if (
-            isinstance(com_max_constraints, bool)
-            or not isinstance(com_max_constraints, int)
-            or com_max_constraints < 3
+        self.capture_point_constraint_enabled = capture_point_support_polygon_xy is not None
+        self.velocity_zmp_constraint_enabled = velocity_zmp_support_polygon_xy is not None
+        momentum_mask = tuple(bool(value) for value in centroidal_momentum_axis_mask)
+        if momentum_mask and len(momentum_mask) != 6:
+            raise ValueError("centroidal momentum axis mask must contain six values")
+        self.centroidal_momentum_task_enabled = centroidal_momentum_target is not None and any(
+            momentum_mask
+        )
+        self.centroidal_momentum_bounds_enabled = (
+            centroidal_momentum_lower is not None or centroidal_momentum_upper is not None
+        )
+        if self.centroidal_momentum_bounds_enabled and (
+            centroidal_momentum_lower is None or centroidal_momentum_upper is None
         ):
-            raise ValueError("com_max_constraints must be an integer >= 3")
+            raise ValueError("centroidal momentum bounds require lower and upper")
+        capacities = {
+            "com_max_constraints": com_max_constraints,
+            "capture_point_max_constraints": capture_point_max_constraints,
+            "velocity_zmp_max_constraints": velocity_zmp_max_constraints,
+        }
+        for name, capacity in capacities.items():
+            if isinstance(capacity, bool) or not isinstance(capacity, int) or capacity < 3:
+                raise ValueError(f"{name} must be an integer >= 3")
         if (
             isinstance(com_projection_iterations, bool)
             or not isinstance(com_projection_iterations, int)
             or com_projection_iterations < 1
+            or isinstance(centroidal_projection_iterations, bool)
+            or not isinstance(centroidal_projection_iterations, int)
+            or centroidal_projection_iterations < 1
         ):
-            raise ValueError("com_projection_iterations must be a positive integer")
+            raise ValueError("centroidal projection iterations must be positive integers")
         self._com_projection_iterations = com_projection_iterations
-        if self.com_constraint_enabled:
+        self._centroidal_projection_iterations = centroidal_projection_iterations
+        self.centroidal_enabled = bool(
+            self.com_constraint_enabled
+            or self.capture_point_constraint_enabled
+            or self.velocity_zmp_constraint_enabled
+            or self.centroidal_momentum_task_enabled
+            or self.centroidal_momentum_bounds_enabled
+        )
+        if self.centroidal_enabled:
             from .newton_com import NewtonCoMEvaluator
 
             com_spec = robot_spec if com_robot_spec is None else com_robot_spec
@@ -913,16 +931,14 @@ class DeviceResidentMultiFramePoseSolver:
                 or len(com_spec.active_velocity_indices) != self.velocity_dim
             ):
                 raise ValueError(
-                    "CoM model must retain the solver's active joint order and root kind"
+                    "centroidal model must retain the solver's active joint order and root kind"
                 )
             if len(com_default) != com_spec.configuration_dim or not all(
                 math.isfinite(v) for v in com_default
             ):
-                raise ValueError(
-                    "CoM default must match its complete model configuration"
-                )
+                raise ValueError("centroidal default must match its complete model configuration")
             if robot_spec.floating_base and com_spec != robot_spec:
-                raise ValueError("floating CoM model must match the solver model")
+                raise ValueError("floating centroidal model must match the solver model")
             self.com = NewtonCoMEvaluator(
                 batch_size,
                 urdf_path,
@@ -930,6 +946,27 @@ class DeviceResidentMultiFramePoseSolver:
                 com_spec,
                 device=str(self.device),
             )
+            self._com_default = (
+                torch.tensor(com_default, dtype=torch.float32, device=self.device)
+                .expand(batch_size, -1)
+                .clone()
+            )
+            self._com_q_indices = torch.tensor(
+                com_spec.active_configuration_indices or com_spec.active_velocity_indices,
+                dtype=torch.long,
+                device=self.device,
+            )
+            self._centroidal_active_velocity_indices = torch.tensor(
+                com_spec.active_velocity_indices,
+                dtype=torch.long,
+                device=self.device,
+            )
+            self._centroidal_full_velocity = torch.zeros(
+                (batch_size, com_spec.velocity_dim),
+                dtype=torch.float32,
+                device=self.device,
+            )
+            active_indices = tuple(robot_spec.active_velocity_indices)
             self._com_a = torch.zeros(
                 (batch_size, com_max_constraints, 2),
                 dtype=torch.float64,
@@ -945,38 +982,119 @@ class DeviceResidentMultiFramePoseSolver:
                 (batch_size, 1), dtype=torch.float64, device=self.device
             )
             self._com_settings = torch.zeros(3, dtype=torch.float64, device=self.device)
-            self._com_default = (
-                torch.tensor(com_default, dtype=torch.float32, device=self.device)
-                .expand(batch_size, -1)
-                .clone()
-            )
-            self._com_q_indices = torch.tensor(
-                com_spec.active_configuration_indices
-                or com_spec.active_velocity_indices,
-                dtype=torch.long,
-                device=self.device,
-            )
             excluded = tuple(com_excluded_velocity_indices)
-            active_indices = tuple(robot_spec.active_velocity_indices)
             if len(set(excluded)) != len(excluded) or any(
                 i not in active_indices for i in excluded
             ):
-                raise ValueError(
-                    "CoM excluded indices must be unique active source velocities"
-                )
+                raise ValueError("CoM excluded indices must be unique active source velocities")
             self._com_excluded = torch.tensor(
                 [i in excluded for i in active_indices],
                 dtype=torch.bool,
                 device=self.device,
             )
-            self.configure_com_constraint(
-                support_polygon_xy=com_support_polygon_xy,
-                margin=com_margin,
-                vel_max=com_vel_max,
-                acc_max=com_acc_max,
-                use_acceleration_limits=com_use_acceleration_limits,
-                proximity_fraction=com_proximity_fraction,
+            self._capture_a = torch.zeros(
+                (batch_size, capture_point_max_constraints, 2),
+                dtype=torch.float64,
+                device=self.device,
             )
+            self._capture_b = torch.zeros(
+                (batch_size, capture_point_max_constraints),
+                dtype=torch.float64,
+                device=self.device,
+            )
+            self._capture_active = torch.zeros_like(self._capture_b, dtype=torch.bool)
+            self._capture_settings = torch.tensor(
+                (
+                    -1.0 if capture_point_omega is None else capture_point_omega,
+                    -1.0 if capture_point_height is None else capture_point_height,
+                    capture_point_gravity_z,
+                ),
+                dtype=torch.float64,
+                device=self.device,
+            )
+            self._zmp_a = torch.zeros(
+                (batch_size, velocity_zmp_max_constraints, 2),
+                dtype=torch.float64,
+                device=self.device,
+            )
+            self._zmp_b = torch.zeros(
+                (batch_size, velocity_zmp_max_constraints),
+                dtype=torch.float64,
+                device=self.device,
+            )
+            self._zmp_active = torch.zeros_like(self._zmp_b, dtype=torch.bool)
+            self._zmp_settings = torch.tensor(
+                (velocity_zmp_fz_min, velocity_zmp_gravity_z),
+                dtype=torch.float64,
+                device=self.device,
+            )
+            self._momentum_target = torch.zeros(
+                (batch_size, 6), dtype=torch.float32, device=self.device
+            )
+            self._momentum_axis_mask = torch.tensor(
+                momentum_mask or (False,) * 6, dtype=torch.bool, device=self.device
+            )
+            self._momentum_weight = torch.tensor(
+                centroidal_momentum_weight, dtype=torch.float32, device=self.device
+            )
+            self._momentum_priority = int(centroidal_momentum_priority)
+            if self._momentum_priority not in (1, 2):
+                raise ValueError("centroidal momentum priority must be 1 or 2")
+            momentum_excluded = tuple(centroidal_momentum_excluded_velocity_indices)
+            if len(set(momentum_excluded)) != len(momentum_excluded) or any(
+                index not in active_indices for index in momentum_excluded
+            ):
+                raise ValueError(
+                    "centroidal momentum exclusions must be unique active source velocities"
+                )
+            self._momentum_excluded = torch.tensor(
+                [index in momentum_excluded for index in active_indices],
+                dtype=torch.bool,
+                device=self.device,
+            )
+            self._momentum_lower = torch.full(
+                (batch_size, 6), -1.0e100, dtype=torch.float64, device=self.device
+            )
+            self._momentum_upper = torch.full_like(self._momentum_lower, 1.0e100)
+            self._momentum_bound_active = torch.zeros(
+                (batch_size, 6), dtype=torch.bool, device=self.device
+            )
+            if self.com_constraint_enabled:
+                self.configure_com_constraint(
+                    support_polygon_xy=com_support_polygon_xy,
+                    margin=com_margin,
+                    vel_max=com_vel_max,
+                    acc_max=com_acc_max,
+                    use_acceleration_limits=com_use_acceleration_limits,
+                    proximity_fraction=com_proximity_fraction,
+                )
+            if self.capture_point_constraint_enabled:
+                self.configure_capture_point_constraint(
+                    support_polygon_xy=capture_point_support_polygon_xy,
+                    margin=capture_point_margin,
+                    omega=capture_point_omega,
+                    height=capture_point_height,
+                    gravity_z=capture_point_gravity_z,
+                )
+            if self.velocity_zmp_constraint_enabled:
+                self.configure_velocity_zmp_constraint(
+                    support_polygon_xy=velocity_zmp_support_polygon_xy,
+                    margin=velocity_zmp_margin,
+                    fz_min=velocity_zmp_fz_min,
+                    gravity_z=velocity_zmp_gravity_z,
+                )
+            if self.centroidal_momentum_task_enabled or self.centroidal_momentum_bounds_enabled:
+                self.configure_centroidal_momentum(
+                    enabled=self.centroidal_momentum_task_enabled,
+                    target=centroidal_momentum_target,
+                    axis_mask=momentum_mask or (False,) * 6,
+                    weight=centroidal_momentum_weight,
+                    lower=centroidal_momentum_lower,
+                    upper=centroidal_momentum_upper,
+                )
+        self.secondary_task_enabled = bool(
+            self.secondary_task_enabled or self.centroidal_momentum_task_enabled
+        )
         self.fi = (
             StrictCusadiFunction(
                 fi_function,
@@ -1000,7 +1118,7 @@ class DeviceResidentMultiFramePoseSolver:
         self._warp_torso_projection = None
         self._warp_priority_solvers = {}
         self._cusolver_priority_solvers = {}
-        if self.com_constraint_enabled or self.torso_constraint_enabled:
+        if self.centroidal_enabled or self.torso_constraint_enabled:
             from .warp_constraints import WarpCyclicRowProjection
         if self.config.velocity_solver == "warp_srinv":
             from .warp_directional_srinv import WarpDirectionalSRINV
@@ -1030,8 +1148,7 @@ class DeviceResidentMultiFramePoseSolver:
                     batch_capacity=batch_size,
                     inverse_mode="undamped_relative",
                     relative_rank_tolerance=(
-                        max(contact_rows, self.velocity_dim)
-                        * torch.finfo(torch.float64).eps
+                        max(contact_rows, self.velocity_dim) * torch.finfo(torch.float64).eps
                     ),
                     device=str(self.device),
                 )
@@ -1073,8 +1190,7 @@ class DeviceResidentMultiFramePoseSolver:
                     self.velocity_dim,
                     batch_capacity=batch_size,
                     relative_rank_tolerance=(
-                        max(contact_rows, self.velocity_dim)
-                        * torch.finfo(torch.float64).eps
+                        max(contact_rows, self.velocity_dim) * torch.finfo(torch.float64).eps
                     ),
                     output_mode=(
                         "action_undamped"
@@ -1094,11 +1210,18 @@ class DeviceResidentMultiFramePoseSolver:
                     dtype=torch.float32,
                     device=self.device,
                 )
-        if self.com_constraint_enabled:
+        if self.centroidal_enabled:
+            self._centroidal_row_capacity = (
+                com_max_constraints
+                + capture_point_max_constraints
+                + velocity_zmp_max_constraints
+                + 1
+                + 6
+            )
             self._warp_com_projection = WarpCyclicRowProjection(
-                com_max_constraints,
+                self._centroidal_row_capacity,
                 self.velocity_dim,
-                iterations=self._com_projection_iterations,
+                iterations=self._centroidal_projection_iterations,
                 batch_capacity=batch_size,
                 feasibility_tolerance=1.0e-6,
                 device=str(self.device),
@@ -1122,12 +1245,8 @@ class DeviceResidentMultiFramePoseSolver:
         ).expand(batch_size, -1)
         self._lower_velocity = -limits.contiguous()
         self._upper_velocity = limits.contiguous()
-        self._joint_lower = torch.tensor(
-            joint_lower, dtype=torch.float32, device=self.device
-        )
-        self._joint_upper = torch.tensor(
-            joint_upper, dtype=torch.float32, device=self.device
-        )
+        self._joint_lower = torch.tensor(joint_lower, dtype=torch.float32, device=self.device)
+        self._joint_upper = torch.tensor(joint_upper, dtype=torch.float32, device=self.device)
         self._orientation_frame_mask = torch.tensor(
             [dimension == 6 for dimension in self.frame_task_dimensions],
             dtype=torch.bool,
@@ -1140,12 +1259,8 @@ class DeviceResidentMultiFramePoseSolver:
             orientation_gains, dtype=torch.float32, device=self.device
         )
         if robot_spec.floating_base:
-            self._posture_joint_configuration_indices = (
-                robot_spec.joint_configuration_indices
-            )
-            self._posture_joint_configuration_sizes = (
-                robot_spec.joint_configuration_sizes
-            )
+            self._posture_joint_configuration_indices = robot_spec.joint_configuration_indices
+            self._posture_joint_configuration_sizes = robot_spec.joint_configuration_sizes
             self._posture_joint_velocity_indices = robot_spec.joint_velocity_indices
             self._posture_joint_velocity_sizes = robot_spec.joint_velocity_sizes
         else:
@@ -1154,14 +1269,10 @@ class DeviceResidentMultiFramePoseSolver:
             # input while velocity starts retain their original model indices.
             self._posture_joint_configuration_indices = tuple(range(self.velocity_dim))
             self._posture_joint_configuration_sizes = (1,) * self.velocity_dim
-            self._posture_joint_velocity_indices = tuple(
-                robot_spec.active_velocity_indices
-            )
+            self._posture_joint_velocity_indices = tuple(robot_spec.active_velocity_indices)
             self._posture_joint_velocity_sizes = (1,) * self.velocity_dim
         self._posture_target = None
-        self._posture_velocity_indices = tuple(
-            int(index) for index in posture_velocity_indices
-        )
+        self._posture_velocity_indices = tuple(int(index) for index in posture_velocity_indices)
         self._posture_weights = None
         self._posture_q_indices = None
         self._posture_jacobian = None
@@ -1207,8 +1318,7 @@ class DeviceResidentMultiFramePoseSolver:
                 self._posture_gain, dtype=torch.float32, device=self.device
             )
             self._posture_runtime_enabled = bool(
-                self._posture_gain > 0.0
-                and any(weight > 0.0 for weight in posture_weights)
+                self._posture_gain > 0.0 and any(weight > 0.0 for weight in posture_weights)
             )
         self._secondary_frame_task_dimensions = tuple(
             int(value) for value in secondary_frame_task_dimensions
@@ -1286,12 +1396,9 @@ class DeviceResidentMultiFramePoseSolver:
             self._torso_excluded_columns = torch.zeros(
                 self.velocity_dim, dtype=torch.bool, device=self.device
             )
-            self._torso_excluded_columns[
-                list(torso_excluded_active_velocity_indices)
-            ] = True
+            self._torso_excluded_columns[list(torso_excluded_active_velocity_indices)] = True
             self._torso_tolerance = torch.tensor(
-                (CPU_TORSO_BOUND_SLACK_EPS_TRANS,) * 3
-                + (CPU_TORSO_BOUND_SLACK_EPS_ROT,) * 3,
+                (CPU_TORSO_BOUND_SLACK_EPS_TRANS,) * 3 + (CPU_TORSO_BOUND_SLACK_EPS_ROT,) * 3,
                 dtype=torch.float64,
                 device=self.device,
             )
@@ -1323,9 +1430,7 @@ class DeviceResidentMultiFramePoseSolver:
         if robot_spec.floating_base:
             active_lookup = {
                 source_index: active_index
-                for active_index, source_index in enumerate(
-                    robot_spec.active_velocity_indices
-                )
+                for active_index, source_index in enumerate(robot_spec.active_velocity_indices)
             }
             for q_index, q_size, v_index, v_size in zip(
                 robot_spec.joint_configuration_indices,
@@ -1360,12 +1465,9 @@ class DeviceResidentMultiFramePoseSolver:
         self._compiled_collision_constraint = None
         self._compiled_collision_rows = None
         compile_requested = self.config.collision_enabled or (
-            self.config.velocity_solver == "torch_srinv"
-            and self.config.native_compile_enabled
+            self.config.velocity_solver == "torch_srinv" and self.config.native_compile_enabled
         )
-        compile_available = (
-            not compile_requested or _python_extension_headers_available()
-        )
+        compile_available = not compile_requested or _python_extension_headers_available()
         if compile_requested and not compile_available:
             warnings.warn(
                 "Python development headers are unavailable; disabling optional "
@@ -1390,9 +1492,7 @@ class DeviceResidentMultiFramePoseSolver:
                 device=str(self.device),
                 query_distance_m=self.config.collision_query_distance_m,
                 contacts_per_world=self.config.collision_contacts_per_world,
-                triangle_pairs_per_world=(
-                    self.config.collision_triangle_pairs_per_world
-                ),
+                triangle_pairs_per_world=(self.config.collision_triangle_pairs_per_world),
                 sort_contacts=self.config.collision_contact_sort_enabled,
             )
             if (
@@ -1453,12 +1553,17 @@ class DeviceResidentMultiFramePoseSolver:
                     dynamic=False,
                     options=compile_options,
                 )
-            self._compiled_finalization = torch.compile(
-                self._finalize_publication_eager,
-                fullgraph=True,
-                dynamic=False,
-                options=compile_options,
-            )
+            # Centroidal final validation evaluates Newton/Warp kinematics.
+            # Keep that path eager so the outer CUDA graph records the Warp
+            # launches directly instead of asking Dynamo to trace its driver
+            # context manager.
+            if not self.centroidal_enabled:
+                self._compiled_finalization = torch.compile(
+                    self._finalize_publication_eager,
+                    fullgraph=True,
+                    dynamic=False,
+                    options=compile_options,
+                )
         if (
             self.config.velocity_solver == "torch_srinv"
             and self.config.native_compile_enabled
@@ -1478,7 +1583,13 @@ class DeviceResidentMultiFramePoseSolver:
                 options=compile_options,
             )
 
-    def _validate(self, q: Any, target: Any, previous_velocity: Any | None) -> None:
+    def _validate(
+        self,
+        q: Any,
+        target: Any,
+        previous_velocity: Any | None,
+        current_velocity: Any | None,
+    ) -> None:
         torch = self.torch
         expected = {
             "q": (q, (self.batch_size, self.configuration_dim)),
@@ -1498,6 +1609,15 @@ class DeviceResidentMultiFramePoseSolver:
             or previous_velocity.dtype is not torch.float32
         ):
             raise ValueError("previous_velocity must match the active velocity shape")
+        if current_velocity is not None and (
+            not isinstance(current_velocity, torch.Tensor)
+            or current_velocity.shape != (self.batch_size, self.velocity_dim)
+            or current_velocity.device != self.device
+            or current_velocity.dtype is not torch.float32
+        ):
+            raise ValueError("current_velocity must match the active velocity shape")
+        if self.velocity_zmp_constraint_enabled and current_velocity is None:
+            raise ValueError("velocity ZMP requires explicit current_velocity")
         if self.robot_spec.floating_base:
             q_position = q[:, self._position_configuration_indices]
             lower_position = self._joint_lower[self._position_velocity_indices]
@@ -1525,9 +1645,7 @@ class DeviceResidentMultiFramePoseSolver:
                 torch.linalg.vector_norm(q[:, root_q + 3 : root_q + 7], dim=-1) > 1e-8
             ).all()
         else:
-            position_limits_valid = (
-                (q >= self._joint_lower) & (q <= self._joint_upper)
-            ).all()
+            position_limits_valid = ((q >= self._joint_lower) & (q <= self._joint_upper)).all()
             quaternion_valid = torch.tensor(True, device=self.device)
         checks = torch.stack(
             (
@@ -1538,6 +1656,11 @@ class DeviceResidentMultiFramePoseSolver:
                     if previous_velocity is None
                     else torch.isfinite(previous_velocity).all()
                 ),
+                (
+                    torch.tensor(True, device=self.device)
+                    if current_velocity is None
+                    else torch.isfinite(current_velocity).all()
+                ),
                 (torch.linalg.vector_norm(target[:, :, 3:], dim=-1) > 1e-8).all(),
                 position_limits_valid,
                 quaternion_valid,
@@ -1546,9 +1669,7 @@ class DeviceResidentMultiFramePoseSolver:
         if not all(checks):
             raise ValueError("multi-frame request contains invalid values or limits")
 
-    def _bounds(
-        self, q: Any, q_start: Any, previous: Any, effective_dt: Any
-    ) -> tuple[Any, Any]:
+    def _bounds(self, q: Any, q_start: Any, previous: Any, effective_dt: Any) -> tuple[Any, Any]:
         if self._compiled_bounds is not None:
             return self._compiled_bounds(q, q_start, previous, effective_dt)
         return self._bounds_eager(q, q_start, previous, effective_dt)
@@ -1636,9 +1757,7 @@ class DeviceResidentMultiFramePoseSolver:
                 dtype=self._fi_dtype,
                 device=self.device,
             )
-            velocity.index_copy_(
-                1, self._unlocked_active_columns_tensor, solved_velocity
-            )
+            velocity.index_copy_(1, self._unlocked_active_columns_tensor, solved_velocity)
         else:
             velocity = solved_velocity
         lower = lower.to(self._fi_dtype)
@@ -1646,12 +1765,8 @@ class DeviceResidentMultiFramePoseSolver:
         needs_upper_scale = velocity > upper
         needs_lower_scale = velocity < lower
         scales = torch.ones_like(velocity)
-        scales = torch.where(
-            needs_upper_scale, upper / torch.clamp(velocity, min=1e-30), scales
-        )
-        scales = torch.where(
-            needs_lower_scale, lower / torch.clamp(velocity, max=-1e-30), scales
-        )
+        scales = torch.where(needs_upper_scale, upper / torch.clamp(velocity, min=1e-30), scales)
+        scales = torch.where(needs_lower_scale, lower / torch.clamp(velocity, max=-1e-30), scales)
         scale = torch.clamp(torch.amin(scales, dim=-1), min=0.0, max=1.0)
         return (velocity * scale[:, None]).to(torch.float32)
 
@@ -1661,17 +1776,13 @@ class DeviceResidentMultiFramePoseSolver:
             matrix = jacobian
             if self._locked_active_columns:
                 matrix = matrix.index_select(2, self._unlocked_active_columns_tensor)
-            outputs = self._cusolver_srinv.solve(
-                matrix.contiguous(), twist.contiguous()
-            )
+            outputs = self._cusolver_srinv.solve(matrix.contiguous(), twist.contiguous())
             solved_velocity = outputs[0]
             self._cusolver_primary_status = outputs[3]
             if self.config.cusolver_reuse_locked_primary_inverse_enabled:
-                singular_values = (
-                    self._cusolver_srinv.factorization.singular_values[
-                        : self.batch_size
-                    ]
-                )
+                singular_values = self._cusolver_srinv.factorization.singular_values[
+                    : self.batch_size
+                ]
                 maximum = singular_values.amax(dim=-1)
                 minimum = singular_values.amin(dim=-1)
                 self._cusolver_locked_primary_reuse_certified = (
@@ -1679,8 +1790,7 @@ class DeviceResidentMultiFramePoseSolver:
                     & (maximum > 0.0)
                     & (
                         minimum
-                        > self.config.cusolver_locked_primary_reuse_min_singular_ratio
-                        * maximum
+                        > self.config.cusolver_locked_primary_reuse_min_singular_ratio * maximum
                     )
                 )
                 self._cusolver_primary_status = torch.where(
@@ -1694,9 +1804,7 @@ class DeviceResidentMultiFramePoseSolver:
                     dtype=torch.float32,
                     device=self.device,
                 )
-                velocity.index_copy_(
-                    1, self._unlocked_active_columns_tensor, solved_velocity
-                )
+                velocity.index_copy_(1, self._unlocked_active_columns_tensor, solved_velocity)
                 if self.config.cusolver_reuse_locked_primary_inverse_enabled:
                     full_inverse = torch.zeros(
                         (
@@ -1739,18 +1847,14 @@ class DeviceResidentMultiFramePoseSolver:
                 matrix = matrix.index_select(2, self._unlocked_active_columns_tensor)
             self._warp_srinv.tolerance = self.config.srinv_tolerance
             self._warp_srinv.damping = self.config.srinv_damping
-            solved_velocity = self._warp_srinv.solve(
-                matrix.contiguous(), twist.contiguous()
-            )
+            solved_velocity = self._warp_srinv.solve(matrix.contiguous(), twist.contiguous())
             if self._locked_active_columns:
                 velocity = torch.zeros(
                     (self.batch_size, self.velocity_dim),
                     dtype=torch.float32,
                     device=self.device,
                 )
-                velocity.index_copy_(
-                    1, self._unlocked_active_columns_tensor, solved_velocity
-                )
+                velocity.index_copy_(1, self._unlocked_active_columns_tensor, solved_velocity)
             else:
                 velocity = solved_velocity
             lower32, upper32 = lower.to(torch.float32), upper.to(torch.float32)
@@ -1807,9 +1911,7 @@ class DeviceResidentMultiFramePoseSolver:
             compute_gradient=False,
             probe_only=True,
         )
-        return self.collision.publish_convex_envelope_certificate(
-            self.collision_convex_envelope
-        )
+        return self.collision.publish_convex_envelope_certificate(self.collision_convex_envelope)
 
     def _apply_collision_constraint(
         self,
@@ -1883,9 +1985,7 @@ class DeviceResidentMultiFramePoseSolver:
             torch.minimum(velocity + high[:, None] * gradient, upper32), lower32
         )
         corrected = torch.where(required[:, None], projected, velocity)
-        corrected = torch.where(
-            overflow[:, None], torch.zeros_like(corrected), corrected
-        )
+        corrected = torch.where(overflow[:, None], torch.zeros_like(corrected), corrected)
         return (
             corrected,
             required,
@@ -1893,15 +1993,23 @@ class DeviceResidentMultiFramePoseSolver:
         )
 
     def solve(
-        self, q_start: Any, target: Any, previous_velocity: Any | None = None
+        self,
+        q_start: Any,
+        target: Any,
+        previous_velocity: Any | None = None,
+        current_velocity: Any | None = None,
     ) -> MultiFramePoseBatchResult:
-        self._validate(q_start, target, previous_velocity)
+        self._validate(q_start, target, previous_velocity, current_velocity)
         if self.config.standalone_cuda_graph_enabled:
-            return self._solve_graph(q_start, target, previous_velocity)
-        return self._solve_impl(q_start, target, previous_velocity)
+            return self._solve_graph(q_start, target, previous_velocity, current_velocity)
+        return self._solve_impl(q_start, target, previous_velocity, current_velocity)
 
     def _solve_graph(
-        self, q_start: Any, target: Any, previous_velocity: Any | None
+        self,
+        q_start: Any,
+        target: Any,
+        previous_velocity: Any | None,
+        current_velocity: Any | None,
     ) -> MultiFramePoseBatchResult:
         torch = self.torch
         if self._graph is None:
@@ -1912,6 +2020,7 @@ class DeviceResidentMultiFramePoseSolver:
                 dtype=q_start.dtype,
                 device=q_start.device,
             )
+            static_current = torch.empty_like(static_previous)
             static_q.copy_(q_start)
             static_target.copy_(target)
             (
@@ -1919,7 +2028,12 @@ class DeviceResidentMultiFramePoseSolver:
                 if previous_velocity is None
                 else static_previous.copy_(previous_velocity)
             )
-            warm_result = self._solve_impl(static_q, static_target, static_previous)
+            (
+                static_current.zero_()
+                if current_velocity is None
+                else static_current.copy_(current_velocity)
+            )
+            warm_result = self._solve_impl(static_q, static_target, static_previous, static_current)
             self.compact_publication(warm_result)
             torch.cuda.synchronize(self.device)
             import warp as wp
@@ -1931,7 +2045,7 @@ class DeviceResidentMultiFramePoseSolver:
                 # mixed Torch/Newton parent capture as an external capture.
                 with torch.cuda.graph(graph, capture_error_mode="thread_local"):
                     raw_graph_result = self._solve_impl(
-                        static_q, static_target, static_previous
+                        static_q, static_target, static_previous, static_current
                     )
                     graph_result = replace(
                         raw_graph_result,
@@ -1951,18 +2065,21 @@ class DeviceResidentMultiFramePoseSolver:
                         capture_mode=wp.CaptureMode.THREAD_LOCAL,
                     ):
                         raw_graph_result = self._solve_impl(
-                            static_q, static_target, static_previous
+                            static_q, static_target, static_previous, static_current
                         )
                         graph_result = replace(
                             raw_graph_result,
-                            compact_publication=self.compact_publication(
-                                raw_graph_result
-                            ),
+                            compact_publication=self.compact_publication(raw_graph_result),
                         )
             self._graph = graph
-            self._graph_inputs = (static_q, static_target, static_previous)
+            self._graph_inputs = (
+                static_q,
+                static_target,
+                static_previous,
+                static_current,
+            )
             self._graph_result = graph_result
-        static_q, static_target, static_previous = self._graph_inputs
+        static_q, static_target, static_previous, static_current = self._graph_inputs
         static_q.copy_(q_start)
         static_target.copy_(target)
         (
@@ -1970,12 +2087,15 @@ class DeviceResidentMultiFramePoseSolver:
             if previous_velocity is None
             else static_previous.copy_(previous_velocity)
         )
+        (
+            static_current.zero_()
+            if current_velocity is None
+            else static_current.copy_(current_velocity)
+        )
         self._graph.replay()
         return self._graph_result
 
-    def compact_publication(
-        self, result: MultiFramePoseBatchResult
-    ) -> Any:
+    def compact_publication(self, result: MultiFramePoseBatchResult) -> Any:
         """Pack one solved batch for a single synchronized public readback."""
 
         return self._compact_publication_packer.pack(
@@ -1992,6 +2112,14 @@ class DeviceResidentMultiFramePoseSolver:
             com_applied=result.com_constraint_applied,
             com_feasible=result.com_constraint_feasible,
             com_slack=result.minimum_com_slack_m,
+            capture_applied=result.capture_point_constraint_applied,
+            capture_feasible=result.capture_point_constraint_feasible,
+            capture_slack=result.minimum_capture_point_slack_m,
+            zmp_applied=result.velocity_zmp_constraint_applied,
+            zmp_feasible=result.velocity_zmp_constraint_feasible,
+            zmp_slack=result.minimum_velocity_zmp_slack_m,
+            zmp_force=result.minimum_zmp_normal_force_n,
+            momentum_applied=result.centroidal_momentum_task_applied,
             torso_applied=result.torso_constraint_applied,
             torso_feasible=result.torso_constraint_feasible,
             posture_applied=result.posture_task_applied,
@@ -2003,9 +2131,7 @@ class DeviceResidentMultiFramePoseSolver:
             secondary_before=result.secondary_residual_before,
             secondary_after=result.secondary_residual_after,
             spectral_ok=result.spectral_solve_ok,
-            collision_clear_state_certified=(
-                result.collision_clear_state_certified
-            ),
+            collision_clear_state_certified=(result.collision_clear_state_certified),
         )
 
     def _errors_eager(self, pose: Any, target: Any) -> tuple[Any, Any, Any, Any]:
@@ -2035,19 +2161,13 @@ class DeviceResidentMultiFramePoseSolver:
         return self._compiled_errors(pose, target)
 
     def _task_state_eager(self, pose: Any, target: Any) -> tuple[Any, Any, Any]:
-        position_vector, position, angular_vector, orientation = self._errors_eager(
-            pose, target
-        )
+        position_vector, position, angular_vector, orientation = self._errors_eager(pose, target)
         linear = _clamp_norm(
-            (position_vector * self._frame_position_gains[None, :, None]).reshape(
-                -1, 3
-            ),
+            (position_vector * self._frame_position_gains[None, :, None]).reshape(-1, 3),
             self.config.max_linear_speed,
         ).reshape(self.batch_size, self.frame_count, 3)
         angular = _clamp_norm(
-            (angular_vector * self._frame_orientation_gains[None, :, None]).reshape(
-                -1, 3
-            ),
+            (angular_vector * self._frame_orientation_gains[None, :, None]).reshape(-1, 3),
             self.config.max_angular_speed,
         ).reshape(self.batch_size, self.frame_count, 3)
         chunks = []
@@ -2059,9 +2179,7 @@ class DeviceResidentMultiFramePoseSolver:
         return position, orientation, twist
 
     def _select_task_jacobian(self, jacobian: Any) -> Any:
-        shaped = jacobian.reshape(
-            self.batch_size, self.frame_count, 6, self.velocity_dim
-        )
+        shaped = jacobian.reshape(self.batch_size, self.frame_count, 6, self.velocity_dim)
         chunks = [
             shaped[:, frame_index, :dimension]
             for frame_index, dimension in enumerate(self.frame_task_dimensions)
@@ -2069,9 +2187,7 @@ class DeviceResidentMultiFramePoseSolver:
         return self.torch.cat(chunks, dim=1)
 
     def _contact_jacobian(self, jacobian: Any) -> Any | None:
-        shaped = jacobian.reshape(
-            self.batch_size, self.frame_count, 6, self.velocity_dim
-        )
+        shaped = jacobian.reshape(self.batch_size, self.frame_count, 6, self.velocity_dim)
         chunks = [
             shaped[:, frame_index, : self.frame_task_dimensions[frame_index]]
             for frame_index, constrained in enumerate(self.frame_contact_constraints)
@@ -2088,26 +2204,26 @@ class DeviceResidentMultiFramePoseSolver:
             outputs = self._cusolver_contact_inverse.solve(
                 contact_jacobian.contiguous(), self._cusolver_contact_rhs
             )
-            identity = torch.eye(
-                self.velocity_dim, dtype=torch.float32, device=self.device
-            ).expand(self.batch_size, -1, -1)
+            identity = torch.eye(self.velocity_dim, dtype=torch.float32, device=self.device).expand(
+                self.batch_size, -1, -1
+            )
             return (
                 identity - outputs[2] @ contact_jacobian,
                 outputs[3] == 0,
             )
         if self._warp_contact_inverse is not None:
             inverse = self._warp_contact_inverse.solve(contact_jacobian.contiguous())
-            identity = torch.eye(
-                self.velocity_dim, dtype=torch.float32, device=self.device
-            ).expand(self.batch_size, -1, -1)
+            identity = torch.eye(self.velocity_dim, dtype=torch.float32, device=self.device).expand(
+                self.batch_size, -1, -1
+            )
             return (
                 identity - inverse @ contact_jacobian,
                 self._warp_contact_inverse.status[: self.batch_size] == 0,
             )
         contact = contact_jacobian.to(torch.float64)
-        identity = torch.eye(
-            self.velocity_dim, dtype=torch.float64, device=self.device
-        ).expand(self.batch_size, -1, -1)
+        identity = torch.eye(self.velocity_dim, dtype=torch.float64, device=self.device).expand(
+            self.batch_size, -1, -1
+        )
         return identity - torch.linalg.pinv(contact) @ contact, spectral_ok
 
     def _split_kinematics(self, pose: Any, jacobian: Any) -> tuple[Any, Any, Any, Any]:
@@ -2172,9 +2288,7 @@ class DeviceResidentMultiFramePoseSolver:
             self.set_posture_target(target_configuration)
         if weights is not None:
             assert self._posture_weights is not None
-            values = self.torch.as_tensor(
-                weights, dtype=self.torch.float32, device=self.device
-            )
+            values = self.torch.as_tensor(weights, dtype=self.torch.float32, device=self.device)
             if (
                 values.shape != self._posture_weights.shape
                 or not bool(self.torch.isfinite(values).all().item())
@@ -2201,8 +2315,7 @@ class DeviceResidentMultiFramePoseSolver:
             ] = values
         assert self._posture_weights is not None
         self._posture_runtime_enabled = bool(
-            self._posture_gain > 0.0
-            and self.torch.any(self._posture_weights > 0.0).item()
+            self._posture_gain > 0.0 and self.torch.any(self._posture_weights > 0.0).item()
         )
         if was_enabled != self._posture_runtime_enabled:
             self._graph = None
@@ -2242,17 +2355,13 @@ class DeviceResidentMultiFramePoseSolver:
             values = self.torch.as_tensor(source, dtype=dtype, device=self.device)
             if values.shape != (width,):
                 raise ValueError(f"torso update must have shape {(width,)}")
-            if dtype is not self.torch.bool and not bool(
-                self.torch.isfinite(values).all().item()
-            ):
+            if dtype is not self.torch.bool and not bool(self.torch.isfinite(values).all().item()):
                 raise ValueError("torso update must be finite")
             destination.copy_(values)
         assert self._torso_reference_pose is not None
         assert self._torso_lower_relative_limits is not None
         assert self._torso_upper_relative_limits is not None
-        if not bool(
-            self.torch.linalg.vector_norm(self._torso_reference_pose[3:]) > 1.0e-8
-        ):
+        if not bool(self.torch.linalg.vector_norm(self._torso_reference_pose[3:]) > 1.0e-8):
             raise ValueError("torso reference quaternion must be nonzero")
         if bool(
             self.torch.any(
@@ -2284,9 +2393,7 @@ class DeviceResidentMultiFramePoseSolver:
             if source is None:
                 continue
             assert destination is not None
-            candidate = self.torch.as_tensor(
-                source, dtype=destination.dtype, device=self.device
-            )
+            candidate = self.torch.as_tensor(source, dtype=destination.dtype, device=self.device)
             if candidate.shape != destination.shape or not bool(
                 self.torch.isfinite(candidate).all().item()
             ):
@@ -2304,9 +2411,7 @@ class DeviceResidentMultiFramePoseSolver:
             self._secondary_frame_targets,
         )
         if target is not None and bool(
-            self.torch.any(
-                self.torch.linalg.vector_norm(target[:, 3:], dim=-1) <= 1.0e-8
-            ).item()
+            self.torch.any(self.torch.linalg.vector_norm(target[:, 3:], dim=-1) <= 1.0e-8).item()
         ):
             raise ValueError("secondary target quaternions must be nonzero")
         for destination, candidate in candidates:
@@ -2360,6 +2465,7 @@ class DeviceResidentMultiFramePoseSolver:
         full_jacobian: Any,
         lower: Any,
         upper: Any,
+        centroidal_ag: Any = None,
     ) -> tuple[Any, Any, Any, Any, Any, Any]:
         torch = self.torch
         inactive = torch.zeros(self.batch_size, dtype=torch.bool, device=self.device)
@@ -2370,6 +2476,8 @@ class DeviceResidentMultiFramePoseSolver:
         goals = []
         jacobians = []
         posture_rows = None
+        tertiary_goals = []
+        tertiary_jacobians = []
         if self.posture_task_enabled and self._posture_runtime_enabled:
             assert self._posture_target is not None
             assert self._posture_weights is not None
@@ -2386,7 +2494,8 @@ class DeviceResidentMultiFramePoseSolver:
                 jacobian=self._posture_jacobian.expand(self.batch_size, -1, -1),
             )
             if self._posture_priority == 2:
-                posture_rows = rows
+                tertiary_goals.append(rows.goal)
+                tertiary_jacobians.append(rows.jacobian)
             else:
                 goals.append(rows.goal)
                 jacobians.append(rows.jacobian)
@@ -2405,9 +2514,7 @@ class DeviceResidentMultiFramePoseSolver:
             )
             for task_index, frame_index in enumerate(self._secondary_frame_indices):
                 pose = full_pose[:, frame_index]
-                target = self._secondary_frame_targets[task_index].expand(
-                    self.batch_size, -1
-                )
+                target = self._secondary_frame_targets[task_index].expand(self.batch_size, -1)
                 linear = _clamp_norm(
                     (target[:, :3] - pose[:, :3])
                     * self._secondary_frame_position_gains[task_index],
@@ -2419,8 +2526,7 @@ class DeviceResidentMultiFramePoseSolver:
                     angular, _ = _orientation_error(target[:, 3:], pose[:, 3:])
                     chunks.append(
                         _clamp_norm(
-                            angular
-                            * self._secondary_frame_orientation_gains[task_index],
+                            angular * self._secondary_frame_orientation_gains[task_index],
                             self.config.max_angular_speed,
                         )
                     )
@@ -2430,14 +2536,32 @@ class DeviceResidentMultiFramePoseSolver:
                     chunks = chunks[1:]
                     row_start = 3
                 goals.append(torch.cat(chunks, dim=-1) * weight)
-                jacobians.append(
-                    shaped_jacobian[:, frame_index, row_start:dimension] * weight
-                )
+                jacobians.append(shaped_jacobian[:, frame_index, row_start:dimension] * weight)
+        if getattr(self, "centroidal_momentum_task_enabled", False):
+            if centroidal_ag is None:
+                raise RuntimeError("centroidal momentum task requires centroidal state")
+            row_weight = self._momentum_axis_mask.to(torch.float32) * self._momentum_weight
+            momentum_jacobian = centroidal_ag * row_weight[None, :, None]
+            momentum_jacobian = momentum_jacobian.masked_fill(
+                self._momentum_excluded[None, None, :], 0.0
+            )
+            momentum_goal = self._momentum_target * row_weight[None, :]
+            if self._momentum_priority == 2:
+                tertiary_goals.append(momentum_goal)
+                tertiary_jacobians.append(momentum_jacobian)
+            else:
+                goals.append(momentum_goal)
+                jacobians.append(momentum_jacobian)
         bands = []
         if jacobians:
             bands.append((torch.cat(jacobians, dim=1), torch.cat(goals, dim=1)))
-        if posture_rows is not None:
-            bands.append((posture_rows.jacobian, posture_rows.goal))
+        if tertiary_jacobians:
+            bands.append(
+                (
+                    torch.cat(tertiary_jacobians, dim=1),
+                    torch.cat(tertiary_goals, dim=1),
+                )
+            )
         if not bands:
             return velocity, inactive, zeros, zeros, zeros, spectral_ok
         if getattr(self, "_cusolver_srinv", None) is not None:
@@ -2483,14 +2607,8 @@ class DeviceResidentMultiFramePoseSolver:
                     band_goal.contiguous(),
                     lower.to(torch.float32),
                     upper.to(torch.float32),
-                    (
-                        self._locked_velocity_mask
-                        if self._locked_active_columns
-                        else None
-                    ),
-                    protected_inverse=(
-                        self._cusolver_primary_inverse if reuse_primary else None
-                    ),
+                    (self._locked_velocity_mask if self._locked_active_columns else None),
+                    protected_inverse=(self._cusolver_primary_inverse if reuse_primary else None),
                     protected_spectral_ok=(
                         self._cusolver_primary_status == 0 if reuse_primary else None
                     ),
@@ -2534,9 +2652,7 @@ class DeviceResidentMultiFramePoseSolver:
                         device=str(self.device),
                     )
                     self._warp_priority_solvers[key] = solver
-                reuse_primary_factorization = (
-                    band_index == 0 and not self._locked_active_columns
-                )
+                reuse_primary_factorization = band_index == 0 and not self._locked_active_columns
                 priority = solver.solve(
                     velocity,
                     protected.contiguous(),
@@ -2544,11 +2660,7 @@ class DeviceResidentMultiFramePoseSolver:
                     band_goal.contiguous(),
                     lower.to(torch.float32),
                     upper.to(torch.float32),
-                    (
-                        None
-                        if reuse_primary_factorization
-                        else self._locked_velocity_mask
-                    ),
+                    (None if reuse_primary_factorization else self._locked_velocity_mask),
                     protected_inverse=(
                         self._warp_srinv.undamped_inverse[: self.batch_size]
                         if reuse_primary_factorization
@@ -2571,9 +2683,7 @@ class DeviceResidentMultiFramePoseSolver:
             priority.velocity,
             torch.stack([p.applied for p in priorities]).any(dim=0),
             torch.linalg.vector_norm(
-                (
-                    primary_jacobian @ (priority.velocity - velocity).unsqueeze(-1)
-                ).squeeze(-1),
+                (primary_jacobian @ (priority.velocity - velocity).unsqueeze(-1)).squeeze(-1),
                 dim=-1,
             ),
             priority.secondary_residual_before,
@@ -2590,15 +2700,30 @@ class DeviceResidentMultiFramePoseSolver:
         full_jacobian: Any,
         lower: Any,
         upper: Any,
+        centroidal_ag: Any = None,
     ) -> tuple[Any, Any, Any, Any, Any, Any]:
         compiled = getattr(self, "_compiled_secondary_tasks", None)
         if compiled is None:
             return DeviceResidentMultiFramePoseSolver._apply_secondary_tasks_eager(
                 self,
-                velocity, primary_jacobian, q, full_pose, full_jacobian, lower, upper
+                velocity,
+                primary_jacobian,
+                q,
+                full_pose,
+                full_jacobian,
+                lower,
+                upper,
+                centroidal_ag,
             )
         return compiled(
-            velocity, primary_jacobian, q, full_pose, full_jacobian, lower, upper
+            velocity,
+            primary_jacobian,
+            q,
+            full_pose,
+            full_jacobian,
+            lower,
+            upper,
+            centroidal_ag,
         )
 
     def configure_com_constraint(
@@ -2633,13 +2758,8 @@ class DeviceResidentMultiFramePoseSolver:
         ).items():
             if value is not None:
                 values[key] = value
-        if any(
-            not math.isfinite(values[k]) or values[k] <= 0
-            for k in ("vel_max", "acc_max")
-        ):
-            raise ValueError(
-                "CoM velocity/acceleration limits must be finite and positive"
-            )
+        if any(not math.isfinite(values[k]) or values[k] <= 0 for k in ("vel_max", "acc_max")):
+            raise ValueError("CoM velocity/acceleration limits must be finite and positive")
         polygons = np.asarray(values["support_polygon_xy"], dtype=np.float64)
         if polygons.ndim == 2:
             polygons = np.broadcast_to(polygons, (self.batch_size,) + polygons.shape)
@@ -2671,9 +2791,7 @@ class DeviceResidentMultiFramePoseSolver:
             (self._com_proximity, prox),
         ):
             destination.copy_(
-                self.torch.as_tensor(
-                    source, dtype=destination.dtype, device=self.device
-                )
+                self.torch.as_tensor(source, dtype=destination.dtype, device=self.device)
             )
         self._com_settings.copy_(
             self.torch.tensor(
@@ -2695,41 +2813,418 @@ class DeviceResidentMultiFramePoseSolver:
         if toggle and hasattr(self, "_graph"):
             self._graph = None
 
-    def _com_state(self, q):
+    def _configure_centroidal_polygon(
+        self, destination_a, destination_b, destination_active, polygon, margin
+    ) -> None:
+        import numpy as np
+
+        polygons = np.asarray(polygon, dtype=np.float64)
+        if polygons.ndim == 2:
+            polygons = np.broadcast_to(polygons, (self.batch_size,) + polygons.shape)
+        if polygons.ndim != 3 or polygons.shape[0] != self.batch_size:
+            raise ValueError("support polygon must be [vertices,2] or [batch,vertices,2]")
+        a = np.zeros(tuple(destination_a.shape))
+        b = np.zeros(tuple(destination_b.shape))
+        active = np.zeros(b.shape, dtype=bool)
+        for world, vertices in enumerate(polygons):
+            normals, offsets, _ = support_polygon_halfplanes(
+                vertices, margin=float(margin), proximity_fraction=0.0
+            )
+            count = len(offsets)
+            if count > a.shape[1]:
+                raise ValueError("support polygon exceeds fixed constraint capacity")
+            a[world, :count] = normals
+            b[world, :count] = offsets
+            active[world, :count] = True
+        for destination, source in (
+            (destination_a, a),
+            (destination_b, b),
+            (destination_active, active),
+        ):
+            destination.copy_(
+                self.torch.as_tensor(source, dtype=destination.dtype, device=self.device)
+            )
+
+    def configure_capture_point_constraint(
+        self,
+        *,
+        support_polygon_xy=None,
+        enabled=None,
+        margin=None,
+        omega=None,
+        height=None,
+        gravity_z=None,
+    ) -> None:
+        """Update the fixed-capacity world-frame capture-point constraint."""
+
+        if self.com is None:
+            raise ValueError("centroidal capacity must be configured at construction")
+        old = getattr(self, "_capture_host", {})
+        values = dict(old)
+        for key, value in {
+            "support_polygon_xy": support_polygon_xy,
+            "margin": margin,
+            "omega": omega,
+            "height": height,
+            "gravity_z": gravity_z,
+        }.items():
+            if value is not None:
+                values[key] = value
+        values.setdefault("margin", 0.0)
+        values.setdefault("omega", None)
+        values.setdefault("height", None)
+        values.setdefault("gravity_z", -9.81)
+        if "support_polygon_xy" not in values:
+            raise ValueError("capture-point support polygon is required")
+        if not math.isfinite(float(values["margin"])) or values["margin"] < 0.0:
+            raise ValueError("capture-point margin must be finite and nonnegative")
+        if values["omega"] is not None and (
+            not math.isfinite(float(values["omega"])) or values["omega"] <= 0.0
+        ):
+            raise ValueError("capture-point omega must be finite and positive")
+        if values["height"] is not None and (
+            not math.isfinite(float(values["height"])) or values["height"] <= 0.0
+        ):
+            raise ValueError("capture-point height must be finite and positive")
+        if not math.isfinite(float(values["gravity_z"])) or values["gravity_z"] >= 0.0:
+            raise ValueError("capture-point gravity_z must be finite and negative")
+        self._configure_centroidal_polygon(
+            self._capture_a,
+            self._capture_b,
+            self._capture_active,
+            values["support_polygon_xy"],
+            values["margin"],
+        )
+        self._capture_settings.copy_(
+            self.torch.tensor(
+                (
+                    -1.0 if values["omega"] is None else values["omega"],
+                    -1.0 if values["height"] is None else values["height"],
+                    values["gravity_z"],
+                ),
+                dtype=self.torch.float64,
+                device=self.device,
+            )
+        )
+        self._capture_host = values
+        toggle = enabled is not None and bool(enabled) != self.capture_point_constraint_enabled
+        if enabled is not None:
+            self.capture_point_constraint_enabled = bool(enabled)
+        if toggle and hasattr(self, "_graph"):
+            self._graph = None
+
+    def configure_velocity_zmp_constraint(
+        self,
+        *,
+        support_polygon_xy=None,
+        enabled=None,
+        margin=None,
+        fz_min=None,
+        gravity_z=None,
+    ) -> None:
+        """Update exact affine velocity-ZMP settings in the world support frame."""
+
+        if self.com is None:
+            raise ValueError("centroidal capacity must be configured at construction")
+        old = getattr(self, "_zmp_host", {})
+        values = dict(old)
+        for key, value in {
+            "support_polygon_xy": support_polygon_xy,
+            "margin": margin,
+            "fz_min": fz_min,
+            "gravity_z": gravity_z,
+        }.items():
+            if value is not None:
+                values[key] = value
+        values.setdefault("margin", 0.0)
+        values.setdefault("fz_min", 1.0)
+        values.setdefault("gravity_z", -9.81)
+        if "support_polygon_xy" not in values:
+            raise ValueError("velocity-ZMP support polygon is required")
+        if not math.isfinite(float(values["margin"])) or values["margin"] < 0.0:
+            raise ValueError("velocity-ZMP margin must be finite and nonnegative")
+        if not math.isfinite(float(values["fz_min"])) or values["fz_min"] <= 0.0:
+            raise ValueError("velocity-ZMP fz_min must be finite and positive")
+        if not math.isfinite(float(values["gravity_z"])) or values["gravity_z"] >= 0.0:
+            raise ValueError("velocity-ZMP gravity_z must be finite and negative")
+        self._configure_centroidal_polygon(
+            self._zmp_a,
+            self._zmp_b,
+            self._zmp_active,
+            values["support_polygon_xy"],
+            values["margin"],
+        )
+        self._zmp_settings.copy_(
+            self.torch.tensor(
+                (values["fz_min"], values["gravity_z"]),
+                dtype=self.torch.float64,
+                device=self.device,
+            )
+        )
+        self._zmp_host = values
+        toggle = enabled is not None and bool(enabled) != self.velocity_zmp_constraint_enabled
+        if enabled is not None:
+            self.velocity_zmp_constraint_enabled = bool(enabled)
+        if toggle and hasattr(self, "_graph"):
+            self._graph = None
+
+    def configure_centroidal_momentum(
+        self,
+        *,
+        enabled=None,
+        target=None,
+        axis_mask=None,
+        weight=None,
+        lower=None,
+        upper=None,
+    ) -> None:
+        """Update a shape-stable absolute momentum task and optional hard bounds."""
+
+        import numpy as np
+
+        if self.com is None:
+            raise ValueError("centroidal capacity must be configured at construction")
+        if target is not None:
+            values = np.asarray(target, dtype=np.float32)
+            if values.shape != (6,) or not np.isfinite(values).all():
+                raise ValueError("centroidal momentum target must be finite with shape (6,)")
+            self._momentum_target.copy_(
+                self.torch.as_tensor(values, device=self.device).expand(self.batch_size, -1)
+            )
+        if axis_mask is not None:
+            mask = np.asarray(axis_mask, dtype=bool)
+            if mask.shape != (6,):
+                raise ValueError("centroidal momentum axis mask must have shape (6,)")
+            self._momentum_axis_mask.copy_(
+                self.torch.as_tensor(mask, dtype=self.torch.bool, device=self.device)
+            )
+            if self.centroidal_momentum_bounds_enabled:
+                self._momentum_bound_active.copy_(
+                    self._momentum_axis_mask.expand(self.batch_size, -1)
+                )
+        if weight is not None:
+            if not math.isfinite(float(weight)) or weight < 0.0:
+                raise ValueError("centroidal momentum weight must be finite and nonnegative")
+            self._momentum_weight.fill_(float(weight))
+        if (lower is None) != (upper is None):
+            raise ValueError("centroidal momentum lower and upper must be updated together")
+        if lower is not None:
+            lower_values = np.asarray(lower, dtype=np.float64)
+            upper_values = np.asarray(upper, dtype=np.float64)
+            if (
+                lower_values.shape != (6,)
+                or upper_values.shape != (6,)
+                or not np.isfinite(lower_values).all()
+                or not np.isfinite(upper_values).all()
+                or np.any(lower_values > upper_values)
+            ):
+                raise ValueError(
+                    "centroidal momentum bounds must be finite ordered shape-(6,) values"
+                )
+            self._momentum_lower.copy_(
+                self.torch.as_tensor(lower_values, device=self.device).expand(self.batch_size, -1)
+            )
+            self._momentum_upper.copy_(
+                self.torch.as_tensor(upper_values, device=self.device).expand(self.batch_size, -1)
+            )
+            self._momentum_bound_active.copy_(self._momentum_axis_mask.expand(self.batch_size, -1))
+            self.centroidal_momentum_bounds_enabled = True
+        toggle = enabled is not None and bool(enabled) != self.centroidal_momentum_task_enabled
+        if enabled is not None:
+            self.centroidal_momentum_task_enabled = bool(enabled)
+        if toggle and hasattr(self, "_graph"):
+            self._graph = None
+
+    def _centroidal_configuration(self, q):
         full = q
         if not self.robot_spec.floating_base:
             full = self._com_default.clone()
             full.index_copy_(1, self._com_q_indices, q)
-        position, jacobian = self.com.evaluate(full)
-        slack = self._com_b - (
-            self._com_a @ position[:, :2, None].to(self.torch.float64)
-        ).squeeze(-1)
+        return full
+
+    def _com_state(self, q):
+        position, jacobian = self.com.evaluate(self._centroidal_configuration(q))
+        slack = self._com_b - (self._com_a @ position[:, :2, None].to(self.torch.float64)).squeeze(
+            -1
+        )
         rows = self._com_a @ jacobian[:, :2].to(self.torch.float64)
         return slack, rows.masked_fill(self._com_excluded[None, None, :], 0)
 
-    def _apply_com_constraint(self, q, velocity, lower, upper, contact_projector):
+    def _apply_com_constraint(
+        self,
+        q,
+        velocity,
+        lower,
+        upper,
+        contact_projector,
+        current_velocity=None,
+        centroidal_state=None,
+    ):
         torch = self.torch
-        if not self.com_constraint_enabled:
-            inactive = torch.zeros(
-                self.batch_size, dtype=torch.bool, device=self.device
+        if not self.centroidal_enabled:
+            inactive = torch.zeros(self.batch_size, dtype=torch.bool, device=self.device)
+            return velocity, inactive, ~inactive, None, None, None, None
+        full = self._centroidal_configuration(q)
+        position, jacobian, ag = (
+            self.com.evaluate_centroidal(full) if centroidal_state is None else centroidal_state
+        )
+        position64 = position.to(torch.float64)
+        jacobian64 = jacobian.to(torch.float64)
+        ag64 = ag.to(torch.float64)
+        row_chunks = []
+        lower_chunks = []
+        upper_chunks = []
+        active_chunks = []
+        slack = None
+        capture_slack = None
+        zmp_slack = None
+        zmp_force = None
+        if self.com_constraint_enabled:
+            slack = self._com_b - (self._com_a @ position64[:, :2, None]).squeeze(-1)
+            com_rows = self._com_a @ jacobian64[:, :2]
+            com_rows = com_rows.masked_fill(self._com_excluded[None, None, :], 0)
+            com_lower, com_upper = com_halfspace_velocity_bounds(
+                slack,
+                self.config.dt,
+                self._com_settings[0],
+                self._com_settings[1],
+                self._com_settings[2].bool(),
+                self._com_proximity,
             )
-            return velocity, inactive, ~inactive, None
-        slack, rows = self._com_state(q)
+        else:
+            com_rows = torch.zeros(
+                (*self._com_a.shape[:2], self.velocity_dim),
+                dtype=torch.float64,
+                device=self.device,
+            )
+            com_lower = torch.zeros_like(self._com_b)
+            com_upper = torch.zeros_like(self._com_b)
+        row_chunks.append(com_rows)
+        lower_chunks.append(com_lower)
+        upper_chunks.append(com_upper)
+        active_chunks.append(
+            self._com_active if self.com_constraint_enabled else torch.zeros_like(self._com_active)
+        )
+        if self.capture_point_constraint_enabled:
+            configured_omega = self._capture_settings[0]
+            configured_height = self._capture_settings[1]
+            height = torch.where(
+                configured_height > 0.0,
+                configured_height.expand(self.batch_size),
+                position64[:, 2],
+            )
+            derived = torch.sqrt(torch.abs(self._capture_settings[2]) / height.clamp_min(1.0e-30))
+            omega = torch.where(
+                configured_omega > 0.0,
+                configured_omega.expand(self.batch_size),
+                derived,
+            )
+            omega = torch.where(height > 0.0, omega, torch.full_like(omega, float("nan")))
+            cp_rows, cp_lower, cp_upper = _capture_point_constraint_rows_trusted(
+                self._capture_a,
+                self._capture_b,
+                position64[:, :2],
+                jacobian64[:, :2],
+                omega,
+            )
+            capture_point = (
+                position64[:, :2]
+                + (jacobian64[:, :2] @ velocity.to(torch.float64).unsqueeze(-1)).squeeze(-1)
+                / omega[:, None]
+            )
+            capture_slack = self._capture_b - (
+                self._capture_a @ capture_point.unsqueeze(-1)
+            ).squeeze(-1)
+        else:
+            cp_rows = torch.zeros(
+                (*self._capture_a.shape[:2], self.velocity_dim),
+                dtype=torch.float64,
+                device=self.device,
+            )
+            cp_lower = torch.zeros_like(self._capture_b)
+            cp_upper = torch.zeros_like(self._capture_b)
+        row_chunks.append(cp_rows)
+        lower_chunks.append(cp_lower)
+        upper_chunks.append(cp_upper)
+        active_chunks.append(
+            self._capture_active
+            if self.capture_point_constraint_enabled
+            else torch.zeros_like(self._capture_active)
+        )
+        if self.velocity_zmp_constraint_enabled:
+            if current_velocity is None:
+                raise ValueError("velocity ZMP requires explicit current_velocity")
+            full_current_velocity = self._centroidal_full_velocity.zero_()
+            full_current_velocity.index_copy_(
+                1,
+                self._centroidal_active_velocity_indices,
+                current_velocity,
+            )
+            bias = self.com.evaluate_centroidal_bias(full, full_current_velocity).to(torch.float64)
+            weight = torch.zeros((self.batch_size, 3), dtype=torch.float64, device=self.device)
+            weight[:, 2] = self.com.total_mass * torch.abs(self._zmp_settings[1])
+            dt = torch.full(
+                (self.batch_size,), self.config.dt, dtype=torch.float64, device=self.device
+            )
+            zmp_rows, zmp_lower, zmp_upper = _velocity_zmp_constraint_rows_trusted(
+                self._zmp_a,
+                self._zmp_b,
+                position64,
+                ag64,
+                bias,
+                current_velocity.to(torch.float64),
+                weight,
+                dt,
+                self._zmp_settings[0].expand(self.batch_size),
+            )
+            zmp_active = torch.cat(
+                (
+                    self._zmp_active,
+                    torch.ones((self.batch_size, 1), dtype=torch.bool, device=self.device),
+                ),
+                dim=-1,
+            )
+            zmp_value = (zmp_rows @ velocity.to(torch.float64).unsqueeze(-1)).squeeze(-1)
+            zmp_slack = zmp_upper[:, :-1] - zmp_value[:, :-1]
+            zmp_force = zmp_value[:, -1] - zmp_lower[:, -1] + self._zmp_settings[0]
+        else:
+            zmp_rows = torch.zeros(
+                (self.batch_size, self._zmp_a.shape[1] + 1, self.velocity_dim),
+                dtype=torch.float64,
+                device=self.device,
+            )
+            zmp_lower = torch.zeros(
+                (self.batch_size, self._zmp_a.shape[1] + 1),
+                dtype=torch.float64,
+                device=self.device,
+            )
+            zmp_upper = torch.zeros_like(zmp_lower)
+            zmp_active = torch.zeros_like(zmp_lower, dtype=torch.bool)
+        row_chunks.append(zmp_rows)
+        lower_chunks.append(zmp_lower)
+        upper_chunks.append(zmp_upper)
+        active_chunks.append(zmp_active)
+        momentum_rows = ag64.masked_fill(self._momentum_excluded[None, None, :], 0)
+        row_chunks.append(momentum_rows)
+        lower_chunks.append(self._momentum_lower)
+        upper_chunks.append(self._momentum_upper)
+        active_chunks.append(
+            self._momentum_bound_active
+            if self.centroidal_momentum_bounds_enabled
+            else torch.zeros_like(self._momentum_bound_active)
+        )
+        rows = torch.cat(row_chunks, dim=1)
+        row_lower = torch.cat(lower_chunks, dim=1)
+        row_upper = torch.cat(upper_chunks, dim=1)
+        active = torch.cat(active_chunks, dim=1)
         if contact_projector is not None:
             # Preserve fixed contact tangent directions in the recovery correction.
             rows = rows @ contact_projector.to(torch.float64)
-        row_lower, row_upper = com_halfspace_velocity_bounds(
-            slack,
-            self.config.dt,
-            self._com_settings[0],
-            self._com_settings[1],
-            self._com_settings[2].bool(),
-            self._com_proximity,
-        )
-        self._com_step_rows, self._com_step_lower, self._com_step_upper = (
+        self._com_step_rows, self._com_step_lower, self._com_step_upper, self._com_step_active = (
             rows,
             row_lower,
             row_upper,
+            active,
         )
         result = (
             self._warp_com_projection.solve(
@@ -2739,7 +3234,7 @@ class DeviceResidentMultiFramePoseSolver:
                 row_upper.contiguous(),
                 lower.contiguous(),
                 upper.contiguous(),
-                self._com_active.contiguous(),
+                active.contiguous(),
             )
             if self._warp_com_projection is not None
             else bounded_cyclic_row_projection(
@@ -2749,42 +3244,54 @@ class DeviceResidentMultiFramePoseSolver:
                 row_upper,
                 lower,
                 upper,
-                active_mask=self._com_active,
-                iterations=self._com_projection_iterations,
+                active_mask=active,
+                iterations=self._centroidal_projection_iterations,
                 feasibility_tolerance=1e-6,
             )
         )
-        finite = torch.isfinite(slack).all(-1) & torch.isfinite(result.velocity).all(-1)
+        finite = (
+            torch.isfinite(position).all(-1)
+            & torch.isfinite(jacobian).all(dim=(-2, -1))
+            & torch.isfinite(ag).all(dim=(-2, -1))
+            & torch.isfinite(result.velocity).all(-1)
+        )
+        if slack is not None:
+            finite &= torch.isfinite(slack).all(-1)
+        if capture_slack is not None:
+            finite &= torch.isfinite(capture_slack).all(-1)
+        if zmp_slack is not None:
+            finite &= torch.isfinite(zmp_slack).all(-1)
+            finite &= torch.isfinite(zmp_force)
         applied = (result.velocity - velocity).abs().amax(-1) > 1e-7
         return (
             result.velocity.to(torch.float32),
             applied,
             result.feasible & finite,
             slack,
+            capture_slack,
+            zmp_slack,
+            zmp_force,
         )
 
     def _com_candidate_valid(self, current_slack, candidate, velocity=None):
-        if not self.com_constraint_enabled:
-            return self.torch.ones(
-                self.batch_size, dtype=self.torch.bool, device=self.device
-            )
-        slack, _ = self._com_state(candidate)
-        floor = self.torch.minimum(
-            current_slack, self.torch.zeros_like(current_slack)
-        ).clamp_max(-1e-4)
-        valid = (
-            self.torch.isfinite(slack) & (~self._com_active | (slack >= floor - 1e-7))
-        ).all(-1)
-        if velocity is not None:
-            value = (
-                self._com_step_rows @ velocity.to(self.torch.float64).unsqueeze(-1)
-            ).squeeze(-1)
+        if not self.centroidal_enabled:
+            return self.torch.ones(self.batch_size, dtype=self.torch.bool, device=self.device)
+        valid = self.torch.ones(self.batch_size, dtype=self.torch.bool, device=self.device)
+        if self.com_constraint_enabled:
+            slack, _ = self._com_state(candidate)
+            floor = self.torch.minimum(
+                current_slack, self.torch.zeros_like(current_slack)
+            ).clamp_max(-1e-4)
             valid &= (
-                ~self._com_active
-                | (
-                    (value >= self._com_step_lower - 1e-6)
-                    & (value <= self._com_step_upper + 1e-6)
-                )
+                self.torch.isfinite(slack) & (~self._com_active | (slack >= floor - 1e-7))
+            ).all(-1)
+        if velocity is not None:
+            value = (self._com_step_rows @ velocity.to(self.torch.float64).unsqueeze(-1)).squeeze(
+                -1
+            )
+            valid &= (
+                ~self._com_step_active
+                | ((value >= self._com_step_lower - 1e-6) & (value <= self._com_step_upper + 1e-6))
             ).all(-1)
         return valid
 
@@ -2798,9 +3305,7 @@ class DeviceResidentMultiFramePoseSolver:
     ) -> tuple[Any, Any, Any, Any]:
         torch = self.torch
         if not self.torso_constraint_enabled:
-            inactive = torch.zeros(
-                self.batch_size, dtype=torch.bool, device=self.device
-            )
+            inactive = torch.zeros(self.batch_size, dtype=torch.bool, device=self.device)
             return velocity, inactive, ~inactive, None
         rows, row_lower, row_upper, active = self._torso_rows(
             torso_pose,
@@ -2854,9 +3359,7 @@ class DeviceResidentMultiFramePoseSolver:
             self._torso_acceleration_limits,
             self._torso_nominal_dt,
             self._torso_excluded_columns,
-            acceleration_history_enabled=(
-                self._torso_acceleration_history_enabled_device
-            ),
+            acceleration_history_enabled=(self._torso_acceleration_history_enabled_device),
             headroom_enabled=self._torso_headroom_enabled_device,
             headroom_fraction=self._torso_headroom_fraction_device,
             headroom_activation_margin=(self._torso_headroom_activation_margin_device),
@@ -2964,9 +3467,7 @@ class DeviceResidentMultiFramePoseSolver:
         active = torch.gather(pair_active, 1, selected)
         direction = gradient
         if contact_projector is not None:
-            direction = (gradient.to(contact_projector.dtype) @ contact_projector).to(
-                torch.float32
-            )
+            direction = (gradient.to(contact_projector.dtype) @ contact_projector).to(torch.float32)
 
         lower32, upper32 = lower.to(torch.float32), upper.to(torch.float32)
         lower_bound = self._collision_lower_bound(distance)
@@ -2982,15 +3483,10 @@ class DeviceResidentMultiFramePoseSolver:
                     active[:, row]
                     & ~overflow
                     & (directional_derivative > 1e-14)
-                    & (
-                        value
-                        < lower_bound[:, row]
-                        - self.config.collision_velocity_tolerance_m_s
-                    )
+                    & (value < lower_bound[:, row] - self.config.collision_velocity_tolerance_m_s)
                 )
                 required_step = torch.clamp_min(
-                    (lower_bound[:, row] - value)
-                    / directional_derivative.clamp_min(1e-14),
+                    (lower_bound[:, row] - value) / directional_derivative.clamp_min(1e-14),
                     0.0,
                 )
                 positive_limit = torch.where(
@@ -3010,9 +3506,7 @@ class DeviceResidentMultiFramePoseSolver:
                 candidate = corrected + step[:, None] * row_direction
                 corrected = torch.where(required[:, None], candidate, corrected)
                 applied |= required
-        corrected = torch.where(
-            overflow[:, None], torch.zeros_like(corrected), corrected
-        )
+        corrected = torch.where(overflow[:, None], torch.zeros_like(corrected), corrected)
         return corrected, applied
 
     def _project_contact_configuration(
@@ -3031,9 +3525,7 @@ class DeviceResidentMultiFramePoseSolver:
         full_pose, full_jacobian = self.kinematics._evaluate_trusted(candidate)
         pose, full_jacobian, _, _ = self._split_kinematics(full_pose, full_jacobian)
         position_vector, _, angular_vector, _ = self._errors_eager(pose, target)
-        shaped = full_jacobian.reshape(
-            self.batch_size, self.frame_count, 6, self.velocity_dim
-        )
+        shaped = full_jacobian.reshape(self.batch_size, self.frame_count, 6, self.velocity_dim)
         error_chunks = []
         jacobian_chunks = []
         for frame_index, constrained in enumerate(self.frame_contact_constraints):
@@ -3053,28 +3545,20 @@ class DeviceResidentMultiFramePoseSolver:
             outputs = self._cusolver_contact_inverse.solve(
                 jacobian.contiguous(), error.contiguous()
             )
-            correction = (
-                outputs[2] @ error.contiguous().unsqueeze(-1)
-            ).squeeze(-1)
+            correction = (outputs[2] @ error.contiguous().unsqueeze(-1)).squeeze(-1)
             spectral_ok = outputs[3] == 0
         elif self._warp_contact_inverse is not None:
-            correction = self._warp_contact_inverse.solve(
-                jacobian.contiguous(), error.contiguous()
-            )
+            correction = self._warp_contact_inverse.solve(jacobian.contiguous(), error.contiguous())
             spectral_ok = self._warp_contact_inverse.status[: self.batch_size] == 0
         else:
             correction = (
                 torch.linalg.pinv(jacobian.to(torch.float64))
                 @ error.to(torch.float64).unsqueeze(-1)
             ).squeeze(-1)
-            spectral_ok = torch.ones(
-                self.batch_size, dtype=torch.bool, device=self.device
-            )
+            spectral_ok = torch.ones(self.batch_size, dtype=torch.bool, device=self.device)
         correction_norm = torch.linalg.vector_norm(correction, dim=-1, keepdim=True)
         correction *= torch.clamp(0.02 / correction_norm.clamp_min(1e-12), max=1.0)
-        corrected_velocity = (
-            velocity + correction.to(torch.float32) / effective_dt[:, None]
-        )
+        corrected_velocity = velocity + correction.to(torch.float32) / effective_dt[:, None]
         corrected_velocity = torch.maximum(
             torch.minimum(corrected_velocity, upper.to(torch.float32)),
             lower.to(torch.float32),
@@ -3094,13 +3578,10 @@ class DeviceResidentMultiFramePoseSolver:
         valid = torch.ones(self.batch_size, dtype=torch.bool, device=self.device)
         for frame_index, constrained in enumerate(self.frame_contact_constraints):
             if constrained:
-                valid &= (
-                    position[:, frame_index] <= self.config.contact_position_tolerance_m
-                )
+                valid &= position[:, frame_index] <= self.config.contact_position_tolerance_m
                 if self.frame_task_dimensions[frame_index] == 6:
                     valid &= (
-                        orientation[:, frame_index]
-                        <= self.config.contact_orientation_tolerance_rad
+                        orientation[:, frame_index] <= self.config.contact_orientation_tolerance_rad
                     )
         return corrected_candidate, corrected_velocity, valid, spectral_ok
 
@@ -3136,31 +3617,23 @@ class DeviceResidentMultiFramePoseSolver:
         """Apply the exact ordered acceptance policy and safe-state selection."""
 
         torch = self.torch
-        publish = converged | (
-            self.config.allow_nonconverged_progress_steps & nonworsening & moved
-        )
+        publish = converged | (self.config.allow_nonconverged_progress_steps & nonworsening & moved)
         publish &= spectral_solve_ok
         collision_diagnostic_publish = publish
         if self.com_constraint_enabled:
-            initial_min = initial_com_slack.masked_fill(
-                ~self._com_active, float("inf")
-            ).amin(-1)
-            final_min = final_com_slack.masked_fill(
-                ~self._com_active, float("inf")
-            ).amin(-1)
+            initial_min = initial_com_slack.masked_fill(~self._com_active, float("inf")).amin(-1)
+            final_min = final_com_slack.masked_fill(~self._com_active, float("inf")).amin(-1)
             publish |= (initial_min < -1e-4) & (final_min > initial_min + 1e-7)
             converged &= final_min >= -1e-4
         if self.collision is not None and self.config.collision_enabled:
             collision_safe = (
                 final_collision_distance
-                >= self.config.collision_min_distance_m
-                - self.config.collision_tolerance_m
+                >= self.config.collision_min_distance_m - self.config.collision_tolerance_m
             ) & ~final_collision_overflow
             collision_recovery = (
                 (
                     initial_collision_distance
-                    < self.config.collision_min_distance_m
-                    - self.config.collision_tolerance_m
+                    < self.config.collision_min_distance_m - self.config.collision_tolerance_m
                 )
                 & (
                     final_collision_distance
@@ -3177,27 +3650,20 @@ class DeviceResidentMultiFramePoseSolver:
             final_collision_active = torch.where(
                 publish, final_collision_active, initial_collision_active
             )
+        if self.centroidal_enabled:
+            publish &= self._com_candidate_valid(initial_com_slack, q, accepted_velocity)
         if self.com_constraint_enabled:
-            publish &= self._com_candidate_valid(initial_com_slack, q)
-            final_com_slack = torch.where(
-                publish[:, None], final_com_slack, initial_com_slack
-            )
+            final_com_slack = torch.where(publish[:, None], final_com_slack, initial_com_slack)
         # Preserve the last spectral veto after all recovery OR-composition.
         publish &= spectral_solve_ok
         safe_q = torch.where(publish[:, None], q, q_start)
         safe_velocity = torch.where(
             publish[:, None], accepted_velocity, torch.zeros_like(accepted_velocity)
         )
-        published_position = torch.where(
-            publish[:, None], position, initial_position
-        )
-        published_orientation = torch.where(
-            publish[:, None], orientation, initial_orientation
-        )
+        published_position = torch.where(publish[:, None], position, initial_position)
+        published_orientation = torch.where(publish[:, None], orientation, initial_orientation)
         clear_state = (
-            collision_clear_state_certified
-            & collision_step_accepted
-            & ~collision_overflow_observed
+            collision_clear_state_certified & collision_step_accepted & ~collision_overflow_observed
             if self.config.collision_clear_state_fast_path_enabled
             else torch.zeros_like(collision_step_accepted)
         )
@@ -3221,12 +3687,14 @@ class DeviceResidentMultiFramePoseSolver:
         return self._compiled_finalization(*args)
 
     def _solve_impl(
-        self, q_start: Any, target: Any, previous_velocity: Any | None
+        self,
+        q_start: Any,
+        target: Any,
+        previous_velocity: Any | None,
+        current_velocity: Any | None,
     ) -> MultiFramePoseBatchResult:
         torch = self.torch
-        collision_active_for_solve = (
-            self.collision is not None and self.config.collision_enabled
-        )
+        collision_active_for_solve = self.collision is not None and self.config.collision_enabled
         graph_safe_native = (
             self.config.standalone_cuda_graph_enabled
             and self.config.velocity_solver in {"warp_srinv", "cusolver_srinv"}
@@ -3240,6 +3708,15 @@ class DeviceResidentMultiFramePoseSolver:
             )
             if previous_velocity is None
             else previous_velocity
+        )
+        measured_velocity = (
+            torch.zeros(
+                (self.batch_size, self.velocity_dim),
+                dtype=torch.float32,
+                device=self.device,
+            )
+            if current_velocity is None
+            else current_velocity
         )
         accepted_velocity = torch.zeros(
             (self.batch_size, self.velocity_dim),
@@ -3261,12 +3738,8 @@ class DeviceResidentMultiFramePoseSolver:
         final_collision_point0 = None
         final_collision_point1 = None
         final_collision_shape_pair = None
-        collision_step_accepted = torch.ones(
-            self.batch_size, dtype=torch.bool, device=self.device
-        )
-        collision_clear_state_certified = torch.ones_like(
-            collision_step_accepted
-        )
+        collision_step_accepted = torch.ones(self.batch_size, dtype=torch.bool, device=self.device)
+        collision_clear_state_certified = torch.ones_like(collision_step_accepted)
         collision_constraint_applied = torch.zeros_like(collision_step_accepted)
         collision_overflow_observed = torch.zeros_like(collision_step_accepted)
         torso_constraint_applied = torch.zeros_like(collision_step_accepted)
@@ -3274,16 +3747,19 @@ class DeviceResidentMultiFramePoseSolver:
         com_constraint_applied = torch.zeros_like(collision_step_accepted)
         com_constraint_feasible = torch.ones_like(collision_step_accepted)
         initial_com_slack = None
+        capture_constraint_applied = torch.zeros_like(collision_step_accepted)
+        capture_constraint_feasible = torch.ones_like(collision_step_accepted)
+        velocity_zmp_constraint_applied = torch.zeros_like(collision_step_accepted)
+        velocity_zmp_constraint_feasible = torch.ones_like(collision_step_accepted)
+        current_capture_slack = None
+        current_zmp_slack = None
+        current_zmp_force = None
         posture_task_applied = torch.zeros_like(collision_step_accepted)
         posture_primary_residual_increase = torch.zeros(
             self.batch_size, dtype=torch.float32, device=self.device
         )
-        posture_secondary_residual_before = torch.zeros_like(
-            posture_primary_residual_increase
-        )
-        posture_secondary_residual_after = torch.zeros_like(
-            posture_primary_residual_increase
-        )
+        posture_secondary_residual_before = torch.zeros_like(posture_primary_residual_increase)
+        posture_secondary_residual_after = torch.zeros_like(posture_primary_residual_increase)
         spectral_solve_ok = torch.ones_like(collision_step_accepted)
         effective_dt = torch.full(
             (self.batch_size,),
@@ -3293,13 +3769,16 @@ class DeviceResidentMultiFramePoseSolver:
         )
         for _ in range(self.config.iterations):
             full_pose, full_jacobian = self.kinematics._evaluate_trusted(q)
+            centroidal_state = (
+                self.com.evaluate_centroidal(self._centroidal_configuration(q))
+                if self.centroidal_enabled
+                else None
+            )
             pose, jacobian, torso_pose, torso_jacobian = self._split_kinematics(
                 full_pose, full_jacobian
             )
             contact_jacobian = self._contact_jacobian(jacobian)
-            contact_projector, contact_spectral_ok = self._contact_projector(
-                contact_jacobian
-            )
+            contact_projector, contact_spectral_ok = self._contact_projector(contact_jacobian)
             spectral_solve_ok &= contact_spectral_ok
             jacobian = self._select_task_jacobian(jacobian)
             position, orientation, twist = self._task_state(pose, target)
@@ -3309,8 +3788,7 @@ class DeviceResidentMultiFramePoseSolver:
             prefetched_collision = None
             collision_margin = None
             clear_state_fast_path = bool(
-                graph_safe_native
-                and self.config.collision_clear_state_fast_path_enabled
+                graph_safe_native and self.config.collision_clear_state_fast_path_enabled
             )
             if collision_active_for_solve and self.config.adaptive_dt:
                 if (
@@ -3323,22 +3801,17 @@ class DeviceResidentMultiFramePoseSolver:
                         compute_gradient=False,
                         probe_only=True,
                     )
-                    prefetched_collision = (
-                        self.collision.publish_convex_envelope_certificate(
-                            self.collision_convex_envelope
-                        )
+                    prefetched_collision = self.collision.publish_convex_envelope_certificate(
+                        self.collision_convex_envelope
                     )
                 else:
                     prefetched_collision = self.collision._query_trusted(
                         q,
-                        compute_gradient=(
-                            graph_safe_native and not clear_state_fast_path
-                        ),
+                        compute_gradient=(graph_safe_native and not clear_state_fast_path),
                         probe_only=clear_state_fast_path,
                     )
                 collision_margin = (
-                    prefetched_collision.distance_m
-                    - self.config.collision_min_distance_m
+                    prefetched_collision.distance_m - self.config.collision_min_distance_m
                 )
             adaptive_scale = _adaptive_dt_scale(
                 torch,
@@ -3362,9 +3835,7 @@ class DeviceResidentMultiFramePoseSolver:
                 kernel_time_ms += 1000.0 * self.fi._evaluate_trusted(
                     (
                         twist.to(self._fi_dtype).contiguous(),
-                        jacobian.to(self._fi_dtype)
-                        .reshape(self.batch_size, -1)
-                        .contiguous(),
+                        jacobian.to(self._fi_dtype).reshape(self.batch_size, -1).contiguous(),
                         self._constraints,
                         lower.to(self._fi_dtype).contiguous(),
                         upper.to(self._fi_dtype).contiguous(),
@@ -3386,6 +3857,7 @@ class DeviceResidentMultiFramePoseSolver:
                 full_jacobian,
                 lower,
                 upper,
+                None if centroidal_state is None else centroidal_state[2],
             )
             posture_task_applied |= posture_applied
             spectral_solve_ok &= priority_spectral_ok
@@ -3425,18 +3897,14 @@ class DeviceResidentMultiFramePoseSolver:
                         )
                         else self.collision._query_trusted(
                             q,
-                            compute_gradient=(
-                                graph_safe_native and not clear_state_fast_path
-                            ),
+                            compute_gradient=(graph_safe_native and not clear_state_fast_path),
                             probe_only=clear_state_fast_path,
                         )
                     )
                 )
                 current_gradient_loaded = graph_safe_native and not clear_state_fast_path
                 if not graph_safe_native and bool(
-                    torch.any(
-                        current_collision.active & ~current_collision.overflow
-                    ).item()
+                    torch.any(current_collision.active & ~current_collision.overflow).item()
                 ):
                     current_collision = self.collision._query_trusted(q)
                     current_gradient_loaded = True
@@ -3446,9 +3914,7 @@ class DeviceResidentMultiFramePoseSolver:
                 current_pair_active = current_collision.pair_active.clone()
                 current_active = current_collision.active.clone()
                 current_overflow = current_collision.overflow.clone()
-                collision_clear_state_certified &= (
-                    ~current_active & ~current_overflow
-                )
+                collision_clear_state_certified &= ~current_active & ~current_overflow
                 collision_overflow_observed |= current_overflow
                 if self.config.collision_debug_enabled:
                     current_point0 = current_collision.point0_world_m.clone()
@@ -3459,15 +3925,9 @@ class DeviceResidentMultiFramePoseSolver:
                     initial_collision_active = current_active.clone()
                     initial_collision_overflow = current_overflow.clone()
                     if self.config.collision_debug_enabled:
-                        initial_collision_point0 = (
-                            current_collision.point0_world_m.clone()
-                        )
-                        initial_collision_point1 = (
-                            current_collision.point1_world_m.clone()
-                        )
-                        initial_collision_shape_pair = (
-                            current_collision.shape_pair.clone()
-                        )
+                        initial_collision_point0 = current_collision.point0_world_m.clone()
+                        initial_collision_point1 = current_collision.point1_world_m.clone()
+                        initial_collision_shape_pair = current_collision.shape_pair.clone()
                 if current_gradient_loaded:
                     velocity, constraint_applied = self._apply_collision_rows(
                         primary_velocity,
@@ -3483,10 +3943,26 @@ class DeviceResidentMultiFramePoseSolver:
                 else:
                     constraint_applied = torch.zeros_like(current_active)
                 collision_constraint_applied |= constraint_applied
-            velocity, com_applied, com_feasible, current_com_slack = (
-                self._apply_com_constraint(q, velocity, lower, upper, contact_projector)
+            (
+                velocity,
+                com_applied,
+                com_feasible,
+                current_com_slack,
+                current_capture_slack,
+                current_zmp_slack,
+                current_zmp_force,
+            ) = self._apply_com_constraint(
+                q,
+                velocity,
+                lower,
+                upper,
+                contact_projector,
+                measured_velocity,
+                centroidal_state,
             )
             com_constraint_applied |= com_applied
+            capture_constraint_applied |= com_applied & self.capture_point_constraint_enabled
+            velocity_zmp_constraint_applied |= com_applied & self.velocity_zmp_constraint_enabled
             if initial_com_slack is None:
                 initial_com_slack = current_com_slack
             if self.robot_spec.floating_base:
@@ -3523,13 +3999,13 @@ class DeviceResidentMultiFramePoseSolver:
                     effective_dt,
                 )
                 spectral_solve_ok &= contact_spectral_ok
-            torso_candidate_valid = self._torso_candidate_valid(
-                current_torso_state, candidate
-            )
-            com_candidate_valid = self._com_candidate_valid(
-                current_com_slack, candidate, velocity
-            )
+            torso_candidate_valid = self._torso_candidate_valid(current_torso_state, candidate)
+            com_candidate_valid = self._com_candidate_valid(current_com_slack, candidate, velocity)
             com_constraint_feasible &= com_feasible & com_candidate_valid
+            if self.capture_point_constraint_enabled:
+                capture_constraint_feasible &= com_feasible & com_candidate_valid
+            if self.velocity_zmp_constraint_enabled:
+                velocity_zmp_constraint_feasible &= com_feasible & com_candidate_valid
             if not collision_active_for_solve:
                 accepted = (
                     contact_configuration_valid
@@ -3539,37 +4015,28 @@ class DeviceResidentMultiFramePoseSolver:
                     & com_candidate_valid
                 )
                 q = torch.where(accepted[:, None], candidate, q)
-                accepted_velocity = torch.where(
-                    accepted[:, None], velocity, accepted_velocity
-                )
+                accepted_velocity = torch.where(accepted[:, None], velocity, accepted_velocity)
                 torso_constraint_feasible &= accepted
                 continue
 
             safe_pair_floor = torch.where(
                 current_pair_distance
-                >= self.config.collision_min_distance_m
-                - self.config.collision_tolerance_m,
+                >= self.config.collision_min_distance_m - self.config.collision_tolerance_m,
                 torch.full_like(
                     current_pair_distance,
-                    self.config.collision_min_distance_m
-                    - self.config.collision_tolerance_m,
+                    self.config.collision_min_distance_m - self.config.collision_tolerance_m,
                 ),
                 current_pair_distance - self.config.collision_tolerance_m,
             )
-            if (
-                clear_state_fast_path
-                and self.config.collision_candidate_convex_certificate_enabled
-            ):
+            if clear_state_fast_path and self.config.collision_candidate_convex_certificate_enabled:
                 assert self.collision_convex_envelope is not None
                 self.collision_convex_envelope._query_trusted(
                     candidate,
                     compute_gradient=False,
                     probe_only=True,
                 )
-                candidate_collision = (
-                    self.collision.publish_convex_envelope_certificate(
-                        self.collision_convex_envelope
-                    )
+                candidate_collision = self.collision.publish_convex_envelope_certificate(
+                    self.collision_convex_envelope
                 )
             else:
                 candidate_collision = self.collision._query_trusted(
@@ -3599,9 +4066,7 @@ class DeviceResidentMultiFramePoseSolver:
                     & torch.all(candidate_pair_distance >= safe_pair_floor, dim=-1)
                 )
                 repair_needed = (
-                    ~accepted
-                    & candidate_collision.active
-                    & ~candidate_collision.overflow
+                    ~accepted & candidate_collision.active & ~candidate_collision.overflow
                 )
                 if not graph_safe_native and not bool(torch.any(repair_needed).item()):
                     break
@@ -3631,10 +4096,22 @@ class DeviceResidentMultiFramePoseSolver:
                     contact_projector,
                 )
                 collision_constraint_applied |= repair_applied & ~accepted
-                repaired_velocity, repair_com_applied, repair_com_feasible, _ = (
-                    self._apply_com_constraint(
-                        q, repaired_velocity, lower, upper, contact_projector
-                    )
+                (
+                    repaired_velocity,
+                    repair_com_applied,
+                    repair_com_feasible,
+                    _,
+                    _,
+                    _,
+                    _,
+                ) = self._apply_com_constraint(
+                    q,
+                    repaired_velocity,
+                    lower,
+                    upper,
+                    contact_projector,
+                    measured_velocity,
+                    centroidal_state,
                 )
                 com_constraint_applied |= repair_com_applied & ~accepted
                 com_feasible = torch.where(accepted, com_feasible, repair_com_feasible)
@@ -3679,27 +4156,19 @@ class DeviceResidentMultiFramePoseSolver:
                         contact_spectral_ok,
                     )
                     spectral_solve_ok &= contact_spectral_ok
-                candidate = torch.where(
-                    accepted[:, None], accepted_candidate, candidate
-                )
-                velocity = torch.where(
-                    accepted[:, None], accepted_velocity_before_repair, velocity
-                )
+                candidate = torch.where(accepted[:, None], accepted_candidate, candidate)
+                velocity = torch.where(accepted[:, None], accepted_velocity_before_repair, velocity)
                 contact_configuration_valid = torch.where(
                     accepted, accepted_contact_valid, contact_configuration_valid
                 )
-                torso_candidate_valid = self._torso_candidate_valid(
-                    current_torso_state, candidate
-                )
+                torso_candidate_valid = self._torso_candidate_valid(current_torso_state, candidate)
                 com_candidate_valid = self._com_candidate_valid(
                     current_com_slack, candidate, velocity
                 )
                 torso_candidate_valid = torch.where(
                     accepted, accepted_torso_valid, torso_candidate_valid
                 )
-                com_candidate_valid = torch.where(
-                    accepted, accepted_com_valid, com_candidate_valid
-                )
+                com_candidate_valid = torch.where(accepted, accepted_com_valid, com_candidate_valid)
                 candidate_collision = self.collision._query_trusted(
                     candidate, compute_gradient=False
                 )
@@ -3717,23 +4186,20 @@ class DeviceResidentMultiFramePoseSolver:
                 & com_candidate_valid
                 & (
                     candidate_distance
-                    >= self.config.collision_min_distance_m
-                    - self.config.collision_tolerance_m
+                    >= self.config.collision_min_distance_m - self.config.collision_tolerance_m
                     if clear_state_fast_path
-                    else torch.all(
-                        candidate_pair_distance >= safe_pair_floor, dim=-1
-                    )
+                    else torch.all(candidate_pair_distance >= safe_pair_floor, dim=-1)
                 )
             )
             torso_constraint_feasible &= torso_feasible & torso_candidate_valid
+            if self.capture_point_constraint_enabled:
+                capture_constraint_feasible &= com_feasible & com_candidate_valid
+            if self.velocity_zmp_constraint_enabled:
+                velocity_zmp_constraint_feasible &= com_feasible & com_candidate_valid
             q = torch.where(accepted[:, None], candidate, q)
-            accepted_velocity = torch.where(
-                accepted[:, None], velocity, accepted_velocity
-            )
+            accepted_velocity = torch.where(accepted[:, None], velocity, accepted_velocity)
             collision_step_accepted &= accepted
-            final_collision_distance = torch.where(
-                accepted, candidate_distance, current_distance
-            )
+            final_collision_distance = torch.where(accepted, candidate_distance, current_distance)
             final_collision_active = torch.where(
                 accepted, candidate_collision.active, current_active
             )
@@ -3840,16 +4306,48 @@ class DeviceResidentMultiFramePoseSolver:
                     initial_collision_shape_pair,
                 )
         minimum_com_slack = (
-            final_com_slack.masked_fill(~self._com_active, float("inf")).amin(-1)
+            final_com_slack.masked_fill(~self._com_active, float("inf")).amin(-1).to(torch.float32)
             if self.com_constraint_enabled
             else None
         )
+        minimum_capture_slack = None
+        minimum_zmp_slack = None
+        minimum_zmp_normal_force = None
+        if self.centroidal_enabled:
+            row_value = (
+                self._com_step_rows @ safe_velocity.to(torch.float64).unsqueeze(-1)
+            ).squeeze(-1)
+            com_end = self._com_a.shape[1]
+            capture_end = com_end + self._capture_a.shape[1]
+            zmp_end = capture_end + self._zmp_a.shape[1] + 1
+            if self.capture_point_constraint_enabled:
+                cp_slack = (
+                    self._com_step_upper[:, com_end:capture_end] - row_value[:, com_end:capture_end]
+                )
+                minimum_capture_slack = (
+                    cp_slack.masked_fill(~self._capture_active, float("inf"))
+                    .amin(-1)
+                    .to(torch.float32)
+                )
+            if self.velocity_zmp_constraint_enabled:
+                zmp_slack = (
+                    self._com_step_upper[:, capture_end : zmp_end - 1]
+                    - row_value[:, capture_end : zmp_end - 1]
+                )
+                minimum_zmp_slack = (
+                    zmp_slack.masked_fill(~self._zmp_active, float("inf"))
+                    .amin(-1)
+                    .to(torch.float32)
+                )
+                minimum_zmp_normal_force = (
+                    row_value[:, zmp_end - 1]
+                    - self._com_step_lower[:, zmp_end - 1]
+                    + self._zmp_settings[0]
+                ).to(torch.float32)
         published_collision_distance = (
             final_collision_distance if collision_active_for_solve else None
         )
-        published_collision_active = (
-            final_collision_active if collision_active_for_solve else None
-        )
+        published_collision_active = final_collision_active if collision_active_for_solve else None
         published_collision_accepted = (
             collision_step_accepted if collision_active_for_solve else None
         )
@@ -3878,6 +4376,27 @@ class DeviceResidentMultiFramePoseSolver:
                 com_constraint_feasible if self.com_constraint_enabled else None
             ),
             minimum_com_slack_m=minimum_com_slack,
+            capture_point_constraint_enabled=self.capture_point_constraint_enabled,
+            capture_point_constraint_applied=(
+                capture_constraint_applied if self.capture_point_constraint_enabled else None
+            ),
+            capture_point_constraint_feasible=(
+                capture_constraint_feasible if self.capture_point_constraint_enabled else None
+            ),
+            minimum_capture_point_slack_m=minimum_capture_slack,
+            velocity_zmp_constraint_enabled=self.velocity_zmp_constraint_enabled,
+            velocity_zmp_constraint_applied=(
+                velocity_zmp_constraint_applied if self.velocity_zmp_constraint_enabled else None
+            ),
+            velocity_zmp_constraint_feasible=(
+                velocity_zmp_constraint_feasible if self.velocity_zmp_constraint_enabled else None
+            ),
+            minimum_velocity_zmp_slack_m=minimum_zmp_slack,
+            minimum_zmp_normal_force_n=minimum_zmp_normal_force,
+            centroidal_momentum_task_enabled=self.centroidal_momentum_task_enabled,
+            centroidal_momentum_task_applied=(
+                posture_task_applied if self.centroidal_momentum_task_enabled else None
+            ),
             minimum_collision_distance_m=published_collision_distance,
             collision_active=published_collision_active,
             collision_step_accepted=published_collision_accepted,
@@ -3909,9 +4428,7 @@ class DeviceResidentMultiFramePoseSolver:
                 torso_constraint_feasible if self.torso_constraint_enabled else None
             ),
             posture_task_enabled=self.posture_task_enabled,
-            posture_task_applied=(
-                posture_task_applied if self.posture_task_enabled else None
-            ),
+            posture_task_applied=(posture_task_applied if self.posture_task_enabled else None),
             posture_primary_residual_increase=(
                 posture_primary_residual_increase if self.posture_task_enabled else None
             ),
@@ -3922,23 +4439,15 @@ class DeviceResidentMultiFramePoseSolver:
                 posture_secondary_residual_after if self.posture_task_enabled else None
             ),
             secondary_task_enabled=self.secondary_task_enabled,
-            secondary_task_applied=(
-                posture_task_applied if self.secondary_task_enabled else None
-            ),
+            secondary_task_applied=(posture_task_applied if self.secondary_task_enabled else None),
             secondary_primary_residual_increase=(
-                posture_primary_residual_increase
-                if self.secondary_task_enabled
-                else None
+                posture_primary_residual_increase if self.secondary_task_enabled else None
             ),
             secondary_residual_before=(
-                posture_secondary_residual_before
-                if self.secondary_task_enabled
-                else None
+                posture_secondary_residual_before if self.secondary_task_enabled else None
             ),
             secondary_residual_after=(
-                posture_secondary_residual_after
-                if self.secondary_task_enabled
-                else None
+                posture_secondary_residual_after if self.secondary_task_enabled else None
             ),
             spectral_solve_ok=spectral_solve_ok,
             compact_publication=None,

@@ -36,9 +36,9 @@ class GpuWbcCapabilities:
     acceleration_limits: bool = True
     com_support_polygon: bool = True
     device_resident_batch: bool = True
-    capture_point_constraints: bool = False
-    velocity_zmp_constraints: bool = False
-    centroidal_momentum_tasks: bool = False
+    capture_point_constraints: bool = True
+    velocity_zmp_constraints: bool = True
+    centroidal_momentum_tasks: bool = True
     acceleration_level_tasks: bool = False
     task_axis_masks: bool = False
     joint_metrics: bool = False
@@ -120,9 +120,7 @@ def derive_frames_active_velocity_indices(
     for frame in frames:
         jacobian = np.asarray(robot.get_frame_jacobian(frame), dtype=float)
         if jacobian.ndim != 2 or jacobian.shape[1] != int(robot.nv):
-            raise ValueError(
-                f"frame {frame!r} Jacobian must have {int(robot.nv)} columns"
-            )
+            raise ValueError(f"frame {frame!r} Jacobian must have {int(robot.nv)} columns")
         columns |= np.linalg.norm(jacobian, axis=0) > tolerance
     active = tuple(int(index) for index in np.flatnonzero(columns))
     if not active:
@@ -206,6 +204,17 @@ class GpuWbcMultiFrameResult:
     com_constraint_applied: bool = False
     com_constraint_feasible: bool = True
     minimum_com_slack_m: float | None = None
+    capture_point_constraint_enabled: bool = False
+    capture_point_constraint_applied: bool = False
+    capture_point_constraint_feasible: bool = True
+    minimum_capture_point_slack_m: float | None = None
+    velocity_zmp_constraint_enabled: bool = False
+    velocity_zmp_constraint_applied: bool = False
+    velocity_zmp_constraint_feasible: bool = True
+    minimum_velocity_zmp_slack_m: float | None = None
+    minimum_zmp_normal_force_n: float | None = None
+    centroidal_momentum_task_enabled: bool = False
+    centroidal_momentum_task_applied: bool = False
     torso_constraint_enabled: bool = False
     torso_constraint_applied: bool = False
     torso_constraint_feasible: bool = True
@@ -441,6 +450,24 @@ class GpuWbcMultiFrameSolver:
         com_full_default_configuration: object = None,
         com_max_constraints: int = 8,
         com_excluded_velocity_indices: tuple[int, ...] = (),
+        capture_point_support_polygon_xy: object = None,
+        capture_point_max_constraints: int = 8,
+        capture_point_margin: float = 0.0,
+        capture_point_omega: float | None = None,
+        capture_point_height: float | None = None,
+        capture_point_gravity_z: float = -9.81,
+        velocity_zmp_support_polygon_xy: object = None,
+        velocity_zmp_max_constraints: int = 8,
+        velocity_zmp_margin: float = 0.0,
+        velocity_zmp_fz_min: float = 1.0,
+        velocity_zmp_gravity_z: float = -9.81,
+        centroidal_momentum_target: tuple[float, ...] | None = None,
+        centroidal_momentum_axis_mask: tuple[bool, ...] = (),
+        centroidal_momentum_weight: float = 1.0,
+        centroidal_momentum_priority: int = 1,
+        centroidal_momentum_excluded_velocity_indices: tuple[int, ...] = (),
+        centroidal_momentum_lower: tuple[float, ...] | None = None,
+        centroidal_momentum_upper: tuple[float, ...] | None = None,
         torso_frame_name: str | None = None,
         torso_reference_pose_xyzw: tuple[float, ...] | None = None,
         torso_lower_relative_limits: tuple[float, ...] | None = None,
@@ -466,12 +493,13 @@ class GpuWbcMultiFrameSolver:
     ) -> None:
         try:
             import torch
-            from .model_spec import pose_model_parameters_from_embodik
+
             from ._runtime import (
                 COMPACT_PUBLICATION_SCALARS,
                 DeviceResidentMultiFramePoseSolver,
                 MultiFramePoseSolveConfig,
             )
+            from .model_spec import pose_model_parameters_from_embodik
         except ImportError as exc:
             raise RuntimeError(
                 "multi-frame GPU WBC requires EmbodiK's GPU dependencies: CasADi, "
@@ -518,8 +546,7 @@ class GpuWbcMultiFrameSolver:
             }
         else:
             raise ValueError(
-                "solver_backend must be fi_pesns, torch_srinv, warp_srinv, "
-                "or cusolver_srinv"
+                "solver_backend must be fi_pesns, torch_srinv, warp_srinv, " "or cusolver_srinv"
             )
         artifact_spec = artifact.get("robot_spec")
         if artifact_spec is None:
@@ -584,6 +611,7 @@ class GpuWbcMultiFrameSolver:
         )
         self.configuration_dim = len(active_joint_names)
         self.velocity_dim = self.configuration_dim
+        self.active_velocity_indices = tuple(params.robot_spec.active_velocity_indices)
         _validate_posture_target(posture_target_configuration, self.configuration_dim)
         self._solver = DeviceResidentMultiFramePoseSolver(
             batch_size,
@@ -628,6 +656,26 @@ class GpuWbcMultiFrameSolver:
             ),
             com_max_constraints=com_max_constraints,
             com_excluded_velocity_indices=com_excluded_velocity_indices,
+            capture_point_support_polygon_xy=capture_point_support_polygon_xy,
+            capture_point_max_constraints=capture_point_max_constraints,
+            capture_point_margin=capture_point_margin,
+            capture_point_omega=capture_point_omega,
+            capture_point_height=capture_point_height,
+            capture_point_gravity_z=capture_point_gravity_z,
+            velocity_zmp_support_polygon_xy=velocity_zmp_support_polygon_xy,
+            velocity_zmp_max_constraints=velocity_zmp_max_constraints,
+            velocity_zmp_margin=velocity_zmp_margin,
+            velocity_zmp_fz_min=velocity_zmp_fz_min,
+            velocity_zmp_gravity_z=velocity_zmp_gravity_z,
+            centroidal_momentum_target=centroidal_momentum_target,
+            centroidal_momentum_axis_mask=centroidal_momentum_axis_mask,
+            centroidal_momentum_weight=centroidal_momentum_weight,
+            centroidal_momentum_priority=centroidal_momentum_priority,
+            centroidal_momentum_excluded_velocity_indices=(
+                centroidal_momentum_excluded_velocity_indices
+            ),
+            centroidal_momentum_lower=centroidal_momentum_lower,
+            centroidal_momentum_upper=centroidal_momentum_upper,
             joint_lower=params.joint_lower,
             joint_upper=params.joint_upper,
             joint_velocity_limits=params.joint_velocity_limits,
@@ -645,8 +693,7 @@ class GpuWbcMultiFrameSolver:
                 max_joint_acceleration_rad_s2=max_joint_acceleration_rad_s2,
                 velocity_solver=solver_backend,
                 cusolver_specialized_outputs_enabled=(
-                    solver_backend == "cusolver_srinv"
-                    and cusolver_specialized_outputs_enabled
+                    solver_backend == "cusolver_srinv" and cusolver_specialized_outputs_enabled
                 ),
                 cusolver_reuse_locked_primary_inverse_enabled=(
                     cusolver_reuse_locked_primary_inverse_enabled
@@ -673,9 +720,7 @@ class GpuWbcMultiFrameSolver:
             dtype=torch.float32,
             device=self._solver.device,
         )
-        self._compact_publication_enabled = hasattr(
-            self._solver, "compact_publication"
-        )
+        self._compact_publication_enabled = hasattr(self._solver, "compact_publication")
 
         self._last_target = None
         self._last_target_host = None
@@ -693,9 +738,7 @@ class GpuWbcMultiFrameSolver:
         if options.get("solver_backend", "warp_srinv") == "fi_pesns":
             raise ValueError("from_robot does not support the artifact-backed fi_pesns backend")
         if "active_joint_names" not in options:
-            options["active_joint_names"] = derive_supported_active_joint_names(
-                options["robot"]
-            )
+            options["active_joint_names"] = derive_supported_active_joint_names(options["robot"])
         options.setdefault("solver_backend", "warp_srinv")
         return cls(None, urdf_path, cache_dir, **options)
 
@@ -715,6 +758,13 @@ class GpuWbcMultiFrameSolver:
         return np.asarray(configuration, dtype=float)[
             np.asarray(self.active_configuration_indices, dtype=int)
         ].copy()
+
+    def extract_active_velocity(self, velocity: object):
+        """Extract measured tangent state in the GPU solver's active order."""
+        import numpy as np
+
+        values = np.asarray(velocity, dtype=float)
+        return values[np.asarray(self.active_velocity_indices, dtype=int)].copy()
 
     def merge_active_configuration(self, configuration: object, active: object):
         import numpy as np
@@ -788,16 +838,21 @@ class GpuWbcMultiFrameSolver:
         targets: tuple[object, ...],
         *,
         include_collision_debug: bool = False,
+        current_velocity: object = None,
     ) -> GpuWbcMultiFrameResult:
         return GpuWbcFloatingMultiFrameSolver.solve_step(
-            self, joints, targets, include_collision_debug=include_collision_debug
+            self,
+            joints,
+            targets,
+            include_collision_debug=include_collision_debug,
+            current_velocity=current_velocity,
         )
 
-    def solve_device_batch(self, q, target, previous_velocity=None):
+    def solve_device_batch(self, q, target, previous_velocity=None, current_velocity=None):
         """Solve an already device-resident batch without host publication."""
 
         return GpuWbcFloatingMultiFrameSolver.solve_device_batch(
-            self, q, target, previous_velocity
+            self, q, target, previous_velocity, current_velocity
         )
 
 
@@ -850,6 +905,24 @@ class GpuWbcFloatingMultiFrameSolver:
         com_support_polygon_xy: object = None,
         com_max_constraints: int = 8,
         com_excluded_velocity_indices: tuple[int, ...] = (),
+        capture_point_support_polygon_xy: object = None,
+        capture_point_max_constraints: int = 8,
+        capture_point_margin: float = 0.0,
+        capture_point_omega: float | None = None,
+        capture_point_height: float | None = None,
+        capture_point_gravity_z: float = -9.81,
+        velocity_zmp_support_polygon_xy: object = None,
+        velocity_zmp_max_constraints: int = 8,
+        velocity_zmp_margin: float = 0.0,
+        velocity_zmp_fz_min: float = 1.0,
+        velocity_zmp_gravity_z: float = -9.81,
+        centroidal_momentum_target: tuple[float, ...] | None = None,
+        centroidal_momentum_axis_mask: tuple[bool, ...] = (),
+        centroidal_momentum_weight: float = 1.0,
+        centroidal_momentum_priority: int = 1,
+        centroidal_momentum_excluded_velocity_indices: tuple[int, ...] = (),
+        centroidal_momentum_lower: tuple[float, ...] | None = None,
+        centroidal_momentum_upper: tuple[float, ...] | None = None,
         torso_frame_name: str | None = None,
         torso_reference_pose_xyzw: tuple[float, ...] | None = None,
         torso_lower_relative_limits: tuple[float, ...] | None = None,
@@ -875,12 +948,13 @@ class GpuWbcFloatingMultiFrameSolver:
     ) -> None:
         try:
             import torch
-            from .model_spec import floating_pose_model_parameters_from_embodik
+
             from ._runtime import (
                 COMPACT_PUBLICATION_SCALARS,
                 DeviceResidentMultiFramePoseSolver,
                 MultiFramePoseSolveConfig,
             )
+            from .model_spec import floating_pose_model_parameters_from_embodik
         except ImportError as exc:
             raise RuntimeError(
                 "floating multi-frame GPU WBC requires EmbodiK's GPU dependencies: "
@@ -900,10 +974,7 @@ class GpuWbcFloatingMultiFrameSolver:
             "warp_srinv",
             "cusolver_srinv",
         }:
-            raise ValueError(
-                "solver_backend must be torch_srinv, warp_srinv, or "
-                "cusolver_srinv"
-            )
+            raise ValueError("solver_backend must be torch_srinv, warp_srinv, or " "cusolver_srinv")
         source = urdf_path.expanduser().resolve()
         params = floating_pose_model_parameters_from_embodik(
             robot,
@@ -940,13 +1011,12 @@ class GpuWbcFloatingMultiFrameSolver:
         self.batch_size = batch_size
         self._pending_start_event = torch.cuda.Event(enable_timing=True)
         self._pending_end_event = torch.cuda.Event(enable_timing=True)
-        self.collision_clear_state_fast_path_enabled = bool(
-            collision_clear_state_fast_path_enabled
-        )
+        self.collision_clear_state_fast_path_enabled = bool(collision_clear_state_fast_path_enabled)
         self._compact_publication_scalars = COMPACT_PUBLICATION_SCALARS
         self.frames = tuple(frames)
         self.configuration_dim = int(robot.nq)
         self.velocity_dim = len(active_velocity_indices)
+        self.active_velocity_indices = tuple(int(v) for v in active_velocity_indices)
         _validate_posture_target(posture_target_configuration, self.configuration_dim)
         self._solver = DeviceResidentMultiFramePoseSolver(
             batch_size,
@@ -976,13 +1046,10 @@ class GpuWbcFloatingMultiFrameSolver:
                 max_angular_speed=max_angular_speed,
                 max_joint_acceleration_rad_s2=max_joint_acceleration_rad_s2,
                 allow_nonconverged_progress_steps=True,
-                standalone_cuda_graph_enabled=(
-                    solver_backend in {"warp_srinv", "cusolver_srinv"}
-                ),
+                standalone_cuda_graph_enabled=(solver_backend in {"warp_srinv", "cusolver_srinv"}),
                 velocity_solver=solver_backend,
                 cusolver_specialized_outputs_enabled=(
-                    solver_backend == "cusolver_srinv"
-                    and cusolver_specialized_outputs_enabled
+                    solver_backend == "cusolver_srinv" and cusolver_specialized_outputs_enabled
                 ),
                 cusolver_reuse_locked_primary_inverse_enabled=(
                     cusolver_reuse_locked_primary_inverse_enabled
@@ -999,18 +1066,14 @@ class GpuWbcFloatingMultiFrameSolver:
                 collision_contacts_per_world=collision_contacts_per_world,
                 collision_triangle_pairs_per_world=(collision_triangle_pairs_per_world),
                 collision_contact_sort_enabled=collision_contact_sort_enabled,
-                collision_clear_state_fast_path_enabled=(
-                    collision_clear_state_fast_path_enabled
-                ),
+                collision_clear_state_fast_path_enabled=(collision_clear_state_fast_path_enabled),
                 collision_candidate_convex_certificate_enabled=(
                     collision_candidate_convex_certificate_enabled
                 ),
                 collision_current_convex_certificate_enabled=(
                     collision_current_convex_certificate_enabled
                 ),
-                torso_projection_noop_fast_path_enabled=(
-                    torso_projection_noop_fast_path_enabled
-                ),
+                torso_projection_noop_fast_path_enabled=(torso_projection_noop_fast_path_enabled),
                 collision_graph_repair_iterations=(collision_graph_repair_iterations),
             ),
             collision_pairs=tuple(collision_pairs),
@@ -1018,6 +1081,26 @@ class GpuWbcFloatingMultiFrameSolver:
             com_support_polygon_xy=com_support_polygon_xy,
             com_max_constraints=com_max_constraints,
             com_excluded_velocity_indices=com_excluded_velocity_indices,
+            capture_point_support_polygon_xy=capture_point_support_polygon_xy,
+            capture_point_max_constraints=capture_point_max_constraints,
+            capture_point_margin=capture_point_margin,
+            capture_point_omega=capture_point_omega,
+            capture_point_height=capture_point_height,
+            capture_point_gravity_z=capture_point_gravity_z,
+            velocity_zmp_support_polygon_xy=velocity_zmp_support_polygon_xy,
+            velocity_zmp_max_constraints=velocity_zmp_max_constraints,
+            velocity_zmp_margin=velocity_zmp_margin,
+            velocity_zmp_fz_min=velocity_zmp_fz_min,
+            velocity_zmp_gravity_z=velocity_zmp_gravity_z,
+            centroidal_momentum_target=centroidal_momentum_target,
+            centroidal_momentum_axis_mask=centroidal_momentum_axis_mask,
+            centroidal_momentum_weight=centroidal_momentum_weight,
+            centroidal_momentum_priority=centroidal_momentum_priority,
+            centroidal_momentum_excluded_velocity_indices=(
+                centroidal_momentum_excluded_velocity_indices
+            ),
+            centroidal_momentum_lower=centroidal_momentum_lower,
+            centroidal_momentum_upper=centroidal_momentum_upper,
             torso_reference_pose_xyzw=torso_reference_pose_xyzw,
             torso_lower_relative_limits=torso_lower_relative_limits,
             torso_upper_relative_limits=torso_upper_relative_limits,
@@ -1045,9 +1128,7 @@ class GpuWbcFloatingMultiFrameSolver:
             dtype=torch.float32,
             device=self._solver.device,
         )
-        self._compact_publication_enabled = hasattr(
-            self._solver, "compact_publication"
-        )
+        self._compact_publication_enabled = hasattr(self._solver, "compact_publication")
         self._last_target = None
         self._last_target_host = None
         self._last_runtime_option_signature = None
@@ -1074,6 +1155,13 @@ class GpuWbcFloatingMultiFrameSolver:
         self._last_target = None
         self._last_target_host = None
 
+    def extract_active_velocity(self, velocity: object):
+        """Extract measured tangent state in the GPU solver's active order."""
+        import numpy as np
+
+        values = np.asarray(velocity, dtype=float)
+        return values[np.asarray(self.active_velocity_indices, dtype=int)].copy()
+
     def configure_runtime(
         self,
         *,
@@ -1099,6 +1187,25 @@ class GpuWbcFloatingMultiFrameSolver:
         com_acc_max: float | None = None,
         com_use_acceleration_limits: bool | None = None,
         com_proximity_fraction: float | None = None,
+        capture_point_enabled: bool | None = None,
+        capture_point_support_polygon_xy: object = None,
+        capture_point_margin: float | None = None,
+        capture_point_omega: float | None = None,
+        capture_point_height: float | None = None,
+        capture_point_gravity_z: float | None = None,
+        velocity_zmp_enabled: bool | None = None,
+        velocity_zmp_support_polygon_xy: object = None,
+        velocity_zmp_margin: float | None = None,
+        velocity_zmp_fz_min: float | None = None,
+        velocity_zmp_gravity_z: float | None = None,
+        centroidal_momentum_enabled: bool | None = None,
+        centroidal_momentum_target: tuple[float, ...] | None = None,
+        centroidal_momentum_axis_mask: tuple[bool, ...] | None = None,
+        centroidal_momentum_weight: float | None = None,
+        centroidal_momentum_priority: int | None = None,
+        centroidal_momentum_excluded_velocity_indices: tuple[int, ...] | None = None,
+        centroidal_momentum_lower: tuple[float, ...] | None = None,
+        centroidal_momentum_upper: tuple[float, ...] | None = None,
         posture_target_configuration: tuple[float, ...] | None = None,
         posture_weights: tuple[float, ...] | None = None,
         posture_gain: float | None = None,
@@ -1231,6 +1338,55 @@ class GpuWbcFloatingMultiFrameSolver:
         )
         if any(v is not None for v in com_options.values()):
             self._solver.configure_com_constraint(**com_options)
+        capture_options = dict(
+            enabled=capture_point_enabled,
+            support_polygon_xy=capture_point_support_polygon_xy,
+            margin=capture_point_margin,
+            omega=capture_point_omega,
+            height=capture_point_height,
+            gravity_z=capture_point_gravity_z,
+        )
+        if any(v is not None for v in capture_options.values()):
+            self._solver.configure_capture_point_constraint(**capture_options)
+        zmp_options = dict(
+            enabled=velocity_zmp_enabled,
+            support_polygon_xy=velocity_zmp_support_polygon_xy,
+            margin=velocity_zmp_margin,
+            fz_min=velocity_zmp_fz_min,
+            gravity_z=velocity_zmp_gravity_z,
+        )
+        if any(v is not None for v in zmp_options.values()):
+            self._solver.configure_velocity_zmp_constraint(**zmp_options)
+        if (
+            centroidal_momentum_priority is not None
+            and int(centroidal_momentum_priority) != self._solver._momentum_priority
+        ):
+            raise ValueError("changing centroidal momentum priority requires rebuilding the solver")
+        if centroidal_momentum_excluded_velocity_indices is not None:
+            requested = set(int(v) for v in centroidal_momentum_excluded_velocity_indices)
+            configured = {
+                index
+                for index, excluded in zip(
+                    self.active_velocity_indices,
+                    self._solver._momentum_excluded.detach().cpu().tolist(),
+                    strict=True,
+                )
+                if excluded
+            }
+            if requested != configured:
+                raise ValueError(
+                    "changing centroidal momentum excluded velocities requires rebuilding the solver"
+                )
+        momentum_options = dict(
+            enabled=centroidal_momentum_enabled,
+            target=centroidal_momentum_target,
+            axis_mask=centroidal_momentum_axis_mask,
+            weight=centroidal_momentum_weight,
+            lower=centroidal_momentum_lower,
+            upper=centroidal_momentum_upper,
+        )
+        if any(v is not None for v in momentum_options.values()):
+            self._solver.configure_centroidal_momentum(**momentum_options)
         if any(v is not None for v in posture.values()):
             _validate_posture_target(posture_target_configuration, self.configuration_dim)
             self._solver.configure_posture(**posture)
@@ -1314,7 +1470,7 @@ class GpuWbcFloatingMultiFrameSolver:
         self._last_target_host = None
         return (time.perf_counter() - started) * 1e3
 
-    def solve_device_batch(self, q, target, previous_velocity=None):
+    def solve_device_batch(self, q, target, previous_velocity=None, current_velocity=None):
         """Run all worlds in one CUDA launch path and keep results on device.
 
         ``q`` must have shape ``[batch_size, configuration_dim]`` and ``target``
@@ -1324,12 +1480,14 @@ class GpuWbcFloatingMultiFrameSolver:
         """
 
         history = self._previous_velocity if previous_velocity is None else previous_velocity
-        result = self._solver.solve(q, target, history)
+        result = self._solver.solve(q, target, history, current_velocity)
         if previous_velocity is None and result.accepted_velocity is not None:
             self._previous_velocity.copy_(result.accepted_velocity)
         return result
 
-    def solve_device_step(self, q, target) -> _GpuWbcPendingMultiFrameStep:
+    def solve_device_step(
+        self, q, target, *, current_velocity=None
+    ) -> _GpuWbcPendingMultiFrameStep:
         """Launch one step without synchronizing or publishing to the host.
 
         This is the transaction primitive used by composed GPU solvers.  The
@@ -1386,7 +1544,7 @@ class GpuWbcFloatingMultiFrameSolver:
         start_event = self._pending_start_event
         end_event = self._pending_end_event
         start_event.record()
-        result = self._solver.solve(q, target, previous)
+        result = self._solver.solve(q, target, previous, current_velocity)
         compact = getattr(result, "compact_publication", None)
         if compact is None:
             compact = self._solver.compact_publication(result)
@@ -1416,8 +1574,7 @@ class GpuWbcFloatingMultiFrameSolver:
         torch = pending_steps[0].adapter._torch
         device = pending_steps[0].adapter._solver.device
         if any(
-            step.adapter._torch is not torch
-            or step.adapter._solver.device != device
+            step.adapter._torch is not torch or step.adapter._solver.device != device
             for step in pending_steps
         ):
             raise ValueError("pending GPU steps must share one Torch CUDA device")
@@ -1465,15 +1622,10 @@ class GpuWbcFloatingMultiFrameSolver:
         solved_host = host[: self.configuration_dim].astype(float, copy=True)
         position = tuple(
             float(value)
-            for value in host[
-                self.configuration_dim : self.configuration_dim + frame_count
-            ]
+            for value in host[self.configuration_dim : self.configuration_dim + frame_count]
         )
         orientation = tuple(
-            float(value)
-            for value in host[
-                self.configuration_dim + frame_count : scalar_start
-            ]
+            float(value) for value in host[self.configuration_dim + frame_count : scalar_start]
         )
         compact_values = dict(
             zip(
@@ -1492,12 +1644,12 @@ class GpuWbcFloatingMultiFrameSolver:
         collision_active = bool(compact_values["collision_active"])
         collision_accepted = bool(compact_values["collision_step_accepted"])
         collision_overflow = bool(compact_values["collision_overflow"])
-        collision_constraint_applied = bool(
-            compact_values["collision_constraint_applied"]
-        )
+        collision_constraint_applied = bool(compact_values["collision_constraint_applied"])
         torso_feasible = bool(compact_values["torso_constraint_feasible"])
         com_feasible = bool(compact_values["com_constraint_feasible"])
-        if not com_feasible:
+        capture_feasible = bool(compact_values["capture_point_constraint_feasible"])
+        zmp_feasible = bool(compact_values["velocity_zmp_constraint_feasible"])
+        if not (com_feasible and capture_feasible and zmp_feasible):
             status = "SAFE_HOLD_COM"
         elif not torso_feasible:
             status = "SAFE_HOLD_TORSO"
@@ -1519,42 +1671,45 @@ class GpuWbcFloatingMultiFrameSolver:
             collision_step_accepted=collision_accepted,
             collision_overflow=collision_overflow,
             collision_constraint_applied=collision_constraint_applied,
-            collision_clear_state_certified=bool(
-                compact_values["collision_clear_state_certified"]
-            ),
+            collision_clear_state_certified=bool(compact_values["collision_clear_state_certified"]),
             collision_debug=None,
             effective_dt=optional("effective_dt"),
-            com_constraint_enabled=bool(
-                getattr(result, "com_constraint_enabled", False)
-            ),
+            com_constraint_enabled=bool(getattr(result, "com_constraint_enabled", False)),
             com_constraint_applied=bool(compact_values["com_constraint_applied"]),
             com_constraint_feasible=com_feasible,
             minimum_com_slack_m=optional("minimum_com_slack_m"),
-            torso_constraint_enabled=bool(
-                getattr(result, "torso_constraint_enabled", False)
+            capture_point_constraint_enabled=bool(
+                getattr(result, "capture_point_constraint_enabled", False)
             ),
-            torso_constraint_applied=bool(
-                compact_values["torso_constraint_applied"]
+            capture_point_constraint_applied=bool(
+                compact_values["capture_point_constraint_applied"]
             ),
+            capture_point_constraint_feasible=capture_feasible,
+            minimum_capture_point_slack_m=optional("minimum_capture_point_slack_m"),
+            velocity_zmp_constraint_enabled=bool(
+                getattr(result, "velocity_zmp_constraint_enabled", False)
+            ),
+            velocity_zmp_constraint_applied=bool(compact_values["velocity_zmp_constraint_applied"]),
+            velocity_zmp_constraint_feasible=zmp_feasible,
+            minimum_velocity_zmp_slack_m=optional("minimum_velocity_zmp_slack_m"),
+            minimum_zmp_normal_force_n=optional("minimum_zmp_normal_force_n"),
+            centroidal_momentum_task_enabled=bool(
+                getattr(result, "centroidal_momentum_task_enabled", False)
+            ),
+            centroidal_momentum_task_applied=bool(
+                compact_values["centroidal_momentum_task_applied"]
+            ),
+            torso_constraint_enabled=bool(getattr(result, "torso_constraint_enabled", False)),
+            torso_constraint_applied=bool(compact_values["torso_constraint_applied"]),
             torso_constraint_feasible=torso_feasible,
             posture_task_enabled=bool(getattr(result, "posture_task_enabled", False)),
             posture_task_applied=bool(compact_values["posture_task_applied"]),
-            posture_primary_residual_increase=optional(
-                "posture_primary_residual_increase"
-            ),
-            posture_secondary_residual_before=optional(
-                "posture_secondary_residual_before"
-            ),
-            posture_secondary_residual_after=optional(
-                "posture_secondary_residual_after"
-            ),
-            secondary_task_enabled=bool(
-                getattr(result, "secondary_task_enabled", False)
-            ),
+            posture_primary_residual_increase=optional("posture_primary_residual_increase"),
+            posture_secondary_residual_before=optional("posture_secondary_residual_before"),
+            posture_secondary_residual_after=optional("posture_secondary_residual_after"),
+            secondary_task_enabled=bool(getattr(result, "secondary_task_enabled", False)),
             secondary_task_applied=bool(compact_values["secondary_task_applied"]),
-            secondary_primary_residual_increase=optional(
-                "secondary_primary_residual_increase"
-            ),
+            secondary_primary_residual_increase=optional("secondary_primary_residual_increase"),
             secondary_residual_before=optional("secondary_residual_before"),
             secondary_residual_after=optional("secondary_residual_after"),
         )
@@ -1565,10 +1720,9 @@ class GpuWbcFloatingMultiFrameSolver:
         targets: tuple[object, ...],
         *,
         include_collision_debug: bool = False,
+        current_velocity: object = None,
     ) -> GpuWbcMultiFrameResult:
-        collision_debug_enabled = bool(
-            include_collision_debug and self.collision_supported
-        )
+        collision_debug_enabled = bool(include_collision_debug and self.collision_supported)
         if collision_debug_enabled != self._solver.config.collision_debug_enabled:
             self._solver.config = replace(
                 self._solver.config,
@@ -1577,6 +1731,18 @@ class GpuWbcFloatingMultiFrameSolver:
             self._solver._graph = None
         q = self._q_tensor(configuration)
         target = self._target_tensor(targets)
+        measured_velocity = None
+        if current_velocity is not None:
+            import numpy as np
+
+            measured = np.asarray(current_velocity, dtype=np.float32)
+            if measured.shape != (self.velocity_dim,) or not np.isfinite(measured).all():
+                raise ValueError(
+                    f"current_velocity must be finite with shape {(self.velocity_dim,)}"
+                )
+            measured_velocity = self._torch.as_tensor(measured, device=self._solver.device).reshape(
+                1, self.velocity_dim
+            )
         current_target_host = getattr(self, "_current_target_host", None)
         target_changed = self._last_target is None or (
             _target_geometry_changed(self._torch, target, self._last_target)
@@ -1587,7 +1753,7 @@ class GpuWbcFloatingMultiFrameSolver:
             self._previous_velocity.zero_()
         self._torch.cuda.synchronize(self._solver.device)
         started = time.perf_counter()
-        result = self._solver.solve(q, target, self._previous_velocity)
+        result = self._solver.solve(q, target, self._previous_velocity, measured_velocity)
         compact = getattr(result, "compact_publication", None)
         if compact is None and self._compact_publication_enabled:
             compact = self._solver.compact_publication(result)
@@ -1618,15 +1784,10 @@ class GpuWbcFloatingMultiFrameSolver:
             solved_host = host[: self.configuration_dim].astype(float, copy=True)
             position = tuple(
                 float(value)
-                for value in host[
-                    self.configuration_dim : self.configuration_dim + frame_count
-                ]
+                for value in host[self.configuration_dim : self.configuration_dim + frame_count]
             )
             orientation = tuple(
-                float(value)
-                for value in host[
-                    self.configuration_dim + frame_count : scalar_start
-                ]
+                float(value) for value in host[self.configuration_dim + frame_count : scalar_start]
             )
             compact_values = dict(
                 zip(
@@ -1646,9 +1807,7 @@ class GpuWbcFloatingMultiFrameSolver:
                 np.any(
                     np.abs(
                         solved_host
-                        - np.asarray(configuration, dtype=float).reshape(
-                            self.configuration_dim
-                        )
+                        - np.asarray(configuration, dtype=float).reshape(self.configuration_dim)
                     )
                     > 1e-7
                 )
@@ -1658,9 +1817,7 @@ class GpuWbcFloatingMultiFrameSolver:
             collision_active = bool(compact_values["collision_active"])
             collision_accepted = bool(compact_values["collision_step_accepted"])
             collision_overflow = bool(compact_values["collision_overflow"])
-            collision_constraint_applied = bool(
-                compact_values["collision_constraint_applied"]
-            )
+            collision_constraint_applied = bool(compact_values["collision_constraint_applied"])
             collision_clear_state_certified = bool(
                 compact_values["collision_clear_state_certified"]
             )
@@ -1668,12 +1825,8 @@ class GpuWbcFloatingMultiFrameSolver:
         else:
             solved_host = solved.detach().cpu().numpy().astype(float, copy=True)
             position = tuple(float(value) for value in result.position_error_m[0].tolist())
-            orientation = tuple(
-                float(value) for value in result.orientation_error_rad[0].tolist()
-            )
-            moved = bool(
-                self._torch.any(self._torch.abs(solved - q[0]) > 1e-7).item()
-            )
+            orientation = tuple(float(value) for value in result.orientation_error_rad[0].tolist())
+            moved = bool(self._torch.any(self._torch.abs(solved - q[0]) > 1e-7).item())
             converged = bool(result.converged[0].item())
             collision_distance = (
                 None
@@ -1681,16 +1834,13 @@ class GpuWbcFloatingMultiFrameSolver:
                 else float(result.minimum_collision_distance_m[0].item())
             )
             collision_active = bool(
-                result.collision_active is not None
-                and result.collision_active[0].item()
+                result.collision_active is not None and result.collision_active[0].item()
             )
             collision_accepted = bool(
-                result.collision_step_accepted is None
-                or result.collision_step_accepted[0].item()
+                result.collision_step_accepted is None or result.collision_step_accepted[0].item()
             )
             collision_overflow = bool(
-                result.collision_overflow is not None
-                and result.collision_overflow[0].item()
+                result.collision_overflow is not None and result.collision_overflow[0].item()
             )
             collision_constraint_applied = bool(
                 result.collision_constraint_applied is not None
@@ -1701,9 +1851,7 @@ class GpuWbcFloatingMultiFrameSolver:
                 clear_state is not None and clear_state[0].item()
             )
             effective_dt = (
-                None
-                if result.effective_dt is None
-                else float(result.effective_dt[0].item())
+                None if result.effective_dt is None else float(result.effective_dt[0].item())
             )
         collision_debug = None
         if include_collision_debug and collision_active and not collision_overflow:
@@ -1724,14 +1872,16 @@ class GpuWbcFloatingMultiFrameSolver:
                 point_b_world=tuple(float(value) for value in point_b),
             )
         if compact_values is None:
-            torso_feasible = _result_scalar(
-                result, "torso_constraint_feasible", True
-            )
+            torso_feasible = _result_scalar(result, "torso_constraint_feasible", True)
             com_feasible = _result_scalar(result, "com_constraint_feasible", True)
+            capture_feasible = _result_scalar(result, "capture_point_constraint_feasible", True)
+            zmp_feasible = _result_scalar(result, "velocity_zmp_constraint_feasible", True)
         else:
             torso_feasible = bool(compact_values["torso_constraint_feasible"])
             com_feasible = bool(compact_values["com_constraint_feasible"])
-        if not com_feasible:
+            capture_feasible = bool(compact_values["capture_point_constraint_feasible"])
+            zmp_feasible = bool(compact_values["velocity_zmp_constraint_feasible"])
+        if not (com_feasible and capture_feasible and zmp_feasible):
             status = "SAFE_HOLD_COM"
         elif not torso_feasible:
             status = "SAFE_HOLD_TORSO"
@@ -1767,6 +1917,47 @@ class GpuWbcFloatingMultiFrameSolver:
                 _result_scalar(result, "minimum_com_slack_m")
                 if compact_values is None
                 else optional("minimum_com_slack_m")
+            ),
+            capture_point_constraint_enabled=bool(
+                getattr(result, "capture_point_constraint_enabled", False)
+            ),
+            capture_point_constraint_applied=(
+                _result_scalar(result, "capture_point_constraint_applied", False)
+                if compact_values is None
+                else bool(compact_values["capture_point_constraint_applied"])
+            ),
+            capture_point_constraint_feasible=bool(capture_feasible),
+            minimum_capture_point_slack_m=(
+                _result_scalar(result, "minimum_capture_point_slack_m")
+                if compact_values is None
+                else optional("minimum_capture_point_slack_m")
+            ),
+            velocity_zmp_constraint_enabled=bool(
+                getattr(result, "velocity_zmp_constraint_enabled", False)
+            ),
+            velocity_zmp_constraint_applied=(
+                _result_scalar(result, "velocity_zmp_constraint_applied", False)
+                if compact_values is None
+                else bool(compact_values["velocity_zmp_constraint_applied"])
+            ),
+            velocity_zmp_constraint_feasible=bool(zmp_feasible),
+            minimum_velocity_zmp_slack_m=(
+                _result_scalar(result, "minimum_velocity_zmp_slack_m")
+                if compact_values is None
+                else optional("minimum_velocity_zmp_slack_m")
+            ),
+            minimum_zmp_normal_force_n=(
+                _result_scalar(result, "minimum_zmp_normal_force_n")
+                if compact_values is None
+                else optional("minimum_zmp_normal_force_n")
+            ),
+            centroidal_momentum_task_enabled=bool(
+                getattr(result, "centroidal_momentum_task_enabled", False)
+            ),
+            centroidal_momentum_task_applied=(
+                _result_scalar(result, "centroidal_momentum_task_applied", False)
+                if compact_values is None
+                else bool(compact_values["centroidal_momentum_task_applied"])
             ),
             torso_constraint_enabled=bool(getattr(result, "torso_constraint_enabled", False)),
             torso_constraint_applied=(

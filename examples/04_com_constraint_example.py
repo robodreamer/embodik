@@ -46,15 +46,15 @@ from example_helpers.centroidal_support import (
     evaluate_centroidal_diagnostics,
 )
 from example_helpers.ik_common import DEFAULT_VISER_PORT, configure_solver_runtime_policy
+from utils.robot_models import load_robot_presets, resolve_robot_configuration
+
+import embodik
+from embodik import Rt, create_robot_visualizer, q2r, r2q
 from embodik.gpu.wbc import (
     GPU_WBC_CAPABILITIES,
     GpuWbcMultiFrameSolver,
     derive_frame_active_joint_names,
 )
-from utils.robot_models import load_robot_presets, resolve_robot_configuration
-
-import embodik
-from embodik import Rt, create_robot_visualizer, q2r, r2q
 
 logging.basicConfig(
     level=logging.INFO,
@@ -126,8 +126,7 @@ def gpu_collision_pairs(robot, urdf_path: Path, exclusions=(), *, auto=False) ->
                     distances[neighbor] = candidate
                     pending.append((neighbor, candidate))
     parents = {
-        str(geom["name"]): str(geom["parent_frame"])
-        for geom in robot.get_collision_geometries()
+        str(geom["name"]): str(geom["parent_frame"]) for geom in robot.get_collision_geometries()
     }
     excluded = {frozenset(pair) for pair in exclusions}
     return tuple(
@@ -147,9 +146,7 @@ def create_gpu_solver(args, config):
     gpu_robot = embodik.RobotModel(
         str(config["urdf_path"]), actuated_joint_names=names, floating_base=False
     )
-    velocity_indices = tuple(
-        int(gpu_robot.get_joint_velocity_index(name)) for name in names
-    )
+    velocity_indices = tuple(int(gpu_robot.get_joint_velocity_index(name)) for name in names)
     active_default = np.asarray(config["default_configuration"])[list(indices)]
     preset = load_robot_presets()[config["key"]]
     exclusions = preset.get("collision_exclusions", ())
@@ -169,6 +166,12 @@ def create_gpu_solver(args, config):
         com_support_polygon_xy=DEFAULT_POLYGON,
         com_full_robot=robot,
         com_full_default_configuration=config["default_configuration"],
+        capture_point_support_polygon_xy=DEFAULT_POLYGON,
+        velocity_zmp_support_polygon_xy=DEFAULT_POLYGON,
+        centroidal_momentum_target=(0.0,) * 6,
+        centroidal_momentum_axis_mask=(True, True, False, False, False, False),
+        centroidal_momentum_weight=0.01,
+        centroidal_momentum_priority=1,
         iterations=1,
         dt=0.01,
         position_gain=10.0,
@@ -183,7 +186,12 @@ def create_gpu_solver(args, config):
         posture_weights=tuple(1.0 for _ in names),
         posture_gain=1.0,
     )
-    gpu.configure_runtime(collision_enabled=False)
+    gpu.configure_runtime(
+        collision_enabled=False,
+        capture_point_enabled=False,
+        velocity_zmp_enabled=False,
+        centroidal_momentum_enabled=False,
+    )
     return gpu, indices
 
 
@@ -209,6 +217,11 @@ def gpu_step(
     com_acc_max=0.1,
     com_use_acceleration_limits=True,
     com_proximity_fraction=0.05,
+    capture_point_enabled=False,
+    velocity_zmp_enabled=False,
+    momentum_enabled=False,
+    momentum_weight=0.01,
+    current_velocity=None,
 ):
     """Run bounded CoM and optional constraints on the GPU backend."""
     if collision_enabled and not gpu.collision_supported:
@@ -225,19 +238,34 @@ def gpu_step(
         posture_gain=float(posture_gain),
         adaptive_dt=bool(adaptive_dt),
         com_enabled=bool(com_enabled),
-        com_support_polygon_xy=(
-            DEFAULT_POLYGON if support_polygon is None else support_polygon
-        ),
+        com_support_polygon_xy=(DEFAULT_POLYGON if support_polygon is None else support_polygon),
         com_margin=float(com_margin),
         com_vel_max=float(com_vel_max),
         com_acc_max=float(com_acc_max),
         com_use_acceleration_limits=bool(com_use_acceleration_limits),
         com_proximity_fraction=float(com_proximity_fraction),
+        capture_point_enabled=bool(capture_point_enabled),
+        capture_point_support_polygon_xy=(
+            DEFAULT_POLYGON if support_polygon is None else support_polygon
+        ),
+        capture_point_margin=float(com_margin),
+        velocity_zmp_enabled=bool(velocity_zmp_enabled),
+        velocity_zmp_support_polygon_xy=(
+            DEFAULT_POLYGON if support_polygon is None else support_polygon
+        ),
+        velocity_zmp_margin=float(com_margin),
+        centroidal_momentum_enabled=bool(momentum_enabled),
+        centroidal_momentum_target=(0.0,) * 6,
+        centroidal_momentum_axis_mask=(True, True, False, False, False, False),
+        centroidal_momentum_weight=float(momentum_weight),
     )
+    solve_options = {"include_collision_debug": bool(show_debug and collision_enabled)}
+    if current_velocity is not None:
+        solve_options["current_velocity"] = gpu.extract_active_velocity(current_velocity)
     result = gpu.solve_step(
         np.asarray(q)[list(indices)],
         (target,),
-        include_collision_debug=bool(show_debug and collision_enabled),
+        **solve_options,
     )
     updated = np.asarray(q).copy()
     updated[list(indices)] = result.joints
@@ -310,9 +338,7 @@ def _com_color(min_slack: float) -> tuple:
 
 def parse_args() -> argparse.Namespace:
     presets = load_robot_presets()
-    parser = argparse.ArgumentParser(
-        description="embodiK CoM support-polygon constraint demo."
-    )
+    parser = argparse.ArgumentParser(description="embodiK CoM support-polygon constraint demo.")
     parser.add_argument(
         "--robot",
         choices=sorted(presets.keys()),
@@ -323,9 +349,7 @@ def parse_args() -> argparse.Namespace:
         choices=["pinocchio", "viserurdf"],
         default="pinocchio",
     )
-    parser.add_argument(
-        "--port", type=int, default=DEFAULT_VISER_PORT, help="Viser server port."
-    )
+    parser.add_argument("--port", type=int, default=DEFAULT_VISER_PORT, help="Viser server port.")
     parser.add_argument("--gpu-wbc", action="store_true")
     parser.add_argument("--gpu-wbc-manifest", type=Path)
     parser.add_argument(
@@ -435,9 +459,7 @@ def main(args: argparse.Namespace) -> None:
         margin_pct_slider = server.gui.add_slider(
             "Safety margin (%)", min=0.0, max=40.0, initial_value=5.0, step=1.0
         )
-        proximity_checkbox = server.gui.add_checkbox(
-            "Use proximity activation", initial_value=True
-        )
+        proximity_checkbox = server.gui.add_checkbox("Use proximity activation", initial_value=True)
         # Read-only display: shows the auto-computed threshold (5 % of inradius).
         prox_display = server.gui.add_number(
             "Proximity threshold (m)", initial_value=0.0, disabled=True
@@ -448,9 +470,7 @@ def main(args: argparse.Namespace) -> None:
         com_acc_max_slider = server.gui.add_slider(
             "com_acc_max (m/s²)", min=0.01, max=0.5, initial_value=0.1, step=0.01
         )
-        use_acc_limits = server.gui.add_checkbox(
-            "Acceleration limits", initial_value=True
-        )
+        use_acc_limits = server.gui.add_checkbox("Acceleration limits", initial_value=True)
 
     with server.gui.add_folder("Visualization"):
         show_polygon = server.gui.add_checkbox("Show polygon", initial_value=True)
@@ -463,8 +483,7 @@ def main(args: argparse.Namespace) -> None:
     with server.gui.add_folder("IK Controls"):
         backend_select = server.gui.add_dropdown(
             "Solver Backend",
-            options=("CPU EmbodiK",)
-            + (("GPU Newton/Warp",) if gpu_solver is not None else ()),
+            options=("CPU EmbodiK",) + (("GPU Newton/Warp",) if gpu_solver is not None else ()),
             initial_value="CPU EmbodiK",
         )
         timing_handle = server.gui.add_number("Elapsed (ms)", 0.001, disabled=True)
@@ -499,11 +518,9 @@ def main(args: argparse.Namespace) -> None:
             "CoM controls apply to both backends (world XY polygon). GPU uses "
             "bounded recovery and holds infeasible steps. EE solve-mode/fallback controls "
             "apply to CPU only; GPU uses directional extended SRINV. Capture point, "
-            "velocity ZMP, and momentum damping currently apply to CPU only."
+            "velocity ZMP, and momentum damping apply to both backends."
         )
-        gpu_collision = server.gui.add_checkbox(
-            "GPU Self Collision", initial_value=False
-        )
+        gpu_collision = server.gui.add_checkbox("GPU Self Collision", initial_value=False)
         gpu_collision_distance = server.gui.add_slider(
             "GPU Minimum Distance (m)",
             min=0.001,
@@ -511,9 +528,7 @@ def main(args: argparse.Namespace) -> None:
             initial_value=0.03,
             step=0.001,
         )
-        gpu_debug = server.gui.add_checkbox(
-            "Show GPU Collision Debug", initial_value=False
-        )
+        gpu_debug = server.gui.add_checkbox("Show GPU Collision Debug", initial_value=False)
         gpu_posture = server.gui.add_slider(
             "GPU Posture Gain", min=0.0, max=10.0, initial_value=1.0, step=0.1
         )
@@ -567,9 +582,7 @@ def main(args: argparse.Namespace) -> None:
         enable_capture_point.disabled = gpu_selected and not (
             GPU_WBC_CAPABILITIES.capture_point_constraints
         )
-        enable_zmp.disabled = gpu_selected and not (
-            GPU_WBC_CAPABILITIES.velocity_zmp_constraints
-        )
+        enable_zmp.disabled = gpu_selected and not (GPU_WBC_CAPABILITIES.velocity_zmp_constraints)
         enable_momentum_damping.disabled = gpu_selected and not (
             GPU_WBC_CAPABILITIES.centroidal_momentum_tasks
         )
@@ -602,9 +615,7 @@ def main(args: argparse.Namespace) -> None:
                 com_vel_max=com_vel_max_slider.value,
                 com_acc_max=com_acc_max_slider.value,
                 use_acceleration_limits=use_acc_limits.value,
-                proximity_fraction=(
-                    _PROXIMITY_FRACTION if proximity_checkbox.value else 0.0
-                ),
+                proximity_fraction=(_PROXIMITY_FRACTION if proximity_checkbox.value else 0.0),
             )
             prox_display.value = round(solver.get_com_proximity_threshold(), 4)
         else:
@@ -795,6 +806,11 @@ def main(args: argparse.Namespace) -> None:
                         com_proximity_fraction=(
                             _PROXIMITY_FRACTION if proximity_checkbox.value else 0.0
                         ),
+                        capture_point_enabled=enable_capture_point.value,
+                        velocity_zmp_enabled=enable_zmp.value,
+                        momentum_enabled=enable_momentum_damping.value,
+                        momentum_weight=momentum_damping_weight.value,
+                        current_velocity=dq_current,
                         collision_enabled=gpu_collision.value,
                         collision_min_distance=gpu_collision_distance.value,
                         show_debug=gpu_debug.value,
@@ -832,9 +848,7 @@ def main(args: argparse.Namespace) -> None:
                         collision_line.points = np.array(
                             [[debug.point_a_world, debug.point_b_world]]
                         )
-                        collision_a.visible = collision_b.visible = (
-                            collision_line.visible
-                        ) = True
+                        collision_a.visible = collision_b.visible = collision_line.visible = True
         else:
             frame_task.solve_mode = getattr(
                 embodik.TaskSolveMode,
@@ -846,23 +860,19 @@ def main(args: argparse.Namespace) -> None:
             step_opts.orientation_gain = rot_gain.value
             step_opts.max_steps = int(iterations_slider.value)
             step_opts.current_joint_velocity = dq_current
-            result = solver.solve_position_step(
-                q_current, target_pose, "ee_task", step_opts
-            )
+            result = solver.solve_position_step(q_current, target_pose, "ee_task", step_opts)
             effective_mode = (
                 result.task_modes_effective[0].name
                 if len(result.task_modes_effective) > 0
                 else "SCALE"
             )
             used_fallback = (
-                bool(result.task_used_fallback[0])
-                if len(result.task_used_fallback) > 0
-                else False
+                bool(result.task_used_fallback[0]) if len(result.task_used_fallback) > 0 else False
             )
-            scale_value = (
-                float(result.task_scales[0]) if len(result.task_scales) > 0 else 1.0
+            scale_value = float(result.task_scales[0]) if len(result.task_scales) > 0 else 1.0
+            solve_diag.value = (
+                f"CPU mode={effective_mode}, fb={used_fallback}, scale={scale_value:.3f}"
             )
-            solve_diag.value = f"CPU mode={effective_mode}, fb={used_fallback}, scale={scale_value:.3f}"
             dq_command = np.asarray(result.joint_velocities, dtype=float)
             if dq_command.shape != (robot.nv,) or not np.all(np.isfinite(dq_command)):
                 dq_command = np.zeros(robot.nv, dtype=float)

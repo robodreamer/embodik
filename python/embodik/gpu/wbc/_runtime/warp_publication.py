@@ -39,6 +39,14 @@ def _make_publication_kernel(configuration_dim: int, frame_count: int):
         secondary_after: wp.array(dtype=wp.float32),
         spectral_ok: wp.array(dtype=wp.bool),
         collision_clear_state_certified: wp.array(dtype=wp.bool),
+        capture_applied: wp.array(dtype=wp.bool),
+        capture_feasible: wp.array(dtype=wp.bool),
+        capture_slack: wp.array(dtype=wp.float32),
+        zmp_applied: wp.array(dtype=wp.bool),
+        zmp_feasible: wp.array(dtype=wp.bool),
+        zmp_slack: wp.array(dtype=wp.float32),
+        zmp_force: wp.array(dtype=wp.float32),
+        momentum_applied: wp.array(dtype=wp.bool),
         output: wp.array2d(dtype=wp.float32),
     ):
         b = wp.tid()
@@ -71,6 +79,14 @@ def _make_publication_kernel(configuration_dim: int, frame_count: int):
         output[b, offset + 19] = secondary_after[b]
         output[b, offset + 20] = wp.float32(spectral_ok[b])
         output[b, offset + 21] = wp.float32(collision_clear_state_certified[b])
+        output[b, offset + 22] = wp.float32(capture_applied[b])
+        output[b, offset + 23] = wp.float32(capture_feasible[b])
+        output[b, offset + 24] = capture_slack[b]
+        output[b, offset + 25] = wp.float32(zmp_applied[b])
+        output[b, offset + 26] = wp.float32(zmp_feasible[b])
+        output[b, offset + 27] = zmp_slack[b]
+        output[b, offset + 28] = zmp_force[b]
+        output[b, offset + 29] = wp.float32(momentum_applied[b])
 
     wp.set_module_options({"max_unroll": 1}, module=kernel.module)
     return kernel
@@ -92,12 +108,8 @@ class WarpCompactPublication:
         self.frame_count = frame_count
         self.device = torch.device(device)
         width = configuration_dim + 2 * frame_count + len(COMPACT_PUBLICATION_SCALARS)
-        self.output = torch.empty(
-            (batch_capacity, width), dtype=torch.float32, device=self.device
-        )
-        self._zero_float = torch.zeros(
-            batch_capacity, dtype=torch.float32, device=self.device
-        )
+        self.output = torch.empty((batch_capacity, width), dtype=torch.float32, device=self.device)
+        self._zero_float = torch.zeros(batch_capacity, dtype=torch.float32, device=self.device)
         self._one_float = torch.ones_like(self._zero_float)
         self._nan_float = torch.full_like(self._zero_float, float("nan"))
         self._false = torch.zeros(batch_capacity, dtype=torch.bool, device=self.device)
@@ -133,6 +145,14 @@ class WarpCompactPublication:
         secondary_after=None,
         spectral_ok=None,
         collision_clear_state_certified=None,
+        capture_applied=None,
+        capture_feasible=None,
+        capture_slack=None,
+        zmp_applied=None,
+        zmp_feasible=None,
+        zmp_slack=None,
+        zmp_force=None,
+        momentum_applied=None,
     ) -> torch.Tensor:
         torch_stream = wp.stream_from_torch(torch.cuda.current_stream(self.device))
         warp_stream = wp.get_stream(str(self.device))
@@ -167,6 +187,14 @@ class WarpCompactPublication:
                 if collision_clear_state_certified is None
                 else collision_clear_state_certified
             ),
+            self._false if capture_applied is None else capture_applied,
+            self._true if capture_feasible is None else capture_feasible,
+            self._nan_float if capture_slack is None else capture_slack,
+            self._false if zmp_applied is None else zmp_applied,
+            self._true if zmp_feasible is None else zmp_feasible,
+            self._nan_float if zmp_slack is None else zmp_slack,
+            self._nan_float if zmp_force is None else zmp_force,
+            self._false if momentum_applied is None else momentum_applied,
         )
         wp.launch(
             self._kernel,

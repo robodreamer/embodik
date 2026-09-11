@@ -23,10 +23,7 @@ def support_polygon_halfplanes(vertices_xy, *, margin=0.0, proximity_fraction=0.
     points = np.asarray(vertices_xy, dtype=np.float64)
     if points.ndim != 2 or points.shape[1] != 2 or len(points) < 3:
         raise ValueError("support polygon requires at least three xy vertices")
-    if (
-        not np.isfinite(points).all()
-        or not np.isfinite([margin, proximity_fraction]).all()
-    ):
+    if not np.isfinite(points).all() or not np.isfinite([margin, proximity_fraction]).all():
         raise ValueError("support polygon settings must be finite")
     ordered = sorted(set(map(tuple, points)))
 
@@ -55,18 +52,13 @@ def support_polygon_halfplanes(vertices_xy, *, margin=0.0, proximity_fraction=0.
         raise ValueError("support polygon margin collapses an edge")
     a = np.stack((edges[:, 1], -edges[:, 0]), axis=1) / lengths[:, None]
     b = np.sum(a * hull, axis=1)
-    if (
-        np.any(b[:, None] - a @ hull.T < -1e-10)
-        or np.min(b - a @ hull.mean(axis=0)) <= 1e-10
-    ):
+    if np.any(b[:, None] - a @ hull.T < -1e-10) or np.min(b - a @ hull.mean(axis=0)) <= 1e-10:
         raise ValueError("support polygon margin must leave a convex interior")
     radius = np.min(np.abs(b - a @ hull.mean(axis=0)))
     return a, b, proximity_fraction * radius if proximity_fraction > 0 else float("inf")
 
 
-def com_halfspace_velocity_bounds(
-    slack, dt, vel_max, acc_max, use_acceleration_limits, proximity
-):
+def com_halfspace_velocity_bounds(slack, dt, vel_max, acc_max, use_acceleration_limits, proximity):
     """Exact three-layer CPU CoM bounds, including its 0.1 mm dead zone."""
     slack = slack.to(torch.float64)
     dt = (
@@ -85,18 +77,12 @@ def com_halfspace_velocity_bounds(
     enabled = (
         use_acceleration_limits.to(dtype=torch.bool, device=slack.device)
         if isinstance(use_acceleration_limits, torch.Tensor)
-        else torch.full(
-            (), use_acceleration_limits, dtype=torch.bool, device=slack.device
-        )
+        else torch.full((), use_acceleration_limits, dtype=torch.bool, device=slack.device)
     )
-    upper = torch.where(
-        enabled, torch.minimum(upper, torch.sqrt(2 * acc_max * positive)), upper
-    )
+    upper = torch.where(enabled, torch.minimum(upper, torch.sqrt(2 * acc_max * positive)), upper)
     upper = torch.where(slack < proximity, torch.minimum(upper, positive / dt), upper)
     recovery = torch.minimum(velocity, ((-slack - 1e-4) / dt * 0.2).clamp_min(0.01))
-    return -torch.ones_like(slack) * velocity, torch.where(
-        slack < -1e-4, -recovery, upper
-    )
+    return -torch.ones_like(slack) * velocity, torch.where(slack < -1e-4, -recovery, upper)
 
 
 # CPU policy constants from cpp_core/src/kinematics_solver.cpp and
@@ -178,9 +164,7 @@ def _constraint_batch_shape(*shapes: torch.Size) -> torch.Size:
     try:
         return torch.broadcast_shapes(*shapes)
     except RuntimeError as error:
-        raise ValueError(
-            "constraint input batch dimensions are not broadcastable"
-        ) from error
+        raise ValueError("constraint input batch dimensions are not broadcastable") from error
 
 
 def capture_point_constraint_rows(
@@ -200,15 +184,9 @@ def capture_point_constraint_rows(
     """
 
     normals = _constraint_tensor(halfspace_normals, "halfspace_normals")
-    offsets = _constraint_tensor(
-        halfspace_offsets, "halfspace_offsets", device=normals.device
-    )
-    com_xy = _constraint_tensor(
-        com_position_xy, "com_position_xy", device=normals.device
-    )
-    jacobian = _constraint_tensor(
-        com_jacobian_xy, "com_jacobian_xy", device=normals.device
-    )
+    offsets = _constraint_tensor(halfspace_offsets, "halfspace_offsets", device=normals.device)
+    com_xy = _constraint_tensor(com_position_xy, "com_position_xy", device=normals.device)
+    jacobian = _constraint_tensor(com_jacobian_xy, "com_jacobian_xy", device=normals.device)
     frequency = _constraint_scalar(omega, "omega", like=normals)
     if normals.ndim < 2 or normals.shape[-1] != 2 or normals.shape[-2] < 1:
         raise ValueError("halfspace_normals must have shape [..., m, 2] with m >= 1")
@@ -263,9 +241,7 @@ def velocity_zmp_constraint_rows(
     """
 
     normals = _constraint_tensor(halfspace_normals, "halfspace_normals")
-    offsets = _constraint_tensor(
-        halfspace_offsets, "halfspace_offsets", device=normals.device
-    )
+    offsets = _constraint_tensor(halfspace_offsets, "halfspace_offsets", device=normals.device)
     com = _constraint_tensor(com_position, "com_position", device=normals.device)
     ag = _constraint_tensor(
         centroidal_momentum_matrix,
@@ -275,12 +251,8 @@ def velocity_zmp_constraint_rows(
     bias = _constraint_tensor(
         centroidal_momentum_bias, "centroidal_momentum_bias", device=normals.device
     )
-    current_dq = _constraint_tensor(
-        current_velocity, "current_velocity", device=normals.device
-    )
-    weight = _constraint_tensor(
-        support_weight_force, "support_weight_force", device=normals.device
-    )
+    current_dq = _constraint_tensor(current_velocity, "current_velocity", device=normals.device)
+    weight = _constraint_tensor(support_weight_force, "support_weight_force", device=normals.device)
     time_step = _constraint_scalar(dt, "dt", like=normals)
     force_floor = _constraint_scalar(fz_min, "fz_min", like=normals)
 
@@ -292,9 +264,7 @@ def velocity_zmp_constraint_rows(
     if com.ndim < 1 or com.shape[-1] != 3:
         raise ValueError("com_position must have shape [..., 3]")
     if ag.ndim < 2 or ag.shape[-2] != 6 or ag.shape[-1] < 1:
-        raise ValueError(
-            "centroidal_momentum_matrix must have shape [..., 6, nv] with nv >= 1"
-        )
+        raise ValueError("centroidal_momentum_matrix must have shape [..., 6, nv] with nv >= 1")
     velocity_dim = ag.shape[-1]
     if bias.ndim < 1 or bias.shape[-1] != 6:
         raise ValueError("centroidal_momentum_bias must have shape [..., 6]")
@@ -331,16 +301,8 @@ def velocity_zmp_constraint_rows(
     g = ag / time_step[..., None, None]
     current_momentum_rate = torch.matmul(ag, current_dq.unsqueeze(-1)).squeeze(-1)
     k = bias - current_momentum_rate / time_step[..., None]
-    x_rows = (
-        com[..., 0, None] * g[..., 2, :]
-        - g[..., 4, :]
-        - com[..., 2, None] * g[..., 0, :]
-    )
-    y_rows = (
-        com[..., 1, None] * g[..., 2, :]
-        + g[..., 3, :]
-        - com[..., 2, None] * g[..., 1, :]
-    )
+    x_rows = com[..., 0, None] * g[..., 2, :] - g[..., 4, :] - com[..., 2, None] * g[..., 0, :]
+    y_rows = com[..., 1, None] * g[..., 2, :] + g[..., 3, :] - com[..., 2, None] * g[..., 1, :]
     polygon_rows = (
         normals[..., 0, None] * x_rows.unsqueeze(-2)
         + normals[..., 1, None] * y_rows.unsqueeze(-2)
@@ -349,14 +311,10 @@ def velocity_zmp_constraint_rows(
 
     force_z_constant = weight[..., 2] + k[..., 2]
     x_constant = (
-        com[..., 0] * force_z_constant
-        - k[..., 4]
-        - com[..., 2] * (weight[..., 0] + k[..., 0])
+        com[..., 0] * force_z_constant - k[..., 4] - com[..., 2] * (weight[..., 0] + k[..., 0])
     )
     y_constant = (
-        com[..., 1] * force_z_constant
-        + k[..., 3]
-        - com[..., 2] * (weight[..., 1] + k[..., 1])
+        com[..., 1] * force_z_constant + k[..., 3] - com[..., 2] * (weight[..., 1] + k[..., 1])
     )
     polygon_constant = (
         normals[..., 0] * x_constant.unsqueeze(-1)
@@ -389,27 +347,21 @@ def centroidal_momentum_bound_rows(
     may have arbitrary broadcastable leading batch dimensions.
     """
 
-    ag = _constraint_tensor(
-        centroidal_momentum_matrix, "centroidal_momentum_matrix"
-    )
+    ag = _constraint_tensor(centroidal_momentum_matrix, "centroidal_momentum_matrix")
     lower = _constraint_tensor(lower_momentum, "lower_momentum", device=ag.device)
     upper = _constraint_tensor(upper_momentum, "upper_momentum", device=ag.device)
     if not isinstance(axis_mask, torch.Tensor):
         raise TypeError("axis_mask must be a torch.Tensor")
     if axis_mask.shape != (6,):
         raise ValueError("axis_mask must have shape [6]")
-    if axis_mask.dtype != torch.bool and not bool(
-        torch.isfinite(axis_mask).all().item()
-    ):
+    if axis_mask.dtype != torch.bool and not bool(torch.isfinite(axis_mask).all().item()):
         raise ValueError("axis_mask must contain only finite values")
     selected_mask = axis_mask.to(device=ag.device) != 0
     selected_count = int(selected_mask.sum().item())
     if selected_count == 0:
         raise ValueError("axis_mask must select at least one axis")
     if ag.ndim < 2 or ag.shape[-2] != 6 or ag.shape[-1] < 1:
-        raise ValueError(
-            "centroidal_momentum_matrix must have shape [..., 6, nv] with nv >= 1"
-        )
+        raise ValueError("centroidal_momentum_matrix must have shape [..., 6, nv] with nv >= 1")
     if lower.ndim < 1 or lower.shape[-1] != selected_count:
         raise ValueError("lower_momentum must have one value per selected axis")
     if upper.ndim < 1 or upper.shape[-1] != selected_count:
@@ -417,14 +369,83 @@ def centroidal_momentum_bound_rows(
     if bool((lower > upper).any().item()):
         raise ValueError("lower_momentum must not exceed upper_momentum")
 
-    batch_shape = _constraint_batch_shape(
-        ag.shape[:-2], lower.shape[:-1], upper.shape[:-1]
-    )
+    batch_shape = _constraint_batch_shape(ag.shape[:-2], lower.shape[:-1], upper.shape[:-1])
     velocity_dim = ag.shape[-1]
     ag = torch.broadcast_to(ag, batch_shape + (6, velocity_dim))
     lower = torch.broadcast_to(lower, batch_shape + (selected_count,))
     upper = torch.broadcast_to(upper, batch_shape + (selected_count,))
     return ag[..., selected_mask, :], lower, upper
+
+
+def _capture_point_constraint_rows_trusted(
+    halfspace_normals: torch.Tensor,
+    halfspace_offsets: torch.Tensor,
+    com_position_xy: torch.Tensor,
+    com_jacobian_xy: torch.Tensor,
+    omega: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Graph-capturable capture-point assembly for prevalidated CUDA buffers."""
+
+    rows = torch.matmul(halfspace_normals, com_jacobian_xy) / omega[..., None, None]
+    upper = halfspace_offsets - torch.matmul(
+        halfspace_normals, com_position_xy.unsqueeze(-1)
+    ).squeeze(-1)
+    return rows, torch.full_like(upper, -CPU_CENTROIDAL_UNBOUNDED_LIMIT), upper
+
+
+def _velocity_zmp_constraint_rows_trusted(
+    halfspace_normals: torch.Tensor,
+    halfspace_offsets: torch.Tensor,
+    com_position: torch.Tensor,
+    centroidal_momentum_matrix: torch.Tensor,
+    centroidal_momentum_bias: torch.Tensor,
+    current_velocity: torch.Tensor,
+    support_weight_force: torch.Tensor,
+    dt: torch.Tensor,
+    fz_min: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Graph-capturable CPU ZMP row assembly for prevalidated CUDA buffers."""
+
+    g = centroidal_momentum_matrix / dt[..., None, None]
+    momentum = torch.matmul(centroidal_momentum_matrix, current_velocity.unsqueeze(-1)).squeeze(-1)
+    k = centroidal_momentum_bias - momentum / dt[..., None]
+    x_rows = (
+        com_position[..., 0, None] * g[..., 2, :]
+        - g[..., 4, :]
+        - com_position[..., 2, None] * g[..., 0, :]
+    )
+    y_rows = (
+        com_position[..., 1, None] * g[..., 2, :]
+        + g[..., 3, :]
+        - com_position[..., 2, None] * g[..., 1, :]
+    )
+    polygon_rows = (
+        halfspace_normals[..., 0, None] * x_rows.unsqueeze(-2)
+        + halfspace_normals[..., 1, None] * y_rows.unsqueeze(-2)
+        - halfspace_offsets[..., None] * g[..., 2, :].unsqueeze(-2)
+    )
+    force_z_constant = support_weight_force[..., 2] + k[..., 2]
+    x_constant = (
+        com_position[..., 0] * force_z_constant
+        - k[..., 4]
+        - com_position[..., 2] * (support_weight_force[..., 0] + k[..., 0])
+    )
+    y_constant = (
+        com_position[..., 1] * force_z_constant
+        + k[..., 3]
+        - com_position[..., 2] * (support_weight_force[..., 1] + k[..., 1])
+    )
+    polygon_constant = (
+        halfspace_normals[..., 0] * x_constant.unsqueeze(-1)
+        + halfspace_normals[..., 1] * y_constant.unsqueeze(-1)
+        - halfspace_offsets * force_z_constant.unsqueeze(-1)
+    )
+    rows = torch.cat((polygon_rows, g[..., 2, :].unsqueeze(-2)), dim=-2)
+    lower = torch.full_like(rows[..., 0], -CPU_CENTROIDAL_UNBOUNDED_LIMIT)
+    upper = torch.full_like(lower, CPU_CENTROIDAL_UNBOUNDED_LIMIT)
+    upper[..., :-1] = -polygon_constant
+    lower[..., -1] = fz_min - support_weight_force[..., 2] - k[..., 2]
+    return rows, lower, upper
 
 
 def _discrete_stopping_velocity_limit(
@@ -437,9 +458,7 @@ def _discrete_stopping_velocity_limit(
     margin_safe = torch.clamp(margin, min=0.0)
     dt_safe = torch.clamp(dt, min=CPU_MINIMUM_DT)
     valid_acceleration = torch.isfinite(acceleration) & (acceleration > 0.0)
-    safe_acceleration = torch.where(
-        valid_acceleration, acceleration, torch.ones_like(acceleration)
-    )
+    safe_acceleration = torch.where(valid_acceleration, acceleration, torch.ones_like(acceleration))
     normalized_margin = margin_safe / (safe_acceleration * dt_safe.square())
     root = 0.5 * (torch.sqrt(1.0 + 8.0 * normalized_margin) - 1.0)
     interval_count = torch.clamp(torch.ceil(root - 1.0e-12), min=1.0)
@@ -515,9 +534,7 @@ def velocity_box_bounds(
     upper = torch.minimum(torch.minimum(position_upper, velocity), stopping_upper)
 
     explicit_headroom = _as_float64(min_velocity_headroom, like=raw_lower)
-    activation = torch.clamp(
-        _as_float64(headroom_activation_margin, like=raw_lower), min=0.0
-    )
+    activation = torch.clamp(_as_float64(headroom_activation_margin, like=raw_lower), min=0.0)
     legacy_headroom = _as_bool(saturation_exit_enabled, like=raw_lower)
     explicit_headroom, activation, legacy_headroom = torch.broadcast_tensors(
         explicit_headroom, activation, legacy_headroom
@@ -696,9 +713,7 @@ def torso_pose_bound_rows(
     upper_limit = torch.broadcast_to(
         _as_float64(upper_relative_pose_limit, like=current), batch_shape + (6,)
     )
-    velocity = torch.broadcast_to(
-        _as_float64(velocity_limit, like=current), batch_shape + (6,)
-    )
+    velocity = torch.broadcast_to(_as_float64(velocity_limit, like=current), batch_shape + (6,))
     acceleration = torch.broadcast_to(
         _as_float64(acceleration_limit, like=current), batch_shape + (6,)
     )
@@ -785,10 +800,7 @@ def bounded_cyclic_row_projection(
     box_upper = velocity_upper.to(dtype=torch.float64, device=velocity.device)
     if work_rows.shape[-1] != work_velocity.shape[-1]:
         raise ValueError("rows and velocity must have the same trailing nv dimension")
-    if (
-        work_rows.shape[-2] != work_lower.shape[-1]
-        or work_lower.shape != work_upper.shape
-    ):
+    if work_rows.shape[-2] != work_lower.shape[-1] or work_lower.shape != work_upper.shape:
         raise ValueError("row bounds must match rows[..., m, nv]")
     if box_lower.shape != box_upper.shape:
         raise ValueError("velocity lower and upper bounds must have matching shapes")

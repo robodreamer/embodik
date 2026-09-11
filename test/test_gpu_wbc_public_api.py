@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -15,6 +16,15 @@ from embodik.gpu.wbc import (
     floating_pose_model_parameters_from_embodik,
     pose_model_parameters_from_embodik,
 )
+
+
+@dataclass(frozen=True)
+class _RuntimeConfig:
+    max_joint_acceleration_rad_s2: float | None = None
+    collision_query_distance_m: float = 0.1
+    standalone_cuda_graph_enabled: bool = False
+
+
 def test_gpu_wbc_capability_contract_is_explicit() -> None:
     assert GPU_WBC_CAPABILITIES.collision_constraints
     assert GPU_WBC_CAPABILITIES.posture_nullspace
@@ -23,9 +33,9 @@ def test_gpu_wbc_capability_contract_is_explicit() -> None:
     assert GPU_WBC_CAPABILITIES.adaptive_dt
     assert GPU_WBC_CAPABILITIES.acceleration_limits
     assert GPU_WBC_CAPABILITIES.com_support_polygon
-    assert not GPU_WBC_CAPABILITIES.capture_point_constraints
-    assert not GPU_WBC_CAPABILITIES.velocity_zmp_constraints
-    assert not GPU_WBC_CAPABILITIES.centroidal_momentum_tasks
+    assert GPU_WBC_CAPABILITIES.capture_point_constraints
+    assert GPU_WBC_CAPABILITIES.velocity_zmp_constraints
+    assert GPU_WBC_CAPABILITIES.centroidal_momentum_tasks
 
 
 class _UnseenFixedRobot:
@@ -233,11 +243,124 @@ def test_device_batch_keeps_velocity_history_on_device():
     expected = SimpleNamespace(accepted_velocity=accepted)
     adapter = GpuWbcFloatingMultiFrameSolver.__new__(GpuWbcFloatingMultiFrameSolver)
     adapter._previous_velocity = torch.zeros_like(accepted)
-    adapter._solver = SimpleNamespace(solve=lambda q, target, history: expected)
-
-    result = adapter.solve_device_batch(
-        torch.zeros((8, 4)), torch.zeros((8, 1, 7))
+    adapter._solver = SimpleNamespace(
+        solve=lambda q, target, history, current_velocity=None: expected
     )
+
+    result = adapter.solve_device_batch(torch.zeros((8, 4)), torch.zeros((8, 1, 7)))
 
     assert result is expected
     torch.testing.assert_close(adapter._previous_velocity, accepted)
+
+
+def test_device_batch_routes_measured_velocity_separately_from_history():
+    torch = pytest.importorskip("torch")
+
+    calls = []
+    accepted = torch.zeros((2, 3), dtype=torch.float32)
+    adapter = GpuWbcFloatingMultiFrameSolver.__new__(GpuWbcFloatingMultiFrameSolver)
+    adapter._previous_velocity = torch.ones_like(accepted)
+    adapter._solver = SimpleNamespace(
+        solve=lambda q, target, history, current: (
+            calls.append((history, current)) or SimpleNamespace(accepted_velocity=accepted)
+        )
+    )
+    measured = torch.full_like(accepted, 2.0)
+
+    adapter.solve_device_batch(
+        torch.zeros((2, 4)), torch.zeros((2, 1, 7)), current_velocity=measured
+    )
+
+    assert calls[0][0] is adapter._previous_velocity
+    assert calls[0][1] is measured
+
+
+def test_runtime_routes_centroidal_controls_without_cpu_fallback():
+    calls = {}
+
+    class _Core:
+        posture_task_enabled = False
+        torso_constraint_enabled = False
+        secondary_frame_tasks_enabled = False
+        collision = None
+        _momentum_priority = 2
+        _momentum_excluded = np.array([False, True, False], dtype=bool)
+
+        def configure_capture_point_constraint(self, **options):
+            calls["capture"] = options
+
+        def configure_velocity_zmp_constraint(self, **options):
+            calls["zmp"] = options
+
+        def configure_centroidal_momentum(self, **options):
+            calls["momentum"] = options
+
+    torch = pytest.importorskip("torch")
+    core = _Core()
+    core._momentum_excluded = torch.as_tensor(core._momentum_excluded)
+    core._frame_position_gains = torch.ones(1)
+    core._frame_orientation_gains = torch.ones(1)
+    core.config = _RuntimeConfig()
+    adapter = GpuWbcFloatingMultiFrameSolver.__new__(GpuWbcFloatingMultiFrameSolver)
+    adapter._solver = core
+    adapter._torch = torch
+    adapter.frames = ("tool",)
+    adapter.configuration_dim = 3
+    adapter.active_velocity_indices = (4, 7, 9)
+    adapter._last_runtime_option_signature = None
+    adapter._previous_velocity = torch.zeros((1, 3))
+    adapter._last_target = None
+    adapter._last_target_host = None
+
+    polygon = np.array([[-0.2, -0.1], [0.2, -0.1], [0.2, 0.1], [-0.2, 0.1]])
+    adapter.configure_runtime(
+        capture_point_enabled=True,
+        capture_point_support_polygon_xy=polygon,
+        capture_point_margin=0.05,
+        capture_point_omega=3.0,
+        velocity_zmp_enabled=True,
+        velocity_zmp_support_polygon_xy=polygon,
+        velocity_zmp_fz_min=12.0,
+        centroidal_momentum_enabled=True,
+        centroidal_momentum_target=(0.0,) * 6,
+        centroidal_momentum_axis_mask=(True, True, False, False, False, False),
+        centroidal_momentum_weight=0.02,
+        centroidal_momentum_priority=2,
+        centroidal_momentum_excluded_velocity_indices=(7,),
+    )
+
+    assert calls["capture"]["enabled"] is True
+    np.testing.assert_array_equal(calls["capture"]["support_polygon_xy"], polygon)
+    assert calls["zmp"]["fz_min"] == 12.0
+    assert calls["momentum"]["axis_mask"][:2] == (True, True)
+    assert calls["momentum"]["weight"] == 0.02
+
+
+def test_runtime_rejects_shape_changing_momentum_priority_and_exclusions():
+    torch = pytest.importorskip("torch")
+    adapter = GpuWbcFloatingMultiFrameSolver.__new__(GpuWbcFloatingMultiFrameSolver)
+    adapter._torch = torch
+    adapter.frames = ("tool",)
+    adapter.configuration_dim = 2
+    adapter.active_velocity_indices = (3, 8)
+    adapter._last_runtime_option_signature = None
+    adapter._previous_velocity = torch.zeros((1, 2))
+    adapter._last_target = None
+    adapter._last_target_host = None
+    adapter._solver = SimpleNamespace(
+        collision=None,
+        posture_task_enabled=False,
+        torso_constraint_enabled=False,
+        secondary_frame_tasks_enabled=False,
+        _momentum_priority=1,
+        _momentum_excluded=torch.tensor([False, True]),
+        _frame_position_gains=torch.ones(1),
+        _frame_orientation_gains=torch.ones(1),
+        config=_RuntimeConfig(),
+    )
+
+    with pytest.raises(ValueError, match="priority requires rebuilding"):
+        adapter.configure_runtime(centroidal_momentum_priority=2)
+    adapter._last_runtime_option_signature = None
+    with pytest.raises(ValueError, match="excluded velocities requires rebuilding"):
+        adapter.configure_runtime(centroidal_momentum_excluded_velocity_indices=(3,))

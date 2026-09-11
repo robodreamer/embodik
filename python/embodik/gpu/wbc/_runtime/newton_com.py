@@ -109,11 +109,7 @@ class NewtonCoMEvaluator:
         *,
         device: str = "cuda:0",
     ) -> None:
-        if (
-            isinstance(batch_size, bool)
-            or not isinstance(batch_size, int)
-            or batch_size <= 0
-        ):
+        if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size <= 0:
             raise ValueError("batch_size must be a positive integer")
         records = _validate_spec(robot_spec)
         tree, masses = _inertial_urdf(Path(urdf_path).expanduser().resolve())
@@ -121,8 +117,8 @@ class NewtonCoMEvaluator:
         import torch
         import warp as wp
         from newton._src.sim.inverse_dynamics import (
-            _InverseDynamicsScratchBuffer,
             _compute_coriolis_force,
+            _InverseDynamicsScratchBuffer,
         )
 
         if torch.device(device).type != "cuda" or not torch.cuda.is_available():
@@ -244,9 +240,7 @@ class NewtonCoMEvaluator:
             progressed = False
             for j in list(pending):
                 parent = source.joint_parent[j]
-                parent_joint = next(
-                    (k for k in pending if source.joint_child[k] == parent), None
-                )
+                parent_joint = next((k for k in pending if source.joint_child[k] == parent), None)
                 if parent_joint is not None:
                     continue
                 if parent in moving_bodies or j in represented_joints:
@@ -258,9 +252,7 @@ class NewtonCoMEvaluator:
         weights = []
         for body, label in enumerate(source.body_label):
             matches = [
-                mass
-                for name, mass in masses.items()
-                if label == name or label.endswith("/" + name)
+                mass for name, mass in masses.items() if label == name or label.endswith("/" + name)
             ]
             if len(matches) != 1 or not math.isclose(
                 float(source.body_mass[body]), matches[0], rel_tol=1e-5, abs_tol=1e-8
@@ -296,9 +288,7 @@ class NewtonCoMEvaluator:
         if not bool(torch.isfinite(self._weights).all().item()):
             raise ValueError("mass weights cannot be represented in float32")
         self._q = wp.to_torch(self.model.joint_q).reshape(batch_size, -1).clone()
-        self._qd = wp.zeros(
-            self.model.joint_dof_count, dtype=float, device=self.model.device
-        )
+        self._qd = wp.zeros(self.model.joint_dof_count, dtype=float, device=self.model.device)
         self._qw = wp.from_torch(self._q.flatten())
         self._J = wp.zeros(
             (
@@ -314,12 +304,8 @@ class NewtonCoMEvaluator:
             dtype=wp.spatial_vector,
             device=self.model.device,
         )
-        self._body_q = wp.to_torch(self.state.body_q).reshape(
-            batch_size, source.body_count, 7
-        )
-        self._body_com = wp.to_torch(self.model.body_com).reshape(
-            batch_size, source.body_count, 3
-        )
+        self._body_q = wp.to_torch(self.state.body_q).reshape(batch_size, source.body_count, 7)
+        self._body_com = wp.to_torch(self.model.body_com).reshape(batch_size, source.body_count, 3)
         model_mass = wp.to_torch(self.model.body_mass)
         self._body_inertia = wp.to_torch(self.model.body_inertia).reshape(
             batch_size, source.body_count, 3, 3
@@ -330,17 +316,15 @@ class NewtonCoMEvaluator:
             or not bool(torch.isfinite(self._body_inertia).all().item())
         ):
             raise ValueError("inertial mass/offset cannot be represented in float32")
-        if source.joint_count != source.body_count or sorted(
-            source.joint_child
-        ) != list(range(source.body_count)):
+        if source.joint_count != source.body_count or sorted(source.joint_child) != list(
+            range(source.body_count)
+        ):
             raise ValueError("centroidal reduction requires one Newton joint per body")
         self._jt = wp.to_torch(self._J).reshape(batch_size, source.joint_count, 6, -1)
         self._joint_body_indices = tensor(source.joint_child)
         self._joint_weights = self._weights[self._joint_body_indices]
         self._joint_masses = self._joint_weights * self.total_mass
-        self._joint_modeled_mask = self._modeled_body_mask[
-            self._joint_body_indices
-        ]
+        self._joint_modeled_mask = self._modeled_body_mask[self._joint_body_indices]
 
         bias_qstarts = bias_source.joint_q_start
         bias_vstarts = bias_source.joint_qd_start
@@ -363,9 +347,7 @@ class NewtonCoMEvaluator:
             joint = (
                 inner_roots[0]
                 if qsize == 7
-                else _unique_suffix_index(
-                    bias_source.joint_label, name, kind="bias-probe joint"
-                )
+                else _unique_suffix_index(bias_source.joint_label, name, kind="bias-probe joint")
             )
             if (bias_nq[joint], bias_nv[joint]) != (qsize, vsize):
                 raise ValueError(f"bias-probe q/v spans disagree for {name}")
@@ -388,17 +370,14 @@ class NewtonCoMEvaluator:
         wp.synchronize_device(self.bias_model.device)
         if (
             self.bias_model.articulation_count != batch_size
-            or self.bias_model.max_dofs_per_articulation
-            != bias_source.joint_dof_count
+            or self.bias_model.max_dofs_per_articulation != bias_source.joint_dof_count
             or bias_source.body_count != source.body_count + 1
             or bias_source.body_label[1:] != source.body_label
         ):
             raise ValueError("expected one complete bias-probe articulation per world")
         self._bias_qmap = tensor(bias_qmap)
         self._bias_qsource = tensor(bias_qsource)
-        self._bias_vmap = tensor(
-            [bias_vmap[index] for index in range(robot_spec.velocity_dim)]
-        )
+        self._bias_vmap = tensor([bias_vmap[index] for index in range(robot_spec.velocity_dim)])
         self._bias_q = wp.to_torch(self.bias_state.joint_q).reshape(batch_size, -1)
         self._bias_qd = wp.to_torch(self.bias_state.joint_qd).reshape(batch_size, -1)
         self._bias_coriolis_wp = wp.zeros(
@@ -406,9 +385,7 @@ class NewtonCoMEvaluator:
             dtype=float,
             device=self.bias_model.device,
         )
-        self._bias_coriolis = wp.to_torch(self._bias_coriolis_wp).reshape(
-            batch_size, -1
-        )
+        self._bias_coriolis = wp.to_torch(self._bias_coriolis_wp).reshape(batch_size, -1)
         self._bias_rnea_scratch = _InverseDynamicsScratchBuffer(
             body_count=self.bias_model.body_count,
             articulation_count=self.bias_model.articulation_count,
@@ -457,17 +434,11 @@ class NewtonCoMEvaluator:
         # wait on its previous stream is unnecessary and breaks parent capture.
         with wp.ScopedStream(self._streams[pointer], sync_enter=False):
             self.newton.eval_fk(self.model, self._qw, self._qd, self.state)
-            self.newton.eval_jacobian(
-                self.model, self.state, J=self._J, joint_S_s=self._S
-            )
+            self.newton.eval_jacobian(self.model, self.state, J=self._J, joint_S_s=self._S)
         rotation = _quat_xyzw_to_matrix(torch, self._body_q[..., 3:])
-        centers = self._body_q[..., :3] + (
-            rotation @ self._body_com.unsqueeze(-1)
-        ).squeeze(-1)
+        centers = self._body_q[..., :3] + (rotation @ self._body_com.unsqueeze(-1)).squeeze(-1)
         position = (centers * self._weights[None, :, None]).sum(dim=1)
-        jacobian = (
-            self._jt[:, :, :3, :] * self._joint_weights[None, :, None, None]
-        ).sum(dim=1)
+        jacobian = (self._jt[:, :, :3, :] * self._joint_weights[None, :, None, None]).sum(dim=1)
         return valid, rotation, centers, position, jacobian
 
     def _active_tangent(self, value: Any, q: Any) -> Any:
@@ -483,9 +454,7 @@ class NewtonCoMEvaluator:
             linear = value[:, :, nvi : nvi + 3].clone()
             angular = value[:, :, nvi + 3 : nvi + 6].clone()
             value[:, :, nvi : nvi + 3] = linear @ R
-            value[:, :, nvi + 3 : nvi + 6] = (
-                angular - linear @ _skew(torch, offset)
-            ) @ R
+            value[:, :, nvi + 3 : nvi + 6] = (angular - linear @ _skew(torch, offset)) @ R
         return value.index_select(-1, self._vmap)
 
     def evaluate(self, q: Any) -> tuple[Any, Any]:
@@ -495,9 +464,7 @@ class NewtonCoMEvaluator:
         valid, _, _, position, jacobian = self._evaluate_kinematics(q)
         jacobian = self._active_tangent(jacobian, q)
         valid = (
-            valid
-            & torch.isfinite(position).all(dim=1)
-            & torch.isfinite(jacobian).all(dim=(1, 2))
+            valid & torch.isfinite(position).all(dim=1) & torch.isfinite(jacobian).all(dim=(1, 2))
         )
         return (
             torch.where(valid[:, None], position, float("nan")),
@@ -516,23 +483,16 @@ class NewtonCoMEvaluator:
         torch = self.torch
         valid, rotation, centers, position, jacobian = self._evaluate_kinematics(q)
         body_rotation = rotation.index_select(1, self._joint_body_indices)
-        body_inertia = self._body_inertia.index_select(
-            1, self._joint_body_indices
-        )
-        world_inertia = (
-            body_rotation @ body_inertia @ body_rotation.transpose(-1, -2)
-        )
+        body_inertia = self._body_inertia.index_select(1, self._joint_body_indices)
+        world_inertia = body_rotation @ body_inertia @ body_rotation.transpose(-1, -2)
         linear_jacobian = self._jt[:, :, :3, :]
         angular_jacobian = self._jt[:, :, 3:, :]
-        mass_linear_jacobian = (
-            linear_jacobian * self._joint_masses[None, :, None, None]
-        )
+        mass_linear_jacobian = linear_jacobian * self._joint_masses[None, :, None, None]
         linear_momentum = mass_linear_jacobian.sum(dim=1)
         body_centers = centers.index_select(1, self._joint_body_indices)
         offsets = body_centers - position[:, None, :]
         angular_momentum = (
-            world_inertia @ angular_jacobian
-            + _skew(torch, offsets) @ mass_linear_jacobian
+            world_inertia @ angular_jacobian + _skew(torch, offsets) @ mass_linear_jacobian
         ) * self._joint_modeled_mask[None, :, None, None]
         angular_momentum = angular_momentum.sum(dim=1)
         ag = torch.cat((linear_momentum, angular_momentum), dim=1)
@@ -566,9 +526,7 @@ class NewtonCoMEvaluator:
         if dq.device != self.device or dq.dtype != torch.float32:
             raise ValueError("dq must be float32 on the configured CUDA device")
         valid = self._validate_q(q) & torch.isfinite(dq).all(dim=1)
-        self._bias_q.index_copy_(
-            1, self._bias_qmap, q.index_select(1, self._bias_qsource)
-        )
+        self._bias_q.index_copy_(1, self._bias_qmap, q.index_select(1, self._bias_qsource))
         self._bias_qd.zero_()
         self._bias_qd.index_copy_(1, self._bias_vmap, dq)
         if self._bias_inner_root is not None:
@@ -577,12 +535,8 @@ class NewtonCoMEvaluator:
             local_linear = dq[:, vi : vi + 3]
             local_angular = dq[:, vi + 3 : vi + 6]
             local_com = self._bias_body_com[:, body]
-            com_linear = local_linear + torch.cross(
-                local_angular, local_com, dim=-1
-            )
-            self._bias_qd[:, nvi : nvi + 3] = (
-                root_rotation @ com_linear[..., None]
-            ).squeeze(-1)
+            com_linear = local_linear + torch.cross(local_angular, local_com, dim=-1)
+            self._bias_qd[:, nvi : nvi + 3] = (root_rotation @ com_linear[..., None]).squeeze(-1)
             self._bias_qd[:, nvi + 3 : nvi + 6] = (
                 root_rotation @ local_angular[..., None]
             ).squeeze(-1)
@@ -609,11 +563,7 @@ class NewtonCoMEvaluator:
         position = (body_centers * self._bias_weights[None, :, None]).sum(dim=1)
         force = self._bias_coriolis[:, :3]
         moment_at_world_origin = self._bias_coriolis[:, 3:6]
-        moment_at_com = moment_at_world_origin - torch.cross(
-            position, force, dim=-1
-        )
+        moment_at_com = moment_at_world_origin - torch.cross(position, force, dim=-1)
         bias = torch.cat((force, moment_at_com), dim=-1)
-        valid = valid & torch.isfinite(position).all(dim=1) & torch.isfinite(bias).all(
-            dim=1
-        )
+        valid = valid & torch.isfinite(position).all(dim=1) & torch.isfinite(bias).all(dim=1)
         return torch.where(valid[:, None], bias, float("nan"))

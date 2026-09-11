@@ -76,8 +76,8 @@ the CPU implementation.
 | Adaptive dt and velocity-solver acceleration-history limits | Supported |
 | CoM support-polygon constraints | Supported |
 | Device-resident multi-world solve | Supported with Warp |
-| Capture-point and velocity-ZMP constraints | Planned |
-| Centroidal momentum tasks | Planned |
+| Capture-point and velocity-ZMP constraints | Supported in the world support frame |
+| Centroidal momentum tasks and hard momentum bounds | Supported |
 | Acceleration-level task solver | Planned |
 | General task axis masks and joint metrics | Planned |
 | Exact CPU collision tuning/certification policy | Planned |
@@ -85,6 +85,15 @@ the CPU implementation.
 The acceleration limit above bounds changes in the velocity command using
 device-resident history. It is not the acceleration-level eSNS API exposed by
 the CPU solver.
+
+Velocity-ZMP uses measured generalized velocity, not the solver's previous
+command. Pass `current_velocity` to `solve_step()` or `solve_device_batch()`
+whenever that constraint is enabled; a missing or non-finite state fails
+closed. Capture-point and ZMP polygons, margins, and physical settings can be
+updated with `configure_runtime()` without changing their construction-time
+row capacities. Momentum priority and excluded velocity columns are
+construction-time layout choices; changing either requires rebuilding the
+solver.
 
 Install the optional Python dependencies with `embodik[gpu-wbc]`. The validated
 Newton 1.6 development build must currently be installed from the
