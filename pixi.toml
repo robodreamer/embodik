@@ -80,9 +80,9 @@ benchmark-gpu-batched = "python scripts/benchmark_gpu_batched.py"
 benchmark-fi-pesns = "python scripts/benchmark_fi_pesns.py"
 benchmark-collision = "python examples/gpu_collision_batch.py"
 benchmark-transforms = "python scripts/benchmark_transforms.py"
-# Parallel trajectory demo (real FK/Jacobians via pytorch_kinematics)
-demo-parallel-tracking = "python examples/parallel_trajectory_tracking.py --n-robots 100 --viz-mode hybrid --n-viz-full 9 --spacing 1.2"
-demo-parallel-tracking-benchmark = "python examples/parallel_trajectory_tracking.py --n-robots 1000 --benchmark"
+# Model-derived Newton/Warp GPU WBC showcase.
+demo-parallel-tracking = "python examples/parallel_trajectory_tracking.py --robot panda --worlds 1024 --show 9"
+demo-parallel-tracking-benchmark = "python examples/parallel_trajectory_tracking.py --robot panda --worlds 1024 --headless --warmup-steps 20 --steps 50"
 # Export CasADi function for GPU solver
 export-casadi = "python -m embodik.gpu.export_casadi_velocity_solve --robot panda --out build/casadi/fn_velocity_solve.casadi"
 lint = "black --check --extend-exclude '\\.pyi$' python/ test/ && isort --check --skip-glob '*.pyi' python/ test/"

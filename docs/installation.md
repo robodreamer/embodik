@@ -231,12 +231,27 @@ used by this repository's development builds.
 | Examples | `python -m pip install "embodik[examples]"` | Copied examples, robot descriptions, Viser, and Python Pinocchio for scripts that import it directly |
 | Direct visualization | `python -m pip install "embodik[visualization]"` | Viser, mesh loading, and URDF parsing without adding Python Pinocchio |
 | Pinocchio visualization | `python -m pip install "embodik[visualization-pinocchio]"` | Pinocchio's Python ViserVisualizer |
-| GPU solvers | `python -m pip install "embodik[gpu]"` | Experimental; see [GPU Solvers](gpu_solvers.md) |
+| Model-derived GPU WBC | `python -m pip install "embodik[gpu-wbc]"` | Torch + Warp; also install a compatible Newton build as described below |
+| Legacy CusADi solvers | `python -m pip install "embodik[gpu]"` | Shape-specific experimental kernels retained for comparison |
 | GPU collision | `python -m pip install "embodik[gpu-collision]"` | NVIDIA Warp collision experiments |
 
-Teleop controller setup and CUDA/CusADi build steps are intentionally kept out
-of the core install path. See the [Examples Guide](examples/index.md) and
-[GPU Solvers](gpu_solvers.md) when you need those workflows.
+The model-derived WBC examples also need Newton. The current integration is
+validated against Newton's 1.6 development line:
+
+```bash
+git clone --depth 1 https://github.com/newton-physics/newton.git ../newton
+python -m pip install -e ../newton
+python -m pip install -e ".[examples,gpu-wbc]"
+```
+
+GPU WBC requires a CUDA device recognized by Torch, Warp, and Newton. Kernel
+compilation and graph capture happen on first use for each model/layout; measure
+performance only after warm-up. See [GPU WBC](gpu_solvers.md) for the model
+envelope, capability matrix, and fail-closed behavior.
+
+Teleop controller setup and legacy CUDA/CusADi build steps are intentionally
+kept out of the core install path. See the [Examples Guide](examples/index.md)
+and [GPU WBC](gpu_solvers.md) when you need those workflows.
 
 For Seer controller teleop, xvisio stays in optional Pixi environments and is
 only imported when `--enable-teleop` is provided:

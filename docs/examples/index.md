@@ -30,6 +30,7 @@ the best starting points for users.
 - [`07_unitree_g1_retargeting_ik.py`](unitree_g1_retargeting_ik.md) — Unitree G1 retargeting IK with palm/foot/pelvis targets, CoM visualization, and optional self-collision constraints
 - [`08_spot_full_body_ik_viser.py`](spot_full_body_ik.md) — Spot full-body IK in regular Viser with arm+torso, torso-only, full-body, and two-stage modes
 - [`09_spot_locomanip_mjviser.py`](spot_locomanip_mjviser.md) — Spot locomanipulation ONNX policy rollout in MuJoCo through mjviser
+- [`parallel_trajectory_tracking.py`](parallel_trajectory_tracking.md) — Model-derived Newton/Warp WBC over independently targeted Panda, AI Worker, or G1 worlds
 
 Highlighted interactive examples use a shared solver runtime policy so example
 code stays focused on tasks, targets, and visualization while robust constraint
@@ -66,7 +67,7 @@ the application to `AccelerationSolver`.
 | `gpu_solver_demo.py` | Not applicable | Compares CPU/GPU batched velocity kernels. |
 | `harnesses/ai_worker_weighted_fallback_harness.py` | Not applicable | Measures the velocity solver's weighted-fallback policy, which the acceleration API does not import. |
 | `harnesses/g1_four_gizmo_ik_benchmark.py` | Unsupported | Exercises the same floating-base G1 runtime as example 07. |
-| `parallel_trajectory_tracking.py` | Not applicable | Exercises the separate parallel batched velocity pipeline. |
+| `parallel_trajectory_tracking.py` | Not applicable | Exercises the model-derived parallel velocity WBC pipeline. |
 | `robot_model_example.py` | Not applicable | Walks through model, FK, Jacobian, and CoM APIs without an IK loop. |
 | `visualization_example.py` | Not applicable | Demonstrates visualization and marker APIs without an IK solver loop. |
 
@@ -79,10 +80,10 @@ These scripts remain available in a repository checkout or copied example
 bundle, but they are narrower benchmarks or API walkthroughs rather than the
 main demo path.
 
-- [`gpu_batch_ik.py`](gpu_batch_ik.md) — GPU batched velocity IK benchmark
+- [`parallel_trajectory_tracking.py`](parallel_trajectory_tracking.md) — Current model-derived Newton/Warp parallel WBC showcase
+- [`gpu_batch_ik.py`](gpu_batch_ik.md) — Legacy artifact-backed GPU batched velocity IK benchmark
 - [`gpu_collision_batch.py`](gpu_collision_batch.md) — GPU batch collision detection benchmark
-- [`gpu_solver_demo.py`](gpu_solver_demo.md) — CPU vs GPU solver scaling demo
-- [`parallel_trajectory_tracking.py`](parallel_trajectory_tracking.md) — 100+ robots tracking trajectories in parallel
+- [`gpu_solver_demo.py`](gpu_solver_demo.md) — Legacy CPU vs GPU solver scaling experiment
 - [`robot_model_example.py`](robot_model_usage.md) — RobotModel API walkthrough (FK/Jacobians/CoM)
 - [`visualization_example.py`](visualization_examples.md) — Visualization and interactive marker usage
 

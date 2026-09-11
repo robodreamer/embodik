@@ -34,6 +34,27 @@ stay focused on targets and visualization.
 </div>
 </div>
 
+## GPU WBC: 1,024 Independent Worlds
+
+<video autoplay muted loop playsinline controls width="100%" aria-label="Panda, ROBOTIS AI Worker, and Unitree G1 moving in parallel Viser worlds while EmbodiK solves 1,024 independently targeted worlds on CUDA" src="assets/media/gpu_wbc_parallel_showcase.mp4"></video>
+
+The experimental model-derived GPU path uses Newton for batched kinematics and
+Warp directional SRINV for prioritized velocity IK. A single public example
+selects Panda, AI Worker, or G1 and derives the active joints and task shape from
+the loaded model.
+
+| Model | Active DoF | 6D tasks / world | Solve-only p50 |
+| --- | ---: | ---: | ---: |
+| Franka Panda | 7 | 1 | 0.906 ms |
+| ROBOTIS AI Worker SG2 | 15 | 2 | 4.854 ms |
+| Unitree G1 | 29 | 4 | 20.295 ms |
+
+Profile: 1,024 CUDA-resident worlds, two solver iterations, 50 measured steps
+after 20 warm-up steps, NVIDIA RTX PRO 5000 Blackwell Generation Laptop GPU.
+Target generation, visualization, collision, and host publication are excluded.
+See [GPU WBC](gpu_solvers.md) for the full capability matrix and
+[Parallel GPU WBC](examples/parallel_trajectory_tracking.md) to reproduce it.
+
 ## ✨ Features
 
 - **⚙️ Fast C++ core**: Eigen-based IK routines with Python bindings and numpy support.
@@ -43,6 +64,7 @@ stay focused on targets and visualization.
 - **🔒 Hard-constraint handling**: Joint limits, collision constraints, CoM support polygons, contact, and relative-pose checks stay in C++.
 - **📈 Diagnostics**: Timing, condition numbers, recovery stage, task scaling, and solver status reporting.
 - **🎮 Examples and visualization**: Viser and mjviser demos for Panda, AI Worker, RB-Y1, Unitree G1, and Spot workflows.
+- **⚡ Model-derived GPU WBC**: Newton/Warp CUDA execution for one interactive robot or thousands of independent worlds, without robot-family dimension constants.
 
 ## 🚀 Quick Start
 
@@ -83,7 +105,7 @@ python -m pip install --only-binary=:all: embodik
 - [Solver Robustness & Recovery](solver_robustness.md) — Adaptive dt, elastic limits, auto layout, weighted fallback, stall recovery.
 - [Acceleration Solver](acceleration_solver.md) — Fixed-base acceleration eSNS, compatible state boxes, effort/contact rows, and collision certification boundaries.
 - [Collision Constraints & Tuning](collision_constraints.md) — Tuning presets, safety layers, and performance vs naive full-scan checks.
-- [GPU Batch Solvers](gpu_solvers.md) — FI-PeSNS and PPH-SNS batch solver notes.
+- [GPU WBC](gpu_solvers.md) — Newton/Warp setup, model compatibility, constraints, batching, and measured performance.
 
 ### Reference
 
