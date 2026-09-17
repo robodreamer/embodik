@@ -212,9 +212,6 @@ def test_srinv_threshold_crossing_damping_is_finite_and_bounded():
         (np.array([1.0, 0.3, 0.0032575734]), 301, 5e-5),
         (np.array([1.0, 0.75e-6, 1e-9]), 302, 5e-5),
         (np.array([1.0, 0.5e-6, 0.25e-6]), 303, 5e-5),
-        # The CPU Gram inverse is itself sensitive when two values straddle
-        # epsilon by 0.1%; retain a strict but realistic action tolerance.
-        (np.array([1.0, 0.999e-6, 1.001e-6]), 304, 1e-3),
     ],
 )
 def test_srinv_matches_extended_cpu_law_for_rotated_spectra(
@@ -243,6 +240,43 @@ def test_srinv_matches_extended_cpu_law_for_rotated_spectra(
         rtol=relative_tolerance,
         atol=1e-8,
     )
+
+
+def test_srinv_threshold_straddle_preserves_healthy_action():
+    """Near-equal singular values that straddle epsilon mix the null subspace.
+
+    Per-mode damping is discontinuous at ``tol``, so a tiny left-basis rotation
+    swaps a damped direction for an undamped one. CasADi's fixed Jacobi SVD and
+    NumPy's SVD can therefore disagree on the inverse matrix across BLAS builds
+    even though both apply the same extended-SRINV law. The well-conditioned
+    task direction must still match and must not leak into the near-null joint
+    subspace.
+    """
+    try:
+        import casadi as ca
+
+        from embodik.gpu.casadi_fi_pesns import srinv
+    except ImportError as e:
+        pytest.skip(f"CasADi or modules not available: {e}")
+
+    matrix, left, right = _rotated_matrix(
+        np.array([1.0, 0.999e-6, 1.001e-6]),
+        velocity_dimension=5,
+        seed=304,
+    )
+    symbolic = ca.SX.sym("straddle_matrix", *matrix.shape)
+    gpu = np.asarray(
+        ca.Function("straddle_srinv", [symbolic], [srinv(symbolic, tol=1e-6, damping=0.1)])(matrix)
+    )
+    cpu = _extended_srinv_reference(matrix)
+    healthy = left[:, 0]
+    gpu_healthy = gpu @ healthy
+
+    assert np.isfinite(gpu).all()
+    np.testing.assert_allclose(gpu_healthy, cpu @ healthy, rtol=1e-4, atol=1e-5)
+    np.testing.assert_allclose(gpu_healthy, right[:, 0], rtol=1e-4, atol=1e-4)
+    assert float(right[:, 0] @ gpu_healthy) == pytest.approx(1.0, rel=1e-4)
+    np.testing.assert_allclose(right[:, 1:].T @ gpu_healthy, 0.0, atol=1e-4)
 
 
 def test_srinv_preserves_healthy_motion_while_damping_singular_directions():
