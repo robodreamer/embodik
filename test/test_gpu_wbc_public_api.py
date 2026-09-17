@@ -475,3 +475,156 @@ def test_world_status_encodes_inactive_invalid_and_hold_without_reducing_the_bat
     upper = torch.tensor([1.0, 1.0])
     valid = _floating_position_limits_valid(q, lower, upper, (0, 1), ())
     assert valid.tolist() == [True, False, True]
+
+
+def _stub_core(torch, *, floating: bool = False):
+    from embodik.gpu.wbc._runtime.multi_pose_solver import DeviceResidentMultiFramePoseSolver
+
+    core = DeviceResidentMultiFramePoseSolver.__new__(DeviceResidentMultiFramePoseSolver)
+    core.torch = torch
+    core.device = torch.device("cpu")
+    core.batch_size = 3
+    core.configuration_dim = 7 if floating else 2
+    core.velocity_dim = 6 if floating else 2
+    core.frame_count = 1
+    core.velocity_zmp_constraint_enabled = False
+    core._true_world_mask = torch.ones(core.batch_size, dtype=torch.bool)
+    core._false_world_mask = torch.zeros(core.batch_size, dtype=torch.bool)
+    core.robot_spec = SimpleNamespace(
+        floating_base=floating,
+        active_velocity_indices=(0, 3, 5) if not floating else (0, 1, 2, 3, 4, 5),
+    )
+    if floating:
+        core._position_configuration_indices = []
+        core._position_velocity_indices = []
+        core._locked_active_columns = ()
+        core._joint_lower = torch.zeros(0)
+        core._joint_upper = torch.zeros(0)
+        core._root_quat_start = 3
+    else:
+        core._joint_lower = torch.tensor([-1.0, -1.0])
+        core._joint_upper = torch.tensor([1.0, 1.0])
+    return core
+
+
+def test_world_input_valid_isolates_nan_and_limit_failures_per_world():
+    torch = pytest.importorskip("torch")
+    core = _stub_core(torch)
+    q = torch.tensor([[0.0, 0.0], [float("nan"), 0.0], [2.0, 0.0]], dtype=torch.float32)
+    target = torch.zeros((3, 1, 7), dtype=torch.float32)
+    target[..., 3] = 1.0
+    valid = core._world_input_valid(q, target, None, None)
+    assert valid.tolist() == [True, False, False]
+
+
+def test_layout_validation_does_not_host_reduce_invalid_values():
+    torch = pytest.importorskip("torch")
+    core = _stub_core(torch)
+    q = torch.tensor([[0.0, 0.0], [float("nan"), 0.0], [0.0, 0.0]], dtype=torch.float32)
+    target = torch.zeros((3, 1, 7), dtype=torch.float32)
+    target[..., 3] = 1.0
+    core._validate_layout(q, target, None, None, None, None)
+    with pytest.raises(ValueError, match="must have shape"):
+        core._validate_layout(q[:2], target, None, None, None, None)
+
+
+def test_floating_world_input_valid_rejects_degenerate_root_quaternion():
+    torch = pytest.importorskip("torch")
+    core = _stub_core(torch, floating=True)
+    q = torch.zeros((3, 7), dtype=torch.float32)
+    q[:, 6] = 1.0
+    q[1, 3:] = 0.0
+    target = torch.zeros((3, 1, 7), dtype=torch.float32)
+    target[..., 3] = 1.0
+    valid = core._world_input_valid(q, target, None, None)
+    assert valid.tolist() == [True, False, True]
+
+
+def test_configure_posture_binds_torch_through_the_solver_instance():
+    torch = pytest.importorskip("torch")
+    from embodik.gpu.wbc._runtime.multi_pose_solver import DeviceResidentMultiFramePoseSolver
+
+    core = DeviceResidentMultiFramePoseSolver.__new__(DeviceResidentMultiFramePoseSolver)
+    core.torch = torch
+    core.device = torch.device("cpu")
+    core.posture_task_enabled = True
+    core._posture_runtime_enabled = False
+    core._posture_gain = 1.0
+    core._posture_gain_device = torch.tensor(1.0)
+    core._posture_weights = torch.ones(2)
+    core._posture_jacobian = torch.zeros((2, 3), dtype=torch.float32)
+    core._posture_velocity_indices = (3, 5)
+    core.robot_spec = SimpleNamespace(active_velocity_indices=(1, 3, 5))
+    core._graph = object()
+
+    core.configure_posture(weights=(0.5, 0.25))
+
+    torch.testing.assert_close(core._posture_weights, torch.tensor([0.5, 0.25]))
+    torch.testing.assert_close(core._posture_jacobian[0], torch.tensor([0.0, 0.5, 0.0]))
+    torch.testing.assert_close(core._posture_jacobian[1], torch.tensor([0.0, 0.0, 0.25]))
+    assert core._graph is None
+
+
+def test_measure_device_batch_reports_dispatch_sync_and_allocator_snapshot():
+    torch = pytest.importorskip("torch")
+
+    class _Cuda:
+        def synchronize(self, _device=None):
+            return None
+
+        def memory_allocated(self, _device=None):
+            return 128
+
+        def memory_reserved(self, _device=None):
+            return 256
+
+    adapter = GpuWbcFloatingMultiFrameSolver.__new__(GpuWbcFloatingMultiFrameSolver)
+    adapter._torch = SimpleNamespace(cuda=_Cuda())
+    adapter._solver = SimpleNamespace(device="cuda:0")
+    adapter.batch_size = 1
+    adapter._previous_velocity = torch.zeros((1, 2))
+    adapter.solve_device_batch = lambda *args, **kwargs: SimpleNamespace(
+        accepted_velocity=None, kernel_time_ms=1.5
+    )
+
+    from embodik.gpu.wbc import GpuWbcResourceReport
+
+    report = GpuWbcFloatingMultiFrameSolver.measure_device_batch(
+        adapter, torch.zeros((1, 2)), torch.zeros((1, 1, 7))
+    )
+    assert isinstance(report, GpuWbcResourceReport)
+    assert report.kernel_time_ms == pytest.approx(1.5)
+    assert report.allocated_bytes == 128
+    assert report.reserved_bytes == 256
+    assert report.synchronization_ms >= 0.0
+    assert report.host_dispatch_ms >= 0.0
+
+
+def test_fixed_adapter_reset_and_device_batch_delegate_masks():
+    torch = pytest.importorskip("torch")
+    calls = []
+    adapter = GpuWbcMultiFrameSolver.__new__(GpuWbcMultiFrameSolver)
+    adapter._torch = torch
+    adapter.batch_size = 2
+    adapter._solver = SimpleNamespace(device=torch.device("cpu"))
+    adapter._previous_velocity = torch.ones((2, 2))
+    adapter._last_target = object()
+    adapter._last_target_host = object()
+    adapter._last_runtime_option_signature = "keep"
+    adapter.reset_state(torch.tensor([False, True]))
+    assert adapter._last_runtime_option_signature == "keep"
+    torch.testing.assert_close(adapter._previous_velocity[0], torch.ones(2))
+    torch.testing.assert_close(adapter._previous_velocity[1], torch.zeros(2))
+
+    adapter._solver = SimpleNamespace(
+        device=torch.device("cpu"),
+        solve=lambda q, target, history, current=None, **options: (
+            calls.append(options) or SimpleNamespace(accepted_velocity=torch.zeros((2, 2)))
+        ),
+    )
+    adapter.solve_device_batch(
+        torch.zeros((2, 3)),
+        torch.zeros((2, 1, 7)),
+        valid_mask=torch.tensor([True, False]),
+    )
+    assert calls[0]["valid_mask"].tolist() == [True, False]

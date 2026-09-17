@@ -786,6 +786,9 @@ class GpuWbcMultiFrameSolver:
 
         return self._solver.kinematics.evaluate_body_poses(q)
 
+    def _world_mask(self, value, name: str):
+        return GpuWbcFloatingMultiFrameSolver._world_mask(self, value, name)
+
     def reset_state(self, mask=None) -> None:
         GpuWbcFloatingMultiFrameSolver.reset_state(self, mask)
         if mask is None:

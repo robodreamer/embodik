@@ -440,7 +440,7 @@ def test_accepted_velocity_history_geometry_reset_and_lazy_debug(factory, floati
     result = result_for(adapter)
     histories = []
 
-    def solve(q, t, velocity):
+    def solve(q, t, velocity, current=None, **options):
         histories.append(velocity.clone())
         return result
 
