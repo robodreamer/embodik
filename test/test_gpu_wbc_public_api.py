@@ -36,6 +36,8 @@ def test_gpu_wbc_capability_contract_is_explicit() -> None:
     assert GPU_WBC_CAPABILITIES.capture_point_constraints
     assert GPU_WBC_CAPABILITIES.velocity_zmp_constraints
     assert GPU_WBC_CAPABILITIES.centroidal_momentum_tasks
+    assert GPU_WBC_CAPABILITIES.independent_world_reset
+    assert GPU_WBC_CAPABILITIES.per_world_status
 
 
 class _UnseenFixedRobot:
@@ -381,3 +383,95 @@ def test_runtime_rejects_shape_changing_momentum_priority_and_exclusions():
     adapter._last_runtime_option_signature = None
     with pytest.raises(ValueError, match="excluded velocities requires rebuilding"):
         adapter.configure_runtime(centroidal_momentum_excluded_velocity_indices=(3,))
+
+
+def test_device_batch_applies_reset_and_valid_masks_without_rejecting_the_batch():
+    torch = pytest.importorskip("torch")
+
+    calls = []
+    accepted = torch.tensor([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]], dtype=torch.float32)
+    stored = torch.ones_like(accepted)
+    adapter = GpuWbcFloatingMultiFrameSolver.__new__(GpuWbcFloatingMultiFrameSolver)
+    adapter._torch = torch
+    adapter.batch_size = 3
+    adapter._previous_velocity = stored.clone()
+    adapter._solver = SimpleNamespace(
+        device=stored.device,
+        solve=lambda q, target, history, current_velocity=None, **options: (
+            calls.append((history.clone(), options))
+            or SimpleNamespace(accepted_velocity=accepted.clone())
+        ),
+    )
+    reset = torch.tensor([True, False, False])
+    valid = torch.tensor([True, True, False])
+
+    result = adapter.solve_device_batch(
+        torch.zeros((3, 4)),
+        torch.zeros((3, 1, 7)),
+        reset_mask=reset,
+        valid_mask=valid,
+    )
+
+    history, options = calls[0]
+    assert torch.equal(history[0], torch.zeros(2))
+    assert torch.equal(history[1], torch.ones(2))
+    assert options["reset_mask"].tolist() == [True, False, False]
+    assert options["valid_mask"].tolist() == [True, True, False]
+    torch.testing.assert_close(adapter._previous_velocity[0], accepted[0])
+    torch.testing.assert_close(adapter._previous_velocity[1], accepted[1])
+    torch.testing.assert_close(adapter._previous_velocity[2], torch.ones(2))
+    assert result.accepted_velocity is not None
+
+
+def test_reset_state_can_clear_selected_worlds():
+    torch = pytest.importorskip("torch")
+
+    adapter = GpuWbcFloatingMultiFrameSolver.__new__(GpuWbcFloatingMultiFrameSolver)
+    adapter._torch = torch
+    adapter.batch_size = 2
+    adapter._solver = SimpleNamespace(device=torch.device("cpu"))
+    adapter._previous_velocity = torch.tensor([[1.0, 1.0], [2.0, 2.0]])
+    adapter._last_target = object()
+    adapter.reset_state(torch.tensor([True, False]))
+
+    torch.testing.assert_close(adapter._previous_velocity[0], torch.zeros(2))
+    torch.testing.assert_close(adapter._previous_velocity[1], torch.tensor([2.0, 2.0]))
+    assert adapter._last_target is not None
+
+    adapter.reset_state()
+    torch.testing.assert_close(adapter._previous_velocity, torch.zeros((2, 2)))
+    assert adapter._last_target is None
+
+
+def test_world_status_encodes_inactive_invalid_and_hold_without_reducing_the_batch():
+    torch = pytest.importorskip("torch")
+
+    from embodik.gpu.wbc._runtime.multi_pose_solver import (
+        WORLD_STATUS_HELD,
+        WORLD_STATUS_INACTIVE,
+        WORLD_STATUS_INVALID_INPUT,
+        WORLD_STATUS_NUMERICAL_FAILURE,
+        WORLD_STATUS_SUCCESS,
+        _encode_world_status,
+        _floating_position_limits_valid,
+    )
+
+    enabled = torch.tensor([True, True, True, False])
+    input_valid = torch.tensor([True, False, True, False])
+    spectral_ok = torch.tensor([True, True, False, True])
+    published = torch.tensor([True, True, False, True])
+    status = _encode_world_status(torch, enabled, input_valid, spectral_ok, published)
+
+    assert status.tolist() == [
+        WORLD_STATUS_SUCCESS,
+        WORLD_STATUS_INVALID_INPUT,
+        WORLD_STATUS_NUMERICAL_FAILURE,
+        WORLD_STATUS_INACTIVE,
+    ]
+    assert WORLD_STATUS_HELD == 2
+
+    q = torch.tensor([[0.0, 0.0], [3.0, 0.0], [-0.5, 0.1]])
+    lower = torch.tensor([-1.0, -1.0])
+    upper = torch.tensor([1.0, 1.0])
+    valid = _floating_position_limits_valid(q, lower, upper, (0, 1), ())
+    assert valid.tolist() == [True, False, True]

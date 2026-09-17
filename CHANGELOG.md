@@ -15,6 +15,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   adaptive time steps, and acceleration-history limits.
 - Added explicit GPU capability discovery and CPU/GPU selectors across the
   public Panda, IIWA, bimanual, Unitree G1, and Spot examples.
+- Added per-world `reset_mask` / `valid_mask` inputs, categorical
+  `world_status` codes, and in-place `reset_state(mask)` for the velocity GPU
+  WBC batch path so one invalid or finished environment no longer rejects or
+  clears the whole batch.
+- Added `measure_device_batch()` for solver-path host-dispatch,
+  synchronization, and CUDA allocator snapshots. Full-workload RL profiles
+  remain application-owned.
 
 ### Fixed
 
@@ -25,6 +32,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Kept FI-PeSNS feasibility refinement from reapplying damped task corrections,
   so multiple fixed penalty iterations preserve the CPU extended-SRINV result
   instead of progressively weakening singular-direction damping.
+- Stopped reducing GPU WBC input validation with a host `.tolist()` on every
+  solve. Value checks stay on device per world, and only layout/dtype mismatches
+  raise. Runtime posture weights now bind Torch through the solver instance
+  instead of a missing global name.
 
 ## [0.22.0] - 2026-07-29
 

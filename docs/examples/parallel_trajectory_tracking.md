@@ -117,7 +117,8 @@ Keep the training loop headless and call `solve_device_batch()` with the full
 environment batch. State, measured velocity, target poses, and returned commands
 should remain CUDA tensors; avoid converting each environment through NumPy or
 calling `.cpu()` inside the control loop. Create and warm one fixed-shape solver
-before rollout, then update state and reset masks in place.
+before rollout, then pass `reset_mask` and `valid_mask` into
+`solve_device_batch()` so finished or invalid worlds reset or hold independently.
 
 Viser in this example is intentionally optional publication. During training,
 publish a small rotating sample of environments at a lower rate—or disable the

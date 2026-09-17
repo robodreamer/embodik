@@ -39,6 +39,8 @@ class GpuWbcCapabilities:
     capture_point_constraints: bool = True
     velocity_zmp_constraints: bool = True
     centroidal_momentum_tasks: bool = True
+    independent_world_reset: bool = True
+    per_world_status: bool = True
     acceleration_level_tasks: bool = False
     task_axis_masks: bool = False
     joint_metrics: bool = False
@@ -231,6 +233,22 @@ class GpuWbcMultiFrameResult:
 
 
 @dataclass(frozen=True)
+class GpuWbcResourceReport:
+    """Solver-path host dispatch, synchronization, and CUDA memory snapshot.
+
+    This is not a full-workload RL profile. Physics, observations, policy
+    inference, and rendering remain application-owned measurements.
+    """
+
+    result: object
+    host_dispatch_ms: float
+    synchronization_ms: float
+    kernel_time_ms: float
+    allocated_bytes: int
+    reserved_bytes: int
+
+
+@dataclass(frozen=True)
 class _GpuWbcPendingMultiFrameStep:
     """Device-resident solve awaiting a shared host publication boundary."""
 
@@ -406,6 +424,12 @@ class GpuWbcMultiFrameSolver:
     frame_task_dimensions describes each frame (3 or 6 rows); task_dimensions
     retains its legacy meaning as the generated FI artifact's task layout.
     """
+
+    WORLD_STATUS_SUCCESS = 0
+    WORLD_STATUS_INVALID_INPUT = 1
+    WORLD_STATUS_HELD = 2
+    WORLD_STATUS_NUMERICAL_FAILURE = 3
+    WORLD_STATUS_INACTIVE = 4
 
     def __init__(
         self,
@@ -762,11 +786,10 @@ class GpuWbcMultiFrameSolver:
 
         return self._solver.kinematics.evaluate_body_poses(q)
 
-    def reset_state(self) -> None:
-        self._previous_velocity.zero_()
-        self._last_target = None
-        self._last_target_host = None
-        self._last_runtime_option_signature = None
+    def reset_state(self, mask=None) -> None:
+        GpuWbcFloatingMultiFrameSolver.reset_state(self, mask)
+        if mask is None:
+            self._last_runtime_option_signature = None
 
     def extract_active_configuration(self, configuration: object):
         import numpy as np
@@ -864,16 +887,57 @@ class GpuWbcMultiFrameSolver:
             current_velocity=current_velocity,
         )
 
-    def solve_device_batch(self, q, target, previous_velocity=None, current_velocity=None):
+    def solve_device_batch(
+        self,
+        q,
+        target,
+        previous_velocity=None,
+        current_velocity=None,
+        *,
+        reset_mask=None,
+        valid_mask=None,
+    ):
         """Solve an already device-resident batch without host publication."""
 
         return GpuWbcFloatingMultiFrameSolver.solve_device_batch(
-            self, q, target, previous_velocity, current_velocity
+            self,
+            q,
+            target,
+            previous_velocity,
+            current_velocity,
+            reset_mask=reset_mask,
+            valid_mask=valid_mask,
+        )
+
+    def measure_device_batch(
+        self,
+        q,
+        target,
+        previous_velocity=None,
+        current_velocity=None,
+        *,
+        reset_mask=None,
+        valid_mask=None,
+    ) -> GpuWbcResourceReport:
+        return GpuWbcFloatingMultiFrameSolver.measure_device_batch(
+            self,
+            q,
+            target,
+            previous_velocity,
+            current_velocity,
+            reset_mask=reset_mask,
+            valid_mask=valid_mask,
         )
 
 
 class GpuWbcFloatingMultiFrameSolver:
     """No-fallback public adapter for free-root mixed-frame CUDA pose IK."""
+
+    WORLD_STATUS_SUCCESS = 0
+    WORLD_STATUS_INVALID_INPUT = 1
+    WORLD_STATUS_HELD = 2
+    WORLD_STATUS_NUMERICAL_FAILURE = 3
+    WORLD_STATUS_INACTIVE = 4
 
     def __init__(
         self,
@@ -1182,10 +1246,36 @@ class GpuWbcFloatingMultiFrameSolver:
     def collision_supported(self) -> bool:
         return self._solver.collision is not None
 
-    def reset_state(self) -> None:
-        self._previous_velocity.zero_()
-        self._last_target = None
-        self._last_target_host = None
+    def reset_state(self, mask=None) -> None:
+        """Clear accepted-velocity history for the full batch or selected worlds.
+
+        ``mask`` is a boolean CUDA tensor of shape ``[batch_size]``. True worlds
+        lose command-acceleration history; False worlds keep their current
+        accepted velocity. A full-batch reset also forgets the last target used
+        by the interactive host path.
+        """
+
+        if mask is None:
+            self._previous_velocity.zero_()
+            self._last_target = None
+            self._last_target_host = None
+            return
+        selected = self._world_mask(mask, "reset_mask")
+        self._previous_velocity.masked_fill_(selected.unsqueeze(-1), 0)
+
+    def _world_mask(self, value, name: str):
+        if value is None:
+            return None
+        torch = self._torch
+        if not isinstance(value, torch.Tensor) or value.dtype != torch.bool:
+            raise TypeError(f"{name} must be a boolean torch.Tensor")
+        device = self._solver.device
+        if value.device != device:
+            raise ValueError(f"{name} must reside on {device}")
+        expected = (int(self.batch_size),)
+        if tuple(value.shape) != expected:
+            raise ValueError(f"{name} must have shape {expected}")
+        return value
 
     def extract_active_velocity(self, velocity: object):
         """Extract measured tangent state in the GPU solver's active order."""
@@ -1502,20 +1592,96 @@ class GpuWbcFloatingMultiFrameSolver:
         self._last_target_host = None
         return (time.perf_counter() - started) * 1e3
 
-    def solve_device_batch(self, q, target, previous_velocity=None, current_velocity=None):
+    def solve_device_batch(
+        self,
+        q,
+        target,
+        previous_velocity=None,
+        current_velocity=None,
+        *,
+        reset_mask=None,
+        valid_mask=None,
+    ):
         """Run all worlds in one CUDA launch path and keep results on device.
 
         ``q`` must have shape ``[batch_size, configuration_dim]`` and ``target``
         must have shape ``[batch_size, frame_count, 7]`` in position plus WXYZ
         quaternion order. When ``previous_velocity`` is omitted, accepted
         velocity history is retained on device for the next call.
+
+        Provided tensors for a participating world are treated as contemporaneous
+        this tick. ``reset_mask`` clears command history for selected worlds.
+        ``valid_mask`` excludes worlds from the solve without rebuilding; those
+        worlds hold their configuration and keep stored history unless also
+        reset. There is no independent per-field stale/fresh schedule: omitted
+        history is the retained accepted command, and every supplied field is
+        fresh for participating worlds.
         """
 
         history = self._previous_velocity if previous_velocity is None else previous_velocity
-        result = self._solver.solve(q, target, history, current_velocity)
+        reset = self._world_mask(reset_mask, "reset_mask")
+        valid = self._world_mask(valid_mask, "valid_mask")
+        if reset is not None:
+            torch = self._torch
+            history = torch.where(reset.unsqueeze(-1), torch.zeros_like(history), history)
+            if previous_velocity is None:
+                self._previous_velocity.masked_fill_(reset.unsqueeze(-1), 0)
+        solve_kwargs = {}
+        if reset is not None:
+            solve_kwargs["reset_mask"] = reset
+        if valid is not None:
+            solve_kwargs["valid_mask"] = valid
+        result = self._solver.solve(q, target, history, current_velocity, **solve_kwargs)
         if previous_velocity is None and result.accepted_velocity is not None:
-            self._previous_velocity.copy_(result.accepted_velocity)
+            accepted = result.accepted_velocity
+            if valid is None:
+                self._previous_velocity.copy_(accepted)
+            else:
+                self._previous_velocity.copy_(
+                    self._torch.where(valid.unsqueeze(-1), accepted, self._previous_velocity)
+                )
         return result
+
+    def measure_device_batch(
+        self,
+        q,
+        target,
+        previous_velocity=None,
+        current_velocity=None,
+        *,
+        reset_mask=None,
+        valid_mask=None,
+    ) -> GpuWbcResourceReport:
+        """Time one device batch and snapshot CUDA allocator state.
+
+        The report splits host dispatch from the blocking synchronize used to
+        finish the solve. It does not include physics, observations, policy
+        inference, or rendering.
+        """
+
+        torch = self._torch
+        device = self._solver.device
+        torch.cuda.synchronize(device)
+        started = time.perf_counter()
+        result = self.solve_device_batch(
+            q,
+            target,
+            previous_velocity,
+            current_velocity,
+            reset_mask=reset_mask,
+            valid_mask=valid_mask,
+        )
+        dispatched = time.perf_counter()
+        torch.cuda.synchronize(device)
+        finished = time.perf_counter()
+        return GpuWbcResourceReport(
+            result=result,
+            host_dispatch_ms=(dispatched - started) * 1e3,
+            synchronization_ms=(finished - dispatched) * 1e3,
+            kernel_time_ms=float(getattr(result, "kernel_time_ms", 0.0) or 0.0),
+            allocated_bytes=int(torch.cuda.memory_allocated(device)),
+            reserved_bytes=int(torch.cuda.memory_reserved(device)),
+        )
 
     def solve_device_step(
         self, q, target, *, current_velocity=None

@@ -25,11 +25,12 @@ from .model_spec import (
 )
 from .solver import (
     GPU_WBC_CAPABILITIES,
-    GpuWbcCollisionDebug,
     GpuWbcCapabilities,
+    GpuWbcCollisionDebug,
     GpuWbcFloatingMultiFrameSolver,
     GpuWbcMultiFrameResult,
     GpuWbcMultiFrameSolver,
+    GpuWbcResourceReport,
     derive_frame_active_joint_names,
     derive_frames_active_joint_names,
     derive_frames_active_velocity_indices,
@@ -50,6 +51,7 @@ __all__ = [
     "GpuWbcFloatingMultiFrameSolver",
     "GpuWbcMultiFrameResult",
     "GpuWbcMultiFrameSolver",
+    "GpuWbcResourceReport",
     "PoseModelParameters",
     "RobotSolveSpec",
     "derive_frame_active_joint_names",

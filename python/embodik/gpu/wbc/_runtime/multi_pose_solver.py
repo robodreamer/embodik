@@ -207,6 +207,39 @@ class MultiFramePoseSolveConfig:
             raise ValueError("torso no-op fast path requires the certified collision fast path")
 
 
+WORLD_STATUS_SUCCESS = 0
+WORLD_STATUS_INVALID_INPUT = 1
+WORLD_STATUS_HELD = 2
+WORLD_STATUS_NUMERICAL_FAILURE = 3
+WORLD_STATUS_INACTIVE = 4
+
+
+def _encode_world_status(
+    torch: Any,
+    enabled: Any,
+    input_valid: Any,
+    spectral_ok: Any,
+    published: Any,
+) -> Any:
+    """Encode categorical per-world outcomes without reducing the batch.
+
+    Later assignments win: inactive worlds stay inactive even if their stored
+    tensors were also non-finite, and invalid input outranks a numerical hold.
+    """
+
+    dtype = torch.int8
+    device = enabled.device
+    held = torch.full(enabled.shape, WORLD_STATUS_HELD, dtype=dtype, device=device)
+    success = torch.full_like(held, WORLD_STATUS_SUCCESS)
+    numerical = torch.full_like(held, WORLD_STATUS_NUMERICAL_FAILURE)
+    invalid = torch.full_like(held, WORLD_STATUS_INVALID_INPUT)
+    inactive = torch.full_like(held, WORLD_STATUS_INACTIVE)
+    status = torch.where(published, success, held)
+    status = torch.where(spectral_ok, status, numerical)
+    status = torch.where(input_valid, status, invalid)
+    return torch.where(enabled, status, inactive)
+
+
 @dataclass(frozen=True)
 class MultiFramePoseBatchResult:
     status: str
@@ -258,6 +291,8 @@ class MultiFramePoseBatchResult:
     secondary_residual_before: Any = None
     secondary_residual_after: Any = None
     spectral_solve_ok: Any = None
+    world_status: Any = None
+    world_success: Any = None
     compact_publication: Any = None
     collision_clear_state_certified: Any = None
     solved_primary_pose_xyzw: Any = None
@@ -318,8 +353,8 @@ def _floating_position_limits_valid(
         if active_column not in locked
     ]
     if not rows:
-        return q_position.new_tensor(True, dtype=q_position.dtype).bool()
-    return ((q_position[:, rows] >= lower[rows]) & (q_position[:, rows] <= upper[rows])).all()
+        return q_position.new_ones(q_position.shape[0]).bool()
+    return ((q_position[:, rows] >= lower[rows]) & (q_position[:, rows] <= upper[rows])).all(dim=-1)
 
 
 def _validate_fi_function(function: Any, velocity_dim: int, frame_count: int) -> None:
@@ -1450,6 +1485,41 @@ class DeviceResidentMultiFramePoseSolver:
             dtype=torch.long,
             device=self.device,
         )
+        self._root_quat_start: int | None = None
+        if robot_spec.floating_base:
+            root = next(
+                index
+                for index, (q_size, v_size) in enumerate(
+                    zip(
+                        robot_spec.joint_configuration_sizes,
+                        robot_spec.joint_velocity_sizes,
+                        strict=True,
+                    )
+                )
+                if q_size == 7 and v_size == 6
+            )
+            self._root_quat_start = int(robot_spec.joint_configuration_indices[root]) + 3
+        default_q = torch.as_tensor(default_configuration, dtype=torch.float32, device=self.device)
+        if tuple(default_q.shape) == (self.configuration_dim,):
+            self._default_q = default_q
+        elif (
+            not robot_spec.floating_base
+            and robot_spec.active_configuration_indices
+            and tuple(default_q.shape) == (int(robot_spec.configuration_dim),)
+        ):
+            compact = torch.as_tensor(
+                robot_spec.active_configuration_indices,
+                dtype=torch.long,
+                device=self.device,
+            )
+            self._default_q = default_q.index_select(0, compact)
+        else:
+            raise ValueError(f"default_configuration must have shape {(self.configuration_dim,)}")
+        identity = torch.zeros((self.frame_count, 7), dtype=torch.float32, device=self.device)
+        identity[:, 3] = 1.0
+        self._default_target = identity
+        self._false_world_mask = torch.zeros(self.batch_size, dtype=torch.bool, device=self.device)
+        self._true_world_mask = torch.ones(self.batch_size, dtype=torch.bool, device=self.device)
         self._graph = None
         self._graph_inputs = None
         self._graph_result = None
@@ -1581,12 +1651,14 @@ class DeviceResidentMultiFramePoseSolver:
                 options=compile_options,
             )
 
-    def _validate(
+    def _validate_layout(
         self,
         q: Any,
         target: Any,
         previous_velocity: Any | None,
         current_velocity: Any | None,
+        reset_mask: Any | None,
+        valid_mask: Any | None,
     ) -> None:
         torch = self.torch
         expected = {
@@ -1616,6 +1688,45 @@ class DeviceResidentMultiFramePoseSolver:
             raise ValueError("current_velocity must match the active velocity shape")
         if self.velocity_zmp_constraint_enabled and current_velocity is None:
             raise ValueError("velocity ZMP requires explicit current_velocity")
+        for name, mask in (("reset_mask", reset_mask), ("valid_mask", valid_mask)):
+            if mask is None:
+                continue
+            if (
+                not isinstance(mask, torch.Tensor)
+                or mask.dtype != torch.bool
+                or mask.shape != (self.batch_size,)
+                or mask.device != self.device
+            ):
+                raise ValueError(
+                    f"{name} must be a boolean tensor with shape {(self.batch_size,)} "
+                    f"on {self.device}"
+                )
+
+    def _world_input_valid(
+        self,
+        q: Any,
+        target: Any,
+        previous_velocity: Any | None,
+        current_velocity: Any | None,
+    ) -> Any:
+        """Return a per-world finite/limit mask without reducing the batch to host."""
+
+        torch = self.torch
+        finite = (
+            torch.isfinite(q).all(dim=-1)
+            & torch.isfinite(target).all(dim=(-2, -1))
+            & (
+                self._true_world_mask
+                if previous_velocity is None
+                else torch.isfinite(previous_velocity).all(dim=-1)
+            )
+            & (
+                self._true_world_mask
+                if current_velocity is None
+                else torch.isfinite(current_velocity).all(dim=-1)
+            )
+            & (torch.linalg.vector_norm(target[:, :, 3:], dim=-1) > 1e-8).all(dim=-1)
+        )
         if self.robot_spec.floating_base:
             q_position = q[:, self._position_configuration_indices]
             lower_position = self._joint_lower[self._position_velocity_indices]
@@ -1627,45 +1738,15 @@ class DeviceResidentMultiFramePoseSolver:
                 self._position_velocity_indices,
                 self._locked_active_columns,
             )
-            root = next(
-                index
-                for index, (q_size, v_size) in enumerate(
-                    zip(
-                        self.robot_spec.joint_configuration_sizes,
-                        self.robot_spec.joint_velocity_sizes,
-                        strict=True,
-                    )
-                )
-                if q_size == 7 and v_size == 6
-            )
-            root_q = self.robot_spec.joint_configuration_indices[root]
-            quaternion_valid = (
-                torch.linalg.vector_norm(q[:, root_q + 3 : root_q + 7], dim=-1) > 1e-8
-            ).all()
+            assert self._root_quat_start is not None
+            start = self._root_quat_start
+            quaternion_valid = torch.linalg.vector_norm(q[:, start : start + 4], dim=-1) > 1e-8
         else:
-            position_limits_valid = ((q >= self._joint_lower) & (q <= self._joint_upper)).all()
-            quaternion_valid = torch.tensor(True, device=self.device)
-        checks = torch.stack(
-            (
-                torch.isfinite(q).all(),
-                torch.isfinite(target).all(),
-                (
-                    torch.tensor(True, device=self.device)
-                    if previous_velocity is None
-                    else torch.isfinite(previous_velocity).all()
-                ),
-                (
-                    torch.tensor(True, device=self.device)
-                    if current_velocity is None
-                    else torch.isfinite(current_velocity).all()
-                ),
-                (torch.linalg.vector_norm(target[:, :, 3:], dim=-1) > 1e-8).all(),
-                position_limits_valid,
-                quaternion_valid,
+            position_limits_valid = ((q >= self._joint_lower) & (q <= self._joint_upper)).all(
+                dim=-1
             )
-        ).tolist()
-        if not all(checks):
-            raise ValueError("multi-frame request contains invalid values or limits")
+            quaternion_valid = self._true_world_mask
+        return finite & position_limits_valid & quaternion_valid
 
     def _bounds(self, q: Any, q_start: Any, previous: Any, effective_dt: Any) -> tuple[Any, Any]:
         if self._compiled_bounds is not None:
@@ -1996,11 +2077,22 @@ class DeviceResidentMultiFramePoseSolver:
         target: Any,
         previous_velocity: Any | None = None,
         current_velocity: Any | None = None,
+        *,
+        reset_mask: Any | None = None,
+        valid_mask: Any | None = None,
     ) -> MultiFramePoseBatchResult:
-        self._validate(q_start, target, previous_velocity, current_velocity)
+        self._validate_layout(
+            q_start, target, previous_velocity, current_velocity, reset_mask, valid_mask
+        )
+        reset = self._false_world_mask if reset_mask is None else reset_mask
+        enabled = self._true_world_mask if valid_mask is None else valid_mask
         if self.config.standalone_cuda_graph_enabled:
-            return self._solve_graph(q_start, target, previous_velocity, current_velocity)
-        return self._solve_impl(q_start, target, previous_velocity, current_velocity)
+            return self._solve_graph(
+                q_start, target, previous_velocity, current_velocity, reset, enabled
+            )
+        return self._solve_impl(
+            q_start, target, previous_velocity, current_velocity, reset, enabled
+        )
 
     def _solve_graph(
         self,
@@ -2008,9 +2100,16 @@ class DeviceResidentMultiFramePoseSolver:
         target: Any,
         previous_velocity: Any | None,
         current_velocity: Any | None,
+        reset_mask: Any,
+        valid_mask: Any,
     ) -> MultiFramePoseBatchResult:
         torch = self.torch
-        if self._graph is None:
+        graph_ready = (
+            self._graph is not None
+            and self._graph_inputs is not None
+            and len(self._graph_inputs) == 6
+        )
+        if not graph_ready:
             static_q = torch.empty_like(q_start)
             static_target = torch.empty_like(target)
             static_previous = torch.empty(
@@ -2019,6 +2118,8 @@ class DeviceResidentMultiFramePoseSolver:
                 device=q_start.device,
             )
             static_current = torch.empty_like(static_previous)
+            static_reset = torch.empty_like(self._false_world_mask)
+            static_valid = torch.empty_like(self._true_world_mask)
             static_q.copy_(q_start)
             static_target.copy_(target)
             (
@@ -2031,7 +2132,16 @@ class DeviceResidentMultiFramePoseSolver:
                 if current_velocity is None
                 else static_current.copy_(current_velocity)
             )
-            warm_result = self._solve_impl(static_q, static_target, static_previous, static_current)
+            static_reset.copy_(reset_mask)
+            static_valid.copy_(valid_mask)
+            warm_result = self._solve_impl(
+                static_q,
+                static_target,
+                static_previous,
+                static_current,
+                static_reset,
+                static_valid,
+            )
             self.compact_publication(warm_result)
             torch.cuda.synchronize(self.device)
             import warp as wp
@@ -2043,7 +2153,12 @@ class DeviceResidentMultiFramePoseSolver:
                 # mixed Torch/Newton parent capture as an external capture.
                 with torch.cuda.graph(graph, capture_error_mode="thread_local"):
                     raw_graph_result = self._solve_impl(
-                        static_q, static_target, static_previous, static_current
+                        static_q,
+                        static_target,
+                        static_previous,
+                        static_current,
+                        static_reset,
+                        static_valid,
                     )
                     graph_result = replace(
                         raw_graph_result,
@@ -2063,7 +2178,12 @@ class DeviceResidentMultiFramePoseSolver:
                         capture_mode=wp.CaptureMode.THREAD_LOCAL,
                     ):
                         raw_graph_result = self._solve_impl(
-                            static_q, static_target, static_previous, static_current
+                            static_q,
+                            static_target,
+                            static_previous,
+                            static_current,
+                            static_reset,
+                            static_valid,
                         )
                         graph_result = replace(
                             raw_graph_result,
@@ -2075,9 +2195,13 @@ class DeviceResidentMultiFramePoseSolver:
                 static_target,
                 static_previous,
                 static_current,
+                static_reset,
+                static_valid,
             )
             self._graph_result = graph_result
-        static_q, static_target, static_previous, static_current = self._graph_inputs
+        static_q, static_target, static_previous, static_current, static_reset, static_valid = (
+            self._graph_inputs
+        )
         static_q.copy_(q_start)
         static_target.copy_(target)
         (
@@ -2090,6 +2214,8 @@ class DeviceResidentMultiFramePoseSolver:
             if current_velocity is None
             else static_current.copy_(current_velocity)
         )
+        static_reset.copy_(reset_mask)
+        static_valid.copy_(valid_mask)
         self._graph.replay()
         return self._graph_result
 
@@ -2299,6 +2425,7 @@ class DeviceResidentMultiFramePoseSolver:
             self._posture_weights.copy_(values)
             assert self._posture_jacobian is not None
             self._posture_jacobian.zero_()
+            torch = self.torch
             posture_columns = torch.tensor(
                 [
                     tuple(self.robot_spec.active_velocity_indices).index(index)
@@ -3690,6 +3817,8 @@ class DeviceResidentMultiFramePoseSolver:
         target: Any,
         previous_velocity: Any | None,
         current_velocity: Any | None,
+        reset_mask: Any,
+        valid_mask: Any,
     ) -> MultiFramePoseBatchResult:
         torch = self.torch
         collision_active_for_solve = self.collision is not None and self.config.collision_enabled
@@ -3697,7 +3826,14 @@ class DeviceResidentMultiFramePoseSolver:
             self.config.standalone_cuda_graph_enabled
             and self.config.velocity_solver in {"warp_srinv", "cusolver_srinv"}
         )
+        input_valid = self._world_input_valid(q_start, target, previous_velocity, current_velocity)
+        participate = valid_mask & input_valid
+        q_hold = q_start
+        q_start = torch.where(participate[:, None], q_start, self._default_q.expand_as(q_start))
         q = q_start.clone()
+        target = torch.where(
+            participate[:, None, None], target, self._default_target.expand_as(target)
+        )
         previous = (
             torch.zeros(
                 (self.batch_size, self.velocity_dim),
@@ -3707,6 +3843,8 @@ class DeviceResidentMultiFramePoseSolver:
             if previous_velocity is None
             else previous_velocity
         )
+        previous = torch.where(reset_mask[:, None], torch.zeros_like(previous), previous)
+        previous = torch.where(participate[:, None], previous, torch.zeros_like(previous))
         measured_velocity = (
             torch.zeros(
                 (self.batch_size, self.velocity_dim),
@@ -4282,6 +4420,16 @@ class DeviceResidentMultiFramePoseSolver:
             collision_clear_state_certified,
             collision_step_accepted,
         )
+        publish = publish & participate
+        collision_diagnostic_publish = collision_diagnostic_publish & participate
+        safe_q = torch.where(participate[:, None], safe_q, q_hold)
+        safe_velocity = torch.where(
+            participate[:, None], safe_velocity, torch.zeros_like(safe_velocity)
+        )
+        world_status = _encode_world_status(
+            torch, valid_mask, input_valid, spectral_solve_ok, publish
+        )
+        world_success = world_status == WORLD_STATUS_SUCCESS
         if collision_active_for_solve:
             final_collision_overflow = collision_overflow_observed
             if self.config.collision_debug_enabled:
@@ -4358,6 +4506,8 @@ class DeviceResidentMultiFramePoseSolver:
 
         return MultiFramePoseBatchResult(
             status="solved_or_held_needs_verification",
+            world_status=world_status,
+            world_success=world_success,
             q_solution=safe_q,
             q_candidate=q,
             position_error_m=published_position,

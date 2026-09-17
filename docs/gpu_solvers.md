@@ -157,15 +157,31 @@ result = solver.solve_device_batch(
     q_active,
     policy_targets,
     current_velocity=dq_active,
+    reset_mask=done_mask,
+    valid_mask=active_mask,
 )
 sim.set_joint_position_targets(result.q_solution)
 ```
 
+`reset_mask` and `valid_mask` are boolean tensors of shape `[batch_size]`.
+Resetting selected worlds zeros command-acceleration history without rebuilding
+the solver. Inactive worlds hold their configuration and do not advance stored
+history. One non-finite or out-of-limit world reports
+`GpuWbcFloatingMultiFrameSolver.WORLD_STATUS_INVALID_INPUT` for that row and
+does not reject the batch.
+
+Provided tensors for a participating world are contemporaneous this tick.
+Omitted `previous_velocity` retains the accepted command. There is no separate
+per-field freshness schedule.
+
 Build one solver at the training batch size, warm it before collecting timing
-or rollouts, and reuse it across episode resets. Reset state and enable masks
-in place; rebuilding the solver or changing tensor shapes forces compilation
-and CUDA-graph setup back onto the critical path. For velocity-controlled
-actuators, consume `result.accepted_velocity` instead of `q_solution`.
+or rollouts, and reuse it across episode resets. Rebuilding the solver or
+changing tensor shapes forces compilation and CUDA-graph setup back onto the
+critical path. For velocity-controlled actuators, consume
+`result.accepted_velocity` instead of `q_solution`. Use
+`measure_device_batch()` when you need host-dispatch versus synchronize time
+and a CUDA allocator snapshot. That helper is a solver-path measurement, not a
+physics + observation + policy + rendering profile.
 
 The exact transport depends on the simulator:
 
@@ -219,6 +235,8 @@ false capability must be disabled or rejected.
 | Centroidal momentum task and hard momentum bounds | Supported |
 | Runtime shape-stable constraint enable/disable and tuning | Supported where advertised by capabilities |
 | Device-resident multi-world solve | Supported with Warp |
+| Per-world reset/validity masks and categorical status | Supported |
+| Solver-path dispatch, sync, and memory snapshot | Supported via `measure_device_batch()` |
 | General task axis masks and joint metrics | Planned |
 | Exact CPU collision tuning/certification policy | Planned |
 
@@ -262,6 +280,9 @@ This is a warm **CUDA solve-only** profile. Target generation, Viser, collision,
 host publication, and physics stepping were disabled or excluded. The table is
 evidence of batch scaling, not a claim that every constrained model runs below
 one millisecond or that a 1,024-world simulation has the same end-to-end rate.
+Use `measure_device_batch()` to split host dispatch from the blocking
+synchronize and to read allocated/reserved CUDA bytes for the same path. Full
+RL-loop budgets still have to be measured in the training application.
 
 ## Acceleration-level slice
 
