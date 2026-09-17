@@ -93,6 +93,9 @@ gpu = [
 ]
 # GPU collision detection via NVIDIA Warp
 gpu-collision = ["warp-lang>=1.0.0"]
+# Model-derived whole-body GPU solving. NVIDIA Newton is currently installed
+# from its source repository because the validated version is a development build.
+gpu-wbc = ["torch>=2.0.0", "warp-lang>=1.10.0"]
 dev = ["pytest>=7.0", "pytest-cov>=4.0", "black>=24.0", "isort>=5.13.0"]
 
 [project.urls]

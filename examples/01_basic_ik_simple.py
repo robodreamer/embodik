@@ -14,6 +14,7 @@ import argparse
 import math
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -32,6 +33,10 @@ from example_helpers.ik_common import (
     SOLVER_LEVEL_VELOCITY,
     configure_solver_runtime_policy,
     quiet_websocket_handshake_logs,
+)
+from embodik.gpu.wbc import (
+    GpuWbcMultiFrameSolver,
+    derive_frame_active_joint_names,
 )
 from utils.robot_models import load_robot_presets, resolve_robot_configuration
 
@@ -72,6 +77,128 @@ def reset_basic_acceleration_state(
         runtime.dq = np.zeros(velocity_dimension, dtype=float)
 
 
+def create_gpu_solver(
+    args,
+    robot,
+    urdf_path,
+    robot_name,
+    target_link,
+    q_default,
+    exclusions=(),
+    collision_enabled=False,
+    min_distance=0.03,
+):
+    """Build a fixed-base GPU solver using source-model joint and geometry indices."""
+    names = derive_frame_active_joint_names(robot, target_link)
+    gpu_robot = embodik.RobotModel(str(urdf_path), actuated_joint_names=names, floating_base=False)
+    excluded = {frozenset(pair) for pair in exclusions}
+    pairs = tuple(
+        tuple(pair)
+        for pair in gpu_robot.get_collision_pair_names()
+        if frozenset(pair) not in excluded
+    )
+    source_indices = tuple(int(robot.get_joint_config_index(name)) for name in names)
+    posture = tuple(np.asarray(q_default)[list(source_indices)])
+    gpu_solver = GpuWbcMultiFrameSolver(
+        args.gpu_wbc_manifest,
+        Path(urdf_path),
+        args.gpu_wbc_cache_dir,
+        robot=gpu_robot,
+        robot_name=robot_name,
+        frames=(target_link,),
+        frame_task_dimensions=(6,),
+        active_joint_names=names,
+        default_configuration=posture,
+        solver_backend="torch_srinv",
+        iterations=2,
+        dt=DEFAULT_SOLVER_DT,
+        position_gain=DEFAULT_POS_GAIN,
+        orientation_gain=DEFAULT_ROT_GAIN,
+        adaptive_dt=DEFAULT_ADAPTIVE_DT,
+        adaptive_dt_max_scale=DEFAULT_ADAPTIVE_DT_MAX_SCALE,
+        adaptive_dt_reference_distance=DEFAULT_ADAPTIVE_DT_REFERENCE_DISTANCE,
+        collision_pairs=pairs,
+        collision_min_distance_m=min_distance,
+        collision_query_distance_m=0.15,
+        posture_target_configuration=posture,
+        posture_velocity_indices=tuple(
+            int(gpu_robot.get_joint_velocity_index(name)) for name in names
+        ),
+        posture_weights=tuple(1.0 for _ in names),
+        posture_gain=DEFAULT_NULLSPACE_GAIN if DEFAULT_NULLSPACE_ENABLED else 0.0,
+    )
+    gpu_solver.configure_runtime(collision_enabled=bool(pairs) and collision_enabled)
+    return gpu_solver, source_indices, bool(pairs)
+
+
+class GpuControls:
+    """GPU-only controls shared by the two introductory examples."""
+
+    def __init__(self, gui, scene, collision_supported, collision_enabled, min_distance):
+        self.scene = scene
+        self.collision_supported = collision_supported
+        self.line = None
+        with gui.add_folder("GPU settings (CPU unchanged)"):
+            self.collision = gui.add_checkbox(
+                "Self Collision",
+                initial_value=collision_enabled and collision_supported,
+                disabled=not collision_supported,
+            )
+            self.distance = gui.add_slider(
+                "Minimum Distance (m)", min=0.001, max=0.10, step=0.001, initial_value=min_distance
+            )
+            self.debug = gui.add_checkbox(
+                "Show Collision Debug", initial_value=False, disabled=not collision_supported
+            )
+            self.posture = gui.add_slider(
+                "Posture Gain",
+                min=0.0,
+                max=10.0,
+                step=0.001,
+                initial_value=DEFAULT_NULLSPACE_GAIN if DEFAULT_NULLSPACE_ENABLED else 0.0,
+            )
+            self.adaptive = gui.add_checkbox("Adaptive dt", initial_value=DEFAULT_ADAPTIVE_DT)
+            self.pos = gui.add_slider(
+                "Position Gain", min=0.1, max=100.0, step=0.1, initial_value=DEFAULT_POS_GAIN
+            )
+            self.rot = gui.add_slider(
+                "Orientation Gain", min=0.1, max=100.0, step=0.1, initial_value=DEFAULT_ROT_GAIN
+            )
+
+    def solve(self, solver, q, target):
+        solver.configure_runtime(
+            collision_enabled=bool(self.collision.value and self.collision_supported),
+            collision_min_distance_m=(
+                float(self.distance.value) if self.collision_supported else None
+            ),
+            posture_gain=float(self.posture.value),
+            adaptive_dt=bool(self.adaptive.value),
+            frame_position_gains=(float(self.pos.value),),
+            frame_orientation_gains=(float(self.rot.value),),
+        )
+        result = solver.solve_step(
+            q, (target,), include_collision_debug=bool(self.debug.value and self.collision.value)
+        )
+        self.show_debug(result.collision_debug)
+        return result
+
+    def show_debug(self, debug=None):
+        if self.line is not None:
+            self.line.visible = False
+        if debug is not None and self.debug.value and self.collision.value:
+            points = np.asarray([[debug.point_a_world, debug.point_b_world]], dtype=float)
+            if self.line is None:
+                self.line = self.scene.add_line_segments(
+                    "/gpu_collision_debug",
+                    points=points,
+                    colors=np.asarray([[[255, 50, 50], [50, 255, 50]]], dtype=np.uint8),
+                    line_width=3.0,
+                )
+            else:
+                self.line.points = points
+            self.line.visible = True
+
+
 def parse_args() -> argparse.Namespace:
     presets = load_robot_presets()
     default_robot = "panda" if "panda" in presets else sorted(presets)[0]
@@ -85,6 +212,13 @@ def parse_args() -> argparse.Namespace:
         help="Use Pinocchio's ViserVisualizer or ViserUrdf.",
     )
     parser.add_argument("--port", type=int, default=DEFAULT_VISER_PORT)
+    parser.add_argument("--gpu-wbc", action="store_true")
+    parser.add_argument("--gpu-wbc-manifest", type=Path)
+    parser.add_argument(
+        "--gpu-wbc-cache-dir",
+        type=Path,
+        default=Path("build/gpu-wbc-newton-cache"),
+    )
     return parser.parse_args()
 
 
@@ -283,6 +417,7 @@ def main(args: argparse.Namespace) -> None:
     robot: embodik.RobotModel = config["robot"]
     target_link: str = config["target_link"]
     q_default = np.asarray(config["default_configuration"], dtype=float)
+    urdf_path = Path(config["urdf_path"])
 
     solver = embodik.KinematicsSolver(robot)
     solver.dt = DEFAULT_SOLVER_DT
@@ -306,6 +441,31 @@ def main(args: argparse.Namespace) -> None:
     acceleration_runtime, acceleration_unavailable_reason = basic_acceleration_runtime_status(
         robot, target_link, q_default
     )
+
+    gpu_solver: GpuWbcMultiFrameSolver | None = None
+    gpu_target_offset = None
+    gpu_fault: str | None = None
+    if args.gpu_wbc:
+        import importlib
+
+        collision_example = importlib.import_module("02_collision_aware_IK")
+        collision_cfg = collision_example.resolve_robot_configuration(args.robot)
+        gpu_solver, gpu_indices, gpu_collision_supported = create_gpu_solver(
+            args,
+            robot,
+            urdf_path,
+            str(config["key"]),
+            target_link,
+            q_default,
+            exclusions=collision_cfg.collision_exclusions,
+        )
+        visible_pose = robot.get_frame_pose(target_link)
+        solver_pose = robot.get_frame_pose(gpu_solver.frames[0])
+        gpu_target_offset = visible_pose.inverse() * solver_pose
+        gpu_solver.warm_up(
+            q[list(gpu_indices)],
+            (visible_pose * gpu_target_offset,),
+        )
 
     preset = load_robot_presets()[args.robot.lower()]
     viz = create_robot_visualizer(
@@ -337,11 +497,26 @@ def main(args: argparse.Namespace) -> None:
             options=solver_level_options,
             initial_value=SOLVER_LEVEL_VELOCITY,
         )
+        backend_select = viz.gui.add_dropdown(
+            "Solver Backend",
+            options=("CPU EmbodiK",) + (("GPU Newton/Warp",) if gpu_solver is not None else ()),
+            initial_value="CPU EmbodiK",
+        )
         status = viz.gui.add_text("Status", initial_value="Ready")
         reset_button = viz.gui.add_button("Reset Robot & Target")
 
+    gpu_controls = (
+        GpuControls(viz.gui, viz.scene, gpu_collision_supported, False, 0.03)
+        if gpu_solver is not None
+        else None
+    )
+
     def reset() -> None:
-        nonlocal q
+        nonlocal q, gpu_fault
+        gpu_fault = None
+        if gpu_solver is not None:
+            gpu_solver.reset_state()
+            gpu_controls.show_debug()
         q = q_default.copy()
         reset_basic_acceleration_state(acceleration_runtime, robot.nv)
         robot.update_configuration(q)
@@ -362,6 +537,15 @@ def main(args: argparse.Namespace) -> None:
             solver_level.value = SOLVER_LEVEL_VELOCITY
             status.value = f"Acceleration unavailable: {acceleration_unavailable_reason}"
 
+    @backend_select.on_update
+    def _(_) -> None:
+        nonlocal gpu_fault
+        gpu_fault = None
+        reset_basic_acceleration_state(acceleration_runtime, robot.nv)
+        if gpu_solver is not None:
+            gpu_solver.reset_state()
+            gpu_controls.show_debug()
+
     step_opts = make_step_options()
     accepted_statuses = {
         embodik.SolverStatus.SUCCESS,
@@ -375,7 +559,31 @@ def main(args: argparse.Namespace) -> None:
             R=q2r(np.asarray(target.wxyz, dtype=float)),
             t=np.asarray(target.position, dtype=float),
         )
-        if solver_level.value == SOLVER_LEVEL_ACCELERATION and acceleration_runtime is not None:
+        if backend_select.value == "GPU Newton/Warp":
+            assert gpu_solver is not None
+            assert gpu_target_offset is not None
+            if gpu_fault is None:
+                try:
+                    gpu_result = gpu_controls.solve(
+                        gpu_solver,
+                        q[list(gpu_indices)],
+                        target_pose * gpu_target_offset,
+                    )
+                except Exception as exc:
+                    gpu_fault = f"{type(exc).__name__}: {exc}"
+                    gpu_controls.show_debug()
+                    status.value = f"GPU FAULT — SAFE HOLD: {gpu_fault}"
+                else:
+                    q[list(gpu_indices)] = gpu_result.joints
+                    robot.update_configuration(q)
+                    viz.display(q)
+                    status.value = (
+                        f"GPU {gpu_result.status}: "
+                        f"pos={max(gpu_result.position_errors) * 1e3:.1f} mm, "
+                        f"rot={max(gpu_result.rotation_errors):.3f} rad, "
+                        f"wall={gpu_result.elapsed_ms:.2f} ms"
+                    )
+        elif solver_level.value == SOLVER_LEVEL_ACCELERATION and acceleration_runtime is not None:
             accel_step = solve_basic_acceleration_step(
                 acceleration_runtime,
                 robot,
@@ -398,23 +606,19 @@ def main(args: argparse.Namespace) -> None:
                 f"pos={accel_step.position_error * 1e3:.1f} mm, "
                 f"rot={accel_step.rotation_error:.3f} rad"
             )
-            time.sleep(1e-3)
-            continue
-
-        result = solver.solve_position_step(q, target_pose, "ee_task", step_opts)
-
-        if result.status in accepted_statuses:
-            q = np.asarray(result.q_solution, dtype=float)
-            robot.update_configuration(q)
-            viz.display(q)
-        elif acceleration_runtime is not None:
-            reset_basic_acceleration_state(acceleration_runtime, robot.nv)
-
-        status.value = (
-            f"{SOLVER_LEVEL_VELOCITY} {result.status.name}: "
-            f"pos={result.position_error * 1e3:.1f} mm, "
-            f"rot={result.orientation_error:.3f} rad"
-        )
+        else:
+            result = solver.solve_position_step(q, target_pose, "ee_task", step_opts)
+            if result.status in accepted_statuses:
+                q = np.asarray(result.q_solution, dtype=float)
+                robot.update_configuration(q)
+                viz.display(q)
+            elif acceleration_runtime is not None:
+                reset_basic_acceleration_state(acceleration_runtime, robot.nv)
+            status.value = (
+                f"{SOLVER_LEVEL_VELOCITY} {result.status.name}: "
+                f"pos={result.position_error * 1e3:.1f} mm, "
+                f"rot={result.orientation_error:.3f} rad"
+            )
         time.sleep(1e-3)
 
 

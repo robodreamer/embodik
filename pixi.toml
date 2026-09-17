@@ -75,14 +75,13 @@ verify-ai-worker = "python scripts/verify_ai_worker_robustness.py --scenario all
 # GPU solver tests (requires CUDA)
 test-gpu = "EMBODIK_GPU_TESTS=1 pytest test/test_gpu_solver.py test/test_gpu_collision.py -v"
 # GPU benchmarks
-benchmark-gpu = "python examples/gpu_batch_ik.py --batch_sizes 10 100 500 1000"
 benchmark-gpu-batched = "python scripts/benchmark_gpu_batched.py"
 benchmark-fi-pesns = "python scripts/benchmark_fi_pesns.py"
 benchmark-collision = "python examples/gpu_collision_batch.py"
 benchmark-transforms = "python scripts/benchmark_transforms.py"
-# Parallel trajectory demo (real FK/Jacobians via pytorch_kinematics)
-demo-parallel-tracking = "python examples/parallel_trajectory_tracking.py --n-robots 100 --viz-mode hybrid --n-viz-full 9 --spacing 1.2"
-demo-parallel-tracking-benchmark = "python examples/parallel_trajectory_tracking.py --n-robots 1000 --benchmark"
+# Model-derived Newton/Warp GPU WBC showcase.
+demo-parallel-tracking = "python scripts/check_cuda_arch.py && python examples/10_parallel_trajectory_tracking.py --robot panda"
+demo-parallel-tracking-benchmark = "python scripts/check_cuda_arch.py && python examples/10_parallel_trajectory_tracking.py --robot panda --worlds 1024 --headless --warmup-steps 20 --steps 50"
 # Export CasADi function for GPU solver
 export-casadi = "python -m embodik.gpu.export_casadi_velocity_solve --robot panda --out build/casadi/fn_velocity_solve.casadi"
 lint = "black --check --extend-exclude '\\.pyi$' python/ test/ && isort --check --skip-glob '*.pyi' python/ test/"
@@ -142,16 +141,14 @@ pytorch = { version = ">=2.0", channel = "pytorch" }
 pytorch-cuda = { version = ">=12.1", channel = "pytorch" }
 
 [feature.cuda.tasks]
+setup-cuda-sm120 = "bash scripts/setup_cuda_sm120.sh"
 # Install CusADi from GitHub (run once)
 install-cusadi = "bash scripts/install_cusadi.sh"
-check-cuda = "python -c \"import torch; print(f'PyTorch {torch.__version__}'); print(f'CUDA available: {torch.cuda.is_available()}'); print(f'CUDA version: {torch.version.cuda}' if torch.cuda.is_available() else 'No CUDA')\""
+check-cuda = "python scripts/check_cuda_arch.py"
 check-gpu = "python -c \"from embodik.gpu import HAS_CASADI, HAS_CUSADI, HAS_TORCH_CUDA; print(f'CasADi: {HAS_CASADI}, CusADi: {HAS_CUSADI}, CUDA: {HAS_TORCH_CUDA}')\""
 test-gpu = "EMBODIK_GPU_TESTS=1 pytest test/test_gpu_solver.py test/test_gpu_collision.py -v"
-benchmark-gpu = "python examples/gpu_batch_ik.py --batch_sizes 10 100 500 1000"
 benchmark-collision = "python examples/gpu_collision_batch.py"
 export-casadi = "python -m embodik.gpu.export_casadi_velocity_solve --robot panda --out build/casadi/fn_velocity_solve.casadi"
-demo-gpu = "python examples/gpu_solver_demo.py --batch_sizes 10 100 500 1000 2000"
-demo-ik-gpu = "python examples/02_collision_aware_IK.py --robot panda --gpu"
 # Compare FI-PeSNS vs PPH-SNS solvers
 benchmark-solver-comparison = "python scripts/benchmark_pph_sns_comparison.py --problems 10 --runs 50"
 benchmark-solver-batched = "python scripts/benchmark_pph_sns_batched.py"

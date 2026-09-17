@@ -63,10 +63,20 @@ Optional visualization tools are documented on the [Visualization](visualization
 
 ## GPU Solvers
 
-For GPU-accelerated batched velocity IK, see the [GPU Solvers](../gpu_solvers.md) documentation. The `embodik.gpu` module provides:
+For model-derived, GPU-accelerated WBC, see the
+[GPU Solvers](../gpu_solvers.md) documentation. New integrations should use
+the `embodik.gpu.wbc` package:
 
-- `build_fi_pesns_single_task` — FI-PeSNS solver (primary)
-- `build_pph_sns_single_task` — PPH-SNS solver (alternative)
+- `GpuWbcMultiFrameSolver` — fixed-base, device-resident multi-frame velocity WBC
+- `GpuWbcFloatingMultiFrameSolver` — standard floating-base velocity WBC
+- `GpuAccelerationSolver` — the narrower fixed-base acceleration state-box slice
+- `solve_device_batch(..., reset_mask=, valid_mask=)` — independent per-world
+  reset, participation, and `world_status` codes
+- `measure_device_batch()` — solver-path dispatch/sync/memory snapshot
+
+The older FI-PeSNS and PPH-SNS CasADi builders remain import-compatible, but
+they require generated shape-specific artifacts and are not the recommended
+entry point for new applications.
 
 ## Enumerations
 

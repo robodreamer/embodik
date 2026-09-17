@@ -34,6 +34,64 @@ The detailed installation notes, API reference, and example walkthroughs live in
 
 https://robodreamer.github.io/embodik/
 
+## ⚡ GPU WBC at 1,024 Worlds
+
+<a href="https://robodreamer.github.io/embodik/examples/parallel_trajectory_tracking/">
+  <img src="docs/assets/media/gpu_wbc_parallel_showcase_preview.gif?raw=true" alt="Panda, ROBOTIS AI Worker, and Unitree G1 moving through distinct trajectories across 512 fully articulated CUDA worlds" width="960">
+</a>
+
+The experimental `embodik.gpu.wbc` path combines model-derived Newton
+kinematics with Warp directional SRINV. The same batch API above derives its
+joint and task dimensions from Panda, AI Worker, and G1 models—there is no
+robot-family DoF table in the solver. The viewer renders 512 articulated robots
+by default with shared per-link mesh instances. Four colored world bands follow
+circle, figure-eight, helix, or sweep targets, with independent phases and
+speeds inside each band. Pass `--worlds 1024` for the full reference scale.
+
+From a source checkout with a sibling Newton clone, the one-time setup and
+default launch are:
+
+```bash
+pixi run -e cuda install
+pixi run -e cuda python -m pip install -e ../newton
+pixi run -e cuda check-cuda
+pixi run -e cuda demo-parallel-tracking
+```
+
+If the check reports that the installed Torch wheel lacks `sm_120`, run
+`pixi run -e cuda setup-cuda-sm120`, then repeat the check. This replaces only
+Torch's CUDA wheel inside the Pixi environment with an architecture-compatible
+build.
+
+The viewer is available at `http://localhost:8080`. See the
+[parallel example guide](https://robodreamer.github.io/embodik/examples/parallel_trajectory_tracking/)
+for model switches, 1,024-world runs, headless profiling, RL integration, and
+first-run notes.
+
+On a CUDA-capable NVIDIA GPU with approximately 24 GB of device memory, 1,024
+device-resident worlds measured the following warm solve-only latency (50
+samples after 20 warm-up steps, two solver iterations):
+
+| Model | Active DoF | 6D tasks / world | p50 | Throughput |
+| --- | ---: | ---: | ---: | ---: |
+| Franka Panda | 7 | 1 | 0.906 ms | 1.13M worlds/s |
+| ROBOTIS AI Worker SG2 | 15 | 2 | 4.854 ms | 211k worlds/s |
+| Unitree G1 | 29 | 4 | 20.295 ms | 50.4k worlds/s |
+
+### Status, compatibility, and requirements
+
+GPU WBC is experimental and opt-in; the CPU solver remains the stable default.
+It requires an NVIDIA CUDA device recognized by Torch, Warp, and Newton plus
+the `embodik[gpu-wbc]` dependencies and a compatible Newton build. Fixed-base
+scalar-joint models and standard floating-base models are supported; other
+joint manifolds fail explicitly. There is no silent CPU fallback.
+
+These numbers time the CUDA solve only; target generation, browser rendering,
+collision, and host publication are excluded. Read the [GPU WBC guide](https://robodreamer.github.io/embodik/gpu_solvers/)
+for supported constraints, requirements, single-world tradeoffs, and a
+reproducible headless command. It also covers device-resident integration with
+batched RL simulators and selective mjviser publication.
+
 ## 🚀 Quick Start
 
 Fastest path for most users is the wheel-only PyPI install inside a virtual
@@ -83,6 +141,7 @@ The pip-facing examples are intentionally split by purpose:
 | `07_unitree_g1_retargeting_ik.py` | Unitree G1 whole-body retargeting IK with CoM and optional collision handling. |
 | `08_spot_full_body_ik_viser.py` | Spot full-body IK in regular Viser with arm+torso, torso-only, full-body, and two-stage modes. |
 | `09_spot_locomanip_mjviser.py` | Spot locomanipulation ONNX policy rollout in MuJoCo through mjviser. |
+| `10_parallel_trajectory_tracking.py` | Model-derived Newton/Warp GPU WBC over independently targeted Panda, AI Worker, or G1 worlds. |
 
 Run them from a copied example directory:
 
@@ -188,7 +247,7 @@ Most examples default to the Panda preset. Use `--robot <key>` when a script sup
 - 🧭 Lie-group-aware configuration operations for floating-base, quaternion, and continuous joints.
 - 🤖 Native Pinocchio-backed robot model utilities exposed through EmbodiK bindings.
 - 👁️ Optional Viser visualization for interactive IK demos.
-- ⚡ Experimental GPU batch IK and collision tooling for high-throughput research workflows.
+- ⚡ Model-derived Newton/Warp GPU WBC with device-resident multi-world state, CUDA graph execution, collision constraints, task priority, posture, torso, and centroidal features.
 
 ## 📚 Documentation
 
@@ -198,7 +257,7 @@ Most examples default to the Panda preset. Use `--robot <key>` when a script sup
 - [Working with Transforms](https://robodreamer.github.io/embodik/transforms/) - transform helpers and SE(3) operations.
 - [Examples](https://robodreamer.github.io/embodik/examples/) - public scripts and development-only demos.
 - [API Reference](https://robodreamer.github.io/embodik/api/) - Python API generated from docstrings.
-- [GPU Solvers](https://robodreamer.github.io/embodik/gpu_solvers/) - FI-PeSNS and PPH-SNS batch solver notes.
+- [GPU WBC](https://robodreamer.github.io/embodik/gpu_solvers/) - Newton/Warp setup, model compatibility, constraint coverage, batching, and performance methodology.
 - [Development](https://robodreamer.github.io/embodik/development/) - local build, tests, and contributor workflow.
 
 ## 🛠️ Development

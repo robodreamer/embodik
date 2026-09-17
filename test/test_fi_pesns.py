@@ -59,6 +59,56 @@ def generate_random_problem(
 # =============================================================================
 
 
+def _extended_srinv_reference(
+    matrix: np.ndarray,
+    *,
+    epsilon: float = 1e-6,
+    damping: float = 0.1,
+) -> np.ndarray:
+    gram = matrix @ matrix.T
+    threshold_squared = epsilon**2
+    determinant = float(np.linalg.det(gram))
+    global_regularization = (
+        (1.0 - (determinant / threshold_squared) ** 2) * threshold_squared
+        if determinant < threshold_squared
+        else 0.0
+    )
+    left, singular_values, _ = np.linalg.svd(matrix, full_matrices=True)
+    per_value_damping = damping * np.maximum(
+        1.0 - np.minimum(singular_values / epsilon, 1.0) ** 2,
+        0.0,
+    )
+    regularized = (
+        gram
+        + global_regularization * np.eye(gram.shape[0])
+        + left @ np.diag(per_value_damping) @ left.T
+    )
+    return matrix.T @ np.linalg.inv(regularized)
+
+
+def _rotated_matrix(
+    singular_values: np.ndarray,
+    *,
+    velocity_dimension: int,
+    seed: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    rng = np.random.default_rng(seed)
+    task_dimension = singular_values.size
+    left = np.linalg.qr(rng.standard_normal((task_dimension, task_dimension)))[0]
+    right = np.linalg.qr(rng.standard_normal((velocity_dimension, task_dimension)))[0]
+    return left @ np.diag(singular_values) @ right.T, left, right
+
+
+def test_gpu_srinv_defaults_match_public_kinematics_solver():
+    from embodik.gpu.casadi_fi_pesns import DEFAULT_DAMPING as FI_DAMPING
+    from embodik.gpu.casadi_fi_pesns import DEFAULT_EPSILON as FI_EPSILON
+    from embodik.gpu.casadi_pph_sns import DEFAULT_DAMPING as PPH_DAMPING
+    from embodik.gpu.casadi_pph_sns import DEFAULT_EPSILON as PPH_EPSILON
+
+    assert (FI_EPSILON, FI_DAMPING) == (0.1, 0.1)
+    assert (PPH_EPSILON, PPH_DAMPING) == (0.1, 0.1)
+
+
 def test_srinv_matches_numpy_pinv():
     """SRINV should match NumPy pseudo-inverse for well-conditioned matrices."""
     try:
@@ -107,6 +157,283 @@ def test_srinv_near_singular():
 
     result = np.array(fn(A_np))
     assert np.all(np.isfinite(result)), "SRINV should handle near-singular matrix"
+
+
+def test_srinv_does_not_damp_full_rank_singular_values_above_threshold():
+    """The symbolic path should match CPU SRINV when spectral damping is inactive."""
+    try:
+        import casadi as ca
+
+        from embodik.gpu.casadi_fi_pesns import srinv
+    except ImportError as e:
+        pytest.skip(f"CasADi or modules not available: {e}")
+
+    singular_values = np.array([1.0, 0.3, 0.0032575734])
+    matrix = np.diag(singular_values)
+    symbolic = ca.SX.sym("matrix", 3, 3)
+    function = ca.Function(
+        "srinv_above_threshold",
+        [symbolic],
+        [srinv(symbolic, tol=1e-6, damping=0.1)],
+    )
+
+    np.testing.assert_allclose(
+        np.asarray(function(matrix)),
+        np.linalg.inv(matrix),
+        rtol=1e-10,
+        atol=1e-10,
+    )
+
+
+def test_srinv_threshold_crossing_damping_is_finite_and_bounded():
+    try:
+        import casadi as ca
+
+        from embodik.gpu.casadi_fi_pesns import srinv
+    except ImportError as e:
+        pytest.skip(f"CasADi or modules not available: {e}")
+
+    matrix = np.diag([1.0, 0.75e-6, 1e-9])
+    symbolic = ca.SX.sym("matrix", 3, 3)
+    function = ca.Function(
+        "srinv_threshold_crossing",
+        [symbolic],
+        [srinv(symbolic, tol=1e-6, damping=0.1)],
+    )
+    result = np.asarray(function(matrix))
+
+    assert np.all(np.isfinite(result))
+    assert np.linalg.norm(result) < 2.0
+
+
+@pytest.mark.parametrize(
+    ("singular_values", "seed", "relative_tolerance"),
+    [
+        (np.array([1.0, 0.3, 0.0032575734]), 301, 5e-5),
+        (np.array([1.0, 0.75e-6, 1e-9]), 302, 5e-5),
+        (np.array([1.0, 0.5e-6, 0.25e-6]), 303, 5e-5),
+    ],
+)
+def test_srinv_matches_extended_cpu_law_for_rotated_spectra(
+    singular_values: np.ndarray,
+    seed: int,
+    relative_tolerance: float,
+):
+    try:
+        import casadi as ca
+
+        from embodik.gpu.casadi_fi_pesns import srinv
+    except ImportError as e:
+        pytest.skip(f"CasADi or modules not available: {e}")
+
+    matrix, _, _ = _rotated_matrix(
+        singular_values,
+        velocity_dimension=5,
+        seed=seed,
+    )
+    symbolic = ca.SX.sym("rotated_matrix", *matrix.shape)
+    function = ca.Function("rotated_srinv", [symbolic], [srinv(symbolic, tol=1e-6, damping=0.1)])
+
+    np.testing.assert_allclose(
+        np.asarray(function(matrix)),
+        _extended_srinv_reference(matrix),
+        rtol=relative_tolerance,
+        atol=1e-8,
+    )
+
+
+def test_srinv_threshold_straddle_preserves_healthy_action():
+    """Near-equal singular values that straddle epsilon mix the null subspace.
+
+    Per-mode damping is discontinuous at ``tol``, so a tiny left-basis rotation
+    swaps a damped direction for an undamped one. CasADi's fixed Jacobi SVD and
+    NumPy's SVD can therefore disagree on the inverse matrix across BLAS builds
+    even though both apply the same extended-SRINV law. The well-conditioned
+    task direction must still match and must not leak into the near-null joint
+    subspace.
+    """
+    try:
+        import casadi as ca
+
+        from embodik.gpu.casadi_fi_pesns import srinv
+    except ImportError as e:
+        pytest.skip(f"CasADi or modules not available: {e}")
+
+    matrix, left, right = _rotated_matrix(
+        np.array([1.0, 0.999e-6, 1.001e-6]),
+        velocity_dimension=5,
+        seed=304,
+    )
+    symbolic = ca.SX.sym("straddle_matrix", *matrix.shape)
+    gpu = np.asarray(
+        ca.Function("straddle_srinv", [symbolic], [srinv(symbolic, tol=1e-6, damping=0.1)])(matrix)
+    )
+    cpu = _extended_srinv_reference(matrix)
+    healthy = left[:, 0]
+    gpu_healthy = gpu @ healthy
+
+    assert np.isfinite(gpu).all()
+    np.testing.assert_allclose(gpu_healthy, cpu @ healthy, rtol=1e-4, atol=1e-5)
+    np.testing.assert_allclose(gpu_healthy, right[:, 0], rtol=1e-4, atol=1e-4)
+    assert float(right[:, 0] @ gpu_healthy) == pytest.approx(1.0, rel=1e-4)
+    np.testing.assert_allclose(right[:, 1:].T @ gpu_healthy, 0.0, atol=1e-4)
+
+
+def test_srinv_preserves_healthy_motion_while_damping_singular_directions():
+    try:
+        import casadi as ca
+
+        from embodik.gpu.casadi_fi_pesns import srinv
+    except ImportError as e:
+        pytest.skip(f"CasADi or modules not available: {e}")
+
+    matrix, left, right = _rotated_matrix(
+        np.array([1.0, 0.75e-6, 1e-9]),
+        velocity_dimension=5,
+        seed=305,
+    )
+    symbolic = ca.SX.sym("directional_matrix", *matrix.shape)
+    function = ca.Function(
+        "directional_srinv",
+        [symbolic],
+        [srinv(symbolic, tol=1e-6, damping=0.1)],
+    )
+    inverse = np.asarray(function(matrix))
+    gains = right.T @ inverse @ left
+
+    assert gains[0, 0] == pytest.approx(1.0, rel=1e-10)
+    assert abs(gains[1, 1]) < 1e-4
+    assert abs(gains[2, 2]) < 1e-7
+    np.testing.assert_allclose(
+        gains - np.diag(np.diag(gains)),
+        0.0,
+        atol=1e-8,
+    )
+
+
+def test_default_srinv_matches_cpu_extended_law_in_rotated_directions():
+    """GPU defaults must reproduce CPU extended SRINV, not a nearby variant."""
+    try:
+        import casadi as ca
+
+        import embodik as eik
+        from embodik.gpu.casadi_fi_pesns import srinv
+    except ImportError as e:
+        pytest.skip(f"CasADi or modules not available: {e}")
+
+    matrix, _, _ = _rotated_matrix(
+        np.array([1.7, 0.8, 0.3, 0.12, 0.075, 0.002]),
+        velocity_dimension=7,
+        seed=711,
+    )
+    rng = np.random.default_rng(712)
+    goal = rng.uniform(-0.2, 0.2, matrix.shape[0])
+    symbolic = ca.SX.sym("default_directional_matrix", *matrix.shape)
+    gpu_inverse = ca.Function(
+        "default_directional_srinv",
+        [symbolic],
+        [srinv(symbolic)],
+    )
+
+    cpu_result = eik.computeMultiObjectiveVelocitySolutionEigen(
+        [goal],
+        [matrix],
+        np.eye(matrix.shape[1]),
+        np.full(matrix.shape[1], -100.0),
+        np.full(matrix.shape[1], 100.0),
+        sr_tolerance=0.1,
+        sr_damping=0.1,
+    )
+    gpu_solution = np.asarray(gpu_inverse(matrix)) @ goal
+
+    assert cpu_result.status == eik.SolverStatus.SUCCESS
+    np.testing.assert_allclose(
+        gpu_solution,
+        np.asarray(cpu_result.solution),
+        rtol=5e-12,
+        atol=5e-12,
+    )
+    np.testing.assert_allclose(
+        np.asarray(gpu_inverse(matrix)),
+        _extended_srinv_reference(matrix, epsilon=0.1, damping=0.1),
+        rtol=5e-12,
+        atol=5e-12,
+    )
+
+
+def test_default_fi_task_pass_matches_cpu_extended_srinv_with_loose_bounds():
+    """Fixed penalty iterations must not repeatedly weaken CPU SRINV damping."""
+    try:
+        import embodik as eik
+        from embodik.gpu.casadi_fi_pesns import build_fi_pesns_single_task
+    except ImportError as e:
+        pytest.skip(f"EmbodiK or CasADi not available: {e}")
+
+    matrix, _, _ = _rotated_matrix(
+        np.array([1.7, 0.8, 0.3, 0.12, 0.075, 0.002]),
+        velocity_dimension=7,
+        seed=713,
+    )
+    goal = np.random.default_rng(714).uniform(-0.2, 0.2, matrix.shape[0])
+    lower = np.full(matrix.shape[1], -100.0)
+    upper = np.full(matrix.shape[1], 100.0)
+
+    cpu_result = eik.computeMultiObjectiveVelocitySolutionEigen(
+        [goal],
+        [matrix],
+        np.eye(matrix.shape[1]),
+        lower,
+        upper,
+        sr_tolerance=0.1,
+        sr_damping=0.1,
+    )
+    gpu_function = build_fi_pesns_single_task(
+        n_dof=matrix.shape[1],
+        task_dim=matrix.shape[0],
+        n_constraints=matrix.shape[1],
+        k_max=2,
+    )
+    gpu_solution, gpu_scales = gpu_function(
+        goal,
+        matrix.flatten(),
+        np.eye(matrix.shape[1]),
+        lower,
+        upper,
+    )
+
+    assert cpu_result.status == eik.SolverStatus.SUCCESS
+    np.testing.assert_allclose(
+        np.asarray(gpu_solution).ravel(),
+        np.asarray(cpu_result.solution),
+        rtol=5e-12,
+        atol=5e-12,
+    )
+    np.testing.assert_allclose(np.asarray(gpu_scales).ravel(), 1.0, atol=0.0)
+
+
+@pytest.mark.parametrize("seed", [0, 17, 52])
+def test_srinv_resolves_rotated_six_row_multiple_singularity(seed: int):
+    try:
+        import casadi as ca
+
+        from embodik.gpu.casadi_fi_pesns import srinv
+    except ImportError as e:
+        pytest.skip(f"CasADi or modules not available: {e}")
+
+    matrix, _, _ = _rotated_matrix(
+        np.array([2.0, 1.7, 1.1, 0.4, 0.75e-6, 1e-9]),
+        velocity_dimension=7,
+        seed=seed,
+    )
+    symbolic = ca.SX.sym("six_row_matrix", *matrix.shape)
+    function = ca.Function("six_row_srinv", [symbolic], [srinv(symbolic, tol=1e-6, damping=0.1)])
+
+    np.testing.assert_allclose(
+        np.asarray(function(matrix)),
+        _extended_srinv_reference(matrix),
+        rtol=5e-5,
+        atol=1e-8,
+    )
 
 
 def test_gpu_srinv_wrappers_share_formula():
@@ -273,6 +600,8 @@ def test_fi_pesns_matches_cpu_loose_bounds():
         n_dof=n_dof,
         task_dim=task_dim,
         n_constraints=n_constraints,
+        tol=1e-6,
+        damping=0.1,
         k_max=10,
     )
 
@@ -312,6 +641,8 @@ def test_fi_pesns_vs_cpu_tight_bounds():
         n_dof=n_dof,
         task_dim=task_dim,
         n_constraints=n_constraints,
+        tol=1e-6,
+        damping=0.1,
         k_max=15,
         mu0=1e-2,
         gamma=2.0,

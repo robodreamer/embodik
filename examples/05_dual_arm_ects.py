@@ -27,6 +27,15 @@ Usage
     python 05_dual_arm_ects.py
     # Or: pixi run python3 examples/05_dual_arm_ects.py
 
+With --gpu-wbc and a matching --gpu-wbc-manifest, the backend dropdown enables
+Orthogonal GPU IK with model-derived collision pairs, Bias Pose/None posture,
+runtime dt/iterations/gains, and optional GPU Adaptive dt. Collision debug is
+requested only while enabled and uses the GPU result. CPU collision tuning
+profiles do not configure GPU queries. ECTS coordination/relative bounds, metric
+optimization, partial axis masks, and non-SCALE solve modes remain CPU-only.
+Damping and tolerance control the same extended-SRINV parameters on both backends.
+This fixed-base example has no torso or secondary frame task to configure.
+
 Requires: robot_descriptions, viser, yourdfpy
 """
 
@@ -34,6 +43,7 @@ import argparse
 import os
 import tempfile
 import time
+from pathlib import Path
 
 import numpy as np
 
@@ -49,6 +59,10 @@ from example_helpers.ik_common import (
     DEFAULT_COLLISION_TUNING_MODE,
     DEFAULT_VISER_PORT,
     configure_solver_runtime_policy,
+)
+from embodik.gpu.wbc import (
+    GpuWbcMultiFrameSolver,
+    derive_frames_active_joint_names,
 )
 from utils.dual_iiwa_urdf import (
     build_dual_iiwa_urdf,
@@ -97,13 +111,17 @@ def _apply_collision_tuning_mode(
     mode_label: str,
 ) -> None:
     label = mode_label.lower()
-    if hasattr(solver, "set_collision_tuning_mode") and hasattr(embodik, "CollisionTuningMode"):
+    if hasattr(solver, "set_collision_tuning_mode") and hasattr(
+        embodik, "CollisionTuningMode"
+    ):
         enum_map = {
             "precise": embodik.CollisionTuningMode.PRECISE,
             "balanced": embodik.CollisionTuningMode.BALANCED,
             "speed": embodik.CollisionTuningMode.SPEED,
         }
-        solver.set_collision_tuning_mode(enum_map.get(label, embodik.CollisionTuningMode.BALANCED))
+        solver.set_collision_tuning_mode(
+            enum_map.get(label, embodik.CollisionTuningMode.BALANCED)
+        )
         return
 
     # Backward-compatible fallback for older bindings.
@@ -172,6 +190,139 @@ def _mat_from_wxyz(wxyz: np.ndarray) -> np.ndarray:
     return Rscipy.from_quat(xyzw).as_matrix()
 
 
+def _gpu_feature_options(robot, frames, configuration: np.ndarray) -> dict:
+    """Allocate collision and posture from the loaded model, before exclusions mutate it."""
+    names = derive_frames_active_joint_names(robot, frames)
+    excluded = {frozenset(pair) for pair in _dual_iiwa_collision_exclusions(robot)}
+    pairs = tuple(
+        tuple(pair)
+        for pair in robot.get_collision_pair_names()
+        if frozenset(pair) not in excluded
+    )
+    return dict(
+        active_joint_names=names,
+        solver_backend="torch_srinv",
+        collision_pairs=pairs,
+        collision_min_distance_m=COLLISION_MIN_DISTANCE,
+        collision_query_distance_m=0.15,
+        posture_target_configuration=tuple(
+            float(configuration[robot.get_joint_config_index(name)]) for name in names
+        ),
+        posture_velocity_indices=tuple(
+            robot.get_joint_velocity_index(name) for name in names
+        ),
+        posture_weights=(10.0**DEFAULT_NULLSPACE_GAIN_EXP,) * len(names),
+    )
+
+
+def _gpu_semantic_holds(
+    *, orthogonal, constraint_mode, objective, solve_mode, fallback, axes
+):
+    """List missing core primitives rather than silently approximate CPU tasks.
+
+    Masks must remove Jacobian rows as well as errors; setting gains to zero
+    would still constrain motion. ECTS requires coupled absolute/relative
+    Jacobians, not two independently targeted end effectors.
+    """
+    holds = []
+    if not orthogonal:
+        holds.append("ECTS requires alpha-blended absolute and relative task Jacobians")
+    if constraint_mode != "disable":
+        holds.append("relative bounds require relative-pose Jacobian inequality rows")
+    if objective not in ("None", "Bias Pose"):
+        holds.append(
+            "metric optimization requires a manipulability-gradient posture target"
+        )
+    if solve_mode == "SCALE_ELASTIC":
+        holds.append("SCALE_ELASTIC requires the CPU elastic task-scaling policy")
+    elif solve_mode == "MIN_ERROR":
+        holds.append("MIN_ERROR requires constrained weighted residual minimization")
+    elif solve_mode != "SCALE":
+        holds.append(f"unknown solve policy: {solve_mode}")
+    if fallback:
+        holds.append("SCALE fallback requires MIN_ERROR retry and candidate selection")
+    if len(axes) != 12 or not all(axes):
+        holds.append(
+            "partial tool axes require matching task-error and Jacobian row masks"
+        )
+    return holds
+
+
+def _gpu_configure_inverse(gpu_solver, damping, tolerance):
+    """Bridge Example 05 sliders to the core's existing SRINV configuration.
+
+    The public adapter does not yet forward these two fields. Keep this private
+    core access local, validate before mutation, and reject incompatible cores.
+    No kernel replacement or alternative inverse is introduced here.
+    """
+    from dataclasses import replace
+
+    core = gpu_solver._solver
+    if core.config.velocity_solver != "torch_srinv":
+        raise ValueError("Example 05 inverse controls require torch_srinv")
+    damping, tolerance = float(damping), float(tolerance)
+    if not np.isfinite([damping, tolerance]).all() or min(damping, tolerance) <= 0:
+        raise ValueError("SRINV damping and tolerance must be positive and finite")
+    if (core.config.srinv_damping, core.config.srinv_tolerance) != (damping, tolerance):
+        core.config = replace(
+            core.config, srinv_damping=damping, srinv_tolerance=tolerance
+        )
+
+
+def _gpu_feature_step(
+    gpu_solver,
+    q,
+    targets,
+    *,
+    bias_configuration,
+    secondary_objective,
+    secondary_weight,
+    collision_enabled,
+    collision_min_distance_m,
+    adaptive_dt,
+    dt,
+    iterations,
+    position_gain,
+    orientation_gain,
+    show_collision_debug,
+    damping=0.1,
+    tolerance=0.1,
+):
+    """Shape-stable controls shared by the GUI and headless regression tests."""
+    if secondary_objective not in ("None", "Bias Pose"):
+        raise ValueError("GPU secondary objective supports None or Bias Pose")
+    _gpu_configure_inverse(gpu_solver, damping, tolerance)
+    bias = gpu_solver.extract_active_configuration(bias_configuration)
+    gpu_solver.configure_runtime(
+        collision_enabled=bool(collision_enabled),
+        collision_min_distance_m=float(collision_min_distance_m),
+        adaptive_dt=bool(adaptive_dt),
+        dt=float(dt),
+        iterations=int(iterations),
+        frame_position_gains=(float(position_gain),) * len(targets),
+        frame_orientation_gains=(float(orientation_gain),) * len(targets),
+        posture_target_configuration=tuple(bias),
+        posture_weights=(
+            float(secondary_weight) if secondary_objective == "Bias Pose" else 0.0,
+        )
+        * len(bias),
+    )
+    return gpu_solver.solve_step(
+        gpu_solver.extract_active_configuration(q),
+        targets,
+        include_collision_debug=bool(show_collision_debug and collision_enabled),
+    )
+
+
+def _collision_debug_for_backend(cpu_solver, gpu_result, *, gpu_active, enabled, show):
+    """Never query CPU collision geometry while displaying a GPU solve."""
+    if not (enabled and show):
+        return None
+    if gpu_active:
+        return None if gpu_result is None else gpu_result.collision_debug
+    return cpu_solver.get_last_collision_debug()
+
+
 def _wxyz_from_mat(R: np.ndarray) -> np.ndarray:
     """Convert 3x3 rotation matrix to wxyz quaternion."""
     from scipy.spatial.transform import Rotation as Rscipy
@@ -207,8 +358,19 @@ def _effective_absolute_pose(robot, left_frame: str, right_frame: str, alpha: fl
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Dual-arm ECTS interactive IK example.")
-    parser.add_argument("--port", type=int, default=DEFAULT_VISER_PORT, help="Viser server port.")
+    parser = argparse.ArgumentParser(
+        description="Dual-arm ECTS interactive IK example."
+    )
+    parser.add_argument(
+        "--port", type=int, default=DEFAULT_VISER_PORT, help="Viser server port."
+    )
+    parser.add_argument("--gpu-wbc", action="store_true")
+    parser.add_argument("--gpu-wbc-manifest", type=Path)
+    parser.add_argument(
+        "--gpu-wbc-cache-dir",
+        type=Path,
+        default=Path("build/gpu-wbc-newton-cache"),
+    )
     return parser.parse_args()
 
 
@@ -225,11 +387,38 @@ def main():
     try:
         robot = embodik.RobotModel(urdf_path)
     finally:
-        os.unlink(urdf_path)
+        if not args.gpu_wbc:
+            os.unlink(urdf_path)
 
     q_init = np.array(get_dual_iiwa_default_configuration(), dtype=np.float64)
     q = q_init.copy()
     robot.update_configuration(q)
+
+    gpu_solver = None
+    gpu_fault = None
+    gpu_result = None
+    if args.gpu_wbc:
+        frames = (LEFT_FRAME, RIGHT_FRAME)
+        gpu_solver = GpuWbcMultiFrameSolver(
+            args.gpu_wbc_manifest,
+            Path(urdf_path),
+            args.gpu_wbc_cache_dir,
+            robot=robot,
+            robot_name="dual_iiwa",
+            frames=frames,
+            **_gpu_feature_options(robot, frames, q_init),
+            default_configuration=q_init,
+            iterations=1,
+            dt=DEFAULT_SOLVER_DT,
+            position_gain=DEFAULT_POS_GAIN,
+            orientation_gain=DEFAULT_ROT_GAIN,
+        )
+        gpu_solver.configure_runtime(collision_enabled=False)
+        gpu_solver.warm_up(
+            gpu_solver.extract_active_configuration(q),
+            tuple(robot.get_frame_pose(frame) for frame in frames),
+        )
+        os.unlink(urdf_path)
 
     solver = embodik.KinematicsSolver(robot)
     solver.dt = DEFAULT_SOLVER_DT
@@ -361,10 +550,18 @@ def main():
     q_lower, q_upper = robot.get_joint_limits()
     left_joint_names, right_joint_names = get_dual_iiwa_joint_names()
     all_joint_names = robot.get_joint_names()
-    arm_indices = [all_joint_names.index(n) for n in left_joint_names + right_joint_names]
+    arm_indices = [
+        all_joint_names.index(n) for n in left_joint_names + right_joint_names
+    ]
 
     # --- GUI controls ---
     with server.gui.add_folder("ECTS Controls"):
+        backend_select = server.gui.add_dropdown(
+            "Solver Backend",
+            options=("CPU EmbodiK",)
+            + (("GPU Newton/Warp",) if gpu_solver is not None else ()),
+            initial_value="CPU EmbodiK",
+        )
         coord_mode = server.gui.add_dropdown(
             "Coordination Mode",
             options=COORDINATION_MODES,
@@ -399,13 +596,25 @@ def main():
 
     with server.gui.add_folder("IK Settings"):
         solver_dt_slider = server.gui.add_slider(
-            "Solver dt (s)", min=0.001, max=0.05, step=0.001, initial_value=DEFAULT_SOLVER_DT
+            "Solver dt (s)",
+            min=0.001,
+            max=0.05,
+            step=0.001,
+            initial_value=DEFAULT_SOLVER_DT,
         )
         pos_gain_slider = server.gui.add_slider(
-            "Position Gain (Kp)", min=0.5, max=50.0, step=0.5, initial_value=DEFAULT_POS_GAIN
+            "Position Gain (Kp)",
+            min=0.5,
+            max=50.0,
+            step=0.5,
+            initial_value=DEFAULT_POS_GAIN,
         )
         rot_gain_slider = server.gui.add_slider(
-            "Rotation Gain (Ko)", min=0.5, max=50.0, step=0.5, initial_value=DEFAULT_ROT_GAIN
+            "Rotation Gain (Ko)",
+            min=0.5,
+            max=50.0,
+            step=0.5,
+            initial_value=DEFAULT_ROT_GAIN,
         )
         iterations_slider = server.gui.add_slider(
             "IK Iterations", min=1, max=50, step=1, initial_value=1
@@ -425,11 +634,20 @@ def main():
         tolerance_slider = server.gui.add_slider(
             "Tolerance", min=0.01, max=1.0, step=0.01, initial_value=DEFAULT_TOLERANCE
         )
-        manual_control = server.gui.add_checkbox("Manual Joint Control", initial_value=False)
+        manual_control = server.gui.add_checkbox(
+            "Manual Joint Control", initial_value=False
+        )
+        gpu_adaptive_dt = server.gui.add_checkbox(
+            "GPU Adaptive dt", initial_value=False
+        )
 
     with server.gui.add_folder("Nullspace"):
         nullspace_exp_slider = server.gui.add_slider(
-            "Gain (10^n)", min=-4.0, max=2.0, step=0.1, initial_value=DEFAULT_NULLSPACE_GAIN_EXP
+            "Gain (10^n)",
+            min=-4.0,
+            max=2.0,
+            step=0.1,
+            initial_value=DEFAULT_NULLSPACE_GAIN_EXP,
         )
         nullspace_objective = server.gui.add_dropdown(
             "Secondary Objective",
@@ -438,7 +656,9 @@ def main():
         )
 
     joint_sliders: list = []
-    with server.gui.add_folder("Joint Configuration (Arm Only)", expand_by_default=False):
+    with server.gui.add_folder(
+        "Joint Configuration (Arm Only)", expand_by_default=False
+    ):
         for i, idx in enumerate(arm_indices):
             lo, hi = float(q_lower[idx]), float(q_upper[idx])
             joint_sliders.append(
@@ -456,7 +676,7 @@ def main():
             "Enable Self-Collision Avoidance", initial_value=False
         )
         collision_tuning_dropdown = server.gui.add_dropdown(
-            "Tuning Mode",
+            "Tuning Mode (CPU)",
             options=COLLISION_TUNING_OPTIONS,
             initial_value=_collision_tuning_mode,
         )
@@ -501,11 +721,7 @@ def main():
 
     def _update_collision_visuals() -> None:
         nonlocal _col_line_handle, _last_collision_debug
-        show = (
-            collision_debug_checkbox.value
-            and self_collision_checkbox.value
-            and hasattr(solver, "get_last_collision_debug")
-        )
+        show = collision_debug_checkbox.value and self_collision_checkbox.value
         if not show:
             _col_sphere_a.visible = False
             _col_sphere_b.visible = False
@@ -515,7 +731,13 @@ def main():
                 collision_debug_text.value = "--"
             return
 
-        debug = solver.get_last_collision_debug()
+        debug = _collision_debug_for_backend(
+            solver,
+            gpu_result,
+            gpu_active=backend_select.value == "GPU Newton/Warp",
+            enabled=self_collision_checkbox.value,
+            show=collision_debug_checkbox.value,
+        )
         if debug is None:
             _col_sphere_a.visible = False
             _col_sphere_b.visible = False
@@ -612,6 +834,40 @@ def main():
         nonlocal _reset_requested
         _reset_requested = True
 
+    @backend_select.on_update
+    def _(_evt) -> None:
+        nonlocal gpu_fault, gpu_result
+        gpu_fault = None
+        gpu_result = None
+        if gpu_solver is not None:
+            gpu_solver.reset_state()
+        if backend_select.value == "GPU Newton/Warp":
+            coord_mode.value = "Orthogonal"
+            constraint_mode.value = "disable"
+            if nullspace_objective.value == "Metric Optimization":
+                nullspace_objective.value = "Bias Pose"
+            ee_mode_dropdown.value = "SCALE"
+            ee_fallback_checkbox.value = False
+            for handle in (
+                abs_pos_x,
+                abs_pos_y,
+                abs_pos_z,
+                abs_ori_x,
+                abs_ori_y,
+                abs_ori_z,
+                rel_pos_x,
+                rel_pos_y,
+                rel_pos_z,
+                rel_ori_x,
+                rel_ori_y,
+                rel_ori_z,
+            ):
+                handle.value = True
+            status_text.value = (
+                "GPU Orthogonal: collision, bias posture, SRINV sliders and adaptive dt; "
+                "collision tuning profiles apply to CPU only"
+            )
+
     prev_manual = False
     rel_error_vec = np.zeros(6)
 
@@ -656,6 +912,7 @@ def main():
 
     while True:
         try:
+            gpu_result = None
             # --- Update tasks with current robot state first ---
             abs_task.update(robot)
             rel_task.update(robot)
@@ -722,6 +979,9 @@ def main():
                 _prev_grasp_wxyz = np.array(quat_grasp_init)
                 for i, idx in enumerate(arm_indices):
                     joint_sliders[i].value = float(q[idx])
+                gpu_fault = None
+                if gpu_solver is not None:
+                    gpu_solver.reset_state()
 
             # --- Update IK settings ---
             solver.dt = solver_dt_slider.value
@@ -745,7 +1005,9 @@ def main():
                 rel_task.active = ects_cfg.coordinated
 
             ee_mode = getattr(
-                embodik.TaskSolveMode, ee_mode_dropdown.value, embodik.TaskSolveMode.SCALE
+                embodik.TaskSolveMode,
+                ee_mode_dropdown.value,
+                embodik.TaskSolveMode.SCALE,
             )
             ee_fallback = bool(ee_fallback_checkbox.value)
             abs_task.solve_mode = ee_mode
@@ -874,7 +1136,10 @@ def main():
             elif ns_obj == "Bias Pose":
                 posture.weight = ns_gain
                 posture.set_target_configuration(q_init.copy())
-            elif ns_obj == "Metric Optimization":
+            elif (
+                ns_obj == "Metric Optimization"
+                and backend_select.value != "GPU Newton/Warp"
+            ):
                 posture.weight = ns_gain
                 eps = 1e-4
                 J0 = robot.get_frame_jacobian(LEFT_FRAME)
@@ -952,8 +1217,12 @@ def main():
                         )
 
                         targets = [
-                            embodik.TaskTarget.from_se3("left_ee", target_left_pose, Kp, Ko),
-                            embodik.TaskTarget.from_se3("right_ee", target_right_pose, Kp, Ko),
+                            embodik.TaskTarget.from_se3(
+                                "left_ee", target_left_pose, Kp, Ko
+                            ),
+                            embodik.TaskTarget.from_se3(
+                                "right_ee", target_right_pose, Kp, Ko
+                            ),
                         ]
                         rel_error_vec = np.zeros(6)
                     else:
@@ -967,7 +1236,9 @@ def main():
                         curr_grasp_wxyz = np.array(grasp_handle.wxyz)
                         if not np.allclose(
                             curr_grasp_pos, _prev_grasp_pos, atol=1e-4
-                        ) or not np.allclose(curr_grasp_wxyz, _prev_grasp_wxyz, atol=1e-4):
+                        ) or not np.allclose(
+                            curr_grasp_wxyz, _prev_grasp_wxyz, atol=1e-4
+                        ):
                             left_se3_cur = robot.get_frame_pose(LEFT_FRAME)
                             right_target = Rt(
                                 R=_mat_from_wxyz(curr_grasp_wxyz),
@@ -984,22 +1255,96 @@ def main():
                         target_rel_pose = Rt(R=_rel_target_ori, t=_rel_target_pos)
 
                         targets = [
-                            embodik.TaskTarget.from_se3("absolute", target_abs_pose, Kp, Ko),
-                            embodik.TaskTarget.from_se3("relative", target_rel_pose, Kp, Ko),
+                            embodik.TaskTarget.from_se3(
+                                "absolute", target_abs_pose, Kp, Ko
+                            ),
+                            embodik.TaskTarget.from_se3(
+                                "relative", target_rel_pose, Kp, Ko
+                            ),
                         ]
 
                     # --- Solve ---
-                    t0 = time.perf_counter()
-                    result = solver.solve_position_step(q, targets, step_opts)
-                    solver_elapsed_ms = (time.perf_counter() - t0) * 1000.0
-
-                    q = np.array(result.q_solution)
-                    robot.update_configuration(q)
-                    rel_task.update(robot)
-                    rel_error_vec[:3] = rel_task.current_position - _rel_target_pos
-                    rel_error_vec[3:] = 0.0
-
-                    status_text.value = str(result.status)
+                    if backend_select.value == "GPU Newton/Warp":
+                        assert gpu_solver is not None
+                        all_axes = (
+                            abs_pos_x,
+                            abs_pos_y,
+                            abs_pos_z,
+                            abs_ori_x,
+                            abs_ori_y,
+                            abs_ori_z,
+                            rel_pos_x,
+                            rel_pos_y,
+                            rel_pos_z,
+                            rel_ori_x,
+                            rel_ori_y,
+                            rel_ori_z,
+                        )
+                        unsupported = _gpu_semantic_holds(
+                            orthogonal=is_orthogonal,
+                            constraint_mode=constraint_mode.value,
+                            objective=ns_obj,
+                            solve_mode=ee_mode_dropdown.value,
+                            fallback=ee_fallback_checkbox.value,
+                            axes=tuple(handle.value for handle in all_axes),
+                        )
+                        if unsupported:
+                            status_text.value = "GPU SAFE HOLD: " + "; ".join(
+                                unsupported
+                            )
+                        elif gpu_fault is None:
+                            try:
+                                gpu_result = _gpu_feature_step(
+                                    gpu_solver,
+                                    q,
+                                    (target_left_pose, target_right_pose),
+                                    bias_configuration=q_init,
+                                    secondary_objective=ns_obj,
+                                    secondary_weight=ns_gain,
+                                    collision_enabled=self_collision_checkbox.value,
+                                    collision_min_distance_m=collision_min_dist_slider.value
+                                    * 0.001,
+                                    adaptive_dt=gpu_adaptive_dt.value,
+                                    dt=solver_dt_slider.value,
+                                    iterations=iterations_slider.value,
+                                    position_gain=Kp,
+                                    orientation_gain=Ko,
+                                    show_collision_debug=collision_debug_checkbox.value,
+                                    damping=damping_slider.value,
+                                    tolerance=tolerance_slider.value,
+                                )
+                            except Exception as exc:
+                                gpu_fault = f"{type(exc).__name__}: {exc}"
+                                status_text.value = (
+                                    f"GPU FAULT — SAFE HOLD: {gpu_fault}"
+                                )
+                            else:
+                                q = gpu_solver.merge_active_configuration(
+                                    q, gpu_result.joints
+                                )
+                                robot.update_configuration(q)
+                                solver_elapsed_ms = gpu_result.elapsed_ms
+                                rel_task.update(robot)
+                                rel_error_vec[:3] = (
+                                    rel_task.current_position - _rel_target_pos
+                                )
+                                rel_error_vec[3:] = 0.0
+                                status_text.value = (
+                                    f"GPU {gpu_result.status}; "
+                                    f"per-arm pos={max(gpu_result.position_errors)*1e3:.2f} mm"
+                                )
+                        else:
+                            status_text.value = f"GPU FAULT — SAFE HOLD: {gpu_fault}"
+                    else:
+                        t0 = time.perf_counter()
+                        result = solver.solve_position_step(q, targets, step_opts)
+                        solver_elapsed_ms = (time.perf_counter() - t0) * 1000.0
+                        q = np.array(result.q_solution)
+                        robot.update_configuration(q)
+                        rel_task.update(robot)
+                        rel_error_vec[:3] = rel_task.current_position - _rel_target_pos
+                        rel_error_vec[3:] = 0.0
+                        status_text.value = str(result.status)
                     for i, idx in enumerate(arm_indices):
                         joint_sliders[i].value = float(q[idx])
 
@@ -1020,13 +1365,19 @@ def main():
 
             # --- Status display ---
             abs_task.update(robot)
-            abs_err_m = np.linalg.norm(abs_task.current_position - np.array(object_handle.position))
+            abs_err_m = np.linalg.norm(
+                abs_task.current_position - np.array(object_handle.position)
+            )
             rel_err_m = (
-                float(np.linalg.norm(rel_error_vec[:3])) if not manual_control.value else 0.0
+                float(np.linalg.norm(rel_error_vec[:3]))
+                if not manual_control.value
+                else 0.0
             )
             elapsed_text.value = f"{solver_elapsed_ms:.2f}"
             abs_error_text.value = f"{abs_err_m:.4f}"
-            rel_error_text.value = f"{rel_err_m:.4f}" if not manual_control.value else "--"
+            rel_error_text.value = (
+                f"{rel_err_m:.4f}" if not manual_control.value else "--"
+            )
 
             time.sleep(solver.dt)
 

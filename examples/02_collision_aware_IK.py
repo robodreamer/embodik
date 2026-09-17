@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Interactive collision-aware IK using embodiK and Viser.
 
-Supports optional GPU acceleration via CusADi for batch IK solving.
-Use --gpu flag and --casadi-path to enable GPU mode.
+Use --gpu-wbc-interactive to add an explicit CPU/GPU backend selector. The GPU
+path derives its shape from the loaded model and never silently falls back to
+CPU. ``--gpu-wbc-manifest`` remains an optional compatibility validation input.
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import pinocchio as pin
 import viser
+from embodik.gpu.wbc import GpuWbcMultiFrameSolver
 from example_helpers.ik_common import (
     COLLISION_DEBUG_LOG_PERIOD_S,
     COLLISION_TUNING_OPTIONS,
@@ -44,17 +46,6 @@ from viser.extras import ViserUrdf
 import embodik
 from embodik import Rt, q2r, r2q
 
-# Check GPU availability
-try:
-    from embodik.gpu import HAS_CASADI, HAS_CUSADI, HAS_TORCH_CUDA
-
-    GPU_AVAILABLE = HAS_CASADI and HAS_CUSADI and HAS_TORCH_CUDA
-except ImportError:
-    HAS_CASADI = False
-    HAS_CUSADI = False
-    HAS_TORCH_CUDA = False
-    GPU_AVAILABLE = False
-
 # -----------------------------------------------------------------------------
 # Default numeric constants
 # -----------------------------------------------------------------------------
@@ -66,6 +57,8 @@ COLLISION_EXAMPLE_SOLVER_LEVEL_OPTIONS = SOLVER_LEVEL_OPTIONS
 DEFAULT_ACCELERATION_SOLVER_LIMIT = 15.0
 DEFAULT_ACCELERATION_COLLISION_VALIDATION_SUBSTEPS = 2
 ACCELERATION_EXAMPLE_TASK_MODE = "SCALE"
+CPU_SOLVER_LABEL = "CPU embodiK"
+GPU_SOLVER_LABEL = "GPU Newton/Warp"
 
 _LINK_INDEX_PATTERN = re.compile(r"link_?([0-9]+)")
 
@@ -122,6 +115,19 @@ def generate_auto_collision_exclusions(
         if _should_auto_exclude_pair(name_a, name_b, robot_key):
             exclusions.append((name_a, name_b))
     return exclusions
+
+
+def gpu_collision_include_pairs(
+    robot: embodik.RobotModel, exclusions: List[Tuple[str, str]]
+) -> tuple[tuple[str, str], ...]:
+    """Return the model's collision pairs after order-independent filtering."""
+
+    excluded = {frozenset((str(a), str(b))) for a, b in exclusions}
+    return tuple(
+        (str(a), str(b))
+        for a, b in robot.get_collision_pair_names()
+        if frozenset((str(a), str(b))) not in excluded
+    )
 
 
 # -----------------------------------------------------------------------------
@@ -952,6 +958,60 @@ def run_gui(cfg: RobotConfig, args: argparse.Namespace) -> None:
     q_current = backend.get_q()
     nullspace_bias = default_bias_for_backend(backend)
 
+    gpu_wbc_solver: GpuWbcMultiFrameSolver | None = None
+    gpu_target_offset: pin.SE3 | None = None
+    if args.gpu_wbc:
+        print("[GPU WBC] Initializing the fail-closed Newton/Warp backend...")
+        gpu_robot = embodik.RobotModel(
+            str(cfg.urdf_path),
+            actuated_joint_names=tuple(cfg.joint_names),
+            floating_base=False,
+        )
+        gpu_posture_indices = tuple(
+            int(gpu_robot.get_joint_velocity_index(name))
+            for name in cfg.joint_names
+        )
+        gpu_pairs = gpu_collision_include_pairs(
+            gpu_robot, backend._collision_exclusions
+        )
+        gpu_wbc_solver = GpuWbcMultiFrameSolver(
+            args.gpu_wbc_manifest,
+            cfg.urdf_path,
+            args.gpu_wbc_cache_dir,
+            robot=gpu_robot,
+            robot_name=cfg.key,
+            frames=(cfg.target_link,),
+            frame_task_dimensions=(6,),
+            active_joint_names=tuple(cfg.joint_names),
+            default_configuration=q_current,
+            solver_backend="torch_srinv",
+            iterations=2,
+            dt=DEFAULT_SOLVER_DT,
+            position_gain=DEFAULT_POS_GAIN,
+            orientation_gain=DEFAULT_ROT_GAIN,
+            max_joint_acceleration_rad_s2=4.0,
+            adaptive_dt=DEFAULT_ADAPTIVE_DT,
+            adaptive_dt_max_scale=DEFAULT_ADAPTIVE_DT_MAX_SCALE,
+            adaptive_dt_reference_distance=DEFAULT_ADAPTIVE_DT_REFERENCE_DISTANCE,
+            collision_pairs=gpu_pairs,
+            collision_min_distance_m=0.03,
+            collision_query_distance_m=0.11,
+            posture_target_configuration=tuple(q_current),
+            posture_velocity_indices=gpu_posture_indices,
+            posture_weights=tuple(1.0 for _ in gpu_posture_indices),
+            posture_gain=0.0,
+        )
+        visible_target_pose = backend.get_pose()
+        gpu_tcp_pose = backend.robot.get_frame_pose(gpu_wbc_solver.frames[0])
+        gpu_target_offset = visible_target_pose.inverse() * gpu_tcp_pose
+        warmup_ms = gpu_wbc_solver.warm_up(
+            q_current, (visible_target_pose * gpu_target_offset,)
+        )
+        print(
+            f"[GPU WBC] Ready on {gpu_wbc_solver.device_label}; "
+            f"one-time warm-up took {warmup_ms:.1f} ms."
+        )
+
     urdf = load_robot_description(cfg.description_name)
     server = viser.ViserServer(port=args.port)
     server.scene.add_grid("/ground", width=2, height=2)
@@ -999,6 +1059,18 @@ def run_gui(cfg: RobotConfig, args: argparse.Namespace) -> None:
             "Solver Level",
             options=solver_level_options,
             initial_value=SOLVER_LEVEL_VELOCITY,
+        )
+        solver_options = [CPU_SOLVER_LABEL]
+        if gpu_wbc_solver is not None:
+            solver_options.append(GPU_SOLVER_LABEL)
+        solver_backend_dropdown = server.gui.add_dropdown(
+            "Solver Backend",
+            options=tuple(solver_options),
+            initial_value=CPU_SOLVER_LABEL,
+        )
+        solver_contract_text = server.gui.add_text(
+            "Backend Contract",
+            initial_value="CPU: full Example 02 controls",
         )
         timing_handle = server.gui.add_number("Elapsed (ms)", 0.001, disabled=True)
         pos_gain = server.gui.add_slider(
@@ -1114,219 +1186,6 @@ def run_gui(cfg: RobotConfig, args: argparse.Namespace) -> None:
     bias_to_initial = server.gui.add_button("Bias → Initial Configuration")
     bias_to_zero = server.gui.add_button("Bias → Zero Configuration")
 
-    # GPU Benchmark Panel
-    gpu_enabled = HAS_CUSADI and HAS_TORCH_CUDA
-    batch_size = getattr(args, "batch_size", 100)
-
-    gpu_benchmark_results = {"cpu_ms": 0.0, "gpu_ms": 0.0, "speedup": 0.0, "max_error": 0.0}
-
-    with server.gui.add_folder("GPU Benchmark", expand_by_default=False):
-        gpu_status_text = server.gui.add_text(
-            "GPU Status",
-            initial_value=f"CasADi: {'✓' if HAS_CASADI else '✗'} | "
-            f"CusADi: {'✓' if HAS_CUSADI else '✗'} | "
-            f"CUDA: {'✓' if HAS_TORCH_CUDA else '✗'}",
-        )
-        batch_size_slider = server.gui.add_slider(
-            "Batch Size",
-            min=10,
-            max=10000,
-            step=10,
-            initial_value=batch_size,
-        )
-        run_benchmark_button = server.gui.add_button(
-            "Run CPU vs GPU Benchmark",
-            disabled=not gpu_enabled,
-        )
-        benchmark_result_text = server.gui.add_text(
-            "Benchmark Result", initial_value="Press 'Run Benchmark' to compare CPU vs GPU"
-        )
-        if not gpu_enabled:
-            benchmark_result_text.value = (
-                "GPU unavailable. Install CusADi + CUDA.\n"
-                f"CasADi: {HAS_CASADI}, CusADi: {HAS_CUSADI}, CUDA: {HAS_TORCH_CUDA}"
-            )
-
-    # GPU IK solver for real-time use
-    gpu_ik_solver = None
-    if HAS_CUSADI and HAS_TORCH_CUDA:
-        try:
-            import os
-
-            import casadi as ca
-            import torch
-
-            home = os.path.expanduser("~")
-            casadi_file = os.path.join(
-                home, ".local", "cusadi", "src", "casadi_functions", "fn_velocity_solve.casadi"
-            )
-            if os.path.exists(casadi_file):
-                from embodik.gpu import CusadiFunction
-
-                fn_casadi = ca.Function.load(casadi_file)
-                gpu_ik_solver = {
-                    "fn_casadi": fn_casadi,
-                    "fn_cusadi": CusadiFunction(fn_casadi, 1),  # Single instance for real-time
-                    "device": torch.device("cuda"),
-                }
-                print(f"[GPU] Loaded real-time GPU IK solver")
-        except Exception as e:
-            print(f"[GPU] Failed to load real-time solver: {e}")
-
-    def solve_gpu_ik(target_velocity: np.ndarray, jacobian: np.ndarray) -> Optional[np.ndarray]:
-        """Solve single IK problem on GPU."""
-        if gpu_ik_solver is None:
-            return None
-
-        import torch
-
-        n_dof = backend.arm_dofs
-        task_dim = 6
-        n_constraints = n_dof
-
-        # Prepare inputs
-        target = target_velocity.reshape(1, task_dim)
-        jac_flat = jacobian.flatten().reshape(1, -1)
-        C = np.eye(n_constraints).flatten().reshape(1, -1)
-        lower = np.full((1, n_constraints), -2.0)
-        upper = np.full((1, n_constraints), 2.0)
-
-        # Convert to torch
-        device = gpu_ik_solver["device"]
-        target_t = torch.from_numpy(target).double().to(device).contiguous()
-        jac_t = torch.from_numpy(jac_flat).double().to(device).contiguous()
-        C_t = torch.from_numpy(C).double().to(device).contiguous()
-        lower_t = torch.from_numpy(lower).double().to(device).contiguous()
-        upper_t = torch.from_numpy(upper).double().to(device).contiguous()
-
-        try:
-            gpu_ik_solver["fn_cusadi"].evaluate([target_t, jac_t, C_t, lower_t, upper_t])
-            velocity = gpu_ik_solver["fn_cusadi"].getDenseOutput(0).cpu().numpy().flatten()
-            return velocity
-        except Exception:
-            return None
-
-    def run_gpu_benchmark() -> None:
-        """Run batch IK benchmark comparing CPU vs GPU."""
-        nonlocal gpu_benchmark_results
-
-        if not HAS_CUSADI or not HAS_TORCH_CUDA:
-            benchmark_result_text.value = "GPU not available (install CusADi + CUDA)"
-            return
-
-        benchmark_result_text.value = "Running benchmark..."
-
-        n_dof = backend.arm_dofs
-        task_dim = 6
-        current_batch_size = int(batch_size_slider.value)
-
-        # Generate random IK problems
-        rng = np.random.RandomState(42)
-        targets = rng.randn(current_batch_size, task_dim).astype(np.float64) * 0.1
-        jacobians = rng.randn(current_batch_size, task_dim, n_dof).astype(np.float64)
-
-        # Improve conditioning
-        for i in range(current_batch_size):
-            U, s, Vt = np.linalg.svd(jacobians[i], full_matrices=False)
-            s = np.clip(s, 0.1, 10.0)
-            jacobians[i] = U @ np.diag(s) @ Vt
-
-        C = np.eye(n_dof)
-        lower = np.full(n_dof, -2.0)
-        upper = np.full(n_dof, 2.0)
-
-        # CPU sequential benchmark
-        cpu_start = time.perf_counter()
-        cpu_solutions = []
-        for i in range(current_batch_size):
-            result = embodik.computeMultiObjectiveVelocitySolutionEigen(
-                [targets[i]], [np.asfortranarray(jacobians[i])], C, lower, upper
-            )
-            cpu_solutions.append(np.array(result.solution))
-        cpu_time = (time.perf_counter() - cpu_start) * 1000
-
-        # GPU batched benchmark
-        try:
-            import os
-
-            import casadi as ca
-            import torch
-
-            from embodik.gpu import CusadiFunction
-
-            home = os.path.expanduser("~")
-            casadi_file = os.path.join(
-                home, ".local", "cusadi", "src", "casadi_functions", "fn_velocity_solve.casadi"
-            )
-
-            if not os.path.exists(casadi_file):
-                benchmark_result_text.value = (
-                    "CasADi file not found. Run: pixi run -e cuda export-casadi"
-                )
-                return
-
-            fn_casadi = ca.Function.load(casadi_file)
-            fn_cusadi = CusadiFunction(fn_casadi, current_batch_size)
-            device = torch.device("cuda")
-
-            # Prepare batched inputs
-            jac_flat = jacobians.reshape(current_batch_size, -1)
-            C_batch = np.tile(C.flatten()[np.newaxis, :], (current_batch_size, 1))
-            lower_batch = np.tile(lower[np.newaxis, :], (current_batch_size, 1))
-            upper_batch = np.tile(upper[np.newaxis, :], (current_batch_size, 1))
-
-            targets_t = torch.from_numpy(targets).double().to(device).contiguous()
-            jac_t = torch.from_numpy(jac_flat).double().to(device).contiguous()
-            C_t = torch.from_numpy(C_batch).double().to(device).contiguous()
-            lower_t = torch.from_numpy(lower_batch).double().to(device).contiguous()
-            upper_t = torch.from_numpy(upper_batch).double().to(device).contiguous()
-
-            # Warm-up
-            fn_cusadi.evaluate([targets_t, jac_t, C_t, lower_t, upper_t])
-            torch.cuda.synchronize()
-
-            # Benchmark
-            torch.cuda.synchronize()
-            gpu_start = time.perf_counter()
-            fn_cusadi.evaluate([targets_t, jac_t, C_t, lower_t, upper_t])
-            torch.cuda.synchronize()
-            gpu_time = (time.perf_counter() - gpu_start) * 1000
-
-            gpu_velocities = fn_cusadi.getDenseOutput(0).cpu().numpy()
-
-            # Compute max error
-            max_error = 0.0
-            for i in range(current_batch_size):
-                error = np.max(np.abs(cpu_solutions[i].ravel() - gpu_velocities[i].ravel()))
-                max_error = max(max_error, error)
-
-            speedup = cpu_time / gpu_time if gpu_time > 0 else 0
-
-            gpu_benchmark_results = {
-                "cpu_ms": cpu_time,
-                "gpu_ms": gpu_time,
-                "speedup": speedup,
-                "max_error": max_error,
-            }
-
-            benchmark_result_text.value = (
-                f"N={current_batch_size}: "
-                f"CPU={cpu_time:.1f}ms, GPU={gpu_time:.2f}ms, "
-                f"{speedup:.1f}x speedup"
-            )
-            print(f"[GPU Benchmark] {benchmark_result_text.value}")
-
-        except Exception as e:
-            benchmark_result_text.value = f"GPU error: {str(e)[:50]}"
-            print(f"[GPU Benchmark] Error: {e}")
-            import traceback
-
-            traceback.print_exc()
-
-    @run_benchmark_button.on_click
-    def _(_evt) -> None:
-        run_gpu_benchmark()
-
     target_xyzw = np.zeros(4, dtype=float)
 
     collision_root = "/collision_debug"
@@ -1347,20 +1206,32 @@ def run_gui(cfg: RobotConfig, args: argparse.Namespace) -> None:
     collision_log_timestamp = 0.0
     collision_state = "init"
     collision_debug_enabled = False
+    gpu_collision_debug = None
 
     urdf_vis.update_cfg(make_visual_config(q_current))
 
+    def gpu_backend_selected() -> bool:
+        return solver_backend_dropdown.value == GPU_SOLVER_LABEL
+
     def update_collision_visuals() -> None:
         nonlocal collision_line_handle, last_collision_debug, collision_log_timestamp, collision_state
-        nonlocal collision_debug_enabled
+        nonlocal collision_debug_enabled, gpu_collision_debug
         solver_obj = getattr(backend, "solver", None)
         now = time.time()
+        gpu_selected = gpu_backend_selected()
+        cpu_debug_supported = solver_obj is not None and hasattr(
+            solver_obj, "get_last_collision_debug"
+        )
 
         debug_requested = (
-            collision_debug_checkbox.value
+            not collision_debug_checkbox.disabled
+            and collision_debug_checkbox.value
             and self_collision_checkbox.value
-            and solver_obj is not None
-            and hasattr(solver_obj, "get_last_collision_debug")
+            and (
+                gpu_wbc_solver is not None and gpu_wbc_solver.collision_supported
+                if gpu_selected
+                else cpu_debug_supported
+            )
         )
 
         if not debug_requested:
@@ -1374,7 +1245,7 @@ def run_gui(cfg: RobotConfig, args: argparse.Namespace) -> None:
                 collision_debug_enabled = False
             return
 
-        if solver_obj is None or not hasattr(solver_obj, "get_last_collision_debug"):
+        if not gpu_selected and not cpu_debug_supported:
             collision_point_a.visible = False
             collision_point_b.visible = False
             if collision_line_handle is not None:
@@ -1388,7 +1259,7 @@ def run_gui(cfg: RobotConfig, args: argparse.Namespace) -> None:
             collision_debug_enabled = True
             return
 
-        debug_info = solver_obj.get_last_collision_debug()
+        debug_info = gpu_collision_debug if gpu_selected else solver_obj.get_last_collision_debug()
         if debug_info is None:
             collision_point_a.visible = False
             collision_point_b.visible = False
@@ -1524,7 +1395,7 @@ def run_gui(cfg: RobotConfig, args: argparse.Namespace) -> None:
             ik_target.position = tuple(pose_local.translation)
             ik_target.wxyz = (quat_local[3], quat_local[0], quat_local[1], quat_local[2])
         urdf_vis.update_cfg(make_visual_config(q_current))
-        if hasattr(backend, "enable_self_collision"):
+        if hasattr(backend, "enable_self_collision") and not gpu_backend_selected():
             backend.enable_self_collision(
                 self_collision_checkbox.value and not self_collision_checkbox.disabled
             )
@@ -1548,7 +1419,59 @@ def run_gui(cfg: RobotConfig, args: argparse.Namespace) -> None:
         update_collision_visuals()
         sync_solver_level_options()
 
+    cpu_only_controls = (ee_mode_dropdown, ee_fallback_checkbox)
+    gpu_runtime_fault: str | None = None
+
+    def update_backend_controls() -> None:
+        gpu_selected = gpu_backend_selected()
+        for handle in cpu_only_controls:
+            handle.disabled = gpu_selected
+        self_collision_checkbox.disabled = (
+            not gpu_wbc_solver.collision_supported
+            if gpu_selected and gpu_wbc_solver is not None
+            else not hasattr(backend, "enable_self_collision")
+        )
+        collision_tuning_dropdown.disabled = gpu_selected or not hasattr(
+            backend, "set_collision_tuning_mode"
+        )
+        collision_debug_checkbox.disabled = (
+            gpu_wbc_solver is None or not gpu_wbc_solver.collision_supported
+            if gpu_selected
+            else not (
+                hasattr(backend, "solver") and hasattr(backend.solver, "get_last_collision_debug")
+            )
+        )
+        if gpu_selected:
+            if gpu_wbc_solver is not None and gpu_wbc_solver.collision_supported:
+                solver_contract_text.value = (
+                    "GPU: directional SRINV + limits, posture, adaptive dt, "
+                    "runtime collision, no fallback"
+                )
+                collision_debug_text.value = "Collision: see GPU status diagnostics"
+            else:
+                solver_contract_text.value = (
+                    "GPU: model-derived pose + limits, collision unavailable, no fallback"
+                )
+                collision_debug_text.value = "Collision: unsupported for this GPU model"
+        else:
+            solver_contract_text.value = "CPU: full Example 02 controls"
+
+    @solver_backend_dropdown.on_update
+    def _(_evt) -> None:
+        nonlocal gpu_runtime_fault, gpu_collision_debug
+        gpu_runtime_fault = None
+        gpu_collision_debug = None
+        if gpu_wbc_solver is not None:
+            gpu_wbc_solver.reset_state()
+        update_backend_controls()
+        if not gpu_backend_selected():
+            backend.set_collision_tuning_mode(collision_tuning_dropdown.value)
+            backend.enable_self_collision(self_collision_checkbox.value)
+        update_collision_visuals()
+        status_handle.value = f"Status: Switched to {solver_backend_dropdown.value}"
+
     sync_from_backend(update_target=True)
+    update_backend_controls()
     if hasattr(backend, "set_collision_tuning_mode"):
         backend.set_collision_tuning_mode(collision_tuning_dropdown.value)
 
@@ -1577,12 +1500,19 @@ def run_gui(cfg: RobotConfig, args: argparse.Namespace) -> None:
     @reset_robot_button.on_click
     def _(_evt) -> None:
         backend.reset()
+        if gpu_wbc_solver is not None:
+            gpu_wbc_solver.reset_state()
         sync_from_backend(update_target=True)
         status_handle.value = "Status: Robot reset to default configuration"
 
     @self_collision_checkbox.on_update
     def _(_evt) -> None:
-        if hasattr(backend, "enable_self_collision"):
+        if gpu_backend_selected() and gpu_wbc_solver is not None:
+            gpu_wbc_solver.configure_runtime(
+                collision_enabled=bool(self_collision_checkbox.value)
+            )
+            gpu_wbc_solver.reset_state()
+        elif hasattr(backend, "enable_self_collision"):
             if hasattr(backend, "set_collision_tuning_mode"):
                 backend.set_collision_tuning_mode(collision_tuning_dropdown.value)
             backend.enable_self_collision(
@@ -1667,6 +1597,7 @@ def run_gui(cfg: RobotConfig, args: argparse.Namespace) -> None:
     iteration_count = 0
     while True:
         solver_elapsed_ms = 0.0
+        result: embodiKResult | None = None
 
         if manual_control.value:
             if not prev_manual_state:
@@ -1676,7 +1607,11 @@ def run_gui(cfg: RobotConfig, args: argparse.Namespace) -> None:
                     slider.value = float(value)
             q_current = np.array([slider.value for slider in joint_sliders], dtype=float)
             backend.set_q(q_current)
-            status_handle.value = "Status: Manual joint control active"
+            if gpu_wbc_solver is not None:
+                gpu_wbc_solver.reset_state()
+            status_handle.value = (
+                f"Status: Manual joint control active ({solver_backend_dropdown.value})"
+            )
         else:
             target_position = np.array(ik_target.position, dtype=float)
             target_wxyz = np.array(ik_target.wxyz, dtype=float)
@@ -1684,60 +1619,145 @@ def run_gui(cfg: RobotConfig, args: argparse.Namespace) -> None:
             target_rotation = q2r(target_xyzw, order="xyzs")
             target_pose = Rt(R=target_rotation, t=target_position)
 
-            active_indices = [
-                i for i, checkbox in enumerate(nullspace_checkboxes) if checkbox.value
-            ]
-            if not nullspace_enabled_checkbox.value:
-                active_indices = []
+            if gpu_backend_selected():
+                assert gpu_wbc_solver is not None
+                assert gpu_target_offset is not None
+                if prev_manual_state:
+                    gpu_wbc_solver.reset_state()
+                if gpu_runtime_fault is None:
+                    try:
+                        gpu_posture_weights = tuple(
+                            1.0 if checkbox.value else 0.0
+                            for checkbox in nullspace_checkboxes
+                        )
+                        gpu_wbc_solver.configure_runtime(
+                            iterations=int(iterations_slider.value),
+                            frame_position_gains=(float(pos_gain.value),),
+                            frame_orientation_gains=(float(rot_gain.value),),
+                            adaptive_dt=bool(adaptive_dt_checkbox.value),
+                            adaptive_dt_max_scale=float(
+                                adaptive_dt_max_scale_slider.value
+                            ),
+                            adaptive_dt_reference_distance=float(
+                                adaptive_dt_ref_dist_slider.value
+                            ),
+                            acceleration_limits_enabled=bool(
+                                accel_limit_checkbox.value
+                            ),
+                            max_joint_acceleration_rad_s2=float(
+                                accel_limit_slider.value
+                            ),
+                            collision_enabled=bool(
+                                self_collision_checkbox.value
+                            ),
+                            posture_target_configuration=tuple(nullspace_bias),
+                            posture_weights=gpu_posture_weights,
+                            posture_gain=(
+                                float(nullspace_gain.value)
+                                if nullspace_enabled_checkbox.value
+                                else 0.0
+                            ),
+                        )
+                        gpu_result = gpu_wbc_solver.solve_step(
+                            q_current,
+                            (target_pose * gpu_target_offset,),
+                            include_collision_debug=bool(
+                                collision_debug_checkbox.value
+                                and self_collision_checkbox.value
+                            ),
+                        )
+                    except Exception as exc:  # Fail closed: hold; never invoke CPU implicitly.
+                        gpu_runtime_fault = f"{type(exc).__name__}: {exc}"
+                        gpu_collision_debug = None
+                        status_handle.value = f"Status: GPU FAULT — SAFE HOLD | {gpu_runtime_fault}"
+                    else:
+                        gpu_collision_debug = gpu_result.collision_debug
+                        q_current = np.asarray(gpu_result.joints, dtype=float)
+                        backend.set_q(q_current)
+                        solver_elapsed_ms = gpu_result.elapsed_ms
+                        result = embodiKResult(
+                            joints=q_current,
+                            status=gpu_result.status,
+                            position_error=max(gpu_result.position_errors),
+                            rotation_error=max(gpu_result.rotation_errors),
+                            elapsed_ms=gpu_result.elapsed_ms,
+                            primary_mode="GPU_DIRECTIONAL_SRINV",
+                        )
+                        collision_text = "collision=unsupported"
+                        if gpu_result.minimum_collision_distance_m is not None:
+                            active_text = (
+                                "active" if gpu_result.collision_active else "clear"
+                            )
+                            collision_text = (
+                                f"dmin={gpu_result.minimum_collision_distance_m*1e3:.1f} mm "
+                                f"({active_text})"
+                            )
+                        status_handle.value = (
+                            f"Status: GPU {gpu_result.status} | "
+                            f"pos={max(gpu_result.position_errors)*1e3:.2f} mm, "
+                            f"rot={max(gpu_result.rotation_errors):.4f} rad | "
+                            f"{collision_text} | wall={gpu_result.elapsed_ms:.2f}ms, "
+                            f"FI={gpu_result.kernel_time_ms:.2f}ms"
+                        )
+                        conditioning_text.value = (
+                            "GPU hierarchy: directional SRINV + posture/nullspace"
+                        )
+            else:
+                gpu_collision_debug = None
+                active_indices = [
+                    i for i, checkbox in enumerate(nullspace_checkboxes) if checkbox.value
+                ]
+                if not nullspace_enabled_checkbox.value:
+                    active_indices = []
 
-            result = backend.solve_step(
-                target_pose,
-                pos_gain.value,
-                rot_gain.value,
-                active_indices,
-                nullspace_bias,
-                nullspace_gain.value,
-                nullspace_enabled_checkbox.value,
-                ee_mode=ee_mode_dropdown.value,
-                ee_fallback=ee_fallback_checkbox.value,
-                max_steps=int(iterations_slider.value),
-                adaptive_dt=bool(adaptive_dt_checkbox.value),
-                adaptive_dt_max_scale=float(adaptive_dt_max_scale_slider.value),
-                adaptive_dt_reference_distance=float(adaptive_dt_ref_dist_slider.value),
-                solver_level=str(solver_level_dropdown.value),
-                acceleration_limit=float(accel_limit_slider.value),
-                acceleration_limits_enabled=bool(accel_limit_checkbox.value),
-            )
-            q_current = result.joints
-            solver_elapsed_ms = result.elapsed_ms
-            col_ms = result.collision_time_ms
-            status_prefix = (
-                "⚠ COLLISION_VIOLATED"
-                if result.status == "COLLISION_VIOLATED"
-                else f"embodiK {result.status}"
-            )
-            cert_suffix = ""
-            if (
-                result.solver_level == SOLVER_LEVEL_ACCELERATION
-                and result.velocity_collision_lift_applied
-            ):
-                cert_suffix = (
-                    f" | sampled-lift={result.collision_validation_samples}"
-                    f" cert={result.collision_step_certified}"
+                result = backend.solve_step(
+                    target_pose,
+                    pos_gain.value,
+                    rot_gain.value,
+                    active_indices,
+                    nullspace_bias,
+                    nullspace_gain.value,
+                    nullspace_enabled_checkbox.value,
+                    ee_mode=ee_mode_dropdown.value,
+                    ee_fallback=ee_fallback_checkbox.value,
+                    max_steps=int(iterations_slider.value),
+                    adaptive_dt=bool(adaptive_dt_checkbox.value),
+                    adaptive_dt_max_scale=float(adaptive_dt_max_scale_slider.value),
+                    adaptive_dt_reference_distance=float(adaptive_dt_ref_dist_slider.value),
+                    solver_level=str(solver_level_dropdown.value),
+                    acceleration_limit=float(accel_limit_slider.value),
+                    acceleration_limits_enabled=bool(accel_limit_checkbox.value),
                 )
-            adt_suffix = (
-                f" | adt×{adaptive_dt_max_scale_slider.value:.1f}"
-                if adaptive_dt_checkbox.value
-                else ""
-            )
-            status_handle.value = (
-                f"Status: {status_prefix} | "
-                f"pos={result.position_error*1e3:.2f} mm, rot={result.rotation_error:.4f} rad | "
-                f"mode={result.primary_mode}, scale={result.primary_scale:.3f} | "
-                f"col={col_ms:.2f}ms{cert_suffix}{adt_suffix}"
-            )
-
-            conditioning_text.value = f"condition: {result.condition_number:.1f}"
+                q_current = result.joints
+                solver_elapsed_ms = result.elapsed_ms
+                col_ms = result.collision_time_ms
+                status_prefix = (
+                    "⚠ COLLISION_VIOLATED"
+                    if result.status == "COLLISION_VIOLATED"
+                    else f"embodiK {result.status}"
+                )
+                cert_suffix = ""
+                if (
+                    result.solver_level == SOLVER_LEVEL_ACCELERATION
+                    and result.velocity_collision_lift_applied
+                ):
+                    cert_suffix = (
+                        f" | sampled-lift={result.collision_validation_samples}"
+                        f" cert={result.collision_step_certified}"
+                    )
+                adt_suffix = (
+                    f" | adt×{adaptive_dt_max_scale_slider.value:.1f}"
+                    if adaptive_dt_checkbox.value
+                    else ""
+                )
+                status_handle.value = (
+                    f"Status: {status_prefix} | "
+                    f"pos={result.position_error*1e3:.2f} mm, "
+                    f"rot={result.rotation_error:.4f} rad | "
+                    f"mode={result.primary_mode}, scale={result.primary_scale:.3f} | "
+                    f"col={col_ms:.2f}ms{cert_suffix}{adt_suffix}"
+                )
+                conditioning_text.value = f"condition: {result.condition_number:.1f}"
 
             for slider, value in zip(joint_sliders, q_current):
                 slider.value = float(value)
@@ -1806,23 +1826,27 @@ def parse_args() -> argparse.Namespace:
         help="Enable C++ timing breakdown fields in VelocitySolverResult (debug).",
     )
     parser.add_argument("--port", type=int, default=DEFAULT_VISER_PORT, help="Viser server port.")
-    # GPU options
     parser.add_argument(
-        "--gpu",
+        "--gpu-wbc",
+        "--gpu-wbc-interactive",
+        dest="gpu_wbc",
         action="store_true",
-        help="Enable GPU batch IK benchmark panel (requires CusADi + CUDA).",
+        help=(
+            "Initialize the experimental Newton/Warp GPU-WBC backend and add "
+            "a CPU/GPU dropdown to Viser (no CPU fallback)."
+        ),
     )
     parser.add_argument(
-        "--casadi-path",
-        type=str,
+        "--gpu-wbc-manifest",
+        type=Path,
         default=None,
-        help="Path to compiled CasADi function (.casadi file) for GPU solving.",
+        help="Optional legacy manifest used to validate the loaded model contract.",
     )
     parser.add_argument(
-        "--batch-size",
-        type=int,
-        default=100,
-        help="Batch size for GPU benchmark (default: 100).",
+        "--gpu-wbc-cache-dir",
+        type=Path,
+        default=Path("build/gpu-wbc-newton-cache"),
+        help="Cache directory for the stripped Newton Panda model.",
     )
     return parser.parse_args()
 
@@ -1834,22 +1858,7 @@ def main() -> None:
     print(f"  - URDF path: {cfg.urdf_path}")
     print(f"  - Target link: {cfg.target_link}")
 
-    # Print GPU status
-    print(
-        f"  - GPU Status: CasADi={'✓' if HAS_CASADI else '✗'}, "
-        f"CusADi={'✓' if HAS_CUSADI else '✗'}, "
-        f"CUDA={'✓' if HAS_TORCH_CUDA else '✗'}"
-    )
-    if args.gpu:
-        if GPU_AVAILABLE:
-            print(f"  - GPU mode: ENABLED")
-            if args.casadi_path:
-                print(f"  - CasADi path: {args.casadi_path}")
-            else:
-                print(f"  - WARNING: --casadi-path not set, GPU benchmark disabled")
-        else:
-            print(f"  - GPU mode: REQUESTED but not available")
-            print(f"    Install CusADi and PyTorch with CUDA to enable GPU acceleration")
+    print(f"  - GPU-WBC selector: {'ENABLED' if args.gpu_wbc else 'disabled'}")
 
     run_gui(cfg, args)
 
