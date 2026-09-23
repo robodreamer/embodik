@@ -55,6 +55,7 @@ try:
         resolve_g1_collision_urdf_path,
         resolve_g1_urdf_path,
     )
+    from example_helpers.ik_common import DEFAULT_VISER_PORT
     from example_helpers.public_ai_worker_paths import resolve_public_ai_worker_urdf_paths
 except ModuleNotFoundError as exc:
     if exc.name != "example_helpers" and not str(exc.name).startswith("example_helpers."):
@@ -77,6 +78,7 @@ except ModuleNotFoundError as exc:
         resolve_g1_collision_urdf_path,
         resolve_g1_urdf_path,
     )
+    from examples.example_helpers.ik_common import DEFAULT_VISER_PORT
     from examples.example_helpers.public_ai_worker_paths import (
         resolve_public_ai_worker_urdf_paths,
     )
@@ -656,7 +658,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fps", type=float, default=20.0)
     parser.add_argument("--stats-window", type=int, default=60)
     parser.add_argument("--spacing", type=float)
-    parser.add_argument("--port", type=int, default=8080)
+    parser.add_argument("--port", type=int, default=DEFAULT_VISER_PORT)
     parser.add_argument("--cache-dir", type=Path, default=Path("build/gpu-wbc-cache"))
     parser.add_argument("--output-json", type=Path)
     parser.add_argument("--ai-worker-variant", choices=("sg2", "bg2"), default="sg2")
