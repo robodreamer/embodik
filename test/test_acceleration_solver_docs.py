@@ -42,16 +42,21 @@ def test_acceleration_example_docs_explain_selector_and_collision_contract() -> 
     assert "does not claim continuous swept-path certification" in collision_words
 
 
-def test_acceleration_page_is_in_navigation_and_current_release_changelog() -> None:
+def test_acceleration_page_is_in_navigation_and_release_history() -> None:
     navigation = (ROOT / "mkdocs.yml").read_text()
     changelog = (ROOT / "CHANGELOG.md").read_text()
     with (ROOT / "pyproject.toml").open("rb") as stream:
         version = tomllib.load(stream)["project"]["version"]
 
     assert "Acceleration Solver: acceleration_solver.md" in navigation
-    release = changelog.split(f"## [{version}]", maxsplit=1)[1].split("## [", maxsplit=1)[0]
-    assert "fixed-base acceleration-level eSNS API" in release
-    assert "non-hard-real-time" in release
+    assert f"## [{version}] - " in changelog
+    current_release = changelog.split(f"## [{version}]", maxsplit=1)[1].split("## [", maxsplit=1)[0]
+    acceleration_release = changelog.split("## [0.21.0]", maxsplit=1)[1].split("## [", maxsplit=1)[
+        0
+    ]
+    assert current_release.strip()
+    assert "fixed-base acceleration-level eSNS API" in acceleration_release
+    assert "non-hard-real-time" in acceleration_release
 
 
 def test_development_guide_defines_pre_one_versioning_contract() -> None:

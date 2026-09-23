@@ -1,25 +1,24 @@
 #pragma once
 
-#include <embodik/kinematics_solver.hpp>
+#include "velocity_collision_constraint_provider.hpp"
 
 namespace embodik::detail {
 
 struct VelocityConstraintTestObserver {
-  static std::optional<
-      KinematicsSolver::CollisionVelocityConstraintLinearization>
+  static std::optional<VelocityCollisionConstraintLinearization>
   linearize_collision_velocity_constraint(KinematicsSolver &solver,
                                           double row_dt) {
-    return solver.linearize_collision_velocity_constraint(row_dt);
+    return VelocityCollisionConstraintProvider(solver).linearize(row_dt);
   }
 
-  static std::optional<KinematicsSolver::CollisionConstraintResult>
+  static std::optional<VelocityCollisionConstraintRows>
   compute_collision_constraint(KinematicsSolver &solver, double row_dt) {
-    return solver.compute_collision_constraint(row_dt);
+    return VelocityCollisionConstraintProvider(solver).compute(row_dt);
   }
 
-  static std::optional<KinematicsSolver::CollisionConstraintResult>
+  static std::optional<VelocityCollisionConstraintRows>
   compute_collision_constraint(KinematicsSolver &solver) {
-    return solver.compute_collision_constraint();
+    return VelocityCollisionConstraintProvider(solver).compute();
   }
 };
 
