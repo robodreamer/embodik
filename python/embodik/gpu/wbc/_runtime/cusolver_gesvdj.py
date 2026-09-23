@@ -7,7 +7,6 @@ from pathlib import Path
 
 import torch
 
-
 _SUCCESS = 0
 _EIG_MODE_VECTOR = 1
 
@@ -18,10 +17,7 @@ def _check(status: int, operation: str) -> None:
 
 
 def _library_path() -> Path:
-    path = (
-        Path(torch.__file__).resolve().parent.parent
-        / "nvidia/cusolver/lib/libcusolver.so.11"
-    )
+    path = Path(torch.__file__).resolve().parent.parent / "nvidia/cusolver/lib/libcusolver.so.11"
     if not path.is_file():
         raise RuntimeError(f"the PyTorch cuSOLVER library was not found at {path}")
     return path
@@ -74,9 +70,7 @@ class CuSolverGesvdjBatched:
         )
         try:
             _check(
-                self._library.cusolverDnCreateGesvdjInfo(
-                    ctypes.byref(self._params)
-                ),
+                self._library.cusolverDnCreateGesvdjInfo(ctypes.byref(self._params)),
                 "cusolverDnCreateGesvdjInfo",
             )
             _check(
@@ -86,9 +80,7 @@ class CuSolverGesvdjBatched:
                 "cusolverDnXgesvdjSetTolerance",
             )
             _check(
-                self._library.cusolverDnXgesvdjSetMaxSweeps(
-                    self._params, max_sweeps
-                ),
+                self._library.cusolverDnXgesvdjSetMaxSweeps(self._params, max_sweeps),
                 "cusolverDnXgesvdjSetMaxSweeps",
             )
             _check(
@@ -171,9 +163,7 @@ class CuSolverGesvdjBatched:
             dtype=torch.float32,
             device=self.device,
         )
-        self.info = torch.empty(
-            self.batch_capacity, dtype=torch.int32, device=self.device
-        )
+        self.info = torch.empty(self.batch_capacity, dtype=torch.int32, device=self.device)
         self._set_stream()
         workspace_size = ctypes.c_int()
         _check(
@@ -196,16 +186,12 @@ class CuSolverGesvdjBatched:
             "cusolverDnSgesvdjBatched_bufferSize",
         )
         self.workspace_size = workspace_size.value
-        self.workspace = torch.empty(
-            self.workspace_size, dtype=torch.float32, device=self.device
-        )
+        self.workspace = torch.empty(self.workspace_size, dtype=torch.float32, device=self.device)
 
     def _set_stream(self) -> None:
         stream = torch.cuda.current_stream(self.device)
         _check(
-            self._library.cusolverDnSetStream(
-                self._handle, ctypes.c_void_p(stream.cuda_stream)
-            ),
+            self._library.cusolverDnSetStream(self._handle, ctypes.c_void_p(stream.cuda_stream)),
             "cusolverDnSetStream",
         )
 
@@ -292,9 +278,7 @@ class CuSolverDirectionalSRINV:
         if batch_capacity != 1:
             raise ValueError("the direct-LU determinant prototype currently supports B1")
         if output_mode not in {"full", "action_undamped", "action"}:
-            raise ValueError(
-                "output_mode must be full, action_undamped, or action"
-            )
+            raise ValueError("output_mode must be full, action_undamped, or action")
         self.rows = rows
         self.columns = columns
         self.batch_capacity = batch_capacity
@@ -314,9 +298,7 @@ class CuSolverDirectionalSRINV:
             else None
         )
         self._transpose_input = rows > columns
-        factor_rows, factor_columns = (
-            (columns, rows) if self._transpose_input else (rows, columns)
-        )
+        factor_rows, factor_columns = (columns, rows) if self._transpose_input else (rows, columns)
         self.factorization = CuSolverGesvdjBatched(
             factor_rows,
             factor_columns,
@@ -350,9 +332,7 @@ class CuSolverDirectionalSRINV:
         ]
         lib.cusolverDnDgetrf.restype = ctypes.c_int
         device = self.factorization.device
-        self._gram_lu = torch.empty(
-            (self.rows, self.rows), dtype=torch.float64, device=device
-        )
+        self._gram_lu = torch.empty((self.rows, self.rows), dtype=torch.float64, device=device)
         self._lu_pivots = torch.empty(self.rows, dtype=torch.int32, device=device)
         self._lu_info = torch.empty(1, dtype=torch.int32, device=device)
         workspace_size = ctypes.c_int()
@@ -367,16 +347,10 @@ class CuSolverDirectionalSRINV:
             ),
             "cusolverDnDgetrf_bufferSize",
         )
-        self._lu_workspace = torch.empty(
-            workspace_size.value, dtype=torch.float64, device=device
-        )
-        self._pivot_reference = torch.arange(
-            1, self.rows + 1, dtype=torch.int32, device=device
-        )
+        self._lu_workspace = torch.empty(workspace_size.value, dtype=torch.float64, device=device)
+        self._pivot_reference = torch.arange(1, self.rows + 1, dtype=torch.int32, device=device)
 
-    def _gram_determinant(
-        self, matrix: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    def _gram_determinant(self, matrix: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         if self._transpose_input:
             # A tall J has rank(J J.T) <= columns < rows, hence its Gram
             # determinant is exactly zero. Preserve EmbodiK's determinant
@@ -425,32 +399,23 @@ class CuSolverDirectionalSRINV:
         determinant32 = determinant.to(torch.float32)
         global_regularization = torch.where(
             determinant32 < threshold_squared,
-            (1.0 - (determinant32 / threshold_squared).square())
-            * threshold_squared,
+            (1.0 - (determinant32 / threshold_squared).square()) * threshold_squared,
             torch.zeros_like(determinant32),
         )
         normalized = torch.clamp(singular_values / self.tolerance, max=1.0)
-        per_value_damping = self.damping * torch.clamp(
-            1.0 - normalized.square(), min=0.0
-        )
+        per_value_damping = self.damping * torch.clamp(1.0 - normalized.square(), min=0.0)
         directional_spectrum = singular_values / (
-            singular_values.square()
-            + global_regularization[:, None]
-            + per_value_damping
+            singular_values.square() + global_regularization[:, None] + per_value_damping
         )
         return directional_spectrum
 
     def _spectra_eager(
         self, determinant: torch.Tensor, singular_values: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        directional_spectrum = self._directional_spectrum_eager(
-            determinant, singular_values
-        )
+        directional_spectrum = self._directional_spectrum_eager(determinant, singular_values)
         maximum = singular_values.amax(dim=-1, keepdim=True)
         retained = singular_values > self.relative_rank_tolerance * maximum
-        safe = torch.where(
-            retained, singular_values, torch.ones_like(singular_values)
-        )
+        safe = torch.where(retained, singular_values, torch.ones_like(singular_values))
         undamped_spectrum = torch.where(
             retained, safe.reciprocal(), torch.zeros_like(singular_values)
         )
@@ -463,50 +428,36 @@ class CuSolverDirectionalSRINV:
         determinant_status: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         status = torch.where(
-            (factor_info == 0)
-            & (determinant_status == 0)
-            & torch.isfinite(solution).all(dim=-1),
+            (factor_info == 0) & (determinant_status == 0) & torch.isfinite(solution).all(dim=-1),
             torch.zeros_like(factor_info),
             torch.ones_like(factor_info),
         )
         return (
-            torch.where(
-                status[:, None] == 0, solution, torch.zeros_like(solution)
-            ),
+            torch.where(status[:, None] == 0, solution, torch.zeros_like(solution)),
             status,
         )
 
-    def solve(
-        self, matrix: torch.Tensor, rhs: torch.Tensor
-    ) -> tuple[
+    def solve(self, matrix: torch.Tensor, rhs: torch.Tensor) -> tuple[
         torch.Tensor,
         torch.Tensor | None,
         torch.Tensor | None,
         torch.Tensor,
     ]:
         if tuple(rhs.shape) != (self.batch_capacity, self.rows):
-            raise ValueError(
-                f"rhs must have shape {(self.batch_capacity, self.rows)}"
-            )
+            raise ValueError(f"rhs must have shape {(self.batch_capacity, self.rows)}")
         if (
             rhs.dtype is not torch.float32
             or rhs.device != self.factorization.device
             or not rhs.is_contiguous()
         ):
             raise ValueError("rhs must be contiguous CUDA float32")
-        factor_input = (
-            matrix.transpose(-2, -1).contiguous()
-            if self._transpose_input
-            else matrix
-        )
-        left_transpose, singular_values, right_transpose, factor_info = (
-            self.factorization.factor(factor_input)
+        factor_input = matrix.transpose(-2, -1).contiguous() if self._transpose_input else matrix
+        left_transpose, singular_values, right_transpose, factor_info = self.factorization.factor(
+            factor_input
         )
         determinant, determinant_status = self._gram_determinant(matrix)
         if self.output_mode == "action":
-            directional_spectrum = self._directional_spectrum_eager(
-                determinant, singular_values
-            )
+            directional_spectrum = self._directional_spectrum_eager(determinant, singular_values)
             undamped_spectrum = None
         else:
             directional_spectrum, undamped_spectrum = self._spectra_eager(
@@ -523,21 +474,15 @@ class CuSolverDirectionalSRINV:
             right_basis = left_transpose[:, : self.rows].transpose(-2, -1)
             inverse_basis = right_transpose
 
-        inverse = (
-            right_basis * directional_spectrum[:, None, :]
-        ) @ inverse_basis
+        inverse = (right_basis * directional_spectrum[:, None, :]) @ inverse_basis
 
         undamped_inverse = None
         if self.output_mode != "action":
             assert undamped_spectrum is not None
-            undamped_inverse = (
-                right_basis * undamped_spectrum[:, None, :]
-            ) @ inverse_basis
+            undamped_inverse = (right_basis * undamped_spectrum[:, None, :]) @ inverse_basis
         solution = (inverse @ rhs.unsqueeze(-1)).squeeze(-1)
         status_fn = self._compiled_status or self._status_eager
-        solution, status = status_fn(
-            solution, factor_info, determinant_status
-        )
+        solution, status = status_fn(solution, factor_info, determinant_status)
         return (
             solution,
             inverse if self.output_mode == "full" else None,

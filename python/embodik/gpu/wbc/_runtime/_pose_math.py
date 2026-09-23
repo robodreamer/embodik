@@ -25,12 +25,8 @@ def _orientation_error(target_wxyz: Any, current_xyzw: Any) -> tuple[Any, Any]:
     import torch
 
     target_xyzw = torch.cat((target_wxyz[:, 1:], target_wxyz[:, :1]), dim=-1)
-    target_xyzw = target_xyzw / torch.linalg.vector_norm(
-        target_xyzw, dim=-1, keepdim=True
-    )
-    current_xyzw = current_xyzw / torch.linalg.vector_norm(
-        current_xyzw, dim=-1, keepdim=True
-    )
+    target_xyzw = target_xyzw / torch.linalg.vector_norm(target_xyzw, dim=-1, keepdim=True)
+    current_xyzw = current_xyzw / torch.linalg.vector_norm(current_xyzw, dim=-1, keepdim=True)
     conjugate = torch.cat((-current_xyzw[:, :3], current_xyzw[:, 3:]), dim=-1)
     error = _quaternion_multiply(target_xyzw, conjugate)
     error = torch.where(error[:, 3:4] < 0, -error, error)

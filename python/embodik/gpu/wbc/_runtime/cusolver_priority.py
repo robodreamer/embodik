@@ -42,9 +42,7 @@ class CuSolverSecondaryPriority:
                 if self._primary_uses_gram
                 else relative_rank_tolerance
             ),
-            output_mode=(
-                "action_undamped" if specialized_outputs_enabled else "full"
-            ),
+            output_mode=("action_undamped" if specialized_outputs_enabled else "full"),
             fused_status_enabled=fused_status_enabled,
             profile_label="priority_primary",
             device=device,
@@ -63,9 +61,7 @@ class CuSolverSecondaryPriority:
         self._primary_rhs = torch.zeros(
             (1, primary_factor_rows), dtype=torch.float32, device=self.device
         )
-        self._identity = torch.eye(
-            velocity_dim, dtype=torch.float32, device=self.device
-        )[None]
+        self._identity = torch.eye(velocity_dim, dtype=torch.float32, device=self.device)[None]
         compile_options = {"triton.cudagraphs": False}
         self._compiled_scale_delta = (
             torch.compile(
@@ -121,9 +117,7 @@ class CuSolverSecondaryPriority:
         scale: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         primary_change = (primary_jacobian @ scaled_delta.unsqueeze(-1)).squeeze(-1)
-        secondary_after = secondary_goal - (
-            secondary_jacobian @ velocity.unsqueeze(-1)
-        ).squeeze(-1)
+        secondary_after = secondary_goal - (secondary_jacobian @ velocity.unsqueeze(-1)).squeeze(-1)
         delta_norm = torch.linalg.vector_norm(scaled_delta, dim=-1)
         return (
             torch.linalg.vector_norm(primary_change, dim=-1),
@@ -155,15 +149,9 @@ class CuSolverSecondaryPriority:
         protected = (primary_jacobian * free[None, None, :]).contiguous()
         if protected_inverse is None:
             if self._primary_uses_gram:
-                protected_gram = (
-                    protected.transpose(-2, -1) @ protected
-                ).contiguous()
-                primary_outputs = self._primary.solve(
-                    protected_gram, self._primary_rhs
-                )
-                protected_inverse = (
-                    primary_outputs[2] @ protected.transpose(-2, -1)
-                )
+                protected_gram = (protected.transpose(-2, -1) @ protected).contiguous()
+                primary_outputs = self._primary.solve(protected_gram, self._primary_rhs)
+                protected_inverse = primary_outputs[2] @ protected.transpose(-2, -1)
             else:
                 primary_outputs = self._primary.solve(protected, self._primary_rhs)
                 protected_inverse = primary_outputs[2]
@@ -176,18 +164,16 @@ class CuSolverSecondaryPriority:
             )
         projector = self._identity - protected_inverse @ protected
         projector = projector * free[None, :, None] * free[None, None, :]
-        residual = secondary_goal - (
-            secondary_jacobian @ primary_velocity.unsqueeze(-1)
-        ).squeeze(-1)
+        residual = secondary_goal - (secondary_jacobian @ primary_velocity.unsqueeze(-1)).squeeze(
+            -1
+        )
         projected = (secondary_jacobian @ projector).contiguous()
         secondary_outputs = self._secondary.solve(projected, residual.contiguous())
         tangent_delta = secondary_outputs[0]
         delta = (projector @ tangent_delta.unsqueeze(-1)).squeeze(-1)
 
         scale_delta = self._compiled_scale_delta or self._scale_delta_eager
-        scaled_delta, scale = scale_delta(
-            delta, primary_velocity, lower_velocity, upper_velocity
-        )
+        scaled_delta, scale = scale_delta(delta, primary_velocity, lower_velocity, upper_velocity)
         spectral_ok = primary_ok & (secondary_outputs[3] == 0)
         velocity = torch.where(
             spectral_ok[:, None],

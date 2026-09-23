@@ -73,9 +73,9 @@ class WarpSecondaryPriority:
             damping=srinv_damping,
             device=device,
         )
-        self._identity = torch.eye(
-            velocity_dim, dtype=torch.float32, device=self.device
-        ).expand(batch_capacity, -1, -1)
+        self._identity = torch.eye(velocity_dim, dtype=torch.float32, device=self.device).expand(
+            batch_capacity, -1, -1
+        )
 
     def solve(
         self,
@@ -107,13 +107,9 @@ class WarpSecondaryPriority:
                 or tensor.device != self.device
                 or tensor.dtype != torch.float32
             ):
-                raise ValueError(
-                    "priority inputs must match the configured CUDA float32 shapes"
-                )
+                raise ValueError("priority inputs must match the configured CUDA float32 shapes")
         if locked_velocity_mask is None:
-            free = torch.ones(
-                self.velocity_dim, dtype=torch.float32, device=self.device
-            )
+            free = torch.ones(self.velocity_dim, dtype=torch.float32, device=self.device)
         else:
             if (
                 tuple(locked_velocity_mask.shape) != (self.velocity_dim,)
@@ -129,15 +125,12 @@ class WarpSecondaryPriority:
             primary_spectral_ok = self._primary_inverse.status[:batch] == 0
         else:
             if (
-                tuple(protected_inverse.shape)
-                != (batch, self.velocity_dim, self.primary_rows)
+                tuple(protected_inverse.shape) != (batch, self.velocity_dim, self.primary_rows)
                 or protected_inverse.device != self.device
                 or protected_inverse.dtype != torch.float32
                 or locked_velocity_mask is not None
             ):
-                raise ValueError(
-                    "precomputed protected inverse has an incompatible layout"
-                )
+                raise ValueError("precomputed protected inverse has an incompatible layout")
             primary_spectral_ok = (
                 torch.ones(batch, dtype=torch.bool, device=self.device)
                 if protected_spectral_ok is None
@@ -151,13 +144,11 @@ class WarpSecondaryPriority:
                 raise ValueError("precomputed protected status has the wrong layout")
         projector = self._identity[:batch] - protected_inverse @ protected
         projector = projector * free[None, :, None] * free[None, None, :]
-        residual = secondary_goal - (
-            secondary_jacobian @ primary_velocity.unsqueeze(-1)
-        ).squeeze(-1)
-        projected_jacobian = (secondary_jacobian @ projector).contiguous()
-        tangent_delta = self._secondary_inverse.solve(
-            projected_jacobian, residual.contiguous()
+        residual = secondary_goal - (secondary_jacobian @ primary_velocity.unsqueeze(-1)).squeeze(
+            -1
         )
+        projected_jacobian = (secondary_jacobian @ projector).contiguous()
+        tangent_delta = self._secondary_inverse.solve(projected_jacobian, residual.contiguous())
         delta = (projector @ tangent_delta.unsqueeze(-1)).squeeze(-1)
 
         moving = delta != 0.0
@@ -173,18 +164,14 @@ class WarpSecondaryPriority:
         )
         scale = torch.clamp(ratios.amin(dim=-1), min=0.0, max=1.0)
         scaled_delta = scale[:, None] * delta
-        spectral_ok = primary_spectral_ok & (
-            self._secondary_inverse.status[:batch] == 0
-        )
+        spectral_ok = primary_spectral_ok & (self._secondary_inverse.status[:batch] == 0)
         velocity = torch.where(
             spectral_ok[:, None],
             primary_velocity + scaled_delta,
             primary_velocity,
         )
         primary_change = (primary_jacobian @ scaled_delta.unsqueeze(-1)).squeeze(-1)
-        secondary_after = secondary_goal - (
-            secondary_jacobian @ velocity.unsqueeze(-1)
-        ).squeeze(-1)
+        secondary_after = secondary_goal - (secondary_jacobian @ velocity.unsqueeze(-1)).squeeze(-1)
         delta_norm = torch.linalg.vector_norm(scaled_delta, dim=-1)
         return WarpPriorityResult(
             velocity=velocity,

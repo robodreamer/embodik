@@ -14,8 +14,8 @@ Status 0 means success, 1 nonfinite/unsafe arithmetic, 2 Jacobi nonconvergence;
 failed worlds return zero. Status is device-resident (never downloaded here).
 """
 
-from functools import lru_cache
 import math
+from functools import lru_cache
 
 import torch
 import warp as wp
@@ -286,9 +286,7 @@ class WarpDirectionalSRINV:
                 self.status,
             )
         ]
-        self._kernel = _make_kernel(
-            rows, columns, 1 if inverse_mode == "undamped_relative" else 0
-        )
+        self._kernel = _make_kernel(rows, columns, 1 if inverse_mode == "undamped_relative" else 0)
         wp.load_module(module=self._kernel.module, device=str(self.device))
 
     def solve(self, matrix, rhs=None):
@@ -309,9 +307,7 @@ class WarpDirectionalSRINV:
                 or tensor.dtype != torch.float32
                 or not tensor.is_contiguous()
             ):
-                raise ValueError(
-                    "inputs must be contiguous CUDA float32 on the configured device"
-                )
+                raise ValueError("inputs must be contiguous CUDA float32 on the configured device")
         torch_stream = wp.stream_from_torch(torch.cuda.current_stream(self.device))
         # A whole-solver parent graph wraps Torch capture in Warp's external
         # ScopedCapture. In that case Warp must receive the registered capture

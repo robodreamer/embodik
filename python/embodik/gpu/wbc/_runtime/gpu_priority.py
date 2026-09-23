@@ -165,9 +165,7 @@ def cpu_posture_task_rows(
     Leading dimensions are treated as batch dimensions.
     """
 
-    if not isinstance(current_q, torch.Tensor) or not isinstance(
-        target_q, torch.Tensor
-    ):
+    if not isinstance(current_q, torch.Tensor) or not isinstance(target_q, torch.Tensor):
         raise TypeError("current_q and target_q must be Torch tensors")
     if current_q.ndim < 1 or target_q.ndim < 1:
         raise ValueError("configuration tensors must have at least one dimension")
@@ -181,9 +179,7 @@ def cpu_posture_task_rows(
         raise ValueError("configuration tensors must use a floating dtype")
 
     active = _integer_tuple("active_velocity_indices", active_velocity_indices)
-    selected = _integer_tuple(
-        "selected_source_velocity_indices", selected_source_velocity_indices
-    )
+    selected = _integer_tuple("selected_source_velocity_indices", selected_source_velocity_indices)
     if len(set(active)) != len(active):
         raise ValueError("active_velocity_indices must be unique")
     if len(set(selected)) != len(selected):
@@ -193,9 +189,7 @@ def cpu_posture_task_rows(
     if any(source_velocity not in active for source_velocity in selected):
         raise ValueError("selected posture velocities must be active")
 
-    q_starts = _integer_tuple(
-        "joint_configuration_indices", joint_configuration_indices
-    )
+    q_starts = _integer_tuple("joint_configuration_indices", joint_configuration_indices)
     q_sizes = _integer_tuple("joint_configuration_sizes", joint_configuration_sizes)
     v_starts = _integer_tuple("joint_velocity_indices", joint_velocity_indices)
     v_sizes = _integer_tuple("joint_velocity_sizes", joint_velocity_sizes)
@@ -212,9 +206,7 @@ def cpu_posture_task_rows(
     try:
         current, target = torch.broadcast_tensors(current_q, target_q)
     except RuntimeError as error:
-        raise ValueError(
-            "current_q and target_q batches are not broadcastable"
-        ) from error
+        raise ValueError("current_q and target_q batches are not broadcastable") from error
 
     row_count = len(selected)
     if row_count == 0:
@@ -225,9 +217,7 @@ def cpu_posture_task_rows(
 
     q_index_tensor = torch.as_tensor(q_indices, device=current.device)
     raw_error = torch.index_select(target - current, -1, q_index_tensor)
-    weights = torch.as_tensor(
-        selected_weights, dtype=current.dtype, device=current.device
-    )
+    weights = torch.as_tensor(selected_weights, dtype=current.dtype, device=current.device)
     if weights.ndim == 0 or weights.shape[-1] != row_count:
         raise ValueError("selected_weights must end with the selected row count")
     try:
@@ -247,9 +237,7 @@ def cpu_posture_task_rows(
 
     selected_tensor = torch.as_tensor(selected, device=current.device)
     active_tensor = torch.as_tensor(active, device=current.device)
-    selection = (selected_tensor[:, None] == active_tensor[None, :]).to(
-        dtype=current.dtype
-    )
+    selection = (selected_tensor[:, None] == active_tensor[None, :]).to(dtype=current.dtype)
     jacobian = weights.unsqueeze(-1) * selection
     return PostureTaskRows(weighted_error, goal, jacobian)
 
@@ -266,15 +254,11 @@ def undamped_generalized_inverse(
         raise ValueError("matrix must use a floating dtype")
     if not math.isfinite(relative_rank_tolerance) or relative_rank_tolerance < 0.0:
         raise ValueError("relative_rank_tolerance must be finite and nonnegative")
-    left, singular_values, right_transpose = torch.linalg.svd(
-        matrix, full_matrices=False
-    )
+    left, singular_values, right_transpose = torch.linalg.svd(matrix, full_matrices=False)
     maximum = singular_values.amax(dim=-1, keepdim=True)
     cutoff = relative_rank_tolerance * maximum
     retained = singular_values > cutoff
-    safe_values = torch.where(
-        retained, singular_values, torch.ones_like(singular_values)
-    )
+    safe_values = torch.where(retained, singular_values, torch.ones_like(singular_values))
     inverse_spectrum = torch.where(
         retained, safe_values.reciprocal(), torch.zeros_like(singular_values)
     )
@@ -290,9 +274,9 @@ def undamped_nullspace_projector(
     """Return ``I - J^+ J`` using the undamped hierarchy pseudoinverse."""
 
     inverse = undamped_generalized_inverse(matrix, relative_rank_tolerance)
-    identity = torch.eye(
-        matrix.shape[-1], dtype=matrix.dtype, device=matrix.device
-    ).expand(matrix.shape[:-2] + (matrix.shape[-1], matrix.shape[-1]))
+    identity = torch.eye(matrix.shape[-1], dtype=matrix.dtype, device=matrix.device).expand(
+        matrix.shape[:-2] + (matrix.shape[-1], matrix.shape[-1])
+    )
     return identity - inverse @ matrix
 
 
@@ -320,25 +304,17 @@ def directional_srinv(
         (1.0 - (determinant / threshold_squared) ** 2) * threshold_squared,
         torch.zeros_like(determinant),
     )
-    left, singular_values, right_transpose = torch.linalg.svd(
-        matrix, full_matrices=False
-    )
+    left, singular_values, right_transpose = torch.linalg.svd(matrix, full_matrices=False)
     normalized = torch.clamp(singular_values / tolerance, max=1.0)
     per_value_damping = damping * torch.clamp(1.0 - normalized.square(), min=0.0)
-    denominator = (
-        singular_values.square()
-        + global_regularization.unsqueeze(-1)
-        + per_value_damping
-    )
+    denominator = singular_values.square() + global_regularization.unsqueeze(-1) + per_value_damping
     inverse_spectrum = singular_values / denominator
     return (right_transpose.transpose(-2, -1) * inverse_spectrum.unsqueeze(-2)) @ (
         left.transpose(-2, -1)
     )
 
 
-def _broadcast_vector(
-    value: torch.Tensor, batch: tuple[int, ...], width: int
-) -> torch.Tensor:
+def _broadcast_vector(value: torch.Tensor, batch: tuple[int, ...], width: int) -> torch.Tensor:
     if value.ndim < 1 or value.shape[-1] != width:
         raise ValueError(f"vector must end with width {width}")
     return torch.broadcast_to(value, batch + (width,))
@@ -414,29 +390,19 @@ def secondary_priority_velocity(
             upper_velocity.shape[:-1],
         )
     except RuntimeError as error:
-        raise ValueError(
-            "secondary-priority input batches are not broadcastable"
-        ) from error
+        raise ValueError("secondary-priority input batches are not broadcastable") from error
 
     primary_velocity = _broadcast_vector(reference, batch, velocity_dim)
     lower_velocity = _broadcast_vector(lower_velocity, batch, velocity_dim)
     upper_velocity = _broadcast_vector(upper_velocity, batch, velocity_dim)
-    primary_jacobian = _broadcast_matrix(
-        primary_jacobian, batch, primary_rows, velocity_dim
-    )
-    secondary_jacobian = _broadcast_matrix(
-        secondary_jacobian, batch, secondary_rows, velocity_dim
-    )
+    primary_jacobian = _broadcast_matrix(primary_jacobian, batch, primary_rows, velocity_dim)
+    secondary_jacobian = _broadcast_matrix(secondary_jacobian, batch, secondary_rows, velocity_dim)
     secondary_goal = _broadcast_vector(secondary_goal, batch, secondary_rows)
     if validate_values:
         if torch.any(lower_velocity > upper_velocity):
             raise ValueError("lower_velocity must not exceed upper_velocity")
-        if torch.any(
-            (primary_velocity < lower_velocity) | (primary_velocity > upper_velocity)
-        ):
-            raise ValueError(
-                "primary_velocity must already lie inside the velocity box"
-            )
+        if torch.any((primary_velocity < lower_velocity) | (primary_velocity > upper_velocity)):
+            raise ValueError("primary_velocity must already lie inside the velocity box")
 
     # Locks belong in the nullspace calculation. Zeroing a locked coordinate
     # only after projection can destroy cancellation in a higher-priority row.
@@ -460,9 +426,7 @@ def secondary_priority_velocity(
         primary_jacobian * free.unsqueeze(-2), relative_rank_tolerance
     )
     projector = projector * free.unsqueeze(-1) * free.unsqueeze(-2)
-    residual = secondary_goal - (
-        secondary_jacobian @ primary_velocity.unsqueeze(-1)
-    ).squeeze(-1)
+    residual = secondary_goal - (secondary_jacobian @ primary_velocity.unsqueeze(-1)).squeeze(-1)
     projected_jacobian = secondary_jacobian @ projector
     projected_inverse = directional_srinv(
         projected_jacobian,
@@ -489,17 +453,15 @@ def secondary_priority_velocity(
     velocity = primary_velocity + scaled_delta
 
     primary_change = (primary_jacobian @ scaled_delta.unsqueeze(-1)).squeeze(-1)
-    secondary_after_vector = secondary_goal - (
-        secondary_jacobian @ velocity.unsqueeze(-1)
-    ).squeeze(-1)
+    secondary_after_vector = secondary_goal - (secondary_jacobian @ velocity.unsqueeze(-1)).squeeze(
+        -1
+    )
     delta_norm = torch.linalg.vector_norm(scaled_delta, dim=-1)
     return SecondaryPriorityResult(
         velocity=velocity,
         primary_residual_increase=torch.linalg.vector_norm(primary_change, dim=-1),
         secondary_residual_before=torch.linalg.vector_norm(residual, dim=-1),
-        secondary_residual_after=torch.linalg.vector_norm(
-            secondary_after_vector, dim=-1
-        ),
+        secondary_residual_after=torch.linalg.vector_norm(secondary_after_vector, dim=-1),
         delta_norm=delta_norm,
         applied=(scale > 0.0) & (delta_norm > 0.0),
     )

@@ -30,13 +30,11 @@ def _write_chain(path: Path, dof: int, *, floating: bool = False) -> eik.RobotMo
         links.append(f'<link name="link_{index}"/>')
         parent = "base" if index == 0 else f"link_{index - 1}"
         joint_type = "prismatic" if index % 3 == 1 else "revolute"
-        joints.append(
-            f"""<joint name="joint_{index}" type="{joint_type}">
+        joints.append(f"""<joint name="joint_{index}" type="{joint_type}">
   <parent link="{parent}"/><child link="link_{index}"/>
   <origin xyz="0.1 0 0"/><axis xyz="0 0 1"/>
   <limit lower="-1" upper="1" velocity="2" effort="20"/>
-</joint>"""
-        )
+</joint>""")
     path.write_text(
         '<?xml version="1.0"?>\n<robot name="gpu_acceleration_chain">\n'
         + "\n".join(links + joints)

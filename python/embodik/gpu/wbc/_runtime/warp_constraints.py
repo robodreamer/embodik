@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from functools import lru_cache
 import math
+from functools import lru_cache
 
 import torch
 import warp as wp
@@ -79,8 +79,7 @@ def _make_projection_kernel(
                     for column in range(columns):
                         value += row_matrix[batch, row, column] * work[column]
                     if active[batch, row] and (
-                        value < row_lower[batch, row]
-                        or value > row_upper[batch, row]
+                        value < row_lower[batch, row] or value > row_upper[batch, row]
                     ):
                         fixed_point = False
                 if fixed_point:
@@ -156,9 +155,7 @@ class WarpCyclicRowProjection:
         self.velocity = torch.empty(
             (batch_capacity, columns), dtype=torch.float64, device=self.device
         )
-        self.feasible = torch.empty(
-            batch_capacity, dtype=torch.bool, device=self.device
-        )
+        self.feasible = torch.empty(batch_capacity, dtype=torch.bool, device=self.device)
         self.max_row_violation = torch.empty(
             batch_capacity, dtype=torch.float64, device=self.device
         )

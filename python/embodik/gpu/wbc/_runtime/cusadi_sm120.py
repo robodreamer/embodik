@@ -70,9 +70,7 @@ class StrictCusadiFunction:
             ctypes.c_int,
         )
         self._library.evaluate.restype = ctypes.c_float
-        self._evaluate_on_stream = getattr(
-            self._library, "evaluate_on_stream", None
-        )
+        self._evaluate_on_stream = getattr(self._library, "evaluate_on_stream", None)
         if self._evaluate_on_stream is not None:
             self._evaluate_on_stream.argtypes = (
                 ctypes.c_void_p,
@@ -110,9 +108,7 @@ class StrictCusadiFunction:
     def _validate_inputs(self, inputs: tuple[Any, ...]) -> None:
         torch = self.torch
         if len(inputs) != self.function.n_in():
-            raise ValueError(
-                f"expected {self.function.n_in()} inputs, received {len(inputs)}"
-            )
+            raise ValueError(f"expected {self.function.n_in()} inputs, received {len(inputs)}")
         for index, tensor in enumerate(inputs):
             expected = self.batch_size * self.function.nnz_in(index)
             if not isinstance(tensor, torch.Tensor):
@@ -124,9 +120,7 @@ class StrictCusadiFunction:
             if not tensor.is_contiguous():
                 raise ValueError(f"input {index} must be contiguous")
             if tensor.numel() != expected:
-                raise ValueError(
-                    f"input {index} has {tensor.numel()} values; expected {expected}"
-                )
+                raise ValueError(f"input {index} has {tensor.numel()} values; expected {expected}")
             if not bool(torch.isfinite(tensor).all().item()):
                 raise ValueError(f"input {index} contains non-finite values")
 
@@ -147,9 +141,7 @@ class StrictCusadiFunction:
             stop.record()
             stop.synchronize()
             kernel_seconds = start.elapsed_time(stop) / 1000.0
-        if not all(
-            bool(torch.isfinite(output).all().item()) for output in self._outputs
-        ):
+        if not all(bool(torch.isfinite(output).all().item()) for output in self._outputs):
             raise RuntimeError("CusADi produced non-finite output")
         return kernel_seconds
 
@@ -160,9 +152,7 @@ class StrictCusadiFunction:
         pointer_values = [tensor.data_ptr() for tensor in inputs]
         input_pointers = self._input_pointers
         if torch.cuda.is_current_stream_capturing():
-            pinned = torch.tensor(
-                pointer_values, dtype=torch.int64, pin_memory=True
-            )
+            pinned = torch.tensor(pointer_values, dtype=torch.int64, pin_memory=True)
             input_pointers = pinned.to(self.device, non_blocking=True)
             self._captured_input_pointer_tables.append((pinned, input_pointers))
         else:
@@ -188,9 +178,7 @@ class StrictCusadiFunction:
                 )
             )
             if error_code != 0:
-                raise RuntimeError(
-                    f"CusADi stream launch failed with CUDA error {error_code}"
-                )
+                raise RuntimeError(f"CusADi stream launch failed with CUDA error {error_code}")
             return 0.0
         kernel_seconds = float(
             self._library.evaluate(

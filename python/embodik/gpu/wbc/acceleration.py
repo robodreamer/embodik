@@ -128,28 +128,20 @@ class GpuAccelerationSolver:
         self.configuration_dim = int(robot.nq)
         self.velocity_dim = int(robot.nv)
         if self.configuration_dim < 1 or self.configuration_dim != self.velocity_dim:
-            raise ValueError(
-                "fixed-base scalar-joint models must have equal positive nq and nv"
-            )
+            raise ValueError("fixed-base scalar-joint models must have equal positive nq and nv")
         self._validate_scalar_joint_topology(robot)
 
         acceleration = np.asarray(acceleration_limits, dtype=float)
         if acceleration.shape != (self.velocity_dim,):
-            raise ValueError(
-                f"acceleration_limits must have shape {(self.velocity_dim,)}"
-            )
+            raise ValueError(f"acceleration_limits must have shape {(self.velocity_dim,)}")
         if not np.isfinite(acceleration).all() or np.any(acceleration <= 0.0):
             raise ValueError("acceleration_limits must be finite and strictly positive")
 
         expected = (self.velocity_dim,)
         if apply_position_limits:
-            lower, upper = (
-                np.asarray(value, dtype=float) for value in robot.get_joint_limits()
-            )
+            lower, upper = (np.asarray(value, dtype=float) for value in robot.get_joint_limits())
             if lower.shape != expected or upper.shape != expected:
-                raise ValueError(
-                    f"joint position limits must both have shape {expected}"
-                )
+                raise ValueError(f"joint position limits must both have shape {expected}")
             if not np.isfinite(lower).all() or not np.isfinite(upper).all():
                 raise ValueError("joint position limits must be finite")
             if np.any(lower > upper):
@@ -162,9 +154,7 @@ class GpuAccelerationSolver:
             if velocity.shape != expected:
                 raise ValueError(f"joint velocity limits must have shape {expected}")
             if not np.isfinite(velocity).all() or np.any(velocity <= 0.0):
-                raise ValueError(
-                    "joint velocity limits must be finite and strictly positive"
-                )
+                raise ValueError("joint velocity limits must be finite and strictly positive")
         else:
             velocity = np.zeros(self.velocity_dim, dtype=float)
 
@@ -183,12 +173,8 @@ class GpuAccelerationSolver:
         self._acceleration_limits = torch.as_tensor(
             acceleration, dtype=self.dtype, device=self.device
         )
-        self._zero_reference = torch.zeros(
-            self.velocity_dim, dtype=self.dtype, device=self.device
-        )
-        self._false_mask = torch.zeros(
-            self.velocity_dim, dtype=torch.bool, device=self.device
-        )
+        self._zero_reference = torch.zeros(self.velocity_dim, dtype=self.dtype, device=self.device)
+        self._false_mask = torch.zeros(self.velocity_dim, dtype=torch.bool, device=self.device)
 
     @staticmethod
     def capabilities() -> GpuAccelerationCapabilities:
@@ -206,9 +192,7 @@ class GpuAccelerationSolver:
         )
         if not all(hasattr(robot, method) for method in span_methods):
             if len(names) != self.velocity_dim:
-                raise ValueError(
-                    "model metadata must identify one scalar joint per velocity"
-                )
+                raise ValueError("model metadata must identify one scalar joint per velocity")
             return
 
         configuration_indices = []
@@ -444,11 +428,7 @@ class GpuAccelerationSolver:
         )
         feasible = state_box.feasible & locks_compatible
         verified = (
-            candidate_finite
-            & acceleration_valid
-            & velocity_valid
-            & position_valid
-            & lock_valid
+            candidate_finite & acceleration_valid & velocity_valid & position_valid & lock_valid
         )
         success = input_valid & feasible & verified
         status = torch.where(
@@ -459,9 +439,7 @@ class GpuAccelerationSolver:
                 torch.full_like(input_valid, self.STATUS_INFEASIBLE, dtype=torch.int8),
                 torch.where(
                     ~verified,
-                    torch.full_like(
-                        input_valid, self.STATUS_VERIFICATION_FAILED, dtype=torch.int8
-                    ),
+                    torch.full_like(input_valid, self.STATUS_VERIFICATION_FAILED, dtype=torch.int8),
                     torch.full_like(input_valid, self.STATUS_SUCCESS, dtype=torch.int8),
                 ),
             ),
@@ -472,8 +450,7 @@ class GpuAccelerationSolver:
         velocity_output = torch.where(executable, dq_next, nan)
         configuration_output = torch.where(executable, q_next, nan)
         fallback = success & (
-            (state_box.lower > tolerance).any(dim=-1)
-            | (state_box.upper < -tolerance).any(dim=-1)
+            (state_box.lower > tolerance).any(dim=-1) | (state_box.upper < -tolerance).any(dim=-1)
         )
         return GpuAccelerationBatchResult(
             success=success,
@@ -552,9 +529,7 @@ class GpuAccelerationSolver:
                 else empty.copy()
             ),
             q_solution=(
-                batch.q_solution[0].detach().cpu().numpy().copy()
-                if success
-                else empty.copy()
+                batch.q_solution[0].detach().cpu().numpy().copy() if success else empty.copy()
             ),
             acceleration_lower=batch.acceleration_lower[0].detach().cpu().numpy().copy(),
             acceleration_upper=batch.acceleration_upper[0].detach().cpu().numpy().copy(),

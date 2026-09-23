@@ -43,18 +43,14 @@ def _write_grouped_collision_urdf(
             for mesh in collision.findall(".//mesh"):
                 filename = mesh.attrib.get("filename")
                 if filename and not filename.startswith("package://"):
-                    mesh.attrib["filename"] = str(
-                        (source_path.parent / filename).resolve()
-                    )
+                    mesh.attrib["filename"] = str((source_path.parent / filename).resolve())
             origin = collision.find("origin")
             if origin is not None:
                 collision.remove(origin)
             link.remove(collision)
             generated_name = f"{_COLLISION_LINK_PREFIX}{counter}"
             counter += 1
-            generated[generated_name] = panda_collision_geometry_name(
-                link_name, ordinal
-            )
+            generated[generated_name] = panda_collision_geometry_name(link_name, ordinal)
             child = ET.Element("link", {"name": generated_name})
             child.append(collision)
             joint = ET.Element(
@@ -282,10 +278,7 @@ def _mark_overflow(
         or (split_query_capacity >= 0 and split_query_count[0] > split_query_capacity)
         or (gjk_capacity >= 0 and gjk_count[0] > gjk_capacity)
         or (split_gjk_capacity >= 0 and split_gjk_count[0] > split_gjk_capacity)
-        or (
-            split_manifold_capacity >= 0
-            and split_manifold_count[0] > split_manifold_capacity
-        )
+        or (split_manifold_capacity >= 0 and split_manifold_count[0] > split_manifold_capacity)
         or (mesh_capacity >= 0 and mesh_count[0] > mesh_capacity)
         or (triangle_capacity >= 0 and triangle_count[0] > triangle_capacity)
         or (mesh_mesh_capacity >= 0 and mesh_mesh_count[0] > mesh_mesh_capacity)
@@ -485,9 +478,7 @@ class NewtonModelCollisionQuery:
         self.newton = newton
         self.torch = torch
         self._source_path = source_path
-        self._cache_dir = (
-            None if cache_dir is None else Path(cache_dir).expanduser().resolve()
-        )
+        self._cache_dir = None if cache_dir is None else Path(cache_dir).expanduser().resolve()
         self._collision_pairs = tuple(collision_pairs)
         self._default_configuration = default_configuration
         self._device_label = device
@@ -556,26 +547,16 @@ class NewtonModelCollisionQuery:
         else:
             geometry_by_name = self.geometry_shape_groups
             missing = sorted(
-                {
-                    name
-                    for pair in collision_pairs
-                    for name in pair
-                    if name not in geometry_by_name
-                }
+                {name for pair in collision_pairs for name in pair if name not in geometry_by_name}
             )
             if missing:
                 raise RuntimeError(
-                    "configured collision geometries are absent from Newton: "
-                    + ", ".join(missing)
+                    "configured collision geometries are absent from Newton: " + ", ".join(missing)
                 )
             if not collision_pairs:
-                raise ValueError(
-                    "model-derived collision query requires collision_pairs"
-                )
+                raise ValueError("model-derived collision query requires collision_pairs")
             unordered = [frozenset(pair) for pair in collision_pairs]
-            if any(len(pair) != 2 for pair in unordered) or len(set(unordered)) != len(
-                unordered
-            ):
+            if any(len(pair) != 2 for pair in unordered) or len(set(unordered)) != len(unordered):
                 raise ValueError("collision_pairs must be unique two-geometry pairs")
             source_pairs: list[tuple[int, int]] = []
             source_pair_semantic_indices: list[int] = []
@@ -607,17 +588,11 @@ class NewtonModelCollisionQuery:
             assert robot_spec is not None
             self.input_configuration_dim = robot_spec.configuration_dim
             self.active_dim = len(robot_spec.active_velocity_indices)
-            defaults = self._configure_model_mappings(
-                source, robot_spec, default_configuration
-            )
+            defaults = self._configure_model_mappings(source, robot_spec, default_configuration)
 
         if self._convex_hull_mode:
             source.shape_type = [
-                (
-                    newton.GeoType.CONVEX_MESH
-                    if shape_type == newton.GeoType.MESH
-                    else shape_type
-                )
+                (newton.GeoType.CONVEX_MESH if shape_type == newton.GeoType.MESH else shape_type)
                 for shape_type in source.shape_type
             ]
 
@@ -637,9 +612,7 @@ class NewtonModelCollisionQuery:
             shape_count=self.source_shape_count,
             world_count=batch_size,
         )
-        self._shape_pairs = wp.array(
-            explicit_pairs, dtype=wp.vec2i, device=self.model.device
-        )
+        self._shape_pairs = wp.array(explicit_pairs, dtype=wp.vec2i, device=self.model.device)
         pair_lookup = [-1] * (self.source_shape_count * self.source_shape_count)
         for (shape_a, shape_b), semantic_index in zip(
             self.source_pairs,
@@ -648,9 +621,7 @@ class NewtonModelCollisionQuery:
         ):
             pair_lookup[shape_a * self.source_shape_count + shape_b] = semantic_index
             pair_lookup[shape_b * self.source_shape_count + shape_a] = semantic_index
-        self._pair_lookup = wp.array(
-            pair_lookup, dtype=wp.int32, device=self.model.device
-        )
+        self._pair_lookup = wp.array(pair_lookup, dtype=wp.int32, device=self.model.device)
         self._contact_capacity = contacts_per_world * batch_size
         self._triangle_capacity = triangle_pairs_per_world * batch_size
         self.pipeline = newton.CollisionPipeline(
@@ -687,49 +658,31 @@ class NewtonModelCollisionQuery:
         self._distance = wp.empty(
             self._contact_capacity, dtype=wp.float32, device=self.model.device
         )
-        self._point0 = wp.empty(
-            self._contact_capacity, dtype=wp.vec3, device=self.model.device
-        )
+        self._point0 = wp.empty(self._contact_capacity, dtype=wp.vec3, device=self.model.device)
         self._point1 = wp.empty_like(self._point0)
-        self._minimum_distance = wp.empty(
-            batch_size, dtype=wp.float32, device=self.model.device
-        )
+        self._minimum_distance = wp.empty(batch_size, dtype=wp.float32, device=self.model.device)
         self._pair_distance = wp.empty(
             batch_size * self.semantic_pair_count,
             dtype=wp.float32,
             device=self.model.device,
         )
         pair_slots = batch_size * self.semantic_pair_count
-        self._pair_winner = wp.empty(
-            pair_slots, dtype=wp.int32, device=self.model.device
-        )
-        self._pair_shape_pair = wp.empty(
-            pair_slots, dtype=wp.vec2i, device=self.model.device
-        )
-        self._pair_normal = wp.empty(
-            pair_slots, dtype=wp.vec3, device=self.model.device
-        )
+        self._pair_winner = wp.empty(pair_slots, dtype=wp.int32, device=self.model.device)
+        self._pair_shape_pair = wp.empty(pair_slots, dtype=wp.vec2i, device=self.model.device)
+        self._pair_normal = wp.empty(pair_slots, dtype=wp.vec3, device=self.model.device)
         self._pair_point0 = wp.empty_like(self._pair_normal)
         self._pair_point1 = wp.empty_like(self._pair_normal)
-        self._pair_active = wp.empty(
-            pair_slots, dtype=wp.int32, device=self.model.device
-        )
+        self._pair_active = wp.empty(pair_slots, dtype=wp.int32, device=self.model.device)
         self._winner = wp.empty(batch_size, dtype=wp.int32, device=self.model.device)
         self._active = wp.empty(batch_size, dtype=wp.int32, device=self.model.device)
         self._overflow = wp.empty(batch_size, dtype=wp.int32, device=self.model.device)
-        self._overflow_zero_counter = wp.zeros(
-            1, dtype=wp.int32, device=self.model.device
-        )
+        self._overflow_zero_counter = wp.zeros(1, dtype=wp.int32, device=self.model.device)
         self._query_envelope_clear_certified = wp.zeros(
             batch_size, dtype=wp.int32, device=self.model.device
         )
-        self._shape_pair = wp.empty(
-            batch_size, dtype=wp.vec2i, device=self.model.device
-        )
+        self._shape_pair = wp.empty(batch_size, dtype=wp.vec2i, device=self.model.device)
         self._normal = wp.empty(batch_size, dtype=wp.vec3, device=self.model.device)
-        self._selected_point0 = wp.empty(
-            batch_size, dtype=wp.vec3, device=self.model.device
-        )
+        self._selected_point0 = wp.empty(batch_size, dtype=wp.vec3, device=self.model.device)
         self._selected_point1 = wp.empty_like(self._selected_point0)
 
         self._body_jacobian = wp.empty(
@@ -752,9 +705,7 @@ class NewtonModelCollisionQuery:
         if any(index < 0 for index in body_row):
             raise RuntimeError("collision body is missing an articulation Jacobian row")
         source_shape_rows = [body_row[int(body)] for body in source.shape_body]
-        self._source_shape_rows = torch.tensor(
-            source_shape_rows, dtype=torch.long, device=device
-        )
+        self._source_shape_rows = torch.tensor(source_shape_rows, dtype=torch.long, device=device)
         self._active_newton_qd_indices_tensor = torch.tensor(
             self._active_newton_qd_indices, dtype=torch.long, device=device
         )
@@ -820,13 +771,9 @@ class NewtonModelCollisionQuery:
             and _span(qd_starts, index, source.joint_dof_count) == 6
         ]
         if spec.floating_base and (len(free_source) != 1 or len(free_newton) != 1):
-            raise RuntimeError(
-                "floating collision model requires exactly one free joint"
-            )
+            raise RuntimeError("floating collision model requires exactly one free joint")
         if not spec.floating_base and (free_source or free_newton):
-            raise RuntimeError(
-                "fixed collision model unexpectedly contains a free joint"
-            )
+            raise RuntimeError("fixed collision model unexpectedly contains a free joint")
 
         free_source_index = free_source[0] if free_source else None
         if free_source_index is not None:
@@ -841,10 +788,7 @@ class NewtonModelCollisionQuery:
             mapped_source_q.extend(range(source_q_start, source_q_start + 7))
             newton_qd_start = int(qd_starts[free_newton_index])
             newton_velocity_by_source.update(
-                {
-                    source_v_start + offset: newton_qd_start + offset
-                    for offset in range(6)
-                }
+                {source_v_start + offset: newton_qd_start + offset for offset in range(6)}
             )
         for joint_index, joint_name in enumerate(spec.joint_names):
             q_size = spec.joint_configuration_sizes[joint_index]
@@ -855,16 +799,12 @@ class NewtonModelCollisionQuery:
                 raise RuntimeError(
                     f"collision joint {joint_name!r} has unsupported nq/nv={q_size}/{v_size}"
                 )
-            newton_joint = _unique_suffix_index(
-                source.joint_label, joint_name, kind="joint"
-            )
+            newton_joint = _unique_suffix_index(source.joint_label, joint_name, kind="joint")
             if (
                 _span(q_starts, newton_joint, source.joint_coord_count) != 1
                 or _span(qd_starts, newton_joint, source.joint_dof_count) != 1
             ):
-                raise RuntimeError(
-                    f"Newton collision joint {joint_name!r} is not scalar"
-                )
+                raise RuntimeError(f"Newton collision joint {joint_name!r} is not scalar")
             newton_q = int(q_starts[newton_joint])
             source_q = spec.joint_configuration_indices[joint_index]
             source_velocity = spec.joint_velocity_indices[joint_index]
@@ -879,9 +819,7 @@ class NewtonModelCollisionQuery:
             newton_velocity_by_source[index] for index in spec.active_velocity_indices
         )
         defaults = [0.0] * source.joint_coord_count
-        for newton_index, source_index in zip(
-            mapped_newton_q, mapped_source_q, strict=True
-        ):
+        for newton_index, source_index in zip(mapped_newton_q, mapped_source_q, strict=True):
             defaults[newton_index] = default[source_index]
         return defaults
 
@@ -908,6 +846,7 @@ class NewtonModelCollisionQuery:
 
     def _launch_overflow_check(self) -> None:
         narrow = self.pipeline.narrow_phase
+
         def counter_capacity(counter: Any, entries: Any) -> tuple[Any, int]:
             return (
                 counter if counter is not None else self._overflow_zero_counter,
@@ -934,9 +873,7 @@ class NewtonModelCollisionQuery:
             else self._overflow_zero_counter
         )
         split_gjk_capacity = (
-            narrow.split_gjk_work_items.shape[0]
-            if narrow.split_gjk_work_items is not None
-            else -1
+            narrow.split_gjk_work_items.shape[0] if narrow.split_gjk_work_items is not None else -1
         )
         split_manifold_count = (
             narrow.split_manifold_work_count
@@ -964,9 +901,7 @@ class NewtonModelCollisionQuery:
             else self._overflow_zero_counter
         )
         sdf_sdf_capacity = (
-            narrow.shape_pairs_sdf_sdf.shape[0]
-            if narrow.shape_pairs_sdf_sdf is not None
-            else -1
+            narrow.shape_pairs_sdf_sdf.shape[0] if narrow.shape_pairs_sdf_sdf is not None else -1
         )
         mesh_count, mesh_capacity = counter_capacity(
             narrow.shape_pairs_mesh_count, narrow.shape_pairs_mesh
@@ -1025,9 +960,7 @@ class NewtonModelCollisionQuery:
             q_configuration.device != self._q_full.device
             or q_configuration.dtype is not torch.float32
         ):
-            raise ValueError(
-                "q_configuration must be CUDA float32 on the configured device"
-            )
+            raise ValueError("q_configuration must be CUDA float32 on the configured device")
         if not bool(torch.isfinite(q_configuration).all().item()):
             raise ValueError("q_configuration contains non-finite values")
 
@@ -1114,14 +1047,10 @@ class NewtonModelCollisionQuery:
         pair_gradient = self._analytic_pair_gradients() if compute_gradient else None
         if pair_gradient is None:
             q_gradient = self._zero_gradient
-            pair_gradient = self._zero_gradient[:, None, :].expand(
-                -1, self.semantic_pair_count, -1
-            )
+            pair_gradient = self._zero_gradient[:, None, :].expand(-1, self.semantic_pair_count, -1)
         else:
             closest_pair = self.torch.argmin(
-                wp.to_torch(self._pair_distance).reshape(
-                    self.batch_size, self.semantic_pair_count
-                ),
+                wp.to_torch(self._pair_distance).reshape(self.batch_size, self.semantic_pair_count),
                 dim=-1,
             )
             q_gradient = pair_gradient[
@@ -1146,9 +1075,7 @@ class NewtonModelCollisionQuery:
             shape_pair=wp.to_torch(self._shape_pair),
             overflow=wp.to_torch(self._overflow).bool(),
             raw_contact_count=wp.to_torch(self.contacts.rigid_contact_count),
-            query_envelope_clear_certified=wp.to_torch(
-                self._query_envelope_clear_certified
-            ).bool(),
+            query_envelope_clear_certified=wp.to_torch(self._query_envelope_clear_certified).bool(),
         )
 
     def publish_convex_envelope_certificate(
@@ -1249,9 +1176,7 @@ class NewtonModelCollisionQuery:
             shape_pair=result.shape_pair.clone(),
             overflow=result.overflow.clone(),
             raw_contact_count=result.raw_contact_count.clone(),
-            query_envelope_clear_certified=(
-                result.query_envelope_clear_certified.clone()
-            ),
+            query_envelope_clear_certified=(result.query_envelope_clear_certified.clone()),
         )
 
     def _replay_segment(
@@ -1312,9 +1237,9 @@ class NewtonModelCollisionQuery:
             point1_world_m=torch.cat([item.point1_world_m for item in leaves]),
             shape_pair=torch.cat([item.shape_pair for item in leaves]),
             overflow=torch.cat([item.overflow for item in leaves]),
-            raw_contact_count=torch.stack(
-                [item.raw_contact_count[0] for item in leaves]
-            ).sum()[None],
+            raw_contact_count=torch.stack([item.raw_contact_count[0] for item in leaves]).sum()[
+                None
+            ],
             query_envelope_clear_certified=torch.cat(
                 [item.query_envelope_clear_certified for item in leaves]
             ),
@@ -1328,9 +1253,7 @@ class NewtonModelCollisionQuery:
             self.batch_size, self.semantic_pair_count, 2
         )
         pair_active = (
-            wp.to_torch(self._pair_active)
-            .reshape(self.batch_size, self.semantic_pair_count)
-            .bool()
+            wp.to_torch(self._pair_active).reshape(self.batch_size, self.semantic_pair_count).bool()
         )
         source_shape = torch.remainder(pair_shape, self.source_shape_count)
         rows = self._source_shape_rows[source_shape]
@@ -1373,9 +1296,7 @@ class NewtonModelCollisionQuery:
         )
         relative = point_jacobian(1, point1) - point_jacobian(0, point0)
         gradient = torch.sum(normal[:, :, :, None] * relative, dim=2)
-        return torch.where(
-            pair_active[:, :, None], gradient, torch.zeros_like(gradient)
-        )
+        return torch.where(pair_active[:, :, None], gradient, torch.zeros_like(gradient))
 
     def _execute_query_graph(
         self,
@@ -1393,13 +1314,9 @@ class NewtonModelCollisionQuery:
             outputs=[self._query_envelope_clear_certified],
             device=self.model.device,
         )
-        self._execute_exact_query_after_fk(
-            compute_gradient=compute_gradient, probe_only=probe_only
-        )
+        self._execute_exact_query_after_fk(compute_gradient=compute_gradient, probe_only=probe_only)
 
-    def _execute_exact_query_after_fk(
-        self, *, compute_gradient: bool, probe_only: bool
-    ) -> None:
+    def _execute_exact_query_after_fk(self, *, compute_gradient: bool, probe_only: bool) -> None:
         """Run Newton's unchanged exact mesh query after FK has been evaluated."""
 
         self.pipeline.collide(self.state, self.contacts)

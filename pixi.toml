@@ -133,9 +133,14 @@ test-spot-locomanip = { cmd = "python -m pytest test/test_spot_locomanip_mjviser
 
 # CUDA feature for GPU acceleration
 [feature.cuda]
+platforms = ["linux-64"]
 # CUDA feature needs pytorch channel first to get CUDA build
 channels = ["pytorch", "nvidia", "conda-forge"]
 channel-priority = "strict"
+
+[feature.cuda.pypi-dependencies]
+# The Newton source checkout used by GPU WBC needs Warp's DeterministicMode API.
+warp-lang = ">=1.17.0"
 
 [feature.cuda.target.linux-64.dependencies]
 # CUDA-enabled PyTorch from pytorch channel (linux only)

@@ -107,9 +107,7 @@ def _jsonable(value: Any) -> Any:
             label = "-inf"
         return {"__nonfinite_float__": label}
     if is_dataclass(value):
-        return {
-            field.name: _jsonable(getattr(value, field.name)) for field in fields(value)
-        }
+        return {field.name: _jsonable(getattr(value, field.name)) for field in fields(value)}
     if isinstance(value, Mapping):
         return {str(key): _jsonable(item) for key, item in value.items()}
     if isinstance(value, (tuple, list)):
@@ -161,9 +159,7 @@ def _metadata_pairs(
     value: Mapping[str, Any] | Iterable[tuple[str, Any]],
 ) -> tuple[tuple[str, Any], ...]:
     items = value.items() if isinstance(value, Mapping) else value
-    return tuple(
-        sorted(((str(key), item) for key, item in items), key=lambda pair: pair[0])
-    )
+    return tuple(sorted(((str(key), item) for key, item in items), key=lambda pair: pair[0]))
 
 
 def _require_nonnegative(name: str, value: float) -> None:
@@ -196,9 +192,7 @@ class RobotSolveSpec:
     joint_velocity_indices: tuple[int, ...] = ()
     joint_velocity_sizes: tuple[int, ...] = ()
     collision_geometry_names: tuple[str, ...] = ()
-    configuration_update: ConfigurationUpdateKind = (
-        ConfigurationUpdateKind.MODEL_MANIFOLD
-    )
+    configuration_update: ConfigurationUpdateKind = ConfigurationUpdateKind.MODEL_MANIFOLD
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "joint_names", tuple(self.joint_names))
@@ -240,52 +234,36 @@ class RobotSolveSpec:
         if not self.model_hash:
             raise ContractViolation("robot model_hash must not be empty")
         if self.configuration_dim <= 0 or self.velocity_dim <= 0:
-            raise ContractViolation(
-                "robot configuration_dim and velocity_dim must be positive"
-            )
+            raise ContractViolation("robot configuration_dim and velocity_dim must be positive")
         if len(set(self.joint_names)) != len(self.joint_names):
             raise ContractViolation("robot joint_names must be unique")
         if len(set(self.active_joint_names)) != len(self.active_joint_names):
             raise ContractViolation("robot active_joint_names must be unique")
         if len(set(self.task_frames)) != len(self.task_frames):
             raise ContractViolation("robot task_frames must be unique")
-        if len(set(self.collision_geometry_names)) != len(
-            self.collision_geometry_names
-        ):
+        if len(set(self.collision_geometry_names)) != len(self.collision_geometry_names):
             raise ContractViolation("robot collision_geometry_names must be unique")
         if not self.active_velocity_indices:
             raise ContractViolation("robot must expose at least one active velocity")
         if tuple(sorted(self.active_velocity_indices)) != self.active_velocity_indices:
-            raise ContractViolation(
-                "robot active_velocity_indices must be sorted and unique"
-            )
+            raise ContractViolation("robot active_velocity_indices must be sorted and unique")
         if (
             self.active_velocity_indices[0] < 0
             or self.active_velocity_indices[-1] >= self.velocity_dim
         ):
-            raise ContractViolation(
-                "robot active_velocity_indices must lie inside velocity_dim"
-            )
+            raise ContractViolation("robot active_velocity_indices must lie inside velocity_dim")
         active_count = len(self.active_velocity_indices)
         if self.active_joint_names and len(self.active_joint_names) != active_count:
-            raise ContractViolation(
-                "robot active_joint_names must match active_velocity_indices"
-            )
-        if self.active_joint_names and not set(self.active_joint_names).issubset(
-            self.joint_names
-        ):
-            raise ContractViolation(
-                "robot active_joint_names must exist in joint_names"
-            )
+            raise ContractViolation("robot active_joint_names must match active_velocity_indices")
+        if self.active_joint_names and not set(self.active_joint_names).issubset(self.joint_names):
+            raise ContractViolation("robot active_joint_names must exist in joint_names")
         if self.active_configuration_indices:
             if len(self.active_configuration_indices) != active_count:
                 raise ContractViolation(
                     "robot active_configuration_indices must match active velocities"
                 )
             if len(set(self.active_configuration_indices)) != active_count:
-                raise ContractViolation(
-                    "robot active_configuration_indices must be unique"
-                )
+                raise ContractViolation("robot active_configuration_indices must be unique")
             if (
                 min(self.active_configuration_indices) < 0
                 or max(self.active_configuration_indices) >= self.configuration_dim
@@ -302,16 +280,12 @@ class RobotSolveSpec:
         if any(joint_spans) and not all(
             len(values) == len(self.joint_names) for values in joint_spans
         ):
-            raise ContractViolation(
-                "joint coordinate/velocity spans must align with joint_names"
-            )
+            raise ContractViolation("joint coordinate/velocity spans must align with joint_names")
         if all(joint_spans):
             if any(size < 0 for size in self.joint_configuration_sizes) or any(
                 size < 0 for size in self.joint_velocity_sizes
             ):
-                raise ContractViolation(
-                    "joint coordinate/velocity sizes must be nonnegative"
-                )
+                raise ContractViolation("joint coordinate/velocity sizes must be nonnegative")
             if any(
                 start < 0 or start + size > self.configuration_dim
                 for start, size in zip(
@@ -320,9 +294,7 @@ class RobotSolveSpec:
                     strict=True,
                 )
             ):
-                raise ContractViolation(
-                    "joint configuration spans exceed configuration_dim"
-                )
+                raise ContractViolation("joint configuration spans exceed configuration_dim")
             if any(
                 start < 0 or start + size > self.velocity_dim
                 for start, size in zip(
@@ -344,9 +316,7 @@ class RobotSolveSpec:
         """Return a content-derived cache key for one compiled graph shape."""
 
         if not task_layout_hash or not dtype or not device_arch:
-            raise ContractViolation(
-                "task_layout_hash, dtype, and device_arch must not be empty"
-            )
+            raise ContractViolation("task_layout_hash, dtype, and device_arch must not be empty")
         if batch_size <= 0:
             raise ContractViolation("batch_size must be positive")
         return (
@@ -402,9 +372,7 @@ class VelocityTaskLayout:
         object.__setattr__(self, "task_frames", tuple(self.task_frames))
         if not self.name:
             raise ContractViolation("velocity task layout name must not be empty")
-        if not self.task_dimensions or any(
-            dimension <= 0 for dimension in self.task_dimensions
-        ):
+        if not self.task_dimensions or any(dimension <= 0 for dimension in self.task_dimensions):
             raise ContractViolation("velocity task dimensions must be positive")
         if self.constraint_rows <= 0:
             raise ContractViolation("velocity constraint_rows must be positive")
@@ -469,9 +437,7 @@ class TaskSpec:
             TaskKind.MANIPULABILITY: TargetRepresentation.SCALAR,
         }[self.kind]
         if self.representation is not expected:
-            raise ContractViolation(
-                f"{self.kind.value} task requires {expected.value} targets"
-            )
+            raise ContractViolation(f"{self.kind.value} task requires {expected.value} targets")
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> TaskSpec:
@@ -510,8 +476,7 @@ class ConstraintSpec:
             safety_critical=bool(value.get("safety_critical", True)),
             capacity=value.get("capacity"),
             parameters=tuple(
-                (str(key), _deep_tuple(item))
-                for key, item in value.get("parameters", ())
+                (str(key), _deep_tuple(item)) for key, item in value.get("parameters", ())
             ),
         )
 
@@ -533,9 +498,7 @@ class WbcBatchRequest:
     def __post_init__(self) -> None:
         object.__setattr__(self, "tasks", tuple(self.tasks))
         object.__setattr__(self, "constraints", tuple(self.constraints))
-        object.__setattr__(
-            self, "execution_target", _enum(ExecutionTarget, self.execution_target)
-        )
+        object.__setattr__(self, "execution_target", _enum(ExecutionTarget, self.execution_target))
         if not self.request_id:
             raise ContractViolation("request_id must not be empty")
         if self.batch_size <= 0 or self.horizon <= 0:
@@ -561,9 +524,7 @@ class WbcBatchRequest:
         return _jsonable(self)
 
     def to_json(self) -> str:
-        return json.dumps(
-            self.to_dict(), allow_nan=False, sort_keys=True, separators=(",", ":")
-        )
+        return json.dumps(self.to_dict(), allow_nan=False, sort_keys=True, separators=(",", ":"))
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> WbcBatchRequest:
@@ -575,8 +536,7 @@ class WbcBatchRequest:
             q=_deep_tuple(value["q"]),
             tasks=tuple(TaskSpec.from_dict(task) for task in value["tasks"]),
             constraints=tuple(
-                ConstraintSpec.from_dict(constraint)
-                for constraint in value["constraints"]
+                ConstraintSpec.from_dict(constraint) for constraint in value["constraints"]
             ),
             execution_target=ExecutionTarget(value["execution_target"]),
             require_target=bool(value["require_target"]),
@@ -603,9 +563,7 @@ class ExecutionAttribution:
     kernel_launch_count: int = 0
 
     def __post_init__(self) -> None:
-        object.__setattr__(
-            self, "requested_target", _enum(ExecutionTarget, self.requested_target)
-        )
+        object.__setattr__(self, "requested_target", _enum(ExecutionTarget, self.requested_target))
         object.__setattr__(self, "actual_device", _enum(DeviceKind, self.actual_device))
         if self.target_required and self.requested_target is ExecutionTarget.AUTO:
             raise ContractViolation("AUTO requested_target cannot be required")
@@ -660,9 +618,7 @@ class TimingBreakdown:
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> TimingBreakdown:
-        return cls(
-            **{field.name: float(value.get(field.name, 0.0)) for field in fields(cls)}
-        )
+        return cls(**{field.name: float(value.get(field.name, 0.0)) for field in fields(cls)})
 
 
 @dataclass(frozen=True)
@@ -729,9 +685,7 @@ class ItemDiagnostics:
         _require_nonnegative("active_pair_count", self.active_pair_count)
         _require_nonnegative("iterations", self.iterations)
         if self.first_invalid_horizon_sample is not None:
-            _require_nonnegative(
-                "first_invalid_horizon_sample", self.first_invalid_horizon_sample
-            )
+            _require_nonnegative("first_invalid_horizon_sample", self.first_invalid_horizon_sample)
 
     def numerical_values(self) -> tuple[float, ...]:
         names = (
@@ -743,9 +697,7 @@ class ItemDiagnostics:
             "maximum_joint_step_rad",
             "accepted_step_size",
         )
-        return tuple(
-            float(value) for name in names if (value := getattr(self, name)) is not None
-        )
+        return tuple(float(value) for name in names if (value := getattr(self, name)) is not None)
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> ItemDiagnostics:
@@ -766,8 +718,7 @@ class ItemDiagnostics:
             accepted_step_size=value.get("accepted_step_size"),
             interventions=tuple(value.get("interventions", ())),
             backend_diagnostics=tuple(
-                (str(key), _deep_tuple(item))
-                for key, item in value.get("backend_diagnostics", ())
+                (str(key), _deep_tuple(item)) for key, item in value.get("backend_diagnostics", ())
             ),
         )
 
@@ -818,60 +769,41 @@ class WbcBatchResult:
             if requested is ExecutionTarget.CPU and actual is not DeviceKind.CPU:
                 errors.append("required CPU execution did not occur")
             if self.attribution.cpu_fallback_used:
-                errors.append(
-                    "fallback output cannot satisfy a required execution target"
-                )
+                errors.append("fallback output cannot satisfy a required execution target")
             if not self.attribution.device_execution_proven:
                 errors.append("required device execution is not proven")
 
         for item in self.items:
-            if (
-                item.decision is Decision.APPROVED
-                and item.status is not StatusCode.SOLVED
-            ):
-                errors.append(
-                    f"item {item.batch_index}: only solved status can be approved"
-                )
+            if item.decision is Decision.APPROVED and item.status is not StatusCode.SOLVED:
+                errors.append(f"item {item.batch_index}: only solved status can be approved")
             if item.decision is Decision.REJECTED and item.status is StatusCode.SOLVED:
-                errors.append(
-                    f"item {item.batch_index}: solved status cannot be rejected"
-                )
+                errors.append(f"item {item.batch_index}: solved status cannot be rejected")
             if (
                 item.decision is Decision.NEEDS_VERIFICATION
                 and item.status is not StatusCode.SOLVED
             ):
-                errors.append(
-                    f"item {item.batch_index}: only solved status can await verification"
-                )
+                errors.append(f"item {item.batch_index}: only solved status can await verification")
             if (
                 item.decision in {Decision.APPROVED, Decision.NEEDS_VERIFICATION}
                 and item.capacity_overflow
             ):
-                errors.append(
-                    f"item {item.batch_index}: capacity overflow cannot be accepted"
-                )
+                errors.append(f"item {item.batch_index}: capacity overflow cannot be accepted")
             if (
                 item.decision in {Decision.APPROVED, Decision.NEEDS_VERIFICATION}
                 and item.first_invalid_horizon_sample is not None
             ):
-                errors.append(
-                    f"item {item.batch_index}: invalid horizon sample cannot be accepted"
-                )
+                errors.append(f"item {item.batch_index}: invalid horizon sample cannot be accepted")
             if item.decision in {
                 Decision.APPROVED,
                 Decision.NEEDS_VERIFICATION,
             } and not all(math.isfinite(value) for value in item.numerical_values()):
-                errors.append(
-                    f"item {item.batch_index}: non-finite diagnostics cannot be accepted"
-                )
+                errors.append(f"item {item.batch_index}: non-finite diagnostics cannot be accepted")
             if (
                 item.decision in {Decision.APPROVED, Decision.NEEDS_VERIFICATION}
                 and item.minimum_joint_margin_rad is not None
                 and item.minimum_joint_margin_rad < 0
             ):
-                errors.append(
-                    f"item {item.batch_index}: negative joint margin cannot be accepted"
-                )
+                errors.append(f"item {item.batch_index}: negative joint margin cannot be accepted")
             if (
                 item.decision in {Decision.APPROVED, Decision.NEEDS_VERIFICATION}
                 and item.minimum_collision_margin_m is not None
@@ -886,9 +818,7 @@ class WbcBatchResult:
         return _jsonable(self)
 
     def to_json(self) -> str:
-        return json.dumps(
-            self.to_dict(), allow_nan=False, sort_keys=True, separators=(",", ":")
-        )
+        return json.dumps(self.to_dict(), allow_nan=False, sort_keys=True, separators=(",", ":"))
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> WbcBatchResult:

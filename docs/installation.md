@@ -231,7 +231,7 @@ used by this repository's development builds.
 | Examples | `python -m pip install "embodik[examples]"` | Copied examples, robot descriptions, Viser, and Python Pinocchio for scripts that import it directly |
 | Direct visualization | `python -m pip install "embodik[visualization]"` | Viser, mesh loading, and URDF parsing without adding Python Pinocchio |
 | Pinocchio visualization | `python -m pip install "embodik[visualization-pinocchio]"` | Pinocchio's Python ViserVisualizer |
-| Model-derived GPU WBC | `python -m pip install "embodik[gpu-wbc]"` | Torch + Warp; also install a compatible Newton build as described below |
+| Model-derived GPU WBC | `python -m pip install "embodik[gpu-wbc]"` | Torch + Warp 1.17 or newer; also install a compatible Newton build as described below |
 | GPU collision | `python -m pip install "embodik[gpu-collision]"` | NVIDIA Warp collision experiments |
 
 The model-derived WBC examples also need Newton. The current integration is

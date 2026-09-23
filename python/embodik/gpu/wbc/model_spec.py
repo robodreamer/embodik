@@ -35,9 +35,7 @@ def floating_pose_model_parameters_from_embodik(
     import numpy as np
 
     if not bool(robot.is_floating_base):
-        raise ContractViolation(
-            "floating pose parameters require a floating-base robot"
-        )
+        raise ContractViolation("floating pose parameters require a floating-base robot")
     if int(robot.nq) != int(robot.nv) + 1:
         raise ContractViolation("floating pose parameters require nq=nv+1")
     if len(base_velocity_limits) != 6 or not all(
@@ -49,9 +47,7 @@ def floating_pose_model_parameters_from_embodik(
         raise ContractViolation("active_velocity_indices must be sorted and unique")
     default = np.asarray(default_configuration, dtype=float)
     if default.shape != (int(robot.nq),) or not np.isfinite(default).all():
-        raise ContractViolation(
-            f"default configuration must contain {int(robot.nq)} finite values"
-        )
+        raise ContractViolation(f"default configuration must contain {int(robot.nq)} finite values")
 
     names = tuple(str(value) for value in robot.get_joint_names())
     records = [
@@ -74,9 +70,7 @@ def floating_pose_model_parameters_from_embodik(
     if not set(root_velocities).issubset(active):
         raise ContractViolation("all six free-root velocities must be active")
 
-    lower_all, upper_all = (
-        np.asarray(value, dtype=float) for value in robot.get_joint_limits()
-    )
+    lower_all, upper_all = (np.asarray(value, dtype=float) for value in robot.get_joint_limits())
     velocity_all = np.asarray(robot.get_velocity_limits(), dtype=float)
     lower: list[float] = []
     upper: list[float] = []
@@ -106,9 +100,7 @@ def floating_pose_model_parameters_from_embodik(
                 f"active scalar velocity {velocity_index} has non-finite limits"
             )
         if values[0] >= values[1] or values[2] <= 0.0:
-            raise ContractViolation(
-                f"active scalar velocity {velocity_index} has invalid limits"
-            )
+            raise ContractViolation(f"active scalar velocity {velocity_index} has invalid limits")
         lower.append(float(values[0]))
         upper.append(float(values[1]))
         velocity.append(float(values[2]))
@@ -169,9 +161,7 @@ def robot_solve_spec_from_embodik(
         floating_base=bool(robot.is_floating_base),
         joint_names=joint_names,
         active_velocity_indices=(
-            tuple(range(nv))
-            if active_velocity_indices is None
-            else tuple(active_velocity_indices)
+            tuple(range(nv)) if active_velocity_indices is None else tuple(active_velocity_indices)
         ),
         task_frames=tuple(task_frames),
         active_joint_names=tuple(active_joint_names),
@@ -217,9 +207,7 @@ def pose_model_parameters_from_embodik(
     import numpy as np
 
     if bool(robot.is_floating_base):
-        raise ContractViolation(
-            "model-derived pose solver currently requires a fixed-base robot"
-        )
+        raise ContractViolation("model-derived pose solver currently requires a fixed-base robot")
     if frame is not None and task_frames:
         raise ContractViolation("provide frame or task_frames, not both")
     frames = (frame,) if frame is not None else tuple(task_frames)
@@ -232,9 +220,7 @@ def pose_model_parameters_from_embodik(
     all_joint_names = tuple(str(value) for value in robot.get_joint_names())
     missing = sorted(set(active_joint_names) - set(all_joint_names))
     if missing:
-        raise ContractViolation(
-            f"active joints are absent from loaded model: {', '.join(missing)}"
-        )
+        raise ContractViolation(f"active joints are absent from loaded model: {', '.join(missing)}")
     q_indices: list[int] = []
     v_indices: list[int] = []
     for joint_name in active_joint_names:
@@ -248,15 +234,11 @@ def pose_model_parameters_from_embodik(
         q_indices.append(int(robot.get_joint_config_index(joint_name)))
         v_indices.append(int(robot.get_joint_velocity_index(joint_name)))
     if tuple(sorted(v_indices)) != tuple(v_indices):
-        raise ContractViolation(
-            "active joints must be ordered by their model velocity indices"
-        )
+        raise ContractViolation("active joints must be ordered by their model velocity indices")
 
     default = np.asarray(default_configuration, dtype=float)
     if default.shape != (int(robot.nq),) or not np.isfinite(default).all():
-        raise ContractViolation(
-            f"default configuration must contain {int(robot.nq)} finite values"
-        )
+        raise ContractViolation(f"default configuration must contain {int(robot.nq)} finite values")
     lower, upper = robot.get_joint_limits()
     lower = np.asarray(lower, dtype=float)
     upper = np.asarray(upper, dtype=float)
@@ -269,9 +251,7 @@ def pose_model_parameters_from_embodik(
         and np.isfinite(active_upper).all()
         and np.isfinite(active_velocity).all()
     ):
-        raise ContractViolation(
-            "active model joints must have finite position and velocity limits"
-        )
+        raise ContractViolation("active model joints must have finite position and velocity limits")
     if np.any(active_lower >= active_upper) or np.any(active_velocity <= 0.0):
         raise ContractViolation("active model joint limits are invalid")
 

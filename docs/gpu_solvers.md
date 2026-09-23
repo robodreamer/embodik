@@ -34,7 +34,7 @@ copies, target generation, or physics stepping free.
 
 - Python 3.10–3.12 and a working EmbodiK source build;
 - an NVIDIA GPU supported by the installed Torch, Warp, and Newton versions;
-- `torch`, `warp-lang`, and a compatible Newton installation;
+- `torch`, `warp-lang>=1.17.0`, and a compatible Newton installation;
 - Viser, yourdfpy, and robot descriptions for the visual examples.
 
 With pip or a virtual environment:
@@ -45,7 +45,7 @@ git clone --depth 1 https://github.com/newton-physics/newton.git ../newton
 python -m pip install -e ../newton
 ```
 
-For a repository checkout managed by Pixi, create the CUDA environment and
+For a Linux x86-64 repository checkout managed by Pixi, create the CUDA environment and
 install both editable source trees once:
 
 ```bash
@@ -69,7 +69,8 @@ The repair task installs the CUDA 12.9 Torch wheel used for `sm_120`; it does
 not modify the system Python environment.
 
 The current integration was validated against the Newton 1.6 development
-line. The first run builds and caches Newton/Warp kernels for the selected
+line with Warp 1.17.0. Older Warp builds can fail during Newton import before
+an EmbodiK solve begins. The first run builds and caches Newton/Warp kernels for the selected
 model and shape; benchmark only after warm-up.
 
 ## Run the parallel showcase
