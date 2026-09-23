@@ -30,6 +30,7 @@ not replace, reconfigure, or import tasks from an existing velocity solver.
 | Allocation | Diagonal generalized acceleration metric and reference |
 | Contact | Fixed-base point or rigid contact kinematic acceleration equalities |
 | Geometry | Tight point, tight frame pose, relative pose, torso pose bounds, and CoM support polygons |
+| Centroidal stability | Momentum-rate objective and bounds, predicted capture point, and physical centroidal-rate ZMP |
 | Collision compatibility | Canonical velocity collision rows lifted to next velocity, followed by conservative-or-exact sampled validation |
 | Native collision certification | Exact-name sphere-sphere catalogs on fixed-base all-prismatic scalar models |
 
@@ -52,6 +53,9 @@ rows must be supplied explicitly.
 | Task-space finite-step bounds | Supported through `TaskAccelerationBounds`; position-step priority-policy rows are not imported automatically |
 | Self-collision include/exclude filters and per-pair floors | Supported through `solve_with_velocity_collision()` using the configured velocity solver |
 | CoM support polygon | Native `ComSupportPolygonAccelerationConstraint` for fixed-base/root-fixed support |
+| Centroidal momentum-rate objective and bounds | Native physical `Ag * ddq + dAg * dq` rows for fixed-base models |
+| Predicted capture point | Native `CapturePointAccelerationConstraint` using the solver's constant-acceleration integration rule |
+| Physical centroidal-rate ZMP | Native `ZmpAccelerationConstraint` with a positive vertical-force gate and accepted-state recheck |
 | Tight point and frame pose bounds | Native acceleration constraints |
 | Relative pose bounds | Native acceleration constraint |
 | Torso pose bounds | Native acceleration constraint with an explicit caller-owned reference pose |
@@ -119,6 +123,32 @@ The solver is stateless across calls. The caller owns the applied `dq` used on
 the next tick and must reset it when switching controllers, resetting the
 robot, or rejecting a result.
 
+## Centroidal Stability
+
+Centroidal momentum-rate rows use six-axis order
+`[linear x, y, z; angular x, y, z]`. The objective and bounds operate on the
+physical quantity:
+
+```text
+hdot = Ag(q) * ddq + dAg(q, dq) * dq
+```
+
+Predicted capture point uses CoM position, velocity, physical acceleration, a
+per-solve frozen `omega`, and the same constant-acceleration integration rule
+used for `q_solution` and `joint_velocities_next`.
+
+Physical centroidal-rate ZMP uses net force after gravity, enforces
+`Fz >= fz_min > 0`, and retains CoM-height and horizontal-force terms in every
+cross-multiplied polygon row. Successful results are postvalidated at the
+nonlinear predicted state.
+
+These capabilities are fixed-base solver constraints.
+`AccelerationSolver.capabilities().supports_dynamic_balance` remains false:
+the rows do not allocate contact wrenches, enforce friction cones, or prove
+floating-base contact-force feasibility. See
+[Centroidal Stability](centroidal_stability.md) for units, frame conventions,
+velocity-level semantics, formulas, and diagnostics.
+
 ## Collision Modes
 
 ### Velocity-row compatibility
@@ -149,10 +179,12 @@ rejected until they provide the same predicted-state certificate contract.
 
 ## Build And ABI Notes
 
-The acceleration API is introduced in `0.21.0` on top of the `0.20.x`
-velocity-solver integration baseline. The shared `Task` virtual interface and
-object layout are unchanged, but source builds must rebuild `embodik_core` and
-the Nanobind extension together before using the new Python types.
+The acceleration API was introduced in `0.21.0` on top of the `0.20.x`
+velocity-solver integration baseline. The shared `Task` virtual interface is
+unchanged. The `0.22.0` centroidal additions extend public solver option and
+result layouts, so native consumers must rebuild `embodik_core` and the
+Nanobind extension together. Pre-`1.0` native binaries are not compatible
+across minor releases.
 
 ## API Reference
 
@@ -173,6 +205,16 @@ the Nanobind extension together before using the new Python types.
 ::: embodik.AccelerationTaskDiagnostics
 
 ::: embodik.AccelerationAllocationDiagnostics
+
+::: embodik.CentroidalMomentumRateObjective
+
+::: embodik.CentroidalMomentumRateBounds
+
+::: embodik.CentroidalMomentumRateDiagnostics
+
+::: embodik.CapturePointAccelerationDiagnostics
+
+::: embodik.ZmpAccelerationDiagnostics
 
 ::: embodik.AccelerationAnalyticCollisionPairDiagnostics
 
@@ -197,6 +239,10 @@ the Nanobind extension together before using the new Python types.
 ::: embodik.ComSupportPolygonAccelerationPolicy
 
 ::: embodik.ComSupportPolygonAccelerationConstraint
+
+::: embodik.CapturePointAccelerationConstraint
+
+::: embodik.ZmpAccelerationConstraint
 
 ::: embodik.TightPointAccelerationConstraint
 

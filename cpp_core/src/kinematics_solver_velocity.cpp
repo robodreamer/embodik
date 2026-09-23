@@ -7,6 +7,33 @@
 
 namespace embodik {
 
+VelocitySolverResult
+KinematicsSolver::solve_velocity_with_state(const Eigen::VectorXd &current_q,
+                                            const Eigen::VectorXd &current_dq,
+                                            bool apply_limits,
+                                            bool stall_recovery) {
+  if (current_dq.size() != robot_->nv()) {
+    VelocitySolverResult result;
+    result.status = SolverStatus::kInvalidInput;
+    result.status_message =
+        "current_dq size does not match robot nv in solve_velocity_with_state";
+    result.joint_velocities = Eigen::VectorXd::Zero(robot_->nv());
+    result.solution.assign(static_cast<std::size_t>(robot_->nv()), 0.0);
+    return result;
+  }
+  if (!current_dq.allFinite()) {
+    VelocitySolverResult result;
+    result.status = SolverStatus::kNonFiniteInput;
+    result.status_message =
+        "current_dq contains non-finite values in solve_velocity_with_state";
+    result.joint_velocities = Eigen::VectorXd::Zero(robot_->nv());
+    result.solution.assign(static_cast<std::size_t>(robot_->nv()), 0.0);
+    return result;
+  }
+  pending_explicit_current_dq_ = current_dq;
+  return solve_velocity(current_q, apply_limits, stall_recovery);
+}
+
 std::pair<double, double> KinematicsSolver::calculate_velocity_box_constraint(
     double position_margin_lower, double position_margin_upper,
     double velocity_limit, double acceleration_limit, double dt,
@@ -244,6 +271,7 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
         solver->pending_step_validation_dt_.reset();
         solver->pending_position_step_priority_constraints_.clear();
         solver->pending_position_step_acceleration_limits_ = false;
+        solver->pending_explicit_current_dq_.reset();
       }
     }
   } clear_pending_locks{this};
@@ -262,6 +290,19 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
     result.status = SolverStatus::kNonFiniteInput;
     result.status_message =
         "current configuration contains non-finite values in solve_velocity";
+    result.solution.assign(static_cast<std::size_t>(robot_->nv()), 0.0);
+    result.joint_velocities = Eigen::VectorXd::Zero(robot_->nv());
+    result.limits_applied = apply_limits;
+    last_solution_dq_norm_ = 0.0;
+    return result;
+  }
+  const Eigen::VectorXd *explicit_current_dq = active_explicit_current_dq();
+  if (velocity_zmp_constraint_.has_value() &&
+      velocity_zmp_constraint_->enabled && explicit_current_dq == nullptr) {
+    result.status = SolverStatus::kInvalidInput;
+    result.status_message =
+        "velocity-ZMP constraint requires explicit current_dq; use "
+        "solve_velocity_with_state or PositionStepOptions.current_joint_velocity";
     result.solution.assign(static_cast<std::size_t>(robot_->nv()), 0.0);
     result.joint_velocities = Eigen::VectorXd::Zero(robot_->nv());
     result.limits_applied = apply_limits;
@@ -490,13 +531,6 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
     }
   }
 
-  for (int idx : pending_velocity_lock_indices_) {
-    if (idx >= 0 && idx < robot_->nv()) {
-      excluded_union.insert(idx);
-    }
-  }
-
-
   // Velocity-to-configuration index mapping (cached; used by
   // position-based velocity constraints).
   const std::vector<int> &velocity_to_config_index =
@@ -668,6 +702,29 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
   if (use_contact_projection && com_constraint_result.has_value()) {
     com_constraint_result->jacobian =
         com_constraint_result->jacobian * contact_P_c;
+  }
+
+  std::optional<ComConstraintResult> centroidal_momentum_bounds_result =
+      compute_centroidal_momentum_bounds_constraint();
+  if (use_contact_projection && centroidal_momentum_bounds_result.has_value()) {
+    centroidal_momentum_bounds_result->jacobian =
+        centroidal_momentum_bounds_result->jacobian * contact_P_c;
+  }
+  std::optional<ComConstraintResult> capture_point_constraint_result =
+      compute_capture_point_constraint();
+  if (use_contact_projection && capture_point_constraint_result.has_value()) {
+    capture_point_constraint_result->jacobian =
+        capture_point_constraint_result->jacobian * contact_P_c;
+  }
+  std::optional<ComConstraintResult> velocity_zmp_constraint_result =
+      std::nullopt;
+  if (explicit_current_dq != nullptr) {
+    velocity_zmp_constraint_result =
+        compute_velocity_zmp_constraint(*explicit_current_dq);
+    if (use_contact_projection && velocity_zmp_constraint_result.has_value()) {
+      velocity_zmp_constraint_result->jacobian =
+          velocity_zmp_constraint_result->jacobian * contact_P_c;
+    }
   }
 
   // Task normal projection for violated CoM rows:
@@ -1146,6 +1203,18 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
     num_constraints +=
         static_cast<int>(com_constraint_result->jacobian.rows());
   }
+  if (centroidal_momentum_bounds_result.has_value()) {
+    num_constraints += static_cast<int>(
+        centroidal_momentum_bounds_result->jacobian.rows());
+  }
+  if (capture_point_constraint_result.has_value()) {
+    num_constraints +=
+        static_cast<int>(capture_point_constraint_result->jacobian.rows());
+  }
+  if (velocity_zmp_constraint_result.has_value()) {
+    num_constraints +=
+        static_cast<int>(velocity_zmp_constraint_result->jacobian.rows());
+  }
 
   if (rel_pose_constraint_result.has_value()) {
     num_constraints +=
@@ -1423,6 +1492,27 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
         C, c_lower, c_upper, constraint_idx, robot_->nv(),
         com_constraint_result->jacobian, com_constraint_result->lower_bounds,
         com_constraint_result->upper_bounds);
+  }
+  if (centroidal_momentum_bounds_result.has_value()) {
+    constraint_idx = append_constraint_block(
+        C, c_lower, c_upper, constraint_idx, robot_->nv(),
+        centroidal_momentum_bounds_result->jacobian,
+        centroidal_momentum_bounds_result->lower_bounds,
+        centroidal_momentum_bounds_result->upper_bounds);
+  }
+  if (capture_point_constraint_result.has_value()) {
+    constraint_idx = append_constraint_block(
+        C, c_lower, c_upper, constraint_idx, robot_->nv(),
+        capture_point_constraint_result->jacobian,
+        capture_point_constraint_result->lower_bounds,
+        capture_point_constraint_result->upper_bounds);
+  }
+  if (velocity_zmp_constraint_result.has_value()) {
+    constraint_idx = append_constraint_block(
+        C, c_lower, c_upper, constraint_idx, robot_->nv(),
+        velocity_zmp_constraint_result->jacobian,
+        velocity_zmp_constraint_result->lower_bounds,
+        velocity_zmp_constraint_result->upper_bounds);
   }
 
   if (rel_pose_constraint_result.has_value()) {
@@ -2214,6 +2304,19 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
           if (dense_pos_upper_sp[k] > -kNoPosBound)
             dq[k] = std::min(dq[k], dense_pos_upper_sp[k]);
         }
+      }
+    }
+
+    Eigen::Map<Eigen::VectorXd> dq_final(result.solution.data(),
+                                         result.solution.size());
+    if (has_active_velocity_centroidal_hard_constraints()) {
+      std::string validation_message;
+      if (!validate_centroidal_velocity_candidate(
+              q_eval, explicit_current_dq, dq_final, &validation_message)) {
+        result.status = SolverStatus::kInfeasible;
+        result.status_message = validation_message;
+        dq_final.setZero();
+        std::fill(result.solution.begin(), result.solution.end(), 0.0);
       }
     }
 

@@ -24,9 +24,9 @@ the best starting points for users.
 - [`01_basic_ik_simple.py`](basic_ik.md) — Minimal fixed-base IK loop with velocity/acceleration solver selection
 - [`02_collision_aware_IK.py`](collision_aware_ik.md) — Collision-aware IK with velocity/acceleration solver selection and optional GPU mode
 - [`03_teleop_ik.py`](teleop_ik.md) — Minimal teleop input adapter into EmbodiK IK
-- [`04_com_constraint_example.py`](com_constraint_ik.md) — CoM support-polygon constraint demo in Viser
+- [`04_com_constraint_example.py`](com_constraint_ik.md) — Visual Panda CoM, momentum, capture-point, and velocity-ZMP support demo
 - [`05_dual_arm_ects.py`](dual_arm_ects.md) — Dual-arm ECTS/Orthogonal coordination with collision handling
-- [`06_bimanual_whole_body_ik.py`](bimanual_whole_body_ik.md) — Bimanual whole-body teleop for AI Worker and RB-Y1 with CoM, collision handling, adaptive tuning, and optional Seer input
+- [`06_bimanual_whole_body_ik.py`](bimanual_whole_body_ik.md) — Bimanual whole-body teleop for AI Worker and RB-Y1 with opt-in centroidal support, collision handling, adaptive tuning, and optional Seer input
 - [`07_unitree_g1_retargeting_ik.py`](unitree_g1_retargeting_ik.md) — Unitree G1 retargeting IK with palm/foot/pelvis targets, CoM visualization, and optional self-collision constraints
 - [`08_spot_full_body_ik_viser.py`](spot_full_body_ik.md) — Spot full-body IK in regular Viser with arm+torso, torso-only, full-body, and two-stage modes
 - [`09_spot_locomanip_mjviser.py`](spot_locomanip_mjviser.md) — Spot locomanipulation ONNX policy rollout in MuJoCo through mjviser
@@ -52,9 +52,9 @@ the application to `AccelerationSolver`.
 | `01_basic_ik_simple.py` | Selectable | Fixed-base scalar joints with explicit acceleration state and task references. |
 | `02_collision_aware_IK.py` | Selectable | Adds explicit state ownership and a fail-closed sampled velocity-collision adapter. |
 | `03_teleop_ik.py` | Velocity-only | The teleop backend owns velocity position-step and reset policy; no acceleration adapter is implemented. |
-| `04_com_constraint_example.py` | Velocity-only | The topology and CoM constraint have acceleration equivalents, but the interactive runtime has not been ported to explicit `dq` ownership. |
+| `04_com_constraint_example.py` | Velocity-only | Owns explicit `dq` for position-step momentum, capture-point, and velocity-ZMP constraints; its visual runtime is not an acceleration adapter. |
 | `05_dual_arm_ects.py` | Velocity-only | ECTS mode switching and its task semantics are not exposed by the initial acceleration task API. |
-| `06_bimanual_whole_body_ik.py` | Velocity-only | The shared bimanual runtime depends on velocity-specific continuity, ownership, collision, and fallback policies. |
+| `06_bimanual_whole_body_ik.py` | Velocity-only | Exposes opt-in position-step momentum, capture-point, and velocity-ZMP controls while retaining velocity-specific continuity, ownership, collision, and fallback policies. |
 | `07_unitree_g1_retargeting_ik.py` | Unsupported | Uses a floating-base humanoid model; the acceleration solver accepts fixed-base scalar joints only. |
 | `08_spot_full_body_ik_viser.py` | Unsupported | Uses a floating-base whole-body model and velocity-specific recovery policy. |
 | `09_spot_locomanip_mjviser.py` | Unsupported | Couples floating-base IK to wheel/locomotion policy and MuJoCo runtime state. |

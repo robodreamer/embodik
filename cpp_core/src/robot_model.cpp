@@ -16,6 +16,7 @@
 
 #include <Eigen/Geometry>
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <embodik/robot_model.hpp>
 #include <fstream>
@@ -96,6 +97,48 @@ namespace {
 template <typename T>
 bool is_in_vector(const std::vector<T> &vec, const T &elt) {
   return std::find(vec.begin(), vec.end(), elt) != vec.end();
+}
+
+void validate_finite_vector(const Eigen::VectorXd &value,
+                            const std::string &name) {
+  if (!value.allFinite()) {
+    throw std::invalid_argument(name + " vector entries must be finite");
+  }
+}
+
+void validate_configuration_vector(const Eigen::VectorXd &q,
+                                   Eigen::Index expected_size) {
+  if (q.size() != expected_size) {
+    throw std::invalid_argument("Configuration vector size mismatch. Expected " +
+                                std::to_string(expected_size) + ", got " +
+                                std::to_string(q.size()));
+  }
+  validate_finite_vector(q, "Configuration");
+}
+
+Eigen::VectorXd validate_optional_velocity_vector(const Eigen::VectorXd &v,
+                                                  Eigen::Index expected_size) {
+  if (v.size() == 0) {
+    return Eigen::VectorXd::Zero(expected_size);
+  }
+  if (v.size() != expected_size) {
+    throw std::invalid_argument("Velocity vector size mismatch. Expected " +
+                                std::to_string(expected_size) + ", got " +
+                                std::to_string(v.size()));
+  }
+  validate_finite_vector(v, "Velocity");
+  return v;
+}
+
+Eigen::VectorXd validate_velocity_vector(const Eigen::VectorXd &v,
+                                         Eigen::Index expected_size) {
+  if (v.size() != expected_size) {
+    throw std::invalid_argument("Velocity vector size mismatch. Expected " +
+                                std::to_string(expected_size) + ", got " +
+                                std::to_string(v.size()));
+  }
+  validate_finite_vector(v, "Velocity");
+  return v;
 }
 }  // namespace
 
@@ -548,6 +591,67 @@ Eigen::Vector3d RobotModel::get_com_jacobian_bias() const {
     com_acceleration_updated_ = true;
   }
   return data_.acom[0];
+}
+
+double RobotModel::get_total_mass() const {
+  double total_mass = 0.0;
+  for (const auto &inertia : model_.inertias) {
+    total_mass += inertia.mass();
+  }
+  return total_mass;
+}
+
+Eigen::Matrix<double, 6, Eigen::Dynamic>
+RobotModel::get_centroidal_momentum_matrix() const {
+  return compute_centroidal_momentum_matrix(current_q_, current_v_);
+}
+
+Eigen::Matrix<double, 6, 1> RobotModel::get_centroidal_momentum() const {
+  return compute_centroidal_momentum(current_q_, current_v_);
+}
+
+Eigen::Matrix<double, 6, Eigen::Dynamic>
+RobotModel::get_centroidal_momentum_matrix_time_variation() const {
+  return compute_centroidal_momentum_matrix_time_variation(current_q_,
+                                                           current_v_);
+}
+
+Eigen::Matrix<double, 6, 1>
+RobotModel::get_centroidal_momentum_matrix_bias() const {
+  return compute_centroidal_momentum_matrix_bias(current_q_, current_v_);
+}
+
+Eigen::Matrix<double, 6, Eigen::Dynamic>
+RobotModel::compute_centroidal_momentum_matrix(
+    const Eigen::VectorXd &q, const Eigen::VectorXd &v) const {
+  validate_configuration_vector(q, model_.nq);
+  const Eigen::VectorXd validated_v =
+      validate_optional_velocity_vector(v, model_.nv);
+  return pinocchio::ccrba(model_, data_, q, validated_v);
+}
+
+Eigen::Matrix<double, 6, 1>
+RobotModel::compute_centroidal_momentum(const Eigen::VectorXd &q,
+                                        const Eigen::VectorXd &v) const {
+  validate_configuration_vector(q, model_.nq);
+  validate_velocity_vector(v, model_.nv);
+  return pinocchio::computeCentroidalMomentum(model_, data_, q, v).toVector();
+}
+
+Eigen::Matrix<double, 6, Eigen::Dynamic>
+RobotModel::compute_centroidal_momentum_matrix_time_variation(
+    const Eigen::VectorXd &q, const Eigen::VectorXd &v) const {
+  validate_configuration_vector(q, model_.nq);
+  validate_velocity_vector(v, model_.nv);
+  return pinocchio::dccrba(model_, data_, q, v);
+}
+
+Eigen::Matrix<double, 6, 1>
+RobotModel::compute_centroidal_momentum_matrix_bias(
+    const Eigen::VectorXd &q, const Eigen::VectorXd &v) const {
+  const Eigen::Matrix<double, 6, Eigen::Dynamic> dag =
+      compute_centroidal_momentum_matrix_time_variation(q, v);
+  return dag * v;
 }
 
 std::vector<std::string> RobotModel::get_frame_names() const {

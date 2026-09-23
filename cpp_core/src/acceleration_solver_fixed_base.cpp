@@ -188,6 +188,17 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
     return finish(failure(objectives.status, objectives.message));
   }
 
+  CentroidalMomentumRateObjectiveAssembly centroidal_objectives;
+  if (!options.centroidal_momentum_rate_objectives.empty()) {
+    centroidal_objectives = append_centroidal_momentum_rate_objectives(
+        &objectives, options.centroidal_momentum_rate_objectives, *robot_,
+        &constraint_source_ids);
+  }
+  if (centroidal_objectives.status != SolverStatus::kSuccess) {
+    return finish(failure(centroidal_objectives.status,
+                          centroidal_objectives.message));
+  }
+
   ConstraintValidation task_bound_validation;
   if (!options.task_acceleration_bounds.empty()) {
     task_bound_validation = validate_task_acceleration_bounds(
@@ -202,6 +213,16 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
   if (!options.task_acceleration_bounds.empty()) {
     task_bound_constraints = make_task_bound_affine_constraints(
         options.task_acceleration_bounds, objectives);
+  }
+  CentroidalMomentumRateBoundsAssembly centroidal_bounds;
+  if (!options.centroidal_momentum_rate_bounds.empty()) {
+    centroidal_bounds = make_centroidal_momentum_rate_bounds(
+        *robot_, options.centroidal_momentum_rate_bounds,
+        &constraint_source_ids);
+  }
+  if (centroidal_bounds.status != SolverStatus::kSuccess) {
+    return finish(
+        failure(centroidal_bounds.status, centroidal_bounds.message));
   }
   ContactConstraintAssembly contact_constraints;
   if (!options.contact_acceleration_constraints.empty()) {
@@ -272,6 +293,24 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
     return finish(failure(com_support_polygon_constraints.status,
                           com_support_polygon_constraints.message));
   }
+  detail::CapturePointConstraintAssembly capture_point_constraints;
+  if (!options.capture_point_constraints.empty()) {
+    capture_point_constraints = detail::make_capture_point_constraints(
+        *robot_, options.capture_point_constraints, dt,
+        &constraint_source_ids);
+  }
+  if (capture_point_constraints.status != SolverStatus::kSuccess) {
+    return finish(failure(capture_point_constraints.status,
+                          capture_point_constraints.message));
+  }
+  detail::ZmpConstraintAssembly zmp_constraints;
+  if (!options.zmp_constraints.empty()) {
+    zmp_constraints = detail::make_zmp_constraints(
+        *robot_, options.zmp_constraints, &constraint_source_ids);
+  }
+  if (zmp_constraints.status != SolverStatus::kSuccess) {
+    return finish(failure(zmp_constraints.status, zmp_constraints.message));
+  }
   const bool state_box_task_fallback_applied =
       options.allow_state_box_task_fallback &&
       zero_excluded_by_bounds(state_box.lower, state_box.upper);
@@ -283,11 +322,14 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
 
   const Eigen::Index extra_hard_rows =
       constraint_validation.row_count + task_bound_validation.row_count +
+      centroidal_bounds.row_count +
       contact_constraints.row_count + tight_point_constraints.row_count +
       tight_frame_pose_constraints.row_count +
       torso_pose_bound_constraints.row_count +
       relative_pose_constraints.row_count +
       com_support_polygon_constraints.row_count +
+      capture_point_constraints.row_count +
+      zmp_constraints.row_count +
       lock_rows.coefficients.rows() +
       native_collision_prepared.physical_constraint.coefficient_matrix.rows() +
       (effort_constraint.has_value() ? robot_->nv() : 0);
@@ -359,6 +401,14 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
         SolverStatus::kNumericalError,
         "failed to assemble task acceleration bounds"));
   }
+  if (centroidal_bounds.row_count > 0 &&
+      !constraints->append_block(make_affine_constraint_block(
+          centroidal_bounds.constraints, robot_->nv(),
+          centroidal_bounds.row_count))) {
+    return finish(failure(
+        SolverStatus::kNumericalError,
+        "failed to assemble centroidal momentum-rate bounds"));
+  }
   if (contact_constraints.row_count > 0 &&
       !constraints->append_block(make_affine_constraint_block(
           contact_constraints.constraints, robot_->nv(),
@@ -406,6 +456,21 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
     return finish(failure(
         SolverStatus::kNumericalError,
         "failed to assemble CoM support-polygon acceleration constraints"));
+  }
+  if (capture_point_constraints.row_count > 0 &&
+      !constraints->append_block(make_affine_constraint_block(
+          capture_point_constraints.constraints, robot_->nv(),
+          capture_point_constraints.row_count))) {
+    return finish(failure(
+        SolverStatus::kNumericalError,
+        "failed to assemble capture-point acceleration constraints"));
+  }
+  if (zmp_constraints.row_count > 0 &&
+      !constraints->append_block(make_affine_constraint_block(
+          zmp_constraints.constraints, robot_->nv(),
+          zmp_constraints.row_count))) {
+    return finish(failure(SolverStatus::kNumericalError,
+                          "failed to assemble ZMP acceleration constraints"));
   }
   if (!state_box_only && !constraints->finalize()) {
     return finish(failure(SolverStatus::kNumericalError,
@@ -596,6 +661,13 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
         SolverStatus::kNumericalError,
         "accepted acceleration violates task acceleration bounds")));
   }
+  if (!centroidal_bounds.constraints.empty() &&
+      !accepted_centroidal_momentum_rate_bounds_are_satisfied(
+          centroidal_bounds.constraints, result.joint_accelerations)) {
+    return finish(clear_outputs(failure(
+        SolverStatus::kNumericalError,
+        "accepted acceleration violates centroidal momentum-rate bounds")));
+  }
   if (!contact_constraints.constraints.empty() &&
       !accepted_affine_constraints_are_satisfied(
           contact_constraints.constraints, result.joint_accelerations)) {
@@ -644,6 +716,21 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
         SolverStatus::kNumericalError,
         "accepted acceleration violates CoM support-polygon acceleration "
         "constraints")));
+  }
+  if (!capture_point_constraints.constraints.empty() &&
+      !accepted_affine_constraints_are_satisfied(
+          capture_point_constraints.constraints, result.joint_accelerations)) {
+    return finish(clear_outputs(failure(
+        SolverStatus::kNumericalError,
+        "accepted acceleration violates capture-point acceleration "
+        "constraints")));
+  }
+  if (!zmp_constraints.constraints.empty() &&
+      !accepted_affine_constraints_are_satisfied(
+          zmp_constraints.constraints, result.joint_accelerations)) {
+    return finish(clear_outputs(failure(
+        SolverStatus::kNumericalError,
+        "accepted acceleration violates ZMP acceleration constraints")));
   }
   if (effort_constraint.has_value()) {
     auto evaluated =
@@ -700,7 +787,9 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
       !tight_frame_pose_constraints.prepared_constraints.empty() ||
       !torso_pose_bound_constraints.prepared_constraints.empty() ||
       !relative_pose_constraints.prepared_constraints.empty() ||
-      !com_support_polygon_constraints.prepared_constraints.empty();
+      !com_support_polygon_constraints.prepared_constraints.empty() ||
+      !capture_point_constraints.prepared_constraints.empty() ||
+      !zmp_constraints.prepared_constraints.empty();
   std::optional<StateBoxAssembly> predicted_state_box;
   if (has_predicted_geometric_acceptance ||
       native_collision_compiled.has_value()) {
@@ -766,6 +855,30 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
           detail::validate_com_support_polygon_constraint_acceptance(
               prepared, *robot_, q, dq, result.joint_accelerations, dt,
               predicted_state_box->lower, predicted_state_box->upper);
+      if (!acceptance.satisfied()) {
+        return finish(clear_outputs(
+            failure(acceptance.status, acceptance.message)));
+      }
+    }
+    for (const auto &prepared :
+         capture_point_constraints.prepared_constraints) {
+      CapturePointAccelerationDiagnostics diagnostic;
+      const auto acceptance =
+          detail::validate_capture_point_constraint_acceptance(
+              prepared, *robot_, result.q_solution,
+              result.joint_velocities_next, &diagnostic);
+      result.capture_point_diagnostics.push_back(std::move(diagnostic));
+      if (!acceptance.satisfied()) {
+        return finish(clear_outputs(
+            failure(acceptance.status, acceptance.message)));
+      }
+    }
+    for (const auto &prepared : zmp_constraints.prepared_constraints) {
+      ZmpAccelerationDiagnostics diagnostic;
+      const auto acceptance = detail::validate_zmp_constraint_acceptance(
+          prepared, *robot_, result.q_solution, result.joint_velocities_next,
+          result.joint_accelerations, &diagnostic);
+      result.zmp_diagnostics.push_back(std::move(diagnostic));
       if (!acceptance.satisfied()) {
         return finish(clear_outputs(
             failure(acceptance.status, acceptance.message)));
@@ -907,6 +1020,42 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
       }
       task_row_cursor += task_dimension;
     }
+  }
+  result.centroidal_momentum_rate_diagnostics.reserve(
+      centroidal_objectives.diagnostics.size());
+  for (const auto &record : centroidal_objectives.diagnostics) {
+    CentroidalMomentumRateDiagnostics diagnostic;
+    diagnostic.source_id = record.source_id;
+    diagnostic.target_momentum = record.target_momentum;
+    diagnostic.reference_momentum_rate = record.reference_momentum_rate;
+    diagnostic.current_momentum = record.current_momentum;
+    diagnostic.bias_momentum_rate = record.bias_momentum_rate;
+    diagnostic.selected_axes = record.selected_axes;
+    diagnostic.achieved_momentum_rate =
+        robot_->get_centroidal_momentum_matrix() * result.joint_accelerations +
+        record.bias_momentum_rate;
+    diagnostic.residual =
+        diagnostic.achieved_momentum_rate - diagnostic.reference_momentum_rate;
+    diagnostic.scale = record.objective_index < objective_scales.size()
+                           ? objective_scales[record.objective_index]
+                           : 1.0;
+    diagnostic.effective_mode =
+        record.objective_index < objective_modes.size()
+            ? objective_modes[record.objective_index]
+            : TaskSolveMode::kScale;
+    diagnostic.used_min_error_fallback =
+        record.objective_index < objective_fallbacks.size()
+            ? objective_fallbacks[record.objective_index]
+            : false;
+    if (!diagnostic.achieved_momentum_rate.allFinite() ||
+        !diagnostic.residual.allFinite()) {
+      return finish(fail_after_backend(
+          SolverStatus::kNumericalError,
+          "accepted acceleration produced non-finite centroidal momentum-rate "
+          "diagnostics"));
+    }
+    result.centroidal_momentum_rate_diagnostics.push_back(
+        std::move(diagnostic));
   }
   result.final_error = std::sqrt(squared_error);
   return finish(std::move(result));

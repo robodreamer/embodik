@@ -4,12 +4,14 @@
 
 #include "acceleration_analytic_collision.hpp"
 #include "acceleration_allocation_transform.hpp"
+#include "acceleration_capture_point_constraint.hpp"
 #include "acceleration_com_support_polygon_constraint.hpp"
 #include "acceleration_fixed_frame_pose_constraint.hpp"
 #include "acceleration_relative_pose_constraint.hpp"
 #include "acceleration_state_box.hpp"
 #include "acceleration_task_differential.hpp"
 #include "acceleration_tight_point_constraint.hpp"
+#include "acceleration_zmp_constraint.hpp"
 #include "frame_kinematic_differential.hpp"
 #include "generalized_constraint_set.hpp"
 #include "velocity_collision_constraint_provider.hpp"
@@ -75,6 +77,10 @@ constraint_family_name<FrozenNextVelocityConstraint>(
 inline const char *constraint_family_name(const TaskAccelerationBounds &) {
   return "task acceleration bounds";
 }
+inline const char *
+constraint_family_name(const CentroidalMomentumRateBounds &) {
+  return "centroidal momentum-rate bounds";
+}
 inline const char *constraint_family_name(const ContactAccelerationConstraint &) {
   return "contact acceleration constraint";
 }
@@ -92,6 +98,12 @@ inline const char *constraint_family_name(const TorsoPoseBoundAccelerationConstr
 }
 inline const char *constraint_family_name(const ComSupportPolygonAccelerationConstraint &) {
   return "CoM support-polygon constraint";
+}
+inline const char *constraint_family_name(const CapturePointAccelerationConstraint &) {
+  return "capture-point acceleration constraint";
+}
+inline const char *constraint_family_name(const ZmpAccelerationConstraint &) {
+  return "ZMP acceleration constraint";
 }
 
 template <typename Constraint>
@@ -187,6 +199,31 @@ struct ComSupportPolygonConstraintAssembly {
   Eigen::Index row_count = 0;
 };
 
+struct CentroidalMomentumRateObjectiveDiagnosticRecord {
+  std::string source_id;
+  Eigen::VectorXd target_momentum;
+  Eigen::VectorXd reference_momentum_rate;
+  Eigen::VectorXd current_momentum;
+  Eigen::VectorXd bias_momentum_rate;
+  std::vector<bool> selected_axes;
+  std::size_t objective_index = 0;
+};
+
+struct CentroidalMomentumRateObjectiveAssembly {
+  SolverStatus status = SolverStatus::kSuccess;
+  std::string message;
+  std::vector<CentroidalMomentumRateObjectiveDiagnosticRecord> diagnostics;
+};
+
+struct CentroidalMomentumRateBoundsAssembly {
+  SolverStatus status = SolverStatus::kSuccess;
+  std::string message;
+  std::vector<AffineAccelerationConstraint> constraints;
+  Eigen::Matrix<double, 6, Eigen::Dynamic> centroidal_matrix;
+  Eigen::Matrix<double, 6, 1> bias;
+  Eigen::Index row_count = 0;
+};
+
 
 VelocitySolverConfig acceleration_backend_config();
 Eigen::VectorXd resolve_acceleration_limits(const RobotModel &robot, const AccelerationSolveOptions &options, SolverStatus *status, std::string *message);
@@ -216,10 +253,12 @@ struct ObjectiveAssembly {
 
 StateBoxAssembly build_joint_state_box(const RobotModel &robot, const Eigen::VectorXd &q, const Eigen::VectorXd &dq, double dt, const Eigen::VectorXd &accel_limits, const AccelerationSolveOptions &options);
 void assemble_objectives(ObjectiveAssembly *assembly, const std::vector<std::shared_ptr<Task>> &tasks, std::vector<std::shared_ptr<Task>> &ordered_tasks, const std::unordered_map<std::string, AccelerationTaskReference> &references, const RobotModel &robot, const Eigen::VectorXd &dq, bool retain_task_differentials);
+CentroidalMomentumRateObjectiveAssembly append_centroidal_momentum_rate_objectives(ObjectiveAssembly *objectives, const std::vector<CentroidalMomentumRateObjective> &centroidal_objectives, const RobotModel &robot, std::unordered_set<std::string> *source_ids);
 const detail::AccelerationTaskDifferential *find_active_task_differential(const ObjectiveAssembly &objectives, const std::string &task_name);
 ConstraintValidation validate_acceleration_constraints(const std::vector<AffineAccelerationConstraint> &affine_constraints, const std::vector<FrozenNextVelocityConstraint> &frozen_constraints, Eigen::Index variable_count, std::unordered_set<std::string> *source_ids);
 ConstraintValidation validate_task_acceleration_bounds(const std::vector<TaskAccelerationBounds> &bounds, const ObjectiveAssembly &objectives, std::unordered_set<std::string> *source_ids);
 std::vector<AffineAccelerationConstraint> make_task_bound_affine_constraints(const std::vector<TaskAccelerationBounds> &bounds, const ObjectiveAssembly &objectives);
+CentroidalMomentumRateBoundsAssembly make_centroidal_momentum_rate_bounds(const RobotModel &robot, const std::vector<CentroidalMomentumRateBounds> &bounds, std::unordered_set<std::string> *source_ids);
 ContactConstraintAssembly make_contact_acceleration_constraints(const RobotModel &robot, const std::vector<ContactAccelerationConstraint> &contacts, std::unordered_set<std::string> *source_ids);
 TightPointConstraintAssembly make_tight_point_constraints(const RobotModel &robot, const std::vector<TightPointAccelerationConstraint> &tight_points, double dt, const Eigen::VectorXd &joint_acceleration_lower, const Eigen::VectorXd &joint_acceleration_upper, std::unordered_set<std::string> *source_ids);
 
@@ -310,6 +349,7 @@ struct FrozenTransform {
 
 FrozenTransform transform_frozen_constraints(const std::vector<FrozenNextVelocityConstraint> &constraints, const Eigen::VectorXd &dq, double dt);
 bool accepted_affine_constraints_are_satisfied(const std::vector<AffineAccelerationConstraint> &constraints, const Eigen::VectorXd &ddq);
+bool accepted_centroidal_momentum_rate_bounds_are_satisfied(const std::vector<AffineAccelerationConstraint> &constraints, const Eigen::VectorXd &ddq);
 bool accepted_frozen_constraints_are_satisfied(const std::vector<FrozenNextVelocityConstraint> &constraints, const Eigen::VectorXd &dq, double dt, const Eigen::VectorXd &ddq);
 bool accepted_lock_constraints_are_satisfied(const AccelerationSolveOptions &options, const Eigen::VectorXd &dq, double dt, const Eigen::VectorXd &ddq);
 

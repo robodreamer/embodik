@@ -35,12 +35,15 @@ bool native_collision_options_are_supported(
       !options.affine_constraints.empty() ||
       !options.frozen_next_velocity_constraints.empty() ||
       !options.task_acceleration_bounds.empty() ||
+      !options.centroidal_momentum_rate_bounds.empty() ||
       !options.contact_acceleration_constraints.empty() ||
       !options.tight_point_constraints.empty() ||
       !options.tight_frame_pose_constraints.empty() ||
       !options.relative_pose_constraints.empty() ||
       !options.torso_pose_bound_constraints.empty() ||
       !options.com_support_polygon_constraints.empty() ||
+      !options.capture_point_constraints.empty() ||
+      !options.zmp_constraints.empty() ||
       !options.zero_acceleration_joint_indices.empty() ||
       !options.zero_next_velocity_joint_indices.empty() ||
       !options.fixed_current_position_joint_indices.empty();

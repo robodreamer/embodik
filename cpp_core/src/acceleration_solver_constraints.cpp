@@ -2,6 +2,40 @@
 
 namespace embodik {
 namespace acceleration_solver_internal {
+namespace {
+
+std::vector<bool> full_axis_mask() {
+  return {true, true, true, true, true, true};
+}
+
+std::vector<bool> resolved_axis_mask(const std::vector<bool> &axis_mask) {
+  return axis_mask.empty() ? full_axis_mask() : axis_mask;
+}
+
+bool axis_mask_valid(const std::vector<bool> &axis_mask) {
+  return axis_mask.empty() || axis_mask.size() == 6U;
+}
+
+bool axis_mask_has_selection(const std::vector<bool> &axis_mask) {
+  if (axis_mask.empty()) {
+    return true;
+  }
+  return std::any_of(axis_mask.begin(), axis_mask.end(), [](bool selected) {
+    return selected;
+  });
+}
+
+Eigen::Index selected_axis_count(const std::vector<bool> &axis_mask) {
+  Eigen::Index rows = 0;
+  for (bool selected : resolved_axis_mask(axis_mask)) {
+    if (selected) {
+      ++rows;
+    }
+  }
+  return rows;
+}
+
+} // namespace
 
 template <typename Constraint>
 ConstraintValidation validate_constraint_family(
@@ -136,6 +170,166 @@ ConstraintValidation validate_acceleration_constraints(
                                           source_ids, false);
   validation.row_count += affine_rows;
   return validation;
+}
+
+CentroidalMomentumRateBoundsAssembly make_centroidal_momentum_rate_bounds(
+    const RobotModel &robot,
+    const std::vector<CentroidalMomentumRateBounds> &bounds,
+    std::unordered_set<std::string> *source_ids) {
+  CentroidalMomentumRateBoundsAssembly assembly;
+  if (bounds.empty()) {
+    return assembly;
+  }
+  try {
+    assembly.centroidal_matrix = robot.get_centroidal_momentum_matrix();
+    assembly.bias = robot.get_centroidal_momentum_matrix_bias();
+  } catch (const std::exception &error) {
+    assembly.status = SolverStatus::kNumericalError;
+    assembly.message =
+        std::string("centroidal momentum-rate bounds failed: ") +
+        error.what();
+    return assembly;
+  }
+  if (assembly.centroidal_matrix.rows() != 6 ||
+      assembly.centroidal_matrix.cols() != robot.nv() ||
+      assembly.bias.size() != 6 || !assembly.centroidal_matrix.allFinite() ||
+      !assembly.bias.allFinite()) {
+    assembly.status = SolverStatus::kNumericalError;
+    assembly.message =
+        "centroidal momentum-rate bounds produced non-finite dynamics";
+    return assembly;
+  }
+
+  for (const auto &bound : bounds) {
+    const std::string family = constraint_family_name(bound);
+    if (bound.source_id.empty()) {
+      assembly.status = SolverStatus::kInvalidInput;
+      assembly.message = family + " source_id must not be empty";
+      return assembly;
+    }
+    if (!source_ids->insert(bound.source_id).second) {
+      assembly.status = SolverStatus::kInvalidInput;
+      assembly.message = "duplicate acceleration constraint source_id '" +
+                         bound.source_id + "'";
+      return assembly;
+    }
+    if (bound.lower_bounds.size() != 6 || bound.upper_bounds.size() != 6) {
+      assembly.status = SolverStatus::kConstraintBoundsMismatch;
+      assembly.message = family + " '" + bound.source_id +
+                         "' bounds must have size 6";
+      return assembly;
+    }
+    if (!bound.lower_bounds.allFinite() || !bound.upper_bounds.allFinite()) {
+      assembly.status = SolverStatus::kNonFiniteInput;
+      assembly.message = family + " '" + bound.source_id +
+                         "' must contain only finite bounds";
+      return assembly;
+    }
+    if (!axis_mask_valid(bound.axis_mask)) {
+      assembly.status = SolverStatus::kShapeMismatch;
+      assembly.message = family + " '" + bound.source_id +
+                         "' axis_mask must have size 6";
+      return assembly;
+    }
+    if (!axis_mask_has_selection(bound.axis_mask)) {
+      assembly.status = SolverStatus::kInvalidInput;
+      assembly.message = family + " '" + bound.source_id +
+                         "' must select at least one axis";
+      return assembly;
+    }
+    if ((!bound.lower_bound_active.empty() &&
+         bound.lower_bound_active.size() != 6U) ||
+        (!bound.upper_bound_active.empty() &&
+         bound.upper_bound_active.size() != 6U)) {
+      assembly.status = SolverStatus::kShapeMismatch;
+      assembly.message = family + " '" + bound.source_id +
+                         "' active-side flags must have size 6";
+      return assembly;
+    }
+
+    AffineAccelerationConstraint constraint;
+    constraint.source_id = bound.source_id;
+    const Eigen::Index rows = selected_axis_count(bound.axis_mask);
+    constraint.coefficient_matrix.resize(rows, robot.nv());
+    constraint.affine_bias.resize(rows);
+    constraint.lower_bounds.resize(rows);
+    constraint.upper_bounds.resize(rows);
+    if (!bound.lower_bound_active.empty()) {
+      constraint.lower_bound_active.reserve(static_cast<std::size_t>(rows));
+    }
+    if (!bound.upper_bound_active.empty()) {
+      constraint.upper_bound_active.reserve(static_cast<std::size_t>(rows));
+    }
+    const auto mask = resolved_axis_mask(bound.axis_mask);
+    Eigen::Index cursor = 0;
+    for (Eigen::Index axis = 0; axis < 6; ++axis) {
+      if (!mask[static_cast<std::size_t>(axis)]) {
+        continue;
+      }
+      const bool lower_active =
+          bound.lower_bound_active.empty() ||
+          bound.lower_bound_active[static_cast<std::size_t>(axis)];
+      const bool upper_active =
+          bound.upper_bound_active.empty() ||
+          bound.upper_bound_active[static_cast<std::size_t>(axis)];
+      if (!lower_active && !upper_active) {
+        assembly.status = SolverStatus::kInvalidInput;
+        assembly.message = family + " '" + bound.source_id + "' axis " +
+                           std::to_string(axis) +
+                           " has no active bound side";
+        return assembly;
+      }
+      if (lower_active && upper_active &&
+          bound.lower_bounds(axis) > bound.upper_bounds(axis)) {
+        assembly.status = SolverStatus::kInvalidInput;
+        assembly.message = family + " '" + bound.source_id +
+                           "' lower bound exceeds upper bound";
+        return assembly;
+      }
+      if ((lower_active &&
+           !checked_shifted_bound(bound.lower_bounds(axis),
+                                  assembly.bias(axis))) ||
+          (upper_active &&
+           !checked_shifted_bound(bound.upper_bounds(axis),
+                                  assembly.bias(axis)))) {
+        assembly.status = SolverStatus::kInvalidInput;
+        assembly.message = family + " '" + bound.source_id +
+                           "' shifted bound is not finite";
+        return assembly;
+      }
+      double inactive_magnitude = 0.0;
+      double inactive_side_bound = 0.0;
+      if (!inactive_bound_magnitude(assembly.centroidal_matrix.row(axis),
+                                    &inactive_magnitude) ||
+          (!lower_active &&
+           !checked_add(assembly.bias(axis), -inactive_magnitude,
+                        &inactive_side_bound)) ||
+          (!upper_active &&
+           !checked_add(assembly.bias(axis), inactive_magnitude,
+                        &inactive_side_bound))) {
+        assembly.status = SolverStatus::kInvalidInput;
+        assembly.message = family + " '" + bound.source_id +
+                           "' inactive side cannot be represented in the "
+                           "finite backend range";
+        return assembly;
+      }
+      constraint.coefficient_matrix.row(cursor) =
+          assembly.centroidal_matrix.row(axis);
+      constraint.affine_bias(cursor) = assembly.bias(axis);
+      constraint.lower_bounds(cursor) = bound.lower_bounds(axis);
+      constraint.upper_bounds(cursor) = bound.upper_bounds(axis);
+      if (!bound.lower_bound_active.empty()) {
+        constraint.lower_bound_active.push_back(lower_active);
+      }
+      if (!bound.upper_bound_active.empty()) {
+        constraint.upper_bound_active.push_back(upper_active);
+      }
+      ++cursor;
+    }
+    assembly.row_count += rows;
+    assembly.constraints.push_back(std::move(constraint));
+  }
+  return assembly;
 }
 
 ContactConstraintAssembly make_contact_acceleration_constraints(
@@ -588,6 +782,32 @@ bool accepted_affine_constraints_are_satisfied(
       }
       if (upper_side_active(constraint, row) &&
           physical(row) > constraint.upper_bounds(row) + upper_tolerance) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+bool accepted_centroidal_momentum_rate_bounds_are_satisfied(
+    const std::vector<AffineAccelerationConstraint> &constraints,
+    const Eigen::VectorXd &ddq) {
+  constexpr double kCentroidalBoundTolerance = 1e-7;
+  for (const auto &constraint : constraints) {
+    const Eigen::VectorXd physical =
+        constraint.coefficient_matrix * ddq + constraint.affine_bias;
+    if (!physical.allFinite()) {
+      return false;
+    }
+    for (Eigen::Index row = 0; row < physical.size(); ++row) {
+      if (lower_side_active(constraint, row) &&
+          physical(row) < constraint.lower_bounds(row) -
+                              kCentroidalBoundTolerance) {
+        return false;
+      }
+      if (upper_side_active(constraint, row) &&
+          physical(row) > constraint.upper_bounds(row) +
+                              kCentroidalBoundTolerance) {
         return false;
       }
     }
