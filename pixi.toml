@@ -17,6 +17,7 @@ cmake = ">=3.16,<4"
 ninja = ">=1.12,<2"
 # C++ dependencies
 eigen = ">=3.4.0,<4"
+gtest = ">=1.14,<2" # Native solver tests use find_package(GTest).
 pinocchio = ">=3.8.0,<4" # Required for built-in ViserVisualizer
 # Python build dependencies
 python = ">=3.10,<3.13"
@@ -30,6 +31,7 @@ qhull-static = ">=2020.2,<2021"
 numpy = ">=1.26.0"
 # Visualization dependencies (needed for examples)
 viser = ">=0.1.0"
+pyliblzfse = ">=0.4.1" # ViserUrdf loads compressed robot meshes.
 trimesh = ">=3.0.0"
 robot_descriptions = ">=1.0.0"
 scipy = ">=1.11.0"

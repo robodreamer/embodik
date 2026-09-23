@@ -137,6 +137,12 @@ def test_basic_example_reports_velocity_only_when_acceleration_api_missing() -> 
         assert "missing Python acceleration API" in reason
 
 
+def test_basic_example_defaults_to_viserurdf(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = _load_basic_example_module()
+    monkeypatch.setattr(sys, "argv", ["01_basic_ik_simple.py"])
+    assert module.parse_args().visualizer == "viserurdf"
+
+
 def test_basic_example_preserves_acceleration_constructor_failure_reason(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -182,6 +188,22 @@ def test_basic_example_acceleration_stationary_step_runs_headlessly(tmp_path: Pa
     np.testing.assert_allclose(step.dq_solution, np.zeros(robot.nv), atol=1e-12)
     assert step.position_error <= 1e-12
     assert step.rotation_error <= 1e-12
+
+
+def test_panda_example_default_is_feasible_for_acceleration() -> None:
+    module = _load_basic_example_module()
+    _skip_without_acceleration_api(module)
+    from utils.robot_models import resolve_robot_configuration
+
+    config = resolve_robot_configuration("panda")
+    robot = config["robot"]
+    q = np.asarray(config["default_configuration"], dtype=float)
+    lower, upper = robot.get_joint_limits()
+
+    assert np.all(q >= lower)
+    assert np.all(q <= upper)
+    runtime, reason = module.basic_acceleration_runtime_status(robot, config["target_link"], q)
+    assert runtime is not None, reason
 
 
 def test_basic_example_reset_and_switch_semantics_zero_dq(tmp_path: Path) -> None:

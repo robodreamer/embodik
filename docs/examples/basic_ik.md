@@ -60,7 +60,8 @@ pixi run python examples/01_basic_ik_simple.py
 ```
 
 The example defaults to the Panda preset; pass `--robot <key>` to use another
-configured model.
+configured model. Visualization defaults to ViserUrdf. The optional
+`--visualizer pinocchio` backend remains available for comparison.
 
 ## Adding a New Robot
 
