@@ -445,15 +445,13 @@ add_test(NAME test_shared_constraint_definitions
     COMMAND test_shared_constraint_definitions
 )
 
-# Python tests
-find_package(Python COMPONENTS Interpreter REQUIRED)
-
-add_test(NAME test_python_robot_model
-    COMMAND ${Python_EXECUTABLE} -m pytest ${CMAKE_CURRENT_SOURCE_DIR}/test_robot_model.py -v
-    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
-)
-
-# Set Python path for tests
-set_tests_properties(test_python_robot_model PROPERTIES
-    ENVIRONMENT "PYTHONPATH=${CMAKE_BINARY_DIR}/python_bindings:$ENV{PYTHONPATH}"
-)
+if(BUILD_PYTHON_BINDINGS)
+    find_package(Python COMPONENTS Interpreter REQUIRED)
+    add_test(NAME test_python_robot_model
+        COMMAND ${Python_EXECUTABLE} -m pytest ${CMAKE_CURRENT_SOURCE_DIR}/test_robot_model.py -v
+        WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+    )
+    set_tests_properties(test_python_robot_model PROPERTIES
+        ENVIRONMENT "PYTHONPATH=${CMAKE_BINARY_DIR}/python_bindings:$ENV{PYTHONPATH}"
+    )
+endif()
