@@ -50,12 +50,10 @@ def test_acceleration_page_is_in_navigation_and_release_history() -> None:
 
     assert "Acceleration Solver: acceleration_solver.md" in navigation
     assert f"## [{version}] - " in changelog
-    current_release = changelog.split(f"## [{version}]", maxsplit=1)[1].split(
-        "## [", maxsplit=1
-    )[0]
-    acceleration_release = changelog.split("## [0.21.0]", maxsplit=1)[1].split(
-        "## [", maxsplit=1
-    )[0]
+    current_release = changelog.split(f"## [{version}]", maxsplit=1)[1].split("## [", maxsplit=1)[0]
+    acceleration_release = changelog.split("## [0.21.0]", maxsplit=1)[1].split("## [", maxsplit=1)[
+        0
+    ]
     assert current_release.strip()
     assert "fixed-base acceleration-level eSNS API" in acceleration_release
     assert "non-hard-real-time" in acceleration_release
