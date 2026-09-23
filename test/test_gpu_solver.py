@@ -186,7 +186,13 @@ class TestGPUvsCPU:
         # GPU solve
         targets_flat, jacobians_flat = flatten_problem(goals, jacobians)
         gpu_result = solve_velocity_batched(
-            [targets_flat], [jacobians_flat], [C], [lower], [upper], use_gpu=True
+            [targets_flat],
+            [jacobians_flat],
+            [C],
+            [lower],
+            [upper],
+            use_gpu=True,
+            task_dims=[6, 3],
         )
 
         # Compare with looser tolerance (saturation approximation)
