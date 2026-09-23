@@ -70,6 +70,32 @@ def flatten_problem(
     return targets_flat, jacobians_flat
 
 
+def test_cpu_fallback_preserves_flattened_task_priorities():
+    import embodik as eik
+    from embodik.gpu_solver import solve_velocity_batched
+
+    goals, jacobians, C, lower, upper = generate_random_problem(
+        seed=123, n_dof=7, n_tasks=2, task_dims=[6, 3]
+    )
+    expected = eik.computeMultiObjectiveVelocitySolutionEigen(
+        goals, jacobians, C, lower, upper
+    )
+    targets_flat, jacobians_flat = flatten_problem(goals, jacobians)
+    actual = solve_velocity_batched(
+        [targets_flat],
+        [jacobians_flat],
+        [C],
+        [lower],
+        [upper],
+        use_gpu=False,
+        task_dims=[6, 3],
+    )
+
+    assert actual.status == "fallback_cpu"
+    np.testing.assert_allclose(actual.velocities[0], expected.solution, atol=VELOCITY_ATOL)
+    np.testing.assert_allclose(actual.scales[0], expected.task_scales, atol=SCALE_ATOL)
+
+
 # =============================================================================
 # Availability checks
 # =============================================================================
