@@ -98,6 +98,13 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_SEER_CONTROLLER_PORT,
         help="Seer/xvisio serial port (default: /dev/ttyUSB0, same as examples/03_teleop_ik.py).",
     )
+    parser.add_argument("--gpu-wbc", action="store_true")
+    parser.add_argument("--gpu-wbc-manifest", type=Path)
+    parser.add_argument(
+        "--gpu-wbc-cache-dir",
+        type=Path,
+        default=Path("build/gpu-wbc-newton-cache"),
+    )
     return parser.parse_args()
 
 
@@ -346,7 +353,13 @@ def main() -> None:
 
     common_app.resolve_ffw_urdf_path = lambda _variant: urdf_path
     common_app.resolve_generated_ffw_collision_urdf_path = lambda _variant: collision_urdf_path
-    common_app.parse_args = lambda: argparse.Namespace(variant=variant_for_app, port=args.port)
+    common_app.parse_args = lambda: argparse.Namespace(
+        variant=variant_for_app,
+        port=args.port,
+        gpu_wbc=args.gpu_wbc,
+        gpu_wbc_manifest=args.gpu_wbc_manifest,
+        gpu_wbc_cache_dir=args.gpu_wbc_cache_dir,
+    )
     common_app.COMMON_BIMANUAL_ENABLE_SEER_TELEOP = True
     common_app.COMMON_BIMANUAL_SEER_CONTROLLER_PORT = args.controller_port
     common_app.main()

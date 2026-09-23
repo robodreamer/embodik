@@ -152,7 +152,7 @@ conservative collision presets on hot paths) keeps sweep throughput practical wh
 the same collision stack as teleop.
 
 For GPU-scale batch trajectories inside EmbodiK itself, see
-[GPU Solvers](gpu_solvers.md) and `examples/parallel_trajectory_tracking.py`.
+[GPU Solvers](gpu_solvers.md) and `examples/10_parallel_trajectory_tracking.py`.
 
 ## Configure collision avoidance
 

@@ -338,6 +338,7 @@ def solve_velocity_batched(
     max_bounds_batch: Union[np.ndarray, List[np.ndarray]],
     use_gpu: bool = True,
     casadi_path: str = DEFAULT_FN_PATH,
+    task_dims: Optional[List[int]] = None,
 ) -> BatchSolveResult:
     """
     Batched velocity solve with automatic GPU/CPU fallback.
@@ -354,6 +355,8 @@ def solve_velocity_batched(
         max_bounds_batch: Batch of upper bounds
         use_gpu: Whether to attempt GPU acceleration (default True)
         casadi_path: Path to compiled CasADi function
+        task_dims: Dimensions of hierarchical tasks when inputs are flattened.
+            Required for the CPU fallback to preserve multiple task priorities.
 
     Returns:
         BatchSolveResult with velocities, scales, and status
@@ -410,6 +413,22 @@ def solve_velocity_batched(
         upper_list = [max_bounds_batch[b] for b in range(B)]
     else:
         upper_list = list(max_bounds_batch)
+
+    if task_dims is not None:
+        if not task_dims or any(dim <= 0 for dim in task_dims):
+            raise ValueError("task_dims must contain positive task dimensions")
+        total_rows = sum(task_dims)
+        row_splits = np.cumsum(task_dims)[:-1]
+        for index, (targets, jacobians, constraints) in enumerate(
+            zip(targets_list, jacobians_list, C_list)
+        ):
+            if targets.ndim != 1 or jacobians.ndim != 1:
+                raise ValueError("task_dims requires flattened targets and Jacobians")
+            n_dof = constraints.shape[-1]
+            if targets.size != total_rows or jacobians.size != total_rows * n_dof:
+                raise ValueError("task_dims does not match flattened task inputs")
+            targets_list[index] = np.split(targets, row_splits)
+            jacobians_list[index] = np.split(jacobians.reshape(total_rows, n_dof), row_splits)
 
     return _solve_cpu_sequential(
         targets_list,

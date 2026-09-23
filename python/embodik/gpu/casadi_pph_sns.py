@@ -26,9 +26,9 @@ except ImportError:
 
 from embodik.gpu.casadi_srinv import srinv as _casadi_srinv
 
-# Default parameters for PPH-SNS
-DEFAULT_EPSILON = 1e-6
-DEFAULT_DAMPING = 0.12  # Higher damping for stability
+# Match the public KinematicsSolver SRINV defaults.
+DEFAULT_EPSILON = 0.1
+DEFAULT_DAMPING = 0.1
 DEFAULT_MU0 = 1e-3  # Initial penalty weight (softer start)
 DEFAULT_GAMMA = 3.0  # Aggressive penalty growth (vs 2.5 in FI-PeSNS)
 DEFAULT_ETA = 0.1  # Penalty gradient step size

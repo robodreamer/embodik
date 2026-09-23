@@ -114,7 +114,9 @@ def _mjviser_body_candidates_for_ik_link(link_name: str) -> tuple[str, ...]:
     return tuple(dict.fromkeys(candidates))
 
 
-def _mjviser_body_name_for_collision_object(adapter, collision_object: str) -> str | None:
+def _mjviser_body_name_for_collision_object(
+    adapter, collision_object: str
+) -> str | None:
     """Map an EmbodiK collision object name to the rendered MuJoCo body name."""
 
     mujoco = getattr(adapter, "_mujoco", None)
@@ -128,7 +130,9 @@ def _mjviser_body_name_for_collision_object(adapter, collision_object: str) -> s
     return None
 
 
-def _mjviser_body_geom_ids(adapter, body_name: str, *, collision_only: bool = False) -> list[int]:
+def _mjviser_body_geom_ids(
+    adapter, body_name: str, *, collision_only: bool = False
+) -> list[int]:
     """Return all visual/collision geoms attached to a rendered MuJoCo body."""
 
     mujoco = getattr(adapter, "_mujoco", None)
@@ -166,8 +170,12 @@ def _mjviser_nearest_body_distance(
     if mujoco is None or model is None or not hasattr(mujoco, "mj_geomDistance"):
         return None
     best: SimpleNamespace | None = None
-    for geom_a in _mjviser_body_geom_ids(adapter, body_a, collision_only=collision_only):
-        for geom_b in _mjviser_body_geom_ids(adapter, body_b, collision_only=collision_only):
+    for geom_a in _mjviser_body_geom_ids(
+        adapter, body_a, collision_only=collision_only
+    ):
+        for geom_b in _mjviser_body_geom_ids(
+            adapter, body_b, collision_only=collision_only
+        ):
             fromto = np.zeros(6, dtype=np.float64)
             try:
                 distance = float(
@@ -243,7 +251,9 @@ def _collision_pairs_from_solver_debug_rows(
 ) -> list[tuple[str, str]]:
     """Extract curated pairs from solver debug rows while preserving support filtering."""
 
-    supported_by_key = {frozenset(pair): (str(pair[0]), str(pair[1])) for pair in supported_pairs}
+    supported_by_key = {
+        frozenset(pair): (str(pair[0]), str(pair[1])) for pair in supported_pairs
+    }
     selected: list[tuple[str, str]] = []
     seen: set[frozenset[str]] = set()
     for row in rows:
@@ -381,6 +391,7 @@ class SpotLocomanipController:
         policy_rate_hz: float = DEFAULT_POLICY_RATE_HZ,
         async_ik_rate_hz: float = DEFAULT_ASYNC_IK_RATE_HZ,
         async_ik: bool = False,
+        gpu_args: argparse.Namespace | None = None,
     ):
         try:
             import onnxruntime as ort
@@ -409,7 +420,15 @@ class SpotLocomanipController:
             desired_pose=np.zeros(3, dtype=float),
             pose_error_integral=np.zeros(3, dtype=float),
         )
-        self.ik = OptionalSpotWholeBodyIK(spot_urdf, dt=dt)
+        self.gpu_wbc = bool(
+            gpu_args is not None and getattr(gpu_args, "gpu_wbc", False)
+        )
+        if self.gpu_wbc:
+            from example_helpers.gpu_spot_locomanip import GpuSpotLocomanipIK
+
+            self.ik = GpuSpotLocomanipIK(spot_urdf, args=gpu_args, dt=dt)
+        else:
+            self.ik = OptionalSpotWholeBodyIK(spot_urdf, dt=dt)
         if self.ik.collision_include_pairs:
             self.ik._collision_include_pairs = _mjviser_collision_supported_pairs(
                 self.adapter,
@@ -421,7 +440,9 @@ class SpotLocomanipController:
         self.last_ik_collision_constraint_time_ms = 0.0
         self.last_ik_condition_number = float("nan")
         self._last_arm_gravity_torque: np.ndarray | None = None
-        self._async_ik_enabled = bool(async_ik)
+        # GPU arm-overlay acceptance must refer to this physics step. Async
+        # command replay needs a contact/history validation contract first.
+        self._async_ik_enabled = bool(async_ik and not self.gpu_wbc)
         self._async_ik_dt = 1.0 / max(float(async_ik_rate_hz), 1e-6)
         self._async_ik_elapsed = self._async_ik_dt
         self._ik_lock = threading.RLock()
@@ -451,7 +472,9 @@ class SpotLocomanipController:
 
     def set_policy(self, policy: LocomanipPolicy) -> None:
         self.policy = policy
-        self.checkpoint = self._policy_checkpoint_override or policy_checkpoint_path(policy)
+        self.checkpoint = self._policy_checkpoint_override or policy_checkpoint_path(
+            policy
+        )
         if not self.checkpoint.is_file():
             raise FileNotFoundError(f"Policy checkpoint not found: {self.checkpoint}")
         if policy not in self._sessions or self._policy_checkpoint_override is not None:
@@ -463,7 +486,9 @@ class SpotLocomanipController:
         self.input_name = self.session.get_inputs()[0].name
         self.output_name = self.session.get_outputs()[0].name
         output_shape = self.session.get_outputs()[0].shape
-        self.output_len = int(output_shape[-1]) if isinstance(output_shape[-1], int) else 12
+        self.output_len = (
+            int(output_shape[-1]) if isinstance(output_shape[-1], int) else 12
+        )
         self.policy_runtime.configure(
             self.session,
             input_name=self.input_name,
@@ -562,7 +587,9 @@ class SpotLocomanipController:
         if self.ik_solve_in_flight:
             return np.array([], dtype=float)
         with self._ik_lock:
-            return self.ik.sync_measured_configuration_for_debug(observation, arm_command)
+            return self.ik.sync_measured_configuration_for_debug(
+                observation, arm_command
+            )
 
     @property
     def arm_unstow_active(self) -> bool:
@@ -629,8 +656,13 @@ class SpotLocomanipController:
         if alpha >= 1.0:
             self._arm_unstow_active = False
 
-    def _copy_ik_observation(self, observation: Mapping[str, np.ndarray]) -> dict[str, np.ndarray]:
-        return {key: np.asarray(value, dtype=float).copy() for key, value in observation.items()}
+    def _copy_ik_observation(
+        self, observation: Mapping[str, np.ndarray]
+    ) -> dict[str, np.ndarray]:
+        return {
+            key: np.asarray(value, dtype=float).copy()
+            for key, value in observation.items()
+        }
 
     def _async_ik_due(self, dt: float) -> bool:
         self._async_ik_elapsed += max(float(dt), 0.0)
@@ -655,9 +687,13 @@ class SpotLocomanipController:
     def _run_ik_request(
         self,
         generation: int,
-        request: tuple[Mapping[str, np.ndarray], np.ndarray, object, np.ndarray, np.ndarray],
+        request: tuple[
+            Mapping[str, np.ndarray], np.ndarray, object, np.ndarray, np.ndarray
+        ],
     ):
-        observation, arm_command, target_pose, body_command, desired_pose_command = request
+        observation, arm_command, target_pose, body_command, desired_pose_command = (
+            request
+        )
         with self._ik_lock:
             result = self.ik.solve_command(
                 observation,
@@ -670,7 +706,9 @@ class SpotLocomanipController:
 
     def _submit_ik_request(
         self,
-        request: tuple[Mapping[str, np.ndarray], np.ndarray, object, np.ndarray, np.ndarray],
+        request: tuple[
+            Mapping[str, np.ndarray], np.ndarray, object, np.ndarray, np.ndarray
+        ],
     ) -> None:
         if self._ik_executor is None:
             return
@@ -700,19 +738,27 @@ class SpotLocomanipController:
                 [POSE_COMMAND_RANGE[1], POSE_COMMAND_RANGE[1], YAW_COMMAND_RANGE[1]],
             )
         arm_gravity_torque = (
-            getattr(ik_result, "arm_gravity_torque", None) if gravity_compensation_enabled else None
+            getattr(ik_result, "arm_gravity_torque", None)
+            if gravity_compensation_enabled
+            else None
         )
         self.last_ik_status = ik_result.message
         self.last_ik_solve_time_ms = float(getattr(ik_result, "solve_time_ms", 0.0))
         self.last_ik_collision_constraint_time_ms = float(
             getattr(ik_result, "collision_constraint_time_ms", 0.0)
         )
-        self.last_ik_condition_number = float(getattr(ik_result, "condition_number", float("nan")))
+        self.last_ik_condition_number = float(
+            getattr(ik_result, "condition_number", float("nan"))
+        )
         self._last_arm_gravity_torque = arm_gravity_torque
         return arm_gravity_torque
 
-    def _poll_async_ik(self, *, gravity_compensation_enabled: bool) -> np.ndarray | None:
-        arm_gravity_torque = self._last_arm_gravity_torque if gravity_compensation_enabled else None
+    def _poll_async_ik(
+        self, *, gravity_compensation_enabled: bool
+    ) -> np.ndarray | None:
+        arm_gravity_torque = (
+            self._last_arm_gravity_torque if gravity_compensation_enabled else None
+        )
         if self._ik_future is not None and self._ik_future.done():
             future = self._ik_future
             self._ik_future = None
@@ -795,6 +841,25 @@ class SpotLocomanipController:
         self._update_auto_unstow(dt)
         self._update_arm_unstow_interpolation(dt)
         observation = self.adapter.read_policy_observation(data)
+        if self.gpu_wbc:
+            from example_helpers.gpu_spot_locomanip import stationary_contact_state
+
+            # Observe contacts and commands at the same measured physics state.
+            # The policy may walk or change support; synchronous arm IK locks
+            # its base/leg coordinates and reanchors all reference rows here.
+            locomotion_request = (
+                self.commands.velocity.copy()
+                if control_mode == "velocity"
+                else self.commands.desired_pose.copy()
+            )
+            observation.update(
+                stationary_contact_state(
+                    self.adapter,
+                    data,
+                    locomotion_request,
+                    objects_enabled=bool(self.adapter.manipulation_objects_enabled()),
+                )
+            )
         arm_gravity_torque = None
         # The gripper is streamed as an external joint command. It is not part
         # of the whole-body IK output, even when the IK model internally syncs
@@ -841,7 +906,9 @@ class SpotLocomanipController:
                     )
                 self._last_arm_gravity_torque = arm_gravity_torque
             self.last_ik_status = (
-                "IK solving asynchronously" if self.ik_solve_in_flight else self.ik.message
+                "IK solving asynchronously"
+                if self.ik_solve_in_flight
+                else self.ik.message
             )
             self.last_ik_solve_time_ms = 0.0
             self.last_ik_collision_constraint_time_ms = 0.0
@@ -883,7 +950,9 @@ def mujoco_world_to_mjviser_scene_position(
 ) -> np.ndarray:
     """Convert a MuJoCo world position to mjviser's displayed scene coordinates."""
 
-    return np.asarray(world_position, dtype=float) + np.asarray(scene_offset, dtype=float)
+    return np.asarray(world_position, dtype=float) + np.asarray(
+        scene_offset, dtype=float
+    )
 
 
 def mjviser_scene_to_mujoco_world_position(
@@ -892,7 +961,9 @@ def mjviser_scene_to_mujoco_world_position(
 ) -> np.ndarray:
     """Convert an mjviser displayed scene position back to MuJoCo world coordinates."""
 
-    return np.asarray(scene_position, dtype=float) - np.asarray(scene_offset, dtype=float)
+    return np.asarray(scene_position, dtype=float) - np.asarray(
+        scene_offset, dtype=float
+    )
 
 
 class WorldFixedIkTarget:
@@ -954,9 +1025,13 @@ def _add_gui(
         return np.asarray(scene_offset(), dtype=float)
 
     def world_to_scene_position(world_position: np.ndarray) -> np.ndarray:
-        return mujoco_world_to_mjviser_scene_position(world_position, current_scene_offset())
+        return mujoco_world_to_mjviser_scene_position(
+            world_position, current_scene_offset()
+        )
 
-    def manipulation_visual_pose(geom_name: str) -> tuple[tuple[float, ...], tuple[float, ...]]:
+    def manipulation_visual_pose(
+        geom_name: str,
+    ) -> tuple[tuple[float, ...], tuple[float, ...]]:
         pos, wxyz = controller.adapter.geom_pose_wxyz(data, geom_name)
         return (
             tuple(float(v) for v in world_to_scene_position(pos)),
@@ -979,7 +1054,9 @@ def _add_gui(
         for name, spec in MANIPULATION_OBJECT_VISUAL_SPECS.items():
             handle = manipulation_object_handles[name]
             if visible:
-                handle.position, handle.wxyz = manipulation_visual_pose(str(spec["geom_name"]))
+                handle.position, handle.wxyz = manipulation_visual_pose(
+                    str(spec["geom_name"])
+                )
             handle.visible = visible
 
     with server.gui.add_folder("Locomanip policy"):
@@ -1079,7 +1156,11 @@ def _add_gui(
                 initial_value=float(controller.commands.arm[1]),
             ),
             server.gui.add_slider(
-                "arm_el0", 0.0, 3.14159, step=0.02, initial_value=float(controller.commands.arm[2])
+                "arm_el0",
+                0.0,
+                3.14159,
+                step=0.02,
+                initial_value=float(controller.commands.arm[2]),
             ),
             server.gui.add_slider(
                 "arm_el1",
@@ -1103,7 +1184,11 @@ def _add_gui(
                 initial_value=float(controller.commands.arm[5]),
             ),
             server.gui.add_slider(
-                "arm_f1x", -1.57, 0.0, step=0.02, initial_value=float(controller.commands.arm[6])
+                "arm_f1x",
+                -1.57,
+                0.0,
+                step=0.02,
+                initial_value=float(controller.commands.arm[6]),
             ),
         ]
     with server.gui.add_folder("Body command"):
@@ -1129,8 +1214,12 @@ def _add_gui(
             initial_value=float(controller.commands.body[2]),
         )
         reset_body_btn = server.gui.add_button("Reset body command")
-    gripper_pos, gripper_wxyz = controller.adapter.body_pose_wxyz(data, IK_TARGET_VISUAL_FRAME)
-    ik_target_state = WorldFixedIkTarget(gripper_pos, gripper_wxyz, current_scene_offset)
+    gripper_pos, gripper_wxyz = controller.adapter.body_pose_wxyz(
+        data, IK_TARGET_VISUAL_FRAME
+    )
+    ik_target_state = WorldFixedIkTarget(
+        gripper_pos, gripper_wxyz, current_scene_offset
+    )
     ik_visual_reference_position = gripper_pos.copy()
     ik_visual_reference_rotation = np.asarray(
         target_pose_from_wxyz(gripper_pos, gripper_wxyz).rotation,
@@ -1169,7 +1258,9 @@ def _add_gui(
             1.0,
             6.0,
             step=0.25,
-            initial_value=float(getattr(controller.ik, "condition_arm_weight_scale", 3.0)),
+            initial_value=float(
+                getattr(controller.ik, "condition_arm_weight_scale", 3.0)
+            ),
         )
         collision_available = bool(getattr(controller.ik, "collision_available", False))
         collision_debug_available = bool(
@@ -1177,7 +1268,7 @@ def _add_gui(
         )
         collision_enable = server.gui.add_checkbox(
             "Enable collision constraint",
-            initial_value=False,
+            initial_value=bool(controller.ik.enable_collision),
             disabled=not collision_available,
         )
         collision_min_dist_mm = server.gui.add_slider(
@@ -1185,7 +1276,8 @@ def _add_gui(
             0.0,
             100.0,
             step=1.0,
-            initial_value=float(getattr(controller.ik, "collision_min_distance", 0.05)) * 1e3,
+            initial_value=float(getattr(controller.ik, "collision_min_distance", 0.05))
+            * 1e3,
         )
         collision_max_rows = server.gui.add_slider(
             "Closest collision checks",
@@ -1197,7 +1289,9 @@ def _add_gui(
         collision_tuning = server.gui.add_dropdown(
             "Collision tuning",
             options=COLLISION_TUNING_OPTIONS,
-            initial_value=str(getattr(controller.ik, "collision_tuning_mode", "balanced")),
+            initial_value=str(
+                getattr(controller.ik, "collision_tuning_mode", "balanced")
+            ),
         )
         show_collision_debug = server.gui.add_checkbox(
             "Show collision debug",
@@ -1225,8 +1319,14 @@ def _add_gui(
         )
         ik_solve_mode = server.gui.add_dropdown(
             "IK target solve mode",
-            options=("SCALE_ELASTIC", "MIN_ERROR", "SCALE"),
-            initial_value=str(getattr(controller.ik, "target_solve_mode", "SCALE_ELASTIC")),
+            options=(
+                ("GPU_SRINV",)
+                if controller.gpu_wbc
+                else ("SCALE_ELASTIC", "MIN_ERROR", "SCALE")
+            ),
+            initial_value=str(
+                getattr(controller.ik, "target_solve_mode", "SCALE_ELASTIC")
+            ),
         )
         ik_dt = server.gui.add_slider(
             "IK dt (s)",
@@ -1258,7 +1358,9 @@ def _add_gui(
             0.005,
             0.2,
             step=0.005,
-            initial_value=float(getattr(controller.ik, "adaptive_dt_reference_distance", 0.04)),
+            initial_value=float(
+                getattr(controller.ik, "adaptive_dt_reference_distance", 0.04)
+            ),
         )
         if not controller.ik.enabled:
             ik_checkbox.disabled = True
@@ -1277,14 +1379,25 @@ def _add_gui(
             ):
                 handle.disabled = True
         collision_min_dist_mm.disabled = not collision_available
-        collision_max_rows.disabled = not collision_available
-        collision_tuning.disabled = not collision_available
+        collision_max_rows.disabled = not collision_available or controller.gpu_wbc
+        collision_tuning.disabled = not collision_available or controller.gpu_wbc
+        if controller.gpu_wbc:
+            base_assist_slider.disabled = True
+            arm_recovery_bias_slider.disabled = True
+            server.gui.add_markdown(
+                "GPU: synchronous arm IK during walking/contact transitions, self-collision, posture, "
+                "torso bounds and adaptive dt. Base/legs remain policy-owned and locked in IK. "
+                "Torso commands remain policy-owned. CoM and object dynamics hold IK; async is disabled; "
+                "collision capacity is fixed at launch. CPU collision tuning does not apply."
+            )
         arm_command_group = server.gui.add_button_group(
             "Arm command",
             options=("Stow", "Unstow"),
         )
         seed_ik_target_btn = server.gui.add_button("Move IK target to gripper")
-    teleop_connected = bool(teleop_controller is not None and teleop_controller.connected)
+    teleop_connected = bool(
+        teleop_controller is not None and teleop_controller.connected
+    )
     with server.gui.add_folder("Seer teleop", expand_by_default=teleop_connected):
         teleop_enabled_checkbox = server.gui.add_checkbox(
             "Enable teleop",
@@ -1296,11 +1409,15 @@ def _add_gui(
             initial_value="connected" if teleop_connected else "browser only",
             disabled=True,
         )
-        teleop_streaming_text = server.gui.add_text("Streaming", initial_value="OFF", disabled=True)
+        teleop_streaming_text = server.gui.add_text(
+            "Streaming", initial_value="OFF", disabled=True
+        )
         teleop_gripper_text = server.gui.add_text(
             "Gripper", initial_value="0% closed", disabled=True
         )
-        teleop_reset_text = server.gui.add_text("Reset", initial_value="Button B", disabled=True)
+        teleop_reset_text = server.gui.add_text(
+            "Reset", initial_value="Button B", disabled=True
+        )
         teleop_scale_slider = server.gui.add_slider(
             "Position Scale",
             0.5,
@@ -1313,7 +1430,9 @@ def _add_gui(
             teleop_connected and bool(teleop_enabled_checkbox.value)
         )
     with server.gui.add_folder("Status"):
-        step_text = server.gui.add_text("Policy steps", initial_value="0", disabled=True)
+        step_text = server.gui.add_text(
+            "Policy steps", initial_value="0", disabled=True
+        )
         ik_text = server.gui.add_text(
             "IK overlay", initial_value=controller.last_ik_status, disabled=True
         )
@@ -1407,7 +1526,9 @@ def _add_gui(
     def sync_solver_preference_sliders() -> None:
         controller.ik.locomotion_sensitivity = float(base_assist_slider.value)
         if hasattr(controller.ik, "condition_arm_weight_scale"):
-            controller.ik.condition_arm_weight_scale = float(arm_recovery_bias_slider.value)
+            controller.ik.condition_arm_weight_scale = float(
+                arm_recovery_bias_slider.value
+            )
 
     def sync_ik_runtime_options() -> None:
         controller.ik.position_gain = float(ik_position_gain.value)
@@ -1417,11 +1538,15 @@ def _add_gui(
         controller.ik.max_steps = int(ik_max_steps.value)
         controller.ik.adaptive_dt = bool(ik_adaptive_dt.value)
         controller.ik.adaptive_dt_max_scale = float(ik_adaptive_dt_max_scale.value)
-        controller.ik.adaptive_dt_reference_distance = float(ik_adaptive_dt_ref_dist.value)
+        controller.ik.adaptive_dt_reference_distance = float(
+            ik_adaptive_dt_ref_dist.value
+        )
         controller.ik.apply_runtime_options()
 
     def sync_collision_options() -> None:
-        controller.ik.enable_collision = bool(collision_available and collision_enable.value)
+        controller.ik.enable_collision = bool(
+            collision_available and collision_enable.value
+        )
         controller.ik.collision_min_distance = float(collision_min_dist_mm.value) * 1e-3
         controller.ik.collision_max_constraints = int(collision_max_rows.value)
         controller.ik.collision_tuning_mode = str(collision_tuning.value)
@@ -1444,6 +1569,8 @@ def _add_gui(
     def update_collision_debug(*, force: bool = False) -> None:
         nonlocal collision_debug_lines, last_collision_log_key, last_collision_log_time
         nonlocal last_collision_debug_update_time, last_collision_debug_time_ms
+        if controller.gpu_wbc:
+            controller.ik.include_collision_debug = bool(show_collision_debug.value)
         if not (
             show_collision_debug.value
             and ik_checkbox.value
@@ -1473,11 +1600,15 @@ def _add_gui(
                 int(collision_max_rows.value),
             ),
         )
-        debug_rows = _mjviser_collision_debug_rows(
-            controller.adapter,
-            data,
-            active_pairs,
-            max_rows=max_visible_rows,
+        debug_rows = (
+            solver_debug_rows[:max_visible_rows]
+            if controller.gpu_wbc
+            else _mjviser_collision_debug_rows(
+                controller.adapter,
+                data,
+                active_pairs,
+                max_rows=max_visible_rows,
+            )
         )
         last_collision_debug_time_ms = (time.perf_counter() - debug_start) * 1e3
         if not debug_rows:
@@ -1511,7 +1642,7 @@ def _add_gui(
             vector = p_b_world - p_a_world
             summaries.append(
                 f"{row.object_a} <-> {row.object_b} | "
-                f"{row.body_a} <-> {row.body_b}, "
+                f"{getattr(row, 'body_a', row.object_a)} <-> {getattr(row, 'body_b', row.object_b)}, "
                 f"d={float(row.distance):.4f} m, "
                 f"v=[{vector[0]:.3f}, {vector[1]:.3f}, {vector[2]:.3f}]"
             )
@@ -1552,7 +1683,11 @@ def _add_gui(
     def read_commands() -> None:
         controller.commands.velocity[:] = [x_cmd.value, y_cmd.value, yaw_cmd.value]
         if not ik_checkbox.value:
-            controller.commands.desired_pose[:] = [x_des.value, y_des.value, yaw_des.value]
+            controller.commands.desired_pose[:] = [
+                x_des.value,
+                y_des.value,
+                yaw_des.value,
+            ]
             if not controller.arm_unstow_active:
                 controller.commands.arm[:] = [slider.value for slider in arm_sliders]
             controller.commands.body[:] = [roll.value, pitch.value, height.value]
@@ -1573,9 +1708,13 @@ def _add_gui(
         ik_text.value = controller.last_ik_status
         checkpoint_text.value = controller.checkpoint.name
         policy_note.value = POLICIES[controller.policy].description
-        velocity_text.value = ", ".join(f"{value:+.3f}" for value in controller.commands.velocity)
+        velocity_text.value = ", ".join(
+            f"{value:+.3f}" for value in controller.commands.velocity
+        )
         if ik_checkbox.value and ik_target_armed:
-            current_pos, _ = controller.adapter.body_pose_wxyz(data, IK_TARGET_VISUAL_FRAME)
+            current_pos, _ = controller.adapter.body_pose_wxyz(
+                data, IK_TARGET_VISUAL_FRAME
+            )
             target_pos = ik_target_state.world_position
             target_error_text.value = (
                 f"dx={target_pos[0] - current_pos[0]:+.3f}, "
@@ -1685,7 +1824,9 @@ def _add_gui(
         controller.commands.body[:] = DEFAULT_BODY_ROLL_PITCH_HEIGHT
         controller.adapter.apply_ctrl_targets(
             data,
-            policy_action_to_mujoco_ctrl(controller.last_output, controller.commands.arm),
+            policy_action_to_mujoco_ctrl(
+                controller.last_output, controller.commands.arm
+            ),
         )
         seed_ik_target_from_gripper(sync_arm_command=False)
         ik_target.visible = False
@@ -1696,12 +1837,16 @@ def _add_gui(
         nonlocal ik_target_armed, ik_visual_reference_position, ik_visual_reference_rotation
         nonlocal ik_command_reference_pose
         if sync_arm_command:
-            controller.commands.arm[:] = controller.adapter.read_measured_arm_command(data)
+            controller.commands.arm[:] = controller.adapter.read_measured_arm_command(
+                data
+            )
         pos, wxyz = controller.adapter.body_pose_wxyz(data, IK_TARGET_VISUAL_FRAME)
         ik_target_state.set_from_world(pos, wxyz)
         visual_reference_pose = target_pose_from_wxyz(pos, wxyz)
         ik_visual_reference_position = np.asarray(pos, dtype=float).copy()
-        ik_visual_reference_rotation = np.asarray(visual_reference_pose.rotation, dtype=float)
+        ik_visual_reference_rotation = np.asarray(
+            visual_reference_pose.rotation, dtype=float
+        )
         ik_command_reference_pose = controller.command_tool_pose(
             controller.adapter.read_policy_observation(data),
             controller.commands.arm,
@@ -1724,7 +1869,9 @@ def _add_gui(
     def refresh_ik_target_display() -> None:
         nonlocal last_ik_target_scene_offset
         scene_offset_now = current_scene_offset()
-        scene_offset_changed = not np.allclose(scene_offset_now, last_ik_target_scene_offset)
+        scene_offset_changed = not np.allclose(
+            scene_offset_now, last_ik_target_scene_offset
+        )
         sync_manipulation_object_visuals(bool(manipulation_objects_checkbox.value))
         if ik_checkbox.value and scene_offset_changed:
             apply_ik_target_handle()
@@ -1750,11 +1897,16 @@ def _add_gui(
             return visual_target
         visual_position = np.asarray(visual_target.translation, dtype=float)
         visual_rotation = np.asarray(visual_target.rotation, dtype=float)
-        command_reference_position = np.asarray(ik_command_reference_pose.translation, dtype=float)
-        command_reference_rotation = np.asarray(ik_command_reference_pose.rotation, dtype=float)
+        command_reference_position = np.asarray(
+            ik_command_reference_pose.translation, dtype=float
+        )
+        command_reference_rotation = np.asarray(
+            ik_command_reference_pose.rotation, dtype=float
+        )
         visual_delta_rotation = visual_rotation @ ik_visual_reference_rotation.T
         return _target_pose_from_matrix(
-            command_reference_position + (visual_position - ik_visual_reference_position),
+            command_reference_position
+            + (visual_position - ik_visual_reference_position),
             visual_delta_rotation @ command_reference_rotation,
         )
 
@@ -1824,7 +1976,9 @@ def _add_gui(
     def process_teleop() -> None:
         if teleop_controller is None:
             return
-        teleop_connected_text.value = "connected" if teleop_controller.connected else "browser only"
+        teleop_connected_text.value = (
+            "connected" if teleop_controller.connected else "browser only"
+        )
         if not (teleop_controller.connected and bool(teleop_enabled_checkbox.value)):
             teleop_controller.set_enabled(False)
             teleop_gripper_text.value = "disabled"
@@ -1858,14 +2012,27 @@ def _add_gui(
         teleop_controller.on_reset = reset_sim_to_default
 
     policy_dropdown.on_update(lambda _: switch_policy(str(policy_dropdown.value)))
-    for handle in [x_des, y_des, yaw_des, x_cmd, y_cmd, yaw_cmd, *arm_sliders, roll, pitch, height]:
+    for handle in [
+        x_des,
+        y_des,
+        yaw_des,
+        x_cmd,
+        y_cmd,
+        yaw_cmd,
+        *arm_sliders,
+        roll,
+        pitch,
+        height,
+    ]:
         handle.on_update(lambda _: read_commands())
     zero_pose_btn.on_click(lambda _: set_pose_zero())
     hold_pose_btn.on_click(lambda _: hold_current_pose())
     zero_velocity_btn.on_click(lambda _: set_velocity_zero())
     reset_body_btn.on_click(lambda _: reset_body())
     reset_sim_btn.on_click(lambda _: run_with_sim_lock(reset_sim_to_default))
-    manipulation_objects_checkbox.on_update(lambda _: run_with_sim_lock(sync_manipulation_objects))
+    manipulation_objects_checkbox.on_update(
+        lambda _: run_with_sim_lock(sync_manipulation_objects)
+    )
     leg_gain_scale_slider.on_update(lambda _: run_with_sim_lock(sync_actuator_gains))
     base_assist_slider.on_update(lambda _: sync_solver_preference_sliders())
     arm_recovery_bias_slider.on_update(lambda _: sync_solver_preference_sliders())
@@ -1880,8 +2047,15 @@ def _add_gui(
         ik_adaptive_dt_ref_dist,
     ):
         handle.on_update(lambda _: sync_ik_runtime_options())
-    for handle in (collision_enable, collision_min_dist_mm, collision_max_rows, collision_tuning):
-        handle.on_update(lambda _: (sync_collision_options(), update_collision_debug(force=True)))
+    for handle in (
+        collision_enable,
+        collision_min_dist_mm,
+        collision_max_rows,
+        collision_tuning,
+    ):
+        handle.on_update(
+            lambda _: (sync_collision_options(), update_collision_debug(force=True))
+        )
     show_collision_debug.on_update(lambda _: update_collision_debug(force=True))
     ik_checkbox.on_update(lambda _: set_ik_enabled())
     teleop_enabled_checkbox.on_update(lambda _: set_teleop_enabled())
@@ -1923,6 +2097,7 @@ def run_headless(args: argparse.Namespace) -> None:
             "`pixi run -e mjviser spot-locomanip-mjviser --headless`."
         ) from exc
 
+    gpu_wbc = bool(getattr(args, "gpu_wbc", False))
     model = load_spot_mujoco_model(
         Path(args.scene) if args.scene else None,
         apply_default_gains=args.default_gains,
@@ -1931,19 +2106,57 @@ def run_headless(args: argparse.Namespace) -> None:
     controller = SpotLocomanipController(
         model,
         policy=parse_policy(args.policy),
-        policy_checkpoint=Path(args.policy_checkpoint) if args.policy_checkpoint else None,
+        policy_checkpoint=(
+            Path(args.policy_checkpoint) if args.policy_checkpoint else None
+        ),
         spot_urdf=_resolve_optional_spot_urdf(args.spot_urdf),
         dt=args.dt,
         policy_rate_hz=float(getattr(args, "policy_rate_hz", DEFAULT_POLICY_RATE_HZ)),
-        async_ik_rate_hz=float(getattr(args, "async_ik_rate_hz", DEFAULT_ASYNC_IK_RATE_HZ)),
+        async_ik_rate_hz=float(
+            getattr(args, "async_ik_rate_hz", DEFAULT_ASYNC_IK_RATE_HZ)
+        ),
+        gpu_args=args,
     )
     controller.reset(model, data)
     controller.adapter.set_manipulation_objects_enabled(
         data,
         bool(args.spawn_manipulation_objects),
     )
+    target = None
+    if gpu_wbc:
+        observation = controller.adapter.read_policy_observation(data)
+        target = controller.command_tool_pose(
+            observation,
+            controller.commands.arm,
+            body_command=controller.commands.body,
+            desired_pose_command=controller.commands.desired_pose,
+        )
+        target = target_pose_from_wxyz(
+            np.asarray(target.translation)
+            + np.array([args.gpu_wbc_target_offset, 0.0, 0.0]),
+            np.asarray(controller.ik._eik.r2q(target.rotation, order="xyzs"))[
+                [3, 0, 1, 2]
+            ],
+        )
+    gpu_accepted_steps = 0
+    initial_arm_command = controller.commands.arm.copy()
+    maximum_arm_command_motion = 0.0
     for _ in range(args.steps):
-        controller.step(model, data, control_mode=args.control_mode)
+        controller.step(
+            model,
+            data,
+            control_mode=args.control_mode,
+            ik_enabled=gpu_wbc,
+            ik_target_pose=target,
+        )
+        if gpu_wbc and controller.last_ik_status.startswith(
+            ("GPU SUCCESS", "GPU SAFE_STEP")
+        ):
+            gpu_accepted_steps += 1
+        maximum_arm_command_motion = max(
+            maximum_arm_command_motion,
+            float(np.linalg.norm(controller.commands.arm - initial_arm_command)),
+        )
         mujoco.mj_step(model, data)
         if (
             not np.isfinite(data.qpos).all()
@@ -1951,11 +2164,29 @@ def run_headless(args: argparse.Namespace) -> None:
             or not np.isfinite(data.ctrl).all()
         ):
             raise RuntimeError("MuJoCo state became non-finite")
+    gpu_summary = ""
+    if gpu_wbc:
+        if gpu_accepted_steps == 0:
+            raise RuntimeError(
+                f"GPU IK never accepted a step: {controller.last_ik_status}"
+            )
+        result = getattr(controller.ik, "last_result", None)
+        collision_distance = getattr(result, "minimum_collision_distance_m", None)
+        gpu_summary = (
+            f", gpu_accepted_steps={gpu_accepted_steps}, "
+            f"arm_command_motion={maximum_arm_command_motion:.6g}"
+            + (
+                ""
+                if collision_distance is None
+                else f", collision_distance={float(collision_distance):.4f}m"
+            )
+        )
     print(
         f"Ran {args.steps} headless steps with policy={controller.policy.value}, "
         f"checkpoint={controller.checkpoint.name}, scene={resolve_spot_scene_arm_xml().name}, "
         f"gains={'example PD' if args.default_gains else 'menagerie raw'}, "
-        f"objects={'on' if args.spawn_manipulation_objects else 'off'}"
+        f"objects={'on' if args.spawn_manipulation_objects else 'off'}, "
+        f"IK={controller.last_ik_status}{gpu_summary}"
     )
 
 
@@ -1986,12 +2217,17 @@ def run_viewer(args: argparse.Namespace) -> None:
     controller = SpotLocomanipController(
         model,
         policy=parse_policy(args.policy),
-        policy_checkpoint=Path(args.policy_checkpoint) if args.policy_checkpoint else None,
+        policy_checkpoint=(
+            Path(args.policy_checkpoint) if args.policy_checkpoint else None
+        ),
         spot_urdf=_resolve_optional_spot_urdf(args.spot_urdf),
         dt=args.dt,
         policy_rate_hz=float(getattr(args, "policy_rate_hz", DEFAULT_POLICY_RATE_HZ)),
-        async_ik_rate_hz=float(getattr(args, "async_ik_rate_hz", DEFAULT_ASYNC_IK_RATE_HZ)),
+        async_ik_rate_hz=float(
+            getattr(args, "async_ik_rate_hz", DEFAULT_ASYNC_IK_RATE_HZ)
+        ),
         async_ik=not bool(args.sync_ik),
+        gpu_args=args,
     )
     controller.reset(model, data)
     controller.adapter.set_manipulation_objects_enabled(
@@ -1999,7 +2235,9 @@ def run_viewer(args: argparse.Namespace) -> None:
         bool(args.spawn_manipulation_objects),
     )
     schedule_interactive_unstow(controller)
-    teleop_controller = SeerController(args.controller_port if args.enable_teleop else None)
+    teleop_controller = SeerController(
+        args.controller_port if args.enable_teleop else None
+    )
     teleop_controller.connect()
     server = viser.ViserServer(port=args.port, label="EmbodiK Spot locomanipulation")
 
@@ -2102,8 +2340,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=LocomanipPolicy.LOCOMANIP.value,
         help="Locomanipulation checkpoint variant to run.",
     )
-    parser.add_argument("--policy-checkpoint", type=str, default=None, help="Override ONNX path.")
-    parser.add_argument("--scene", type=str, default=None, help="Override MuJoCo scene XML path.")
+    parser.add_argument(
+        "--policy-checkpoint", type=str, default=None, help="Override ONNX path."
+    )
+    parser.add_argument(
+        "--scene", type=str, default=None, help="Override MuJoCo scene XML path."
+    )
     parser.add_argument(
         "--spot-urdf",
         type=str,
@@ -2113,9 +2355,15 @@ def build_parser() -> argparse.ArgumentParser:
             "If omitted, EMBODIK_SPOT_IK_URDF is used when set."
         ),
     )
-    parser.add_argument("--headless", action="store_true", help="Run without Viser/mjviser UI.")
-    parser.add_argument("--steps", type=int, default=50, help="Headless simulation steps.")
-    parser.add_argument("--dt", type=float, default=0.01, help="Controller timestep for IK hooks.")
+    parser.add_argument(
+        "--headless", action="store_true", help="Run without Viser/mjviser UI."
+    )
+    parser.add_argument(
+        "--steps", type=int, default=50, help="Headless simulation steps."
+    )
+    parser.add_argument(
+        "--dt", type=float, default=0.01, help="Controller timestep for IK hooks."
+    )
     parser.add_argument(
         "--policy-rate-hz",
         type=float,
@@ -2148,7 +2396,9 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_false",
         help="Keep MuJoCo Menagerie's raw actuator gains for comparison.",
     )
-    parser.add_argument("--port", type=int, default=DEFAULT_VISER_PORT, help="Viser server port.")
+    parser.add_argument(
+        "--port", type=int, default=DEFAULT_VISER_PORT, help="Viser server port."
+    )
     parser.add_argument(
         "--enable-teleop",
         action="store_true",
@@ -2177,6 +2427,24 @@ def build_parser() -> argparse.ArgumentParser:
         "--sync-ik",
         action="store_true",
         help="Run IK synchronously on the viewer thread instead of the default background worker.",
+    )
+    parser.add_argument(
+        "--gpu-wbc",
+        action="store_true",
+        help="Synchronous GPU arm overlay during policy walking/contact transitions; CoM and object dynamics hold IK; async disabled.",
+    )
+    parser.add_argument("--gpu-wbc-manifest", type=Path)
+    parser.add_argument("--gpu-wbc-cache-dir", type=Path)
+    parser.add_argument(
+        "--gpu-wbc-collision",
+        action="store_true",
+        help="Enable GPU self-collision constraints at launch.",
+    )
+    parser.add_argument(
+        "--gpu-wbc-target-offset",
+        type=float,
+        default=0.02,
+        help="Headless GPU tool target x offset in metres.",
     )
     return parser
 

@@ -93,7 +93,7 @@ nav:
     - Centroidal Stability: centroidal_stability.md
     - Collision Constraints & Tuning: collision_constraints.md
     - Working with Transforms: transforms.md
-    - GPU Batch Solvers: gpu_solvers.md
+    - GPU Whole-Body IK: gpu_solvers.md
   - Examples:
     - Overview: examples/index.md
     - Core IK:
@@ -109,10 +109,8 @@ nav:
       - Spot Full-Body IK: examples/spot_full_body_ik.md
       - Spot Locomanipulation mjviser: examples/spot_locomanip_mjviser.md
     - GPU & batch:
-      - GPU Batch IK: examples/gpu_batch_ik.md
+      - 10. Parallel GPU WBC: examples/parallel_trajectory_tracking.md
       - GPU Collision Batch: examples/gpu_collision_batch.md
-      - GPU Solver Demo: examples/gpu_solver_demo.md
-      - Parallel Trajectory Tracking: examples/parallel_trajectory_tracking.md
     - API walkthroughs:
       - RobotModel Usage: examples/robot_model_usage.md
       - Visualization: examples/visualization_examples.md
@@ -125,5 +123,6 @@ nav:
     - Utilities: api/utils.md
     - Visualization: api/visualization.md
   - Development: development.md
+  - Demo Media Provenance: media_provenance.md
   - Third-Party Notices: third_party_notices.md
   - Changelog: changelog.md

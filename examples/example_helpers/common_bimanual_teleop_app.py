@@ -4,23 +4,193 @@
 This module is shared by the public ROBOTIS AI Worker assets and the RB-Y1
 entrypoint. Model-specific scripts resolve URDFs and then delegate here for the
 common Viser UI, solver setup, collision/centroidal controls, and runtime loop.
+
+GPU mode supports tool priorities, model-selected collision pairs, adaptive dt,
+acceleration limits, runtime gains and named posture/arm bias below a shared
+torso marker. CoM, decoupled/locked torso policies and MIN_ERROR fallback remain
+CPU modes. General task-axis masks and joint metrics require missing primitives.
+Collision tuning presets and the CPU structural non-worsening floor are not
+reproduced by the GPU runtime; GPU collision uses its configured clearance.
 """
 
 from __future__ import annotations
 
 import argparse
 import collections
+import hashlib
 import sys
 import tempfile
 import time
 import xml.etree.ElementTree as ET
+from functools import partial
 from pathlib import Path
 from typing import Iterable
 
 import numpy as np
 
 import embodik
+from embodik.gpu.wbc import GPU_WBC_CAPABILITIES
 from embodik.utils import q2r, r2q
+
+
+def _gpu_cached_urdf(source: Path, cache_dir: Path) -> Path:
+    """Keep transformed model identity independent of temporary input names.
+
+    Preserve XML bytes (and thus manifest hashes). Callers establish package
+    lookup before loading; persistent models with relative assets stay in place.
+    """
+    payload = source.read_bytes()
+    root = ET.fromstring(payload)
+    has_relative_assets = any(
+        filename and "://" not in filename and not Path(filename).is_absolute()
+        for mesh in root.findall(".//mesh")
+        if (filename := mesh.get("filename", "")) is not None
+    )
+    if has_relative_assets:
+        return source.resolve()
+    destination = cache_dir / "models" / hashlib.sha256(payload).hexdigest() / "robot.urdf"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if not destination.exists() or destination.read_bytes() != payload:
+        destination.write_bytes(payload)
+    return destination
+
+
+def _gpu_posture_rows(robot, active_joint_names, posture_names):
+    """Map named regularizers to source velocity rows, including joint spans."""
+    rows, kinds = [], []
+    for name in active_joint_names:
+        posture = name in posture_names
+        arm = _is_arm_joint(name)
+        if not (posture or arm):
+            continue
+        start = int(robot.get_joint_velocity_index(name))
+        size = int(robot.get_joint_velocity_size(name))
+        rows.extend(range(start, start + size))
+        kinds.extend([(posture, arm)] * size)
+    return tuple(rows), tuple(kinds)
+
+
+def _gpu_regularizer_weights(kinds, posture_weight, arm_weight):
+    # Do not collapse duplicate CPU task rows: doing so can change SRINV's
+    # singular spectrum and damping even when ordinary least squares agrees.
+    if posture_weight > 0 and arm_weight > 0 and any(p and a for p, a in kinds):
+        raise ValueError("overlapping posture and arm bias rows require separate GPU tasks")
+    return tuple(
+        float((posture_weight if posture else 0.0) + (arm_weight if arm else 0.0))
+        for posture, arm in kinds
+    )
+
+
+def _collision_debug_rows(cpu_solver, gpu_result, *, gpu_mode, enabled, visible):
+    """Never query CPU collision state for a GPU step or hidden debug panel."""
+    if not enabled or not visible:
+        return []
+    if gpu_mode:
+        row = getattr(gpu_result, "collision_debug", None)
+        return [] if row is None else [row]
+    if not hasattr(cpu_solver, "get_last_collision_debug_list"):
+        return []
+    rows = list(cpu_solver.get_last_collision_debug_list())
+    if not rows and hasattr(cpu_solver, "get_last_collision_debug"):
+        row = cpu_solver.get_last_collision_debug()
+        rows = [] if row is None else [row]
+    return rows
+
+
+def _configure_gpu_bimanual_features(
+    gpu_solver,
+    *,
+    options,
+    collision_enabled,
+    collision_distance,
+    posture_target,
+    posture_kinds,
+    posture_weight,
+    arm_weight,
+    torso_target,
+    torso_enabled,
+    acceleration_limits_enabled=False,
+    max_joint_acceleration=15.0,
+    secondary_targets=(),
+    com_enabled=False,
+    com_support_polygon=None,
+    com_margin=0.0,
+    com_vel_max=0.4,
+    com_acc_max=0.1,
+    com_use_acceleration_limits=True,
+    com_proximity_fraction=0.05,
+    capture_point_enabled=False,
+    velocity_zmp_enabled=False,
+    momentum_enabled=False,
+    momentum_weight=0.01,
+):
+    """Configure EE/torso band 1 and posture band 2 without CPU queries."""
+    secondary_poses = (*secondary_targets, torso_target)
+    updates = dict(
+        iterations=int(options.max_steps),
+        frame_position_gains=(float(options.position_gain),) * len(gpu_solver.frames),
+        frame_orientation_gains=(float(options.orientation_gain),) * len(gpu_solver.frames),
+        adaptive_dt=bool(options.adaptive_dt),
+        adaptive_dt_max_scale=float(options.adaptive_dt_max_scale),
+        adaptive_dt_reference_distance=float(options.adaptive_dt_reference_distance),
+        collision_enabled=bool(collision_enabled),
+        acceleration_limits_enabled=bool(acceleration_limits_enabled),
+        max_joint_acceleration_rad_s2=float(max_joint_acceleration),
+        com_enabled=bool(com_enabled),
+        com_support_polygon_xy=com_support_polygon,
+        com_margin=float(com_margin),
+        com_vel_max=float(com_vel_max),
+        com_acc_max=float(com_acc_max),
+        com_use_acceleration_limits=bool(com_use_acceleration_limits),
+        com_proximity_fraction=float(com_proximity_fraction),
+        capture_point_enabled=bool(capture_point_enabled),
+        capture_point_support_polygon_xy=com_support_polygon,
+        capture_point_margin=float(com_margin),
+        velocity_zmp_enabled=bool(velocity_zmp_enabled),
+        velocity_zmp_support_polygon_xy=com_support_polygon,
+        velocity_zmp_margin=float(com_margin),
+        centroidal_momentum_enabled=bool(momentum_enabled),
+        centroidal_momentum_target=(0.0,) * 6,
+        centroidal_momentum_axis_mask=(True, True, False, False, False, False),
+        centroidal_momentum_weight=float(momentum_weight),
+        secondary_frame_target_poses_wxyz=tuple(
+            tuple(pose[:3, 3]) + tuple(r2q(pose[:3, :3], order="sxyz")) for pose in secondary_poses
+        ),
+        secondary_frame_position_gains=(float(options.position_gain),) * len(secondary_poses),
+        secondary_frame_orientation_gains=(float(options.orientation_gain),) * len(secondary_poses),
+        secondary_frame_weights=(1.0,) * len(secondary_targets) + (float(torso_enabled),),
+    )
+    if gpu_solver.collision_supported:
+        updates["collision_min_distance_m"] = float(collision_distance)
+    if posture_kinds:
+        updates.update(
+            posture_target_configuration=tuple(
+                gpu_solver.extract_active_configuration(posture_target)
+            ),
+            posture_weights=_gpu_regularizer_weights(posture_kinds, posture_weight, arm_weight),
+        )
+    gpu_solver.configure_runtime(**updates)
+
+
+def _gpu_bimanual_task_layout(active, priorities):
+    """Return source tool slots for the two pose bands; posture stays at two."""
+    if any(priority not in (0, 1) for priority in priorities):
+        raise ValueError("GPU tool tasks support priority 0 or 1 only")
+    primary = tuple(i for i, enabled in enumerate(active) if enabled and priorities[i] == 0)
+    secondary = tuple(i for i, enabled in enumerate(active) if enabled and priorities[i] == 1)
+    if not primary:
+        raise ValueError("GPU requires at least one active primary tool task")
+    return primary, secondary
+
+
+def _gpu_bimanual_posture_kinds(rows, kinds, *, torso_enabled, lift_rows, active_arm_rows):
+    """Mirror CPU controlled-row selection without relying on model dimensions."""
+    lift_rows, active_arm_rows = set(lift_rows), set(active_arm_rows)
+    return tuple(
+        (p and not (torso_enabled and row in lift_rows), a and row in active_arm_rows)
+        for row, (p, a) in zip(rows, kinds)
+    )
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
@@ -56,9 +226,18 @@ try:
         set_transform_control_pose,
     )
     from example_helpers.visualization_helpers import make_visual_config_mapper
+
+    from embodik.gpu.wbc import (
+        GpuWbcMultiFrameSolver,
+        derive_frames_active_joint_names,
+    )
 except ModuleNotFoundError as exc:
     if exc.name != "example_helpers" and not str(exc.name).startswith("example_helpers."):
         raise
+    from embodik.gpu.wbc import (
+        GpuWbcMultiFrameSolver,
+        derive_frames_active_joint_names,
+    )
     from examples.example_helpers.adaptive_gain_tuning import (
         AdaptiveGainTuningConfig,
         AdaptiveGainTuningState,
@@ -89,6 +268,15 @@ except ModuleNotFoundError as exc:
     )
     from examples.example_helpers.visualization_helpers import make_visual_config_mapper
 
+
+class _BimanualGpuSolver(GpuWbcMultiFrameSolver):
+    """Keep CPU posture below both tool and shared-torso pose bands."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._solver.configure_task_hierarchy(posture_priority=2)
+
+
 DEFAULT_SOLVER_DT = 0.01
 DEFAULT_POS_GAIN = 10.0
 DEFAULT_ROT_GAIN = 10.0
@@ -104,6 +292,28 @@ TORSO_POLICY_FREE = "Free"
 TORSO_POLICY_AUTO = "Auto / Prefer Locked"
 TORSO_POLICY_LOCKED = "Locked"
 TORSO_POLICY_DECOUPLED = "Decoupled"
+
+
+def _gpu_bimanual_policy_holds(torso_policy, contribution, solve_mode, active_fallback):
+    """Explain missing CPU policies rather than silently substituting a solve."""
+    reasons = []
+    if torso_policy != TORSO_POLICY_FREE:
+        reasons.append(
+            {
+                TORSO_POLICY_DECOUPLED: "Decoupled torso requires per-task excluded joint columns and a primary torso task",
+                TORSO_POLICY_LOCKED: "Locked torso selects CPU MIN_ERROR; GPU has no matching MIN_ERROR solve",
+                TORSO_POLICY_AUTO: "Auto torso requires preferred-lock candidate search and CPU acceptance policy",
+            }.get(torso_policy, "unknown torso policy")
+        )
+    if abs(float(contribution) - 0.5) >= 1e-6:
+        reasons.append("torso contribution requires a weighted joint metric before SRINV")
+    if solve_mode != "SCALE":
+        reasons.append(f"GPU has no matching CPU {solve_mode} solve policy")
+    if active_fallback:
+        reasons.append("active SCALE fallback requires a CPU MIN_ERROR candidate solve")
+    return reasons
+
+
 DEFAULT_AUTO_TORSO_CONTRIBUTION = 0.35
 # Accept measurable arms-only progress before spending torso motion; stricter
 # gates reject productive far-target steps and reintroduce fallback oscillation.
@@ -171,6 +381,7 @@ COMMON_BIMANUAL_DEFAULT_COLLISION_MAX_CONSTRAINTS: int | None = None
 COMMON_BIMANUAL_POSTURE_JOINT_NAMES: list[str] | None = None
 COMMON_BIMANUAL_INITIAL_TARGET_WXYZ: tuple[float, float, float, float] | None = None
 _SolverStep = collections.namedtuple("_SolverStep", ("q_next", "solver_result", "elapsed_ms"))
+_GpuUiResult = collections.namedtuple("_GpuUiResult", ("status", "status_message"))
 COMMON_BIMANUAL_SUPPORT_CONTACT_FRAMES = (
     "left_wheel_drive_link",
     "right_wheel_drive_link",
@@ -262,6 +473,13 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--variant", choices=("sg2", "bg2"), default="sg2")
     parser.add_argument("--port", type=int, default=DEFAULT_VISER_PORT)
+    parser.add_argument("--gpu-wbc", action="store_true")
+    parser.add_argument("--gpu-wbc-manifest", type=Path)
+    parser.add_argument(
+        "--gpu-wbc-cache-dir",
+        type=Path,
+        default=Path("build/gpu-wbc-newton-cache"),
+    )
     return parser.parse_args()
 
 
@@ -1367,6 +1585,13 @@ def main() -> None:
     args = parse_args()
     urdf_path = resolve_ffw_urdf_path(args.variant)
     collision_urdf_path = resolve_generated_ffw_collision_urdf_path(args.variant) or urdf_path
+    from utils.robot_models import ensure_ros_package_path
+
+    ensure_ros_package_path(Path(collision_urdf_path))
+    if bool(getattr(args, "gpu_wbc", False)):
+        collision_urdf_path = _gpu_cached_urdf(
+            Path(collision_urdf_path), Path(args.gpu_wbc_cache_dir)
+        )
 
     import viser
     import yourdfpy
@@ -1455,9 +1680,26 @@ def main() -> None:
     current_dq = np.zeros(robot.nv, dtype=float)
     nullspace_bias_q = np.asarray(q, dtype=float).copy()
     robot.update_configuration(q)
-    support_polygon = _compute_support_polygon_from_contacts(
-        robot, COMMON_BIMANUAL_SUPPORT_CONTACT_FRAMES
+    available_frame_names = set(robot.get_frame_names())
+    support_contact_frames = tuple(
+        frame for frame in COMMON_BIMANUAL_SUPPORT_CONTACT_FRAMES if frame in available_frame_names
     )
+    if len(support_contact_frames) >= 3:
+        support_polygon = _compute_support_polygon_from_contacts(robot, support_contact_frames)
+    else:
+        base_frame = next(
+            (
+                candidate
+                for candidate in ("base_link", "base", "world")
+                if candidate in available_frame_names
+            ),
+            next(iter(available_frame_names)),
+        )
+        base_xy = np.asarray(robot.get_frame_pose(base_frame).translation, dtype=float)[:2]
+        support_polygon = base_xy + np.asarray(
+            ((-0.25, -0.20), (0.25, -0.20), (0.25, 0.20), (-0.25, 0.20)),
+            dtype=float,
+        )
     initial_com_inside_support = _contains_point_in_polygon(
         support_polygon, np.asarray(robot.get_com_position(), dtype=float)[:2]
     )
@@ -1476,6 +1718,103 @@ def main() -> None:
     print(f"[bimanual] variant={args.variant} urdf={urdf_path}")
     print(f"[bimanual] frames={frame_map}")
     print(f"[bimanual] torso_marker_frame={torso_marker_frame}")
+
+    gpu_solver = None
+    gpu_fault = None
+    gpu_result = None
+    gpu_collision_layout = None
+    if bool(getattr(args, "gpu_wbc", False)):
+        manifest_path = getattr(args, "gpu_wbc_manifest", None)
+        gpu_frames = (frame_map["right_tool"], frame_map["left_tool"])
+        gpu_active_names = derive_frames_active_joint_names(robot, gpu_frames)
+        gpu_active_velocity_rows = {
+            row
+            for name in gpu_active_names
+            for row in range(
+                robot.get_joint_velocity_index(name),
+                robot.get_joint_velocity_index(name) + robot.get_joint_velocity_size(name),
+            )
+        }
+        gpu_posture_indices, gpu_posture_kinds = _gpu_posture_rows(
+            robot, gpu_active_names, set(posture_control_joint_names)
+        )
+        gpu_exclusions = _generate_consecutive_collision_exclusions(robot, collision_urdf_path)
+        gpu_pairs = _generate_common_bimanual_collision_include_pairs(
+            robot, collision_urdf_path, gpu_exclusions
+        )
+        gpu_pair_options = {
+            True: tuple(gpu_pairs),
+            False: tuple(
+                _generate_common_bimanual_collision_include_pairs(robot, collision_urdf_path, [])
+            ),
+        }
+        gpu_torso_pose = robot.get_frame_pose(torso_marker_frame)
+        gpu_solver_factory = partial(
+            _BimanualGpuSolver,
+            Path(manifest_path),
+            Path(collision_urdf_path),
+            Path(getattr(args, "gpu_wbc_cache_dir")),
+            robot=robot,
+            robot_name=f"bimanual_{args.variant}",
+            frames=gpu_frames,
+            active_joint_names=gpu_active_names,
+            default_configuration=q,
+            task_dimensions=(12,),
+            iterations=2,
+            dt=DEFAULT_SOLVER_DT,
+            position_gain=DEFAULT_POS_GAIN,
+            orientation_gain=DEFAULT_ROT_GAIN,
+            max_linear_speed=DEFAULT_MAX_LINEAR_SPEED,
+            max_angular_speed=DEFAULT_MAX_ANGULAR_SPEED,
+            max_joint_acceleration_rad_s2=DEFAULT_JOINT_ACCEL_LIMIT,
+            solver_backend="torch_srinv",
+            collision_pairs=tuple(gpu_pairs),
+            collision_query_distance_m=0.24,
+            com_support_polygon_xy=support_polygon,
+            com_full_robot=robot,
+            com_full_default_configuration=q,
+            capture_point_support_polygon_xy=support_polygon,
+            velocity_zmp_support_polygon_xy=support_polygon,
+            centroidal_momentum_target=(0.0,) * 6,
+            centroidal_momentum_axis_mask=(True, True, False, False, False, False),
+            centroidal_momentum_weight=0.01,
+            centroidal_momentum_priority=2,
+            posture_target_configuration=(
+                tuple(
+                    float(value)
+                    for name in gpu_active_names
+                    for value in q[
+                        robot.get_joint_config_index(name) : robot.get_joint_config_index(name)
+                        + robot.get_joint_config_size(name)
+                    ]
+                )
+                if gpu_posture_indices
+                else None
+            ),
+            posture_velocity_indices=gpu_posture_indices,
+            posture_weights=(0.0,) * len(gpu_posture_indices),
+            secondary_frame_names=(torso_marker_frame,),
+            secondary_frame_task_dimensions=(6,),
+            secondary_frame_target_poses_wxyz=(
+                tuple(gpu_torso_pose.translation)
+                + tuple(r2q(gpu_torso_pose.rotation, order="sxyz")),
+            ),
+            secondary_frame_weights=(0.0,),
+        )
+        gpu_collision_layout = None
+        gpu_solver = gpu_solver_factory(
+            collision_max_constraints=_default_collision_max_constraints(args.variant)
+        )
+        gpu_solver.configure_runtime(
+            collision_enabled=False,
+            capture_point_enabled=False,
+            velocity_zmp_enabled=False,
+            centroidal_momentum_enabled=False,
+        )
+        gpu_solver.warm_up(
+            gpu_solver.extract_active_configuration(q),
+            tuple(robot.get_frame_pose(frame) for frame in gpu_frames),
+        )
 
     def _build_solver(q_posture_seed: np.ndarray):
         solver_local = embodik.KinematicsSolver(robot)
@@ -1744,6 +2083,11 @@ def main() -> None:
 
     with server.gui.add_folder("IK Controls"):
         timing_handle = server.gui.add_number("Elapsed (ms)", 0.001, disabled=True)
+        backend_select = server.gui.add_dropdown(
+            "Solver Backend",
+            options=("CPU EmbodiK",) + (("GPU Newton/Warp",) if gpu_solver is not None else ()),
+            initial_value="CPU EmbodiK",
+        )
         auto_ik_solve = server.gui.add_checkbox("Auto IK Solve", initial_value=True)
         enable_left_ee = server.gui.add_checkbox("Enable Left EE", initial_value=True)
         enable_right_ee = server.gui.add_checkbox("Enable Right EE", initial_value=True)
@@ -1996,7 +2340,7 @@ def main() -> None:
         show_collision_debug = server.gui.add_checkbox(
             "Show collision debug",
             initial_value=True,
-            disabled=not hasattr(solver, "get_last_collision_debug"),
+            disabled=gpu_solver is None and not hasattr(solver, "get_last_collision_debug"),
         )
         collision_debug_text = server.gui.add_text("Collision Debug", initial_value="Collision: --")
         collision_pairs_stats = server.gui.add_text(
@@ -2206,11 +2550,13 @@ def main() -> None:
             position=(0.0, 0.0, 0.001),
             visible=bool(show_support_contacts.value),
         )
-        for frame_name in COMMON_BIMANUAL_SUPPORT_CONTACT_FRAMES
+        for frame_name in support_contact_frames
     }
 
     def _current_support_polygon() -> np.ndarray:
-        return _compute_support_polygon_from_contacts(robot, COMMON_BIMANUAL_SUPPORT_CONTACT_FRAMES)
+        if len(support_contact_frames) < 3:
+            return support_polygon.copy()
+        return _compute_support_polygon_from_contacts(robot, support_contact_frames)
 
     def _margin_frac() -> float:
         return float(com_margin_pct.value) / 100.0
@@ -2340,7 +2686,7 @@ def main() -> None:
 
     def _update_com_visualization() -> None:
         support_polygon_now = _current_support_polygon()
-        support_contacts = _support_contact_points(robot, COMMON_BIMANUAL_SUPPORT_CONTACT_FRAMES)
+        support_contacts = _support_contact_points(robot, support_contact_frames)
         inner_polygon = _shrink_polygon_2d(support_polygon_now, _margin_frac())
         com_pos = np.asarray(robot.get_com_position(), dtype=float)
         com_xy = com_pos[:2]
@@ -2441,18 +2787,13 @@ def main() -> None:
 
     def _update_collision_debug() -> None:
         nonlocal dbg_lines
-        if (
-            not bool(enable_collision.value)
-            or not show_collision_debug.value
-            or not hasattr(solver, "get_last_collision_debug_list")
-        ):
-            _clear_collision_debug()
-            return
-
-        dbg_rows = list(solver.get_last_collision_debug_list())
-        if not dbg_rows and hasattr(solver, "get_last_collision_debug"):
-            dbg = solver.get_last_collision_debug()
-            dbg_rows = [] if dbg is None else [dbg]
+        dbg_rows = _collision_debug_rows(
+            solver,
+            gpu_result,
+            gpu_mode=backend_select.value == "GPU Newton/Warp",
+            enabled=bool(enable_collision.value),
+            visible=bool(show_collision_debug.value),
+        )
         if not dbg_rows:
             _clear_collision_debug()
             return
@@ -2511,6 +2852,50 @@ def main() -> None:
             right_ctrl.visible = False
             left_ctrl.visible = False
 
+    @backend_select.on_update
+    def _(_evt) -> None:
+        nonlocal gpu_fault, gpu_result
+        gpu_fault = None
+        gpu_result = None
+        gpu_active = backend_select.value == "GPU Newton/Warp"
+        if gpu_solver is not None:
+            gpu_solver.reset_state()
+        collision_tuning.disabled = gpu_active or not hasattr(solver, "set_collision_tuning_mode")
+        enable_capture_point.disabled = (
+            gpu_active and not GPU_WBC_CAPABILITIES.capture_point_constraints
+        ) or not hasattr(solver, "configure_capture_point_constraint")
+        enable_velocity_zmp.disabled = (
+            gpu_active and not GPU_WBC_CAPABILITIES.velocity_zmp_constraints
+        ) or not hasattr(solver, "configure_velocity_zmp_constraint")
+        enable_momentum_damping.disabled = (
+            gpu_active and not GPU_WBC_CAPABILITIES.centroidal_momentum_tasks
+        ) or not hasattr(solver, "add_centroidal_momentum_task")
+        momentum_damping_weight.disabled = enable_momentum_damping.disabled
+        if gpu_active:
+            enable_left_ee.value = True
+            enable_right_ee.value = True
+            enable_torso_marker.value = False
+            torso_policy.value = TORSO_POLICY_FREE
+            torso_contribution.value = 0.5
+            solve_mode.value = "SCALE"
+            allow_fallback.value = False
+            ik_steps.value = 2
+            pos_gain.value = DEFAULT_POS_GAIN
+            ori_gain.value = DEFAULT_ROT_GAIN
+            max_linear_speed.value = DEFAULT_MAX_LINEAR_SPEED
+            max_angular_speed.value = DEFAULT_MAX_ANGULAR_SPEED
+            if enable_capture_point.disabled:
+                enable_capture_point.value = False
+            if enable_velocity_zmp.disabled:
+                enable_velocity_zmp.value = False
+            if enable_momentum_damping.disabled:
+                enable_momentum_damping.value = False
+            status.value = (
+                "Status: GPU tool priorities, shared torso, posture and runtime gains; "
+                "CoM supported. Capture point, velocity ZMP, momentum damping, and "
+                "collision tuning presets are disabled until GPU parity is implemented."
+            )
+
     @auto_ik_solve.on_update
     def _(_evt) -> None:
         if bool(auto_ik_solve.value) and bool(manual_control.value):
@@ -2568,7 +2953,7 @@ def main() -> None:
 
     def _reset_solver_state(reason: str) -> None:
         nonlocal solver, right_task, left_task, torso_task, posture, arm_nullspace
-        nonlocal momentum_task, collision_cfg, com_cfg, accel_cfg
+        nonlocal momentum_task, collision_cfg, com_cfg, accel_cfg, gpu_fault
         (
             solver,
             right_task,
@@ -2583,6 +2968,9 @@ def main() -> None:
         collision_cfg = None
         com_cfg = None
         accel_cfg = None
+        gpu_fault = None
+        if gpu_solver is not None:
+            gpu_solver.reset_state()
         _sync_targets_from_robot()
         _configure_acceleration_limits_if_needed(force=True)
         _configure_com_constraint_if_needed(force=True)
@@ -2759,6 +3147,7 @@ def main() -> None:
 
     while True:
         q_prev = np.asarray(q, dtype=float).copy()
+        gpu_result = None
         _configure_acceleration_limits_if_needed()
 
         exclusion_pairs = collision_exclusions if exclude_consecutive.value else []
@@ -3064,7 +3453,17 @@ def main() -> None:
         # swallow its gizmo updates.
         if _seg_player is not None and _seg_player.state not in ("idle", "hold"):
             streaming_active = True
-        if settled and not streaming_active and not (left_target_moved or right_target_moved):
+        gpu_needs_step = backend_select.value == "GPU Newton/Warp" and (
+            bool(enable_collision.value)
+            or bool(enable_torso_marker.value)
+            or bool(arm_nullspace_enable.value)
+        )
+        if (
+            settled
+            and not gpu_needs_step
+            and not streaming_active
+            and not (left_target_moved or right_target_moved)
+        ):
             current_dq = np.zeros(robot.nv, dtype=float)
             robot.update_configuration(q)
             _update_robot_visuals(q)
@@ -3243,7 +3642,154 @@ def main() -> None:
             opts.excluded_joint_indices = sorted(set(dynamic_freeze_indices))
             opts.integration_zero_velocity_indices = sorted(set(dynamic_freeze_indices))
 
-        step = _solve_position_step(targets, q)
+        if backend_select.value == "GPU Newton/Warp":
+            assert gpu_solver is not None
+            selected_posture_kinds = _gpu_bimanual_posture_kinds(
+                gpu_posture_indices,
+                gpu_posture_kinds,
+                torso_enabled=_torso_marker_on,
+                lift_rows=lift_posture_indices,
+                active_arm_rows=(right_arm_velocity_indices if right_active else [])
+                + (left_arm_velocity_indices if left_active else []),
+            )
+            unsupported = []
+            if not (right_active or left_active):
+                unsupported.append("GPU requires at least one active primary tool task")
+            unsupported.extend(
+                _gpu_bimanual_policy_holds(
+                    _torso_policy_value,
+                    torso_contribution.value,
+                    solve_mode.value,
+                    primary_allow_fallback,
+                )
+            )
+            if (
+                bool(enable_collision.value)
+                and not gpu_pair_options[bool(exclude_consecutive.value)]
+            ):
+                unsupported.append("loaded model has no selected collision pairs")
+            if (
+                float(posture_weight.value) > 0
+                and float(arm_nullspace.weight) > 0
+                and any(p and a for p, a in selected_posture_kinds)
+            ):
+                unsupported.append(
+                    "overlapping posture and arm bias rows require separate GPU tasks"
+                )
+            if unsupported:
+                step = _SolverStep(
+                    q_next=q_prev,
+                    solver_result=_GpuUiResult("GPU_SAFE_HOLD", "; ".join(unsupported)),
+                    elapsed_ms=0.0,
+                )
+            elif gpu_fault is None:
+                try:
+                    selected_pairs = gpu_pair_options[bool(exclude_consecutive.value)]
+                    primary_slots, secondary_slots = _gpu_bimanual_task_layout(
+                        (right_active, left_active),
+                        (right_task.priority, left_task.priority),
+                    )
+                    tool_targets = (cur_right_target_pose, cur_left_target_pose)
+                    secondary_frames = tuple(gpu_frames[i] for i in secondary_slots) + (
+                        torso_marker_frame,
+                    )
+                    secondary_targets = tuple(tool_targets[i] for i in secondary_slots) + (
+                        _torso_target_matrix(),
+                    )
+                    locked_rows = tuple(
+                        row
+                        for row in opts.excluded_joint_indices
+                        if row in gpu_active_velocity_rows
+                    )
+                    layout = (
+                        selected_pairs,
+                        int(collision_max_constraints.value),
+                        float(max_linear_speed.value),
+                        float(max_angular_speed.value),
+                        primary_slots,
+                        secondary_slots,
+                        locked_rows,
+                    )
+                    if layout != gpu_collision_layout:
+                        gpu_solver = gpu_solver_factory(
+                            frames=tuple(gpu_frames[i] for i in primary_slots),
+                            task_dimensions=(6 * len(primary_slots),),
+                            locked_velocity_indices=locked_rows,
+                            secondary_frame_names=secondary_frames,
+                            secondary_frame_task_dimensions=(6,) * len(secondary_frames),
+                            secondary_frame_target_poses_wxyz=tuple(
+                                tuple(pose[:3, 3]) + tuple(r2q(pose[:3, :3], order="sxyz"))
+                                for pose in secondary_targets
+                            ),
+                            secondary_frame_weights=(0.0,) * len(secondary_frames),
+                            collision_pairs=selected_pairs,
+                            collision_max_constraints=layout[1],
+                            max_linear_speed=layout[2],
+                            max_angular_speed=layout[3],
+                        )
+                        gpu_collision_layout = layout
+                    _configure_gpu_bimanual_features(
+                        gpu_solver,
+                        options=opts,
+                        collision_enabled=bool(enable_collision.value),
+                        collision_distance=collision_min_distance_m,
+                        posture_target=nullspace_bias_q,
+                        posture_kinds=selected_posture_kinds,
+                        posture_weight=float(posture_weight.value),
+                        arm_weight=float(arm_nullspace.weight),
+                        torso_target=_torso_target_matrix(),
+                        torso_enabled=_torso_marker_on,
+                        acceleration_limits_enabled=bool(enable_accel_limits.value),
+                        max_joint_acceleration=float(joint_accel_limit.value),
+                        secondary_targets=tuple(tool_targets[i] for i in secondary_slots),
+                        com_enabled=bool(enable_com_constraint.value),
+                        com_support_polygon=_current_support_polygon(),
+                        com_margin=_margin_frac(),
+                        com_vel_max=float(com_vel_max.value),
+                        com_acc_max=float(com_acc_max.value),
+                        com_use_acceleration_limits=bool(com_use_acc_limits.value),
+                        com_proximity_fraction=(0.05 if bool(com_use_proximity.value) else 0.0),
+                        capture_point_enabled=bool(enable_capture_point.value),
+                        velocity_zmp_enabled=bool(enable_velocity_zmp.value),
+                        momentum_enabled=bool(enable_momentum_damping.value),
+                        momentum_weight=float(momentum_damping_weight.value),
+                    )
+                    gpu_result = gpu_solver.solve_step(
+                        gpu_solver.extract_active_configuration(q),
+                        tuple(
+                            embodik.Rt(R=tool_targets[i][:3, :3], t=tool_targets[i][:3, 3])
+                            for i in primary_slots
+                        ),
+                        include_collision_debug=bool(
+                            enable_collision.value and show_collision_debug.value
+                        ),
+                        current_velocity=gpu_solver.extract_active_velocity(current_dq),
+                    )
+                except Exception as exc:
+                    gpu_fault = f"{type(exc).__name__}: {exc}"
+                    step = _SolverStep(
+                        q_next=q_prev,
+                        solver_result=_GpuUiResult("GPU_FAULT", gpu_fault),
+                        elapsed_ms=0.0,
+                    )
+                else:
+                    step = _SolverStep(
+                        q_next=gpu_solver.merge_active_configuration(q, gpu_result.joints),
+                        solver_result=_GpuUiResult(
+                            f"GPU_{gpu_result.status}",
+                            f"max position error={max(gpu_result.position_errors)*1e3:.2f} mm",
+                        ),
+                        elapsed_ms=gpu_result.elapsed_ms,
+                    )
+            else:
+                step = _SolverStep(
+                    q_next=q_prev,
+                    solver_result=_GpuUiResult("GPU_FAULT", gpu_fault),
+                    elapsed_ms=0.0,
+                )
+        else:
+            step = _solve_position_step(targets, q)
+        q = step.q_next
         result = step.solver_result
         dq_command = np.asarray(
             getattr(result, "joint_velocities", np.zeros(robot.nv)), dtype=float
@@ -3299,7 +3845,7 @@ def main() -> None:
                 f" | {result.status_message}" if getattr(result, "status_message", "") else ""
             )
         else:
-            status.value = f"Status: {result.status.name}" + (
+            status.value = f"Status: {result_status_name}" + (
                 f" | {result.status_message}" if getattr(result, "status_message", "") else ""
             )
         timing_handle.value = float(step.elapsed_ms)
