@@ -77,9 +77,7 @@ def test_cpu_fallback_preserves_flattened_task_priorities():
     goals, jacobians, C, lower, upper = generate_random_problem(
         seed=123, n_dof=7, n_tasks=2, task_dims=[6, 3]
     )
-    expected = eik.computeMultiObjectiveVelocitySolutionEigen(
-        goals, jacobians, C, lower, upper
-    )
+    expected = eik.computeMultiObjectiveVelocitySolutionEigen(goals, jacobians, C, lower, upper)
     targets_flat, jacobians_flat = flatten_problem(goals, jacobians)
     actual = solve_velocity_batched(
         [targets_flat],
