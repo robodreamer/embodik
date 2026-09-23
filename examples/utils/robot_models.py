@@ -30,7 +30,7 @@ _BUILTIN_PRESETS: Dict[str, Dict[str, Any]] = {
         "target_link": "panda_hand",
         "display_name": "Franka Emika Panda",
         "default_configuration": np.array([0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785]),
-        "extra_gripper_default": np.array([0.05, 0.05]),
+        "extra_gripper_default": np.array([0.02, 0.02]),
         "default_offset": np.array([0.05, 0.0, 0.0]),
         "collision_exclusions": "auto",
         "collision_exclusion_overrides": [],
@@ -316,7 +316,7 @@ def resolve_robot_configuration(robot_key: str) -> Dict[str, Any]:
 
     # Handle gripper joints for panda (if robot has 9 DOF)
     if robot_key == "panda" and robot.nq == 9:
-        extra_gripper = preset.get("extra_gripper_default", np.array([0.05, 0.05]))
+        extra_gripper = preset.get("extra_gripper_default", np.array([0.02, 0.02]))
         if isinstance(extra_gripper, list):
             extra_gripper = np.array(extra_gripper)
         q_default = np.concatenate([q_default, extra_gripper])

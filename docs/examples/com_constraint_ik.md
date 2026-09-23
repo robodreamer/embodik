@@ -48,7 +48,8 @@ pixi run python examples/04_com_constraint_example.py
 ```
 
 The example defaults to the Panda preset; pass `--robot <key>` to use another
-configured model.
+configured model. It uses ViserUrdf by default; use `--visualizer pinocchio`
+to select the alternate viewer.
 
 The capture-point and ZMP disks show accepted-command diagnostics in the
 support frame. This remains a fixed-base velocity IK example; successful ZMP
