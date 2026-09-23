@@ -89,6 +89,7 @@ nav:
   - Guides:
     - Overview: guides/index.md
     - Solver Robustness & Recovery: solver_robustness.md
+    - Acceleration Solver: acceleration_solver.md
     - Collision Constraints & Tuning: collision_constraints.md
     - Working with Transforms: transforms.md
     - GPU Batch Solvers: gpu_solvers.md

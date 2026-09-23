@@ -12,6 +12,7 @@
 
 #include <Eigen/Dense>
 #include <embodik/types.hpp>
+#include <pinocchio/spatial/se3.hpp>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -26,6 +27,9 @@ using Matrix6Xd = Eigen::Matrix<double, 6, Eigen::Dynamic>;
 // Forward declarations
 class RobotModel;
 class KinematicsSolver;
+namespace detail {
+struct TaskAccelerationDifferentialAdapter;
+}
 
 /**
  * @brief Task types enumeration
@@ -184,6 +188,17 @@ public:
 protected:
     void markContinuityStateChanged() { ++continuity_revision_; }
     void markContinuityTargetChanged() { ++continuity_target_revision_; }
+    /**
+     * @brief Apply this task's generalized-coordinate exclusions to a Jacobian.
+     */
+    Eigen::MatrixXd apply_excluded_joint_columns(Eigen::MatrixXd jacobian) const {
+        for (int excluded_index : excluded_joint_indices_) {
+            if (excluded_index >= 0 && excluded_index < jacobian.cols()) {
+                jacobian.col(excluded_index).setZero();
+            }
+        }
+        return jacobian;
+    }
 
     std::string name_;
     int priority_;
@@ -200,6 +215,7 @@ protected:
 
 private:
     friend class KinematicsSolver;
+    friend struct detail::TaskAccelerationDifferentialAdapter;
 
     void setPositionStepTargetVelocity(const Eigen::VectorXd& velocity) {
         target_velocity_ = velocity;
@@ -321,6 +337,8 @@ public:
     const Eigen::Matrix3d& getCurrentOrientation() const { return current_orientation_; }
 
 private:
+    friend struct detail::TaskAccelerationDifferentialAdapter;
+
     std::shared_ptr<RobotModel> model_;
     std::string frame_name_;
     TaskType task_type_;
@@ -349,6 +367,8 @@ private:
     void invalidateCache() { cache_valid_ = false; }
     Eigen::Vector3d computeOrientationError(const Eigen::Matrix3d& R_current,
                                            const Eigen::Matrix3d& R_desired) const;
+    Eigen::VectorXd referenceRowScale() const;
+    Eigen::MatrixXd buildPhysicalJacobian() const;
 };
 
 /**
@@ -396,6 +416,8 @@ public:
     const Eigen::Vector3d& getCurrentPosition() const { return current_position_; }
 
 private:
+    friend struct detail::TaskAccelerationDifferentialAdapter;
+
     std::shared_ptr<RobotModel> model_;
 
     // Target and current values
@@ -407,6 +429,9 @@ private:
 
     // Mask for selective control
     Eigen::Vector3d position_mask_ = Eigen::Vector3d::Ones();
+
+    Eigen::VectorXd referenceRowScale() const;
+    Eigen::MatrixXd buildPhysicalJacobian() const;
 };
 
 /**
@@ -505,6 +530,8 @@ public:
     const std::vector<int>& getControlledJointIndices() const { return controlled_joint_indices_; }
 
 private:
+    friend struct detail::TaskAccelerationDifferentialAdapter;
+
     std::shared_ptr<RobotModel> model_;
 
     // Target configuration
@@ -526,6 +553,9 @@ private:
     // Jacobian (identity or projected for configuration space tasks)
     Eigen::MatrixXd jacobian_;
 
+    int configurationIndexForVelocity(int velocity_index) const;
+    Eigen::VectorXd referenceRowScale() const;
+    Eigen::MatrixXd buildPhysicalJacobian() const;
     void updateProjectionMatrix();
 };
 
@@ -591,6 +621,8 @@ public:
     }
 
 private:
+    friend struct detail::TaskAccelerationDifferentialAdapter;
+
     std::shared_ptr<RobotModel> model_;
     std::string frame_name_;
     TaskType frame_task_type_;
@@ -646,6 +678,8 @@ public:
     }
 
 private:
+    friend struct detail::TaskAccelerationDifferentialAdapter;
+
     std::shared_ptr<RobotModel> model_;
     std::vector<int> controlled_joint_indices_;
     std::vector<int> velocity_to_config_index_;
@@ -714,6 +748,8 @@ public:
     TaskType getType() const override { return TaskType::JOINT; }
 
 private:
+    friend struct detail::TaskAccelerationDifferentialAdapter;
+
     std::shared_ptr<RobotModel> model_;
     int joint_index_;
     double target_value_;
@@ -721,6 +757,8 @@ private:
 
     // Jacobian (single row with 1 at joint index)
     Eigen::MatrixXd jacobian_;
+
+    Eigen::MatrixXd buildPhysicalJacobian() const;
 };
 
 /**
@@ -791,6 +829,8 @@ public:
     const Eigen::VectorXd& getTargetValues() const { return target_values_; }
 
 private:
+    friend struct detail::TaskAccelerationDifferentialAdapter;
+
     std::shared_ptr<RobotModel> model_;
     std::vector<int> joint_indices_;
     Eigen::VectorXd target_values_;
@@ -799,6 +839,9 @@ private:
 
     // Jacobian (sparse with 1s at controlled joint indices)
     Eigen::MatrixXd jacobian_;
+
+    Eigen::VectorXd referenceRowScale() const;
+    Eigen::MatrixXd buildPhysicalJacobian() const;
 };
 
 /**
@@ -852,6 +895,8 @@ public:
     TaskType getType() const override { return TaskType::FRAME_POSE; }
 
 private:
+    friend struct detail::TaskAccelerationDifferentialAdapter;
+
     std::shared_ptr<RobotModel> model_;
     std::string frame_a_, frame_b_;
 
@@ -865,6 +910,9 @@ private:
 
     Eigen::Vector3d position_mask_ = Eigen::Vector3d::Ones();
     Eigen::Vector3d orientation_mask_ = Eigen::Vector3d::Ones();
+
+    Eigen::VectorXd referenceRowScale() const;
+    Eigen::MatrixXd buildPhysicalJacobian() const;
 };
 
 /**
@@ -970,6 +1018,8 @@ public:
     TaskType getType() const override { return TaskType::FRAME_POSE; }
 
 private:
+    friend struct detail::TaskAccelerationDifferentialAdapter;
+
     std::shared_ptr<RobotModel> model_;
     std::string frame_a_, frame_b_;
     double alpha_;
@@ -994,6 +1044,12 @@ private:
 
     Eigen::Vector3d position_mask_ = Eigen::Vector3d::Ones();
     Eigen::Vector3d orientation_mask_ = Eigen::Vector3d::Ones();
+
+    bool usesTranslationOnlyAccelerationDifferential() const {
+        return orientation_mask_.isZero(0.0);
+    }
+    Eigen::VectorXd referenceRowScale() const;
+    Eigen::MatrixXd buildPhysicalJacobian() const;
 };
 
 } // namespace embodik

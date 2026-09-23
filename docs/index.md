@@ -81,12 +81,14 @@ python -m pip install --only-binary=:all: embodik
 ### Configure the solver
 
 - [Solver Robustness & Recovery](solver_robustness.md) — Adaptive dt, elastic limits, auto layout, weighted fallback, stall recovery.
+- [Acceleration Solver](acceleration_solver.md) — Fixed-base acceleration eSNS, compatible state boxes, effort/contact rows, and collision certification boundaries.
 - [Collision Constraints & Tuning](collision_constraints.md) — Tuning presets, safety layers, and performance vs naive full-scan checks.
 - [GPU Batch Solvers](gpu_solvers.md) — FI-PeSNS and PPH-SNS batch solver notes.
 
 ### Reference
 
 - [KinematicsSolver API](api/kinematics_solver.md) — Tasks, constraints, runtime policy, and diagnostics.
+- [AccelerationSolver guide and API](acceleration_solver.md) — Explicit `q`, `dq`, `dt` acceleration solves and supported fixed-base scope.
 - [RobotModel API](api/robot_model.md) — Load models, compute FK/Jacobians, and query collisions or CoM.
 - [Installation Guide](installation.md) — Install wheels, source builds, and optional example extras.
 - [Development Guide](development.md) — Local builds, tests, and release workflow.

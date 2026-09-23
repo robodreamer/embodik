@@ -29,6 +29,7 @@
 #include <pinocchio/parsers/urdf.hpp>
 #include <pinocchio/spatial/se3.hpp>
 
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
@@ -125,6 +126,16 @@ public:
       pinocchio::ReferenceFrame ref = pinocchio::LOCAL_WORLD_ALIGNED) const;
 
   /**
+   * @brief Get Jdot_frame(q, v) * v for the current state.
+   *
+   * Uses the same spatial row ordering and reference-frame convention as
+   * get_frame_jacobian().
+   */
+  Eigen::Matrix<double, 6, 1> get_frame_jacobian_bias(
+      const std::string &frame_name,
+      pinocchio::ReferenceFrame ref = pinocchio::LOCAL_WORLD_ALIGNED) const;
+
+  /**
    * @brief Get the Jacobian of a point expressed in a frame's local
    * coordinates.
    * @param frame_name Name of the frame that contains the point.
@@ -154,6 +165,11 @@ public:
    * @return 3xN Jacobian matrix for center of mass
    */
   Eigen::Matrix<double, 3, Eigen::Dynamic> get_com_jacobian() const;
+
+  /**
+   * @brief Get Jdot_com(q, v) * v at the current state.
+   */
+  Eigen::Vector3d get_com_jacobian_bias() const;
 
   /**
    * @brief Get list of all frame names
@@ -194,6 +210,11 @@ public:
    * default values)
    */
   Eigen::VectorXd get_acceleration_limits() const;
+
+  /**
+   * @brief Whether acceleration limits were explicitly supplied by the caller.
+   */
+  bool has_custom_acceleration_limits() const;
 
   /**
    * @brief Set custom joint acceleration limits
@@ -447,9 +468,25 @@ public:
   const pinocchio::GeometryModel *visual_model() const {
     return visual_model_.get();
   }
-  pinocchio::GeometryModel *collision_model() { return collision_model_.get(); }
+  /**
+   * @brief Get mutable collision geometry.
+   *
+   * Requesting mutable access permanently disables collision safety-certificate
+   * reuse because subsequent in-place mutations are not observable.
+   */
+  pinocchio::GeometryModel *collision_model() {
+    collision_geometry_mutable_access_exposed_ = true;
+    ++collision_geometry_revision_;
+    return collision_model_.get();
+  }
   const pinocchio::GeometryModel *collision_model() const {
     return collision_model_.get();
+  }
+  std::uint64_t collision_geometry_revision() const {
+    return collision_geometry_revision_;
+  }
+  bool collision_geometry_provenance_trackable() const {
+    return !collision_geometry_mutable_access_exposed_;
   }
   pinocchio::GeometryData *collision_data() { return collision_data_.get(); }
   const pinocchio::GeometryData *collision_data() const {
@@ -549,10 +586,14 @@ private:
   mutable bool kinematics_updated_ = false;
   mutable bool jacobians_updated_ = false;
   mutable bool com_updated_ = false;
+  mutable bool jacobian_time_variation_updated_ = false;
+  mutable bool com_acceleration_updated_ = false;
 
   // Optional geometry models
   std::unique_ptr<pinocchio::GeometryModel> visual_model_;
   std::unique_ptr<pinocchio::GeometryModel> collision_model_;
+  std::uint64_t collision_geometry_revision_ = 1;
+  bool collision_geometry_mutable_access_exposed_ = false;
   mutable std::unique_ptr<pinocchio::GeometryData> visual_data_;
   mutable std::unique_ptr<pinocchio::GeometryData> collision_data_;
 };

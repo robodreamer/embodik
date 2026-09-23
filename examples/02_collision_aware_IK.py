@@ -8,17 +8,16 @@ Use --gpu flag and --casadi-path to enable GPU mode.
 from __future__ import annotations
 
 import argparse
+import math
 import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-import embodik
 import numpy as np
 import pinocchio as pin
 import viser
-from embodik import Rt, q2r, r2q
 from example_helpers.ik_common import (
     COLLISION_DEBUG_LOG_PERIOD_S,
     COLLISION_TUNING_OPTIONS,
@@ -32,12 +31,18 @@ from example_helpers.ik_common import (
     DEFAULT_ROT_GAIN,
     DEFAULT_SOLVER_DT,
     DEFAULT_VISER_PORT,
+    SOLVER_LEVEL_ACCELERATION,
+    SOLVER_LEVEL_OPTIONS,
+    SOLVER_LEVEL_VELOCITY,
     apply_collision_tuning_mode,
     configure_solver_runtime_policy,
 )
 from robot_descriptions.loaders.yourdfpy import load_robot_description
 from utils.robot_models import ensure_ros_package_path, load_robot_presets
 from viser.extras import ViserUrdf
+
+import embodik
+from embodik import Rt, q2r, r2q
 
 # Check GPU availability
 try:
@@ -57,6 +62,10 @@ except ImportError:
 MAX_LINEAR_STEP = 2.0
 MAX_ANGULAR_STEP = 2.0
 DEFAULT_COLLISION_GAIN = 1.0
+COLLISION_EXAMPLE_SOLVER_LEVEL_OPTIONS = SOLVER_LEVEL_OPTIONS
+DEFAULT_ACCELERATION_SOLVER_LIMIT = 15.0
+DEFAULT_ACCELERATION_COLLISION_VALIDATION_SUBSTEPS = 2
+ACCELERATION_EXAMPLE_TASK_MODE = "SCALE"
 
 _LINK_INDEX_PATTERN = re.compile(r"link_?([0-9]+)")
 
@@ -251,7 +260,7 @@ def resolve_robot_configuration(robot_key: str) -> RobotConfig:
             # Mismatch - pad or truncate to match joint_names length
             if len(joint_names) > len(default_config):
                 # Pad with zeros (for gripper joints)
-                extra_gripper = preset.get("extra_gripper_default", np.array([0.05, 0.05]))
+                extra_gripper = preset.get("extra_gripper_default", np.array([0.02, 0.02]))
                 if isinstance(extra_gripper, list):
                     extra_gripper = np.array(extra_gripper)
                 default_config = np.concatenate([default_config, extra_gripper])
@@ -292,6 +301,44 @@ class embodiKResult:
     collision_sphere_culled: int = 0
     collision_exact_queries: int = 0
     condition_number: float = 1.0
+    solver_level: str = SOLVER_LEVEL_VELOCITY
+    velocity_collision_lift_applied: bool = False
+    collision_step_certified: bool = False
+    collision_validation_samples: int = 0
+    velocity_collision_validation_allowed_pairs: int = 0
+    velocity_collision_validation_pairs_checked: int = 0
+    velocity_collision_validation_sample_exact_distance_queries: int = 0
+    velocity_collision_validation_conservative_bound_certified_pairs: int = 0
+
+
+def acceleration_api_unavailable_reason() -> str:
+    required = (
+        "AccelerationSolver",
+        "AccelerationTaskReference",
+        "AccelerationSolveOptions",
+        "VelocityCollisionLiftOptions",
+    )
+    missing = [name for name in required if not hasattr(embodik, name)]
+    if missing:
+        return "missing Python acceleration API: " + ", ".join(missing)
+    if not hasattr(embodik, "TaskType"):
+        return "missing Python TaskType API"
+    return ""
+
+
+def _acceleration_reference(dimension: int, gain: float) -> object:
+    reference = embodik.AccelerationTaskReference()
+    reference.desired_velocity = np.zeros(dimension)
+    reference.desired_acceleration = np.zeros(dimension)
+    reference.proportional_gain = max(float(gain), 0.0)
+    reference.derivative_gain = 2.0 * math.sqrt(reference.proportional_gain)
+    return reference
+
+
+def _rotation_error_rad(current: np.ndarray, target: np.ndarray) -> float:
+    relative = np.asarray(target, dtype=float).T @ np.asarray(current, dtype=float)
+    cos_theta = (float(np.trace(relative)) - 1.0) * 0.5
+    return float(math.acos(min(1.0, max(-1.0, cos_theta))))
 
 
 class embodiKBackend:
@@ -302,6 +349,16 @@ class embodiKBackend:
         self.solver = embodik.KinematicsSolver(self.robot)
         self.solver.dt = DEFAULT_SOLVER_DT
         configure_solver_runtime_policy(self.solver)
+        self.acceleration_solver = None
+        self.acceleration_position_task = None
+        self.acceleration_orientation_task = None
+        self.acceleration_nullspace_task = None
+        self._velocity_collision_lift_options = None
+        self._acceleration_dq = np.zeros(self.robot.nv, dtype=float)
+        self._solver_level = SOLVER_LEVEL_VELOCITY
+        self._acceleration_unavailable_reason = acceleration_api_unavailable_reason()
+        self._acceleration_collision_enabled = False
+        self._acceleration_collision_reason = "self-collision is inactive"
         self._collision_tuning_mode = "balanced"
         apply_collision_tuning_mode(self.solver, self._collision_tuning_mode)
 
@@ -351,7 +408,81 @@ class embodiKBackend:
         self.nullspace_task.set_target_configuration(self.q.copy())
         self.nullspace_task.set_controlled_joint_indices([])
 
+        if not self._acceleration_unavailable_reason:
+            try:
+                self.acceleration_solver = embodik.AccelerationSolver(self.robot)
+                self._velocity_collision_lift_options = embodik.VelocityCollisionLiftOptions()
+                self._velocity_collision_lift_options.validation_substeps = (
+                    DEFAULT_ACCELERATION_COLLISION_VALIDATION_SUBSTEPS
+                )
+                self.acceleration_position_task = self.acceleration_solver.add_frame_task(
+                    "ee_position", self.cfg.target_link, embodik.TaskType.FRAME_POSITION
+                )
+                self.acceleration_orientation_task = self.acceleration_solver.add_frame_task(
+                    "ee_orientation", self.cfg.target_link, embodik.TaskType.FRAME_ORIENTATION
+                )
+                self.acceleration_nullspace_task = self.acceleration_solver.add_posture_task(
+                    "posture_task"
+                )
+                for task in (self.acceleration_position_task, self.acceleration_orientation_task):
+                    task.priority = 0
+                    task.weight = 1.0
+                    task.solve_mode = embodik.TaskSolveMode.SCALE
+                    task.allow_min_error_fallback = False
+                self.acceleration_nullspace_task.priority = 1
+                self.acceleration_nullspace_task.weight = 0.0
+                self.acceleration_nullspace_task.solve_mode = embodik.TaskSolveMode.MIN_ERROR
+                self.acceleration_nullspace_task.allow_min_error_fallback = False
+                self.acceleration_nullspace_task.set_target_configuration(self.q.copy())
+                self.acceleration_nullspace_task.set_controlled_joint_indices([])
+            except Exception as exc:
+                self.acceleration_solver = None
+                self.acceleration_position_task = None
+                self.acceleration_orientation_task = None
+                self.acceleration_nullspace_task = None
+                self._velocity_collision_lift_options = None
+                self._acceleration_unavailable_reason = (
+                    f"failed to construct AccelerationSolver runtime: {exc}"
+                )
+
         self._step_opts = embodik.PositionStepOptions()
+
+    def supports_solver_level(self, solver_level: str) -> bool:
+        if solver_level == SOLVER_LEVEL_VELOCITY:
+            return True
+        if solver_level == SOLVER_LEVEL_ACCELERATION:
+            supported, _ = self.acceleration_collision_status()
+            return supported
+        return False
+
+    def acceleration_collision_status(self) -> Tuple[bool, str]:
+        if self._acceleration_unavailable_reason:
+            return False, self._acceleration_unavailable_reason
+        if self.acceleration_solver is None:
+            return False, "AccelerationSolver runtime is unavailable"
+        if not getattr(self, "_collision_enabled", False):
+            return True, "self-collision is inactive"
+        if self._acceleration_collision_enabled:
+            return True, ""
+        return False, self._acceleration_collision_reason
+
+    def solver_level_unavailable_reason(self, solver_level: str) -> str:
+        if self.supports_solver_level(solver_level):
+            return ""
+        if solver_level == SOLVER_LEVEL_ACCELERATION:
+            _, reason = self.acceleration_collision_status()
+            return reason
+        return f"unknown solver level '{solver_level}'"
+
+    def set_solver_level(self, solver_level: str) -> None:
+        if solver_level != self._solver_level:
+            self._acceleration_dq = np.zeros(self.robot.nv, dtype=float)
+        if solver_level == SOLVER_LEVEL_ACCELERATION and not self.supports_solver_level(
+            solver_level
+        ):
+            self._solver_level = SOLVER_LEVEL_VELOCITY
+            return
+        self._solver_level = solver_level
 
     def get_joint_limits(self) -> tuple[np.ndarray, np.ndarray]:
         return self.lower[: self.arm_dofs], self.upper[: self.arm_dofs]
@@ -363,6 +494,7 @@ class embodiKBackend:
         self.q[: self.arm_dofs] = np.clip(
             q_arm, self.lower[: self.arm_dofs], self.upper[: self.arm_dofs]
         )
+        self._acceleration_dq = np.zeros(self.robot.nv, dtype=float)
         self.robot.update_configuration(self.q)
 
     def get_pose(self) -> pin.SE3:
@@ -384,7 +516,40 @@ class embodiKBackend:
         adaptive_dt: bool = False,
         adaptive_dt_max_scale: float = 5.0,
         adaptive_dt_reference_distance: float = 0.05,
+        solver_level: str = SOLVER_LEVEL_VELOCITY,
+        acceleration_limit: float = DEFAULT_ACCELERATION_SOLVER_LIMIT,
+        acceleration_limits_enabled: bool = True,
     ) -> embodiKResult:
+        if solver_level == SOLVER_LEVEL_ACCELERATION:
+            if self.acceleration_control_unavailable_reason(
+                ee_mode=ee_mode,
+                ee_fallback=ee_fallback,
+                max_steps=max_steps,
+                adaptive_dt=adaptive_dt,
+                acceleration_limits_enabled=acceleration_limits_enabled,
+            ):
+                self._acceleration_dq = np.zeros(self.robot.nv, dtype=float)
+                return embodiKResult(
+                    joints=self.get_q(),
+                    status="UNSUPPORTED_CONSTRAINT",
+                    position_error=float("nan"),
+                    rotation_error=float("nan"),
+                    elapsed_ms=0.0,
+                    solver_level=SOLVER_LEVEL_ACCELERATION,
+                )
+            self.set_solver_level(solver_level)
+            return self._solve_acceleration_step(
+                target,
+                pos_gain,
+                rot_gain,
+                active_indices,
+                nullspace_bias,
+                nullspace_gain,
+                nullspace_enabled,
+                acceleration_limit,
+            )
+
+        self.set_solver_level(SOLVER_LEVEL_VELOCITY)
         self.frame_task.solve_mode = getattr(
             embodik.TaskSolveMode, ee_mode, embodik.TaskSolveMode.SCALE
         )
@@ -447,12 +612,267 @@ class embodiKBackend:
             condition_number=(
                 float(result.condition_number) if hasattr(result, "condition_number") else 1.0
             ),
+            solver_level=SOLVER_LEVEL_VELOCITY,
+        )
+
+    @staticmethod
+    def acceleration_control_unavailable_reason(
+        *,
+        ee_mode: str,
+        ee_fallback: bool,
+        max_steps: int,
+        adaptive_dt: bool,
+        acceleration_limits_enabled: bool,
+    ) -> str:
+        if ee_mode != ACCELERATION_EXAMPLE_TASK_MODE:
+            return "acceleration mode requires the SCALE task mode; " f"received {ee_mode}"
+        if ee_fallback:
+            return "acceleration mode does not support MIN_ERROR fallback"
+        if max_steps != 1:
+            return "acceleration mode advances exactly one explicit state step"
+        if adaptive_dt:
+            return "acceleration mode uses the fixed solver dt"
+        if not acceleration_limits_enabled:
+            return "acceleration mode requires native acceleration limits"
+        return ""
+
+    def _solve_acceleration_step(
+        self,
+        target: pin.SE3,
+        pos_gain: float,
+        rot_gain: float,
+        active_indices: List[int],
+        nullspace_bias: np.ndarray,
+        nullspace_gain: float,
+        nullspace_enabled: bool,
+        acceleration_limit: float,
+    ) -> embodiKResult:
+        if not self.supports_solver_level(SOLVER_LEVEL_ACCELERATION):
+            self._acceleration_dq = np.zeros(self.robot.nv, dtype=float)
+            return embodiKResult(
+                joints=self.get_q(),
+                status="UNSUPPORTED_CONSTRAINT",
+                position_error=float("nan"),
+                rotation_error=float("nan"),
+                elapsed_ms=0.0,
+                solver_level=SOLVER_LEVEL_ACCELERATION,
+            )
+        assert self.acceleration_solver is not None
+        assert self.acceleration_position_task is not None
+        assert self.acceleration_orientation_task is not None
+        assert self.acceleration_nullspace_task is not None
+
+        self.acceleration_position_task.set_target_position(
+            np.asarray(target.translation, dtype=float)
+        )
+        self.acceleration_orientation_task.set_target_orientation(
+            np.asarray(target.rotation, dtype=float)
+        )
+
+        if nullspace_enabled and active_indices and nullspace_gain > 0.0:
+            bias_full = self.q.copy()
+            for idx in active_indices:
+                bias_full[idx] = nullspace_bias[idx]
+            self.acceleration_nullspace_task.set_target_configuration(bias_full)
+            self.acceleration_nullspace_task.set_controlled_joint_indices(active_indices)
+            self.acceleration_nullspace_task.weight = nullspace_gain
+        else:
+            self.acceleration_nullspace_task.weight = 0.0
+            self.acceleration_nullspace_task.set_controlled_joint_indices([])
+
+        self.acceleration_solver.set_task_reference(
+            "ee_position", _acceleration_reference(3, pos_gain)
+        )
+        self.acceleration_solver.set_task_reference(
+            "ee_orientation", _acceleration_reference(3, rot_gain)
+        )
+        reference_dimension = (
+            len(active_indices)
+            if nullspace_enabled and active_indices and nullspace_gain > 0.0
+            else self.robot.nv
+        )
+        self.acceleration_solver.set_task_reference(
+            "posture_task",
+            _acceleration_reference(reference_dimension, max(float(nullspace_gain), 0.0)),
+        )
+
+        options = embodik.AccelerationSolveOptions()
+        options.acceleration_limits_override = np.full(
+            self.robot.nv, float(acceleration_limit), dtype=float
+        )
+        options.apply_velocity_limits = True
+        options.apply_position_limits = True
+        if hasattr(options, "collect_timing_breakdown"):
+            options.collect_timing_breakdown = True
+
+        ik_start = time.perf_counter()
+        if getattr(self, "_collision_enabled", False):
+            assert self._velocity_collision_lift_options is not None
+            result = self.acceleration_solver.solve_with_velocity_collision(
+                self.solver,
+                self.q,
+                self._acceleration_dq,
+                DEFAULT_SOLVER_DT,
+                options,
+                self._velocity_collision_lift_options,
+            )
+        else:
+            result = self.acceleration_solver.solve(
+                self.q,
+                self._acceleration_dq,
+                DEFAULT_SOLVER_DT,
+                options,
+            )
+        elapsed_ms = (time.perf_counter() - ik_start) * 1000.0
+
+        if result.status is embodik.SolverStatus.SUCCESS:
+            self.q = np.asarray(result.q_solution, dtype=float)
+            self._acceleration_dq = np.asarray(result.joint_velocities_next, dtype=float)
+            self.robot.update_configuration(self.q)
+        else:
+            self._acceleration_dq = np.zeros(self.robot.nv, dtype=float)
+            self.robot.update_configuration(self.q)
+
+        current_pose = self.get_pose()
+        position_error = float(
+            np.linalg.norm(
+                np.asarray(current_pose.translation, dtype=float)
+                - np.asarray(target.translation, dtype=float)
+            )
+        )
+        rotation_error = _rotation_error_rad(
+            np.asarray(current_pose.rotation, dtype=float),
+            np.asarray(target.rotation, dtype=float),
+        )
+        diagnostics = getattr(result, "task_diagnostics", [])
+        first_diag = diagnostics[0] if len(diagnostics) > 0 else None
+
+        return embodiKResult(
+            joints=self.get_q(),
+            status=result.status.name,
+            position_error=position_error,
+            rotation_error=rotation_error,
+            elapsed_ms=elapsed_ms,
+            primary_mode=(first_diag.effective_mode.name if first_diag is not None else "SCALE"),
+            primary_fallback=(
+                bool(first_diag.used_min_error_fallback) if first_diag is not None else False
+            ),
+            primary_scale=(float(first_diag.scale) if first_diag is not None else 1.0),
+            collision_time_ms=float(
+                getattr(
+                    result,
+                    "collision_transaction_time_ms",
+                    getattr(result, "velocity_collision_orchestration_time_ms", 0.0),
+                )
+            ),
+            collision_exact_queries=int(
+                getattr(
+                    result,
+                    "collision_primitive_distance_queries",
+                    getattr(result, "collision_validation_exact_queries", 0),
+                )
+            ),
+            condition_number=float(getattr(result, "condition_number", 1.0)),
+            solver_level=SOLVER_LEVEL_ACCELERATION,
+            velocity_collision_lift_applied=bool(
+                getattr(result, "velocity_collision_lift_applied", False)
+            ),
+            collision_step_certified=bool(getattr(result, "collision_step_certified", False)),
+            collision_validation_samples=int(getattr(result, "collision_validation_samples", 0)),
+            velocity_collision_validation_allowed_pairs=int(
+                getattr(result, "collision_validation_allowed_pairs", 0)
+            ),
+            velocity_collision_validation_pairs_checked=int(
+                getattr(result, "collision_validation_pairs_checked", 0)
+            ),
+            velocity_collision_validation_sample_exact_distance_queries=int(
+                getattr(result, "collision_validation_exact_queries", 0)
+            ),
+            velocity_collision_validation_conservative_bound_certified_pairs=int(
+                getattr(
+                    result,
+                    "velocity_collision_validation_conservative_bound_certified_pairs",
+                    0,
+                )
+            ),
         )
 
     def reset(self) -> pin.SE3:
         self.q = self.default_full.copy()
+        self._acceleration_dq = np.zeros(self.robot.nv, dtype=float)
         self.robot.update_configuration(self.q)
         return self.get_pose()
+
+    def _configure_acceleration_collision_constraint_if_possible(self) -> None:
+        self._acceleration_collision_enabled = False
+        self._acceleration_collision_reason = "velocity-lifted collision smoke check has not run"
+        if self._acceleration_unavailable_reason:
+            self._acceleration_collision_reason = self._acceleration_unavailable_reason
+            return
+        smoke_ok, smoke_reason = self._validate_acceleration_collision_example_smoke()
+        if smoke_ok:
+            self._acceleration_collision_enabled = True
+            self._acceleration_collision_reason = ""
+        else:
+            self._acceleration_collision_reason = smoke_reason
+
+    def _validate_acceleration_collision_example_smoke(self) -> Tuple[bool, str]:
+        if (
+            self.acceleration_solver is None
+            or self.acceleration_position_task is None
+            or self.acceleration_orientation_task is None
+            or self.acceleration_nullspace_task is None
+            or self._velocity_collision_lift_options is None
+        ):
+            return False, self._acceleration_unavailable_reason or "AccelerationSolver unavailable"
+
+        pose = self.get_pose()
+        self.acceleration_position_task.set_target_position(
+            np.asarray(pose.translation, dtype=float)
+        )
+        self.acceleration_orientation_task.set_target_orientation(
+            np.asarray(pose.rotation, dtype=float)
+        )
+        self.acceleration_nullspace_task.set_target_configuration(self.q.copy())
+        self.acceleration_nullspace_task.set_controlled_joint_indices(list(range(self.arm_dofs)))
+        self.acceleration_nullspace_task.weight = DEFAULT_NULLSPACE_GAIN
+        self.acceleration_solver.set_task_reference(
+            "ee_position", _acceleration_reference(3, DEFAULT_POS_GAIN)
+        )
+        self.acceleration_solver.set_task_reference(
+            "ee_orientation", _acceleration_reference(3, DEFAULT_ROT_GAIN)
+        )
+        self.acceleration_solver.set_task_reference(
+            "posture_task", _acceleration_reference(self.arm_dofs, DEFAULT_NULLSPACE_GAIN)
+        )
+
+        options = embodik.AccelerationSolveOptions()
+        options.acceleration_limits_override = np.full(
+            self.robot.nv, DEFAULT_ACCELERATION_SOLVER_LIMIT, dtype=float
+        )
+        options.apply_velocity_limits = True
+        options.apply_position_limits = True
+        if hasattr(options, "collect_timing_breakdown"):
+            options.collect_timing_breakdown = True
+
+        result = self.acceleration_solver.solve_with_velocity_collision(
+            self.solver,
+            self.q.copy(),
+            np.zeros(self.robot.nv, dtype=float),
+            DEFAULT_SOLVER_DT,
+            options,
+            self._velocity_collision_lift_options,
+        )
+        self._acceleration_dq = np.zeros(self.robot.nv, dtype=float)
+        self.robot.update_configuration(self.q)
+        if result.status is embodik.SolverStatus.SUCCESS:
+            return True, ""
+        message = getattr(result, "status_message", "")
+        detail = f": {message}" if message else ""
+        return (
+            False,
+            f"acceleration velocity-collision smoke returned {result.status.name}{detail}",
+        )
 
     def enable_self_collision(self, enable: bool) -> None:
         if not hasattr(self, "_collision_enabled"):
@@ -470,16 +890,23 @@ class embodiKBackend:
                     exclude_pairs=list(self._collision_exclusions),
                 )
                 self._collision_enabled = True
+                self._configure_acceleration_collision_constraint_if_possible()
             except RuntimeError as exc:
                 print(f"[embodiK] Collision configuration failed: {exc}")
                 self._collision_enabled = False
+                self._acceleration_collision_enabled = False
+                self._acceleration_collision_reason = str(exc)
         elif not enable and self._collision_enabled:
             self.solver.clear_collision_constraint()
             self._collision_enabled = False
+            self._acceleration_collision_enabled = False
+            self._acceleration_collision_reason = "self-collision is inactive"
 
     def set_collision_tuning_mode(self, mode_label: str) -> None:
         self._collision_tuning_mode = mode_label.lower()
         apply_collision_tuning_mode(self.solver, self._collision_tuning_mode)
+        if getattr(self, "_collision_enabled", False):
+            self._configure_acceleration_collision_constraint_if_possible()
 
 
 # -----------------------------------------------------------------------------
@@ -560,7 +987,19 @@ def run_gui(cfg: RobotConfig, args: argparse.Namespace) -> None:
         wxyz=initial_wxyz,
     )
 
+    acceleration_available, acceleration_reason = backend.acceleration_collision_status()
+    solver_level_options = (
+        COLLISION_EXAMPLE_SOLVER_LEVEL_OPTIONS
+        if acceleration_available
+        else (SOLVER_LEVEL_VELOCITY,)
+    )
+
     with server.gui.add_folder("IK Controls"):
+        solver_level_dropdown = server.gui.add_dropdown(
+            "Solver Level",
+            options=solver_level_options,
+            initial_value=SOLVER_LEVEL_VELOCITY,
+        )
         timing_handle = server.gui.add_number("Elapsed (ms)", 0.001, disabled=True)
         pos_gain = server.gui.add_slider(
             "Position Gain", min=0.1, max=200.0, initial_value=DEFAULT_POS_GAIN, step=0.1
@@ -624,7 +1063,12 @@ def run_gui(cfg: RobotConfig, args: argparse.Namespace) -> None:
         )
         collision_debug_text = server.gui.add_text("Collision Debug", initial_value="Collision: --")
         manual_control = server.gui.add_checkbox("Manual Joint Control", initial_value=False)
-        status_handle = server.gui.add_text("Status", initial_value="Status: Ready")
+        status_initial = (
+            "Status: Ready"
+            if acceleration_available
+            else f"Status: Acceleration unavailable ({acceleration_reason})"
+        )
+        status_handle = server.gui.add_text("Status", initial_value=status_initial)
         snap_target_button = server.gui.add_button("Snap Target to Current EE")
         reset_robot_button = server.gui.add_button("Reset Robot & Target")
 
@@ -807,6 +1251,7 @@ def run_gui(cfg: RobotConfig, args: argparse.Namespace) -> None:
 
             import casadi as ca
             import torch
+
             from embodik.gpu import CusadiFunction
 
             home = os.path.expanduser("~")
@@ -1003,6 +1448,66 @@ def run_gui(cfg: RobotConfig, args: argparse.Namespace) -> None:
         last_collision_debug = debug_info
         collision_debug_enabled = True
 
+    velocity_control_state = {
+        "ee_mode": str(ee_mode_dropdown.value),
+        "ee_fallback": bool(ee_fallback_checkbox.value),
+        "iterations": int(iterations_slider.value),
+        "adaptive_dt": bool(adaptive_dt_checkbox.value),
+        "acceleration_limits": bool(accel_limit_checkbox.value),
+    }
+
+    def sync_solver_specific_controls() -> None:
+        acceleration_selected = str(solver_level_dropdown.value) == SOLVER_LEVEL_ACCELERATION
+        if acceleration_selected:
+            if not ee_mode_dropdown.disabled:
+                velocity_control_state["ee_mode"] = str(ee_mode_dropdown.value)
+                velocity_control_state["ee_fallback"] = bool(ee_fallback_checkbox.value)
+                velocity_control_state["iterations"] = int(iterations_slider.value)
+                velocity_control_state["adaptive_dt"] = bool(adaptive_dt_checkbox.value)
+                velocity_control_state["acceleration_limits"] = bool(accel_limit_checkbox.value)
+            ee_mode_dropdown.value = ACCELERATION_EXAMPLE_TASK_MODE
+            ee_fallback_checkbox.value = False
+            iterations_slider.value = 1
+            adaptive_dt_checkbox.value = False
+            accel_limit_checkbox.value = True
+        else:
+            restored_ee_mode = str(velocity_control_state["ee_mode"])
+            if restored_ee_mode == "SCALE_ELASTIC":
+                ee_mode_dropdown.value = "SCALE_ELASTIC"
+            elif restored_ee_mode == "MIN_ERROR":
+                ee_mode_dropdown.value = "MIN_ERROR"
+            else:
+                ee_mode_dropdown.value = "SCALE"
+            ee_fallback_checkbox.value = bool(velocity_control_state["ee_fallback"])
+            iterations_slider.value = int(velocity_control_state["iterations"])
+            adaptive_dt_checkbox.value = bool(velocity_control_state["adaptive_dt"])
+            accel_limit_checkbox.value = bool(velocity_control_state["acceleration_limits"])
+
+        for control in (
+            ee_mode_dropdown,
+            ee_fallback_checkbox,
+            iterations_slider,
+            adaptive_dt_checkbox,
+            adaptive_dt_max_scale_slider,
+            adaptive_dt_ref_dist_slider,
+        ):
+            control.disabled = acceleration_selected
+        accel_limit_checkbox.disabled = acceleration_selected
+
+    def sync_solver_level_options() -> None:
+        acceleration_ok, reason = backend.acceleration_collision_status()
+        next_options = (
+            COLLISION_EXAMPLE_SOLVER_LEVEL_OPTIONS if acceleration_ok else (SOLVER_LEVEL_VELOCITY,)
+        )
+        if tuple(solver_level_dropdown.options) != tuple(next_options):
+            solver_level_dropdown.options = next_options
+        if not acceleration_ok:
+            if solver_level_dropdown.value != SOLVER_LEVEL_VELOCITY:
+                solver_level_dropdown.value = SOLVER_LEVEL_VELOCITY
+            backend.set_solver_level(SOLVER_LEVEL_VELOCITY)
+            status_handle.value = f"Status: Acceleration unavailable ({reason})"
+        sync_solver_specific_controls()
+
     def sync_from_backend(update_target: bool = True) -> None:
         nonlocal q_current, nullspace_bias, target_xyzw, collision_line_handle
         lower, upper = backend.get_joint_limits()
@@ -1041,6 +1546,7 @@ def run_gui(cfg: RobotConfig, args: argparse.Namespace) -> None:
             collision_line_handle.remove()
             collision_line_handle = None
         update_collision_visuals()
+        sync_solver_level_options()
 
     sync_from_backend(update_target=True)
     if hasattr(backend, "set_collision_tuning_mode"):
@@ -1091,6 +1597,7 @@ def run_gui(cfg: RobotConfig, args: argparse.Namespace) -> None:
             ):
                 active_pairs = solver_obj.get_active_collision_pairs()
                 print(f"[embodiK] Active collision pairs: {len(active_pairs)}")
+        sync_solver_level_options()
         if not collision_debug_checkbox.value:
             collision_point_a.visible = False
             collision_point_b.visible = False
@@ -1102,10 +1609,41 @@ def run_gui(cfg: RobotConfig, args: argparse.Namespace) -> None:
     def _(_evt) -> None:
         if hasattr(backend, "set_collision_tuning_mode"):
             backend.set_collision_tuning_mode(collision_tuning_dropdown.value)
-        status_handle.value = f"Status: Collision tuning set to {collision_tuning_dropdown.value}"
+        sync_solver_level_options()
+        if backend.supports_solver_level(SOLVER_LEVEL_ACCELERATION):
+            status_handle.value = (
+                f"Status: Collision tuning set to {collision_tuning_dropdown.value}"
+            )
+
+    @solver_level_dropdown.on_update
+    def _(_evt) -> None:
+        requested = str(solver_level_dropdown.value)
+        if not backend.supports_solver_level(requested):
+            reason = backend.solver_level_unavailable_reason(requested)
+            solver_level_dropdown.value = SOLVER_LEVEL_VELOCITY
+            backend.set_solver_level(SOLVER_LEVEL_VELOCITY)
+            status_handle.value = f"Status: Acceleration unavailable ({reason})"
+            return
+        backend.set_solver_level(requested)
+        sync_solver_specific_controls()
+        if requested == SOLVER_LEVEL_ACCELERATION:
+            status_handle.value = (
+                "Status: Solver level set to Acceleration "
+                "(SCALE, one fixed-dt step, native acceleration limits)"
+            )
+        else:
+            status_handle.value = f"Status: Solver level set to {requested}"
 
     @accel_limit_checkbox.on_update
     def _(_evt) -> None:
+        if str(solver_level_dropdown.value) == SOLVER_LEVEL_ACCELERATION:
+            if not accel_limit_checkbox.value:
+                accel_limit_checkbox.value = True
+            status_handle.value = (
+                "Status: Native acceleration limits are required in Acceleration mode"
+            )
+            return
+        velocity_control_state["acceleration_limits"] = bool(accel_limit_checkbox.value)
         backend.solver.enable_acceleration_limits(accel_limit_checkbox.value)
         if accel_limit_checkbox.value:
             backend.solver.set_acceleration_limits(
@@ -1117,7 +1655,7 @@ def run_gui(cfg: RobotConfig, args: argparse.Namespace) -> None:
 
     @accel_limit_slider.on_update
     def _(_evt) -> None:
-        if accel_limit_checkbox.value:
+        if str(solver_level_dropdown.value) == SOLVER_LEVEL_VELOCITY and accel_limit_checkbox.value:
             backend.solver.set_acceleration_limits(
                 np.full(backend.robot.nv, accel_limit_slider.value)
             )
@@ -1166,6 +1704,9 @@ def run_gui(cfg: RobotConfig, args: argparse.Namespace) -> None:
                 adaptive_dt=bool(adaptive_dt_checkbox.value),
                 adaptive_dt_max_scale=float(adaptive_dt_max_scale_slider.value),
                 adaptive_dt_reference_distance=float(adaptive_dt_ref_dist_slider.value),
+                solver_level=str(solver_level_dropdown.value),
+                acceleration_limit=float(accel_limit_slider.value),
+                acceleration_limits_enabled=bool(accel_limit_checkbox.value),
             )
             q_current = result.joints
             solver_elapsed_ms = result.elapsed_ms
@@ -1175,6 +1716,15 @@ def run_gui(cfg: RobotConfig, args: argparse.Namespace) -> None:
                 if result.status == "COLLISION_VIOLATED"
                 else f"embodiK {result.status}"
             )
+            cert_suffix = ""
+            if (
+                result.solver_level == SOLVER_LEVEL_ACCELERATION
+                and result.velocity_collision_lift_applied
+            ):
+                cert_suffix = (
+                    f" | sampled-lift={result.collision_validation_samples}"
+                    f" cert={result.collision_step_certified}"
+                )
             adt_suffix = (
                 f" | adt×{adaptive_dt_max_scale_slider.value:.1f}"
                 if adaptive_dt_checkbox.value
@@ -1184,7 +1734,7 @@ def run_gui(cfg: RobotConfig, args: argparse.Namespace) -> None:
                 f"Status: {status_prefix} | "
                 f"pos={result.position_error*1e3:.2f} mm, rot={result.rotation_error:.4f} rad | "
                 f"mode={result.primary_mode}, scale={result.primary_scale:.3f} | "
-                f"col={col_ms:.2f}ms{adt_suffix}"
+                f"col={col_ms:.2f}ms{cert_suffix}{adt_suffix}"
             )
 
             conditioning_text.value = f"condition: {result.condition_number:.1f}"

@@ -25,11 +25,15 @@ nanobind_add_module(_embodik_impl
     src/tasks_bindings.cpp
     src/kinematics_solver_bindings.cpp
     src/pose_metrics_bindings.cpp
+    src/acceleration_solver_bindings.cpp
 )
 
 # Link with core library
 target_link_libraries(_embodik_impl PRIVATE
     embodik_core
+)
+target_compile_definitions(_embodik_impl PRIVATE
+    EMBODIK_VERSION="${PROJECT_VERSION}"
 )
 
 # Set RPATH so Python can find libembodik_core.{so,dylib}.

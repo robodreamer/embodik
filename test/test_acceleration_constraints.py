@@ -78,6 +78,85 @@ class TestAccelerationConstraints:
         with pytest.raises(ValueError, match="finite and non-negative"):
             solver.set_acceleration_limits(bad_limits)
 
+    def test_disabling_acceleration_limits_restores_velocity_baseline(self, tmp_path):
+        """Acceleration history must not leak into the default velocity path."""
+
+        def build_solver():
+            robot = eik.RobotModel(str(_write_prismatic_limit_urdf(tmp_path)))
+            solver = eik.KinematicsSolver(robot)
+            solver.dt = 0.02
+            solver.enable_position_limits(True)
+            solver.enable_velocity_limits(True)
+            task = solver.add_joint_task("moving_task", "moving_slide", target_value=0.15)
+            task.priority = 0
+            task.weight = 1.0
+            return solver
+
+        q = np.array([0.02], dtype=float)
+        baseline_solver = build_solver()
+        baseline = baseline_solver.solve_velocity(q, apply_limits=True)
+
+        toggled_solver = build_solver()
+        toggled_solver.set_acceleration_limits(np.array([10.0]))
+        toggled_solver.enable_acceleration_limits(True)
+        accelerated = toggled_solver.solve_velocity(q, apply_limits=True)
+        toggled_solver.enable_acceleration_limits(False)
+        restored = toggled_solver.solve_velocity(q, apply_limits=True)
+
+        assert baseline.status == eik.SolverStatus.SUCCESS
+        assert accelerated.status == eik.SolverStatus.SUCCESS
+        assert restored.status == baseline.status
+        np.testing.assert_allclose(
+            restored.joint_velocities, baseline.joint_velocities, rtol=0.0, atol=1e-12
+        )
+        np.testing.assert_allclose(restored.task_scales, baseline.task_scales, atol=1e-12)
+        np.testing.assert_allclose(restored.task_errors, baseline.task_errors, atol=1e-12)
+
+    def test_disabling_acceleration_limits_restores_position_step_baseline(self, tmp_path):
+        """Disabled acceleration state must not alter legacy position integration."""
+
+        def build_solver():
+            robot = eik.RobotModel(str(_write_prismatic_limit_urdf(tmp_path)))
+            solver = eik.KinematicsSolver(robot)
+            solver.dt = 0.02
+            solver.enable_position_limits(True)
+            solver.enable_velocity_limits(True)
+            task = solver.add_frame_task("moving_task", "moving")
+            task.priority = 0
+            task.weight = 1.0
+            return solver
+
+        q = np.array([0.02], dtype=float)
+        target = np.eye(4)
+        target[0, 3] = 0.12
+        options = eik.PositionStepOptions()
+        options.dt = 0.02
+        options.max_steps = 3
+        options.position_gain = 10.0
+        options.orientation_gain = 1.0
+
+        baseline_solver = build_solver()
+        baseline = baseline_solver.solve_position_step(q, target, "moving_task", options)
+
+        toggled_solver = build_solver()
+        toggled_task = toggled_solver.get_task("moving_task")
+        toggled_task.set_target_pose(target[:3, 3], target[:3, :3])
+        toggled_solver.set_acceleration_limits(np.array([10.0]))
+        toggled_solver.enable_acceleration_limits(True)
+        accelerated = toggled_solver.solve_velocity(q, apply_limits=True)
+        toggled_solver.enable_acceleration_limits(False)
+        restored = toggled_solver.solve_position_step(q, target, "moving_task", options)
+
+        assert baseline.status == eik.SolverStatus.SUCCESS
+        assert accelerated.status == eik.SolverStatus.SUCCESS
+        assert restored.status == baseline.status
+        np.testing.assert_allclose(restored.q_solution, baseline.q_solution, rtol=0.0, atol=1e-12)
+        np.testing.assert_allclose(
+            restored.joint_velocities, baseline.joint_velocities, rtol=0.0, atol=1e-12
+        )
+        np.testing.assert_allclose(restored.task_scales, baseline.task_scales, atol=1e-12)
+        np.testing.assert_allclose(restored.task_errors, baseline.task_errors, atol=1e-12)
+
     def test_sampled_stopping_bound_only_applies_with_acceleration_history(self, tmp_path):
         """Acceleration mode must not tighten the established position-only bound."""
         robot = eik.RobotModel(str(_write_prismatic_limit_urdf(tmp_path)))

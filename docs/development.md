@@ -118,8 +118,29 @@ pixi run docs-build
 
 ## Release Process
 
-1. Bump the version with `pixi run version --bump <patch|minor|major>`. Verify
-   `pyproject.toml` and `pixi.toml` contain the same version.
+### Versioning Contract
+
+EmbodiK follows Semantic Versioning while it remains in initial `0.y.z`
+development. The public API includes exported C++ headers, Python bindings, and
+documented solver, task, constraint, result, and supported-model behavior.
+
+- **Patch (`0.Y.Z`)**: backward-compatible bug fixes, documentation, CI/build
+  changes, performance work, and implementation refinements that do not add a
+  public capability.
+- **Minor (`0.Y.0`)**: new public solvers, tasks, constraints, behavior modes,
+  supported model families, or deprecations. An unavoidable compatibility
+  change during pre-1.0 development also requires a minor release and prominent
+  migration notes.
+- **`1.0.0`**: declares that the supported public API is stable and that future
+  incompatible changes require a major release.
+
+A release may include lower-level changes together with its highest applicable
+category. This policy applies prospectively from `0.21.0`; earlier `0.20.x`
+release numbers are not reclassified.
+
+1. Bump the version with `pixi run version --bump <patch|minor|major>`. The
+   command updates `pyproject.toml`; manually synchronize `pixi.toml` and
+   `CMakeLists.txt`, then verify all three files contain the same version.
 2. Move the release notes into a dated version section in `CHANGELOG.md`.
 3. Open and merge the release pull request into `main`.
 4. The `Prepare Release` workflow validates the synchronized version and dated
