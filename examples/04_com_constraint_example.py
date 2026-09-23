@@ -160,7 +160,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--visualizer",
         choices=["pinocchio", "viserurdf"],
-        default="pinocchio",
+        default="viserurdf",
     )
     parser.add_argument("--port", type=int, default=DEFAULT_VISER_PORT, help="Viser server port.")
     return parser.parse_args()
