@@ -13,6 +13,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+pytest.importorskip("torch")
+
 import embodik as eik
 from embodik.gpu.wbc import GpuWbcMultiFrameSolver
 from embodik.gpu.wbc._runtime.newton_com import NewtonCoMEvaluator

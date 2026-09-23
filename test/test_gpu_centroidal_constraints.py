@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import pytest
-import torch
+
+torch = pytest.importorskip("torch")
 
 from embodik.gpu.wbc._runtime.gpu_constraints import (
     CPU_CENTROIDAL_UNBOUNDED_LIMIT,
