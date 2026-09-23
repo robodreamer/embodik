@@ -260,7 +260,7 @@ def resolve_robot_configuration(robot_key: str) -> RobotConfig:
             # Mismatch - pad or truncate to match joint_names length
             if len(joint_names) > len(default_config):
                 # Pad with zeros (for gripper joints)
-                extra_gripper = preset.get("extra_gripper_default", np.array([0.05, 0.05]))
+                extra_gripper = preset.get("extra_gripper_default", np.array([0.02, 0.02]))
                 if isinstance(extra_gripper, list):
                     extra_gripper = np.array(extra_gripper)
                 default_config = np.concatenate([default_config, extra_gripper])
