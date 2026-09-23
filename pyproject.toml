@@ -47,6 +47,7 @@ embodik-examples = "embodik.cli:examples_cmd"
 [project.optional-dependencies]
 visualization = [
     "viser>=0.1.0",     # Direct Viser visualization server
+    "pyliblzfse>=0.4.1; sys_platform != 'win32'", # Compressed ViserUrdf meshes
     "trimesh>=3.0.0",   # Mesh loading for robot visualization
     "yourdfpy>=0.0.52", # URDF parsing for direct Viser visualization
 ]
@@ -73,6 +74,7 @@ examples = [
     "robot_descriptions>=1.0.0",
     "trimesh>=3.0.0",
     "viser>=0.1.0",
+    "pyliblzfse>=0.4.1; sys_platform != 'win32'",
     "yourdfpy>=0.0.52",
 ]
 mjviser = [
