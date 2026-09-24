@@ -927,8 +927,9 @@ class GpuWbcMultiFrameSolver:
 
         ``q`` has shape ``[batch_size, configuration_dim]`` and ``target`` has
         shape ``[batch_size, frame_count, 7]`` as position plus a WXYZ
-        quaternion. Both must be float32 CUDA tensors. Read
-        ``result.world_status`` for each world. ``result.status`` is not a
+        quaternion. Both must be float32 CUDA tensors. Finite joint positions
+        outside their limits are projected onto those limits before the solve.
+        Read ``result.world_status`` for each world. ``result.status`` is not a
         per-world code.
         """
 
@@ -1655,7 +1656,8 @@ class GpuWbcFloatingMultiFrameSolver:
         worlds hold their configuration and keep stored history unless also
         reset. There is no independent per-field stale/fresh schedule: omitted
         history is the retained accepted command, and every supplied field is
-        fresh for participating worlds.
+        fresh for participating worlds. Finite joint positions outside their
+        limits are projected onto those limits before the solve.
 
         ``result.world_status`` is an int8 tensor of shape ``[batch_size]``.
         ``result.status`` only reports that the batch finished and still needs

@@ -41,6 +41,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `from_robot()` rejects a missing or wrong-base `robot` before CUDA setup.
   The GPU guide now states quaternion layouts, active-configuration shapes,
   and the per-world `world_status` codes.
+- Added `pixi run setup-gpu-wbc`, which installs the CUDA environment, a
+  compatible Torch wheel, and Newton in one step.
+- Finite GPU WBC joint positions outside their URDF limits are projected onto
+  those limits before the solve. Non-finite values and degenerate quaternions
+  still return `WORLD_STATUS_INVALID_INPUT`.
 
 ## [0.22.0] - 2026-07-29
 

@@ -101,6 +101,8 @@ upload-testpypi = "bash scripts/upload_testpypi.sh"
 upload-pypi = "bash scripts/upload_pypi.sh"
 # Version management
 version = "python scripts/version.py"
+# One-step CUDA + Newton setup for model-derived GPU WBC.
+setup-gpu-wbc = "bash scripts/setup_gpu_wbc.sh"
 
 [feature.dev.dependencies]
 # Additional dev-only dependencies

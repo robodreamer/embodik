@@ -45,28 +45,20 @@ git clone --depth 1 https://github.com/newton-physics/newton.git ../newton
 python -m pip install -e ../newton
 ```
 
-For a Linux x86-64 repository checkout managed by Pixi, create the CUDA environment and
-install both editable source trees once:
+For a Linux x86-64 repository checkout managed by Pixi, one command creates the
+CUDA environment, installs EmbodiK, selects a Torch wheel that can execute on
+the current GPU, and installs Newton:
 
 ```bash
-git clone --depth 1 https://github.com/newton-physics/newton.git ../newton
-pixi run -e cuda install
-pixi run -e cuda python -m pip install -e ../newton
-pixi run -e cuda check-cuda
+pixi run setup-gpu-wbc
 ```
 
-Skip the clone command when the sibling `../newton` checkout already exists.
-`check-cuda` verifies both CUDA visibility and execution of a real kernel for
-the device architecture. If it reports that Torch lacks `sm_120`, repair that
-Pixi environment and check again:
-
-```bash
-pixi run -e cuda setup-cuda-sm120
-pixi run -e cuda check-cuda
-```
-
-The repair task installs the CUDA 12.9 Torch wheel used for `sm_120`; it does
-not modify the system Python environment.
+The script clones `../newton` when that checkout is absent. Set `NEWTON_DIR` to
+use a different Newton source tree. It runs `check-cuda` before and after the
+optional `sm_120` Torch repair. Newton is installed after that repair, because
+replacing the Torch wheel removes packages that were installed into the same
+environment. `check-cuda` verifies both CUDA visibility and execution of a real
+kernel for the device architecture. The repair stays inside `.pixi/envs/cuda`.
 
 The current integration was validated against the Newton 1.6 development
 line with Warp 1.17.0. Older Warp builds can fail during Newton import before
@@ -119,7 +111,7 @@ from embodik.gpu.wbc import GpuWbcMultiFrameSolver
 
 urdf = Path("robot.urdf")
 robot = embodik.RobotModel(str(urdf), floating_base=False)
-q0 = robot.neutral_configuration()
+q0 = np.asarray(robot.neutral_configuration(), dtype=np.float64)
 batch_size = 1024
 
 solver = GpuWbcMultiFrameSolver.from_robot(
@@ -153,6 +145,13 @@ with one column per name in `active_joint_names`. Gather it with
 `active_configuration_indices`. `q_solution` has that same width, so scatter it
 back with those indices. The factory includes every supported movable joint
 unless you pass `active_joint_names`.
+
+Finite joint positions that fall outside their URDF limits are projected onto
+the nearest limit before the solve. The Franka Panda description places joint 4
+outside its upper limit at `neutral_configuration()`, and that home is repaired
+automatically. Non-finite values and a zero quaternion still return
+`WORLD_STATUS_INVALID_INPUT` and do not move. `get_joint_limits()` reports the
+limits when an application wants to inspect them.
 
 The fixed-base factory defaults to `dt=0.1` and `iterations=2`. Pass `dt`
 explicitly when the control period is different. The floating-base factory
