@@ -415,14 +415,36 @@ def _host_target_geometry_changed(target, previous) -> bool:
     return bool(translation_changed or rotation_changed)
 
 
+def _require_from_robot_model(options: dict, *, floating_base: bool) -> object:
+    """Return the loaded model, or raise before any CUDA work begins."""
+
+    robot = options.get("robot")
+    if robot is None:
+        raise ValueError("from_robot requires robot= set to a loaded embodik.RobotModel")
+    is_floating = bool(getattr(robot, "is_floating_base", False))
+    if floating_base and not is_floating:
+        raise ValueError(
+            "GpuWbcFloatingMultiFrameSolver.from_robot requires a floating-base "
+            "RobotModel; use GpuWbcMultiFrameSolver for a fixed-base model"
+        )
+    if not floating_base and is_floating:
+        raise ValueError(
+            "GpuWbcMultiFrameSolver.from_robot requires a fixed-base RobotModel; "
+            "use GpuWbcFloatingMultiFrameSolver for a free-root model"
+        )
+    return robot
+
+
 class GpuWbcMultiFrameSolver:
     """Fail-closed fixed-base CUDA IK with model-derived constraints.
 
-    Public configurations and posture targets contain only active coordinates,
-    in active_joint_names order. Posture and locked indices refer to source
-    model velocities; torso excluded indices refer to compact active columns.
-    frame_task_dimensions describes each frame (3 or 6 rows); task_dimensions
-    retains its legacy meaning as the generated FI artifact's task layout.
+    Construct with :meth:`from_robot`. Public configurations and posture
+    targets contain only active coordinates, in ``active_joint_names`` order.
+    Targets are position plus a WXYZ quaternion. Posture and locked indices
+    refer to source model velocities; torso excluded indices refer to compact
+    active columns. ``frame_task_dimensions`` describes each frame (3 or 6
+    rows); ``task_dimensions`` retains its legacy meaning as the generated FI
+    artifact's task layout.
     """
 
     WORLD_STATUS_SUCCESS = 0
@@ -759,10 +781,11 @@ class GpuWbcMultiFrameSolver:
         only the legacy FI-PeSNS backend needs a generated artifact manifest.
         """
 
+        robot = _require_from_robot_model(options, floating_base=False)
         if options.get("solver_backend", "warp_srinv") == "fi_pesns":
             raise ValueError("from_robot does not support the artifact-backed fi_pesns backend")
         if "active_joint_names" not in options:
-            options["active_joint_names"] = derive_supported_active_joint_names(options["robot"])
+            options["active_joint_names"] = derive_supported_active_joint_names(robot)
         options.setdefault("solver_backend", "warp_srinv")
         return cls(None, urdf_path, cache_dir, **options)
 
@@ -900,7 +923,14 @@ class GpuWbcMultiFrameSolver:
         reset_mask=None,
         valid_mask=None,
     ):
-        """Solve an already device-resident batch without host publication."""
+        """Solve an already device-resident batch without host publication.
+
+        ``q`` has shape ``[batch_size, configuration_dim]`` and ``target`` has
+        shape ``[batch_size, frame_count, 7]`` as position plus a WXYZ
+        quaternion. Both must be float32 CUDA tensors. Read
+        ``result.world_status`` for each world. ``result.status`` is not a
+        per-world code.
+        """
 
         return GpuWbcFloatingMultiFrameSolver.solve_device_batch(
             self,
@@ -934,7 +964,13 @@ class GpuWbcMultiFrameSolver:
 
 
 class GpuWbcFloatingMultiFrameSolver:
-    """No-fallback public adapter for free-root mixed-frame CUDA pose IK."""
+    """No-fallback public adapter for free-root mixed-frame CUDA pose IK.
+
+    Construct with :meth:`from_robot`. ``q`` is the full model configuration:
+    root translation, root quaternion in XYZW order, then scalar joints.
+    Targets are position plus a WXYZ quaternion.
+    :meth:`evaluate_body_poses_device` returns position plus XYZW.
+    """
 
     WORLD_STATUS_SUCCESS = 0
     WORLD_STATUS_INVALID_INPUT = 1
@@ -1220,8 +1256,9 @@ class GpuWbcFloatingMultiFrameSolver:
     def from_robot(cls, urdf_path: Path, cache_dir: Path, **options):
         """Construct a native floating-base GPU solver from model metadata."""
 
+        robot = _require_from_robot_model(options, floating_base=True)
         if "active_velocity_indices" not in options:
-            options["active_velocity_indices"] = tuple(range(int(options["robot"].nv)))
+            options["active_velocity_indices"] = tuple(range(int(robot.nv)))
         options.setdefault("solver_backend", "warp_srinv")
         return cls(None, urdf_path, cache_dir, **options)
 
@@ -1619,6 +1656,10 @@ class GpuWbcFloatingMultiFrameSolver:
         reset. There is no independent per-field stale/fresh schedule: omitted
         history is the retained accepted command, and every supplied field is
         fresh for participating worlds.
+
+        ``result.world_status`` is an int8 tensor of shape ``[batch_size]``.
+        ``result.status`` only reports that the batch finished and still needs
+        that per-world read.
         """
 
         history = self._previous_velocity if previous_velocity is None else previous_velocity

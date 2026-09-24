@@ -38,6 +38,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   solve. Value checks stay on device per world, and only layout/dtype mismatches
   raise. Runtime posture weights now bind Torch through the solver instance
   instead of a missing global name.
+- `from_robot()` rejects a missing or wrong-base `robot` before CUDA setup.
+  The GPU guide now states quaternion layouts, active-configuration shapes,
+  and the per-world `world_status` codes.
 
 ## [0.22.0] - 2026-07-29
 

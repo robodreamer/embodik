@@ -67,11 +67,12 @@ For model-derived, GPU-accelerated WBC, see the
 [GPU Solvers](../gpu_solvers.md) documentation. New integrations should use
 the `embodik.gpu.wbc` package:
 
-- `GpuWbcMultiFrameSolver` — fixed-base, device-resident multi-frame velocity WBC
-- `GpuWbcFloatingMultiFrameSolver` — standard floating-base velocity WBC
+- `GpuWbcMultiFrameSolver.from_robot()` — fixed-base, device-resident multi-frame velocity WBC
+- `GpuWbcFloatingMultiFrameSolver.from_robot()` — standard floating-base velocity WBC
 - `GpuAccelerationSolver` — the narrower fixed-base acceleration state-box slice
 - `solve_device_batch(..., reset_mask=, valid_mask=)` — independent per-world
-  reset, participation, and `world_status` codes
+  reset, participation, and `world_status` codes. `result.status` is not the
+  per-world outcome.
 - `measure_device_batch()` — solver-path dispatch/sync/memory snapshot
 
 The older FI-PeSNS and PPH-SNS CasADi builders remain import-compatible, but

@@ -168,6 +168,23 @@ def test_unseen_floating_model_derives_root_and_noncontiguous_active_coordinates
     assert parameters.robot_spec.task_frames == ("novel_tool",)
 
 
+def test_from_robot_rejects_a_missing_or_wrong_base_model():
+    with pytest.raises(ValueError, match="from_robot requires robot="):
+        GpuWbcMultiFrameSolver.from_robot(Path("novel.urdf"), Path("cache"))
+    with pytest.raises(ValueError, match="requires a floating-base"):
+        GpuWbcFloatingMultiFrameSolver.from_robot(
+            Path("novel.urdf"),
+            Path("cache"),
+            robot=_UnseenFixedRobot(),
+        )
+    with pytest.raises(ValueError, match="requires a fixed-base"):
+        GpuWbcMultiFrameSolver.from_robot(
+            Path("novel.urdf"),
+            Path("cache"),
+            robot=_UnseenFloatingRobot(),
+        )
+
+
 def test_fixed_factory_keeps_constraint_only_joints_and_needs_no_manifest(monkeypatch):
     captured = {}
 
