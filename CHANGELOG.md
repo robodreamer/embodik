@@ -44,8 +44,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added `pixi run setup-gpu-wbc`, which installs the CUDA environment, a
   compatible Torch wheel, and Newton in one step.
 - Finite GPU WBC joint positions outside their URDF limits are projected onto
-  those limits before the solve. Non-finite values and degenerate quaternions
-  still return `WORLD_STATUS_INVALID_INPUT`.
+  those limits before the solve. Infinities, NaNs, and degenerate quaternions
+  still return `WORLD_STATUS_INVALID_INPUT` and keep the caller's
+  configuration, as do worlds excluded by `valid_mask`.
 
 ## [0.22.0] - 2026-07-29
 

@@ -187,13 +187,14 @@ Both adapters publish the same codes:
 | Code | Constant | Meaning |
 | --- | --- | --- |
 | 0 | `WORLD_STATUS_SUCCESS` | The world produced an accepted step |
-| 1 | `WORLD_STATUS_INVALID_INPUT` | Non-finite input, a zero quaternion, or a position-limit violation |
-| 2 | `WORLD_STATUS_HELD` | No accepted step; `q_solution` stays at the input |
+| 1 | `WORLD_STATUS_INVALID_INPUT` | Non-finite input or a zero quaternion. `q_solution` stays at the caller's configuration |
+| 2 | `WORLD_STATUS_HELD` | No accepted step. `q_solution` stays at the projected seed |
 | 3 | `WORLD_STATUS_NUMERICAL_FAILURE` | The numerical solve failed for that world |
 | 4 | `WORLD_STATUS_INACTIVE` | `valid_mask` excluded the world |
 
-Invalid, held, and inactive rows keep a configuration that is safe to write
-back. Read `world_status` when the application needs to know which worlds
+Invalid and inactive rows keep the configuration the caller passed in. A held
+row keeps the seed after finite joint positions have been projected onto their
+limits. Read `world_status` when the application needs to know which worlds
 tracked the target. One bad row does not reject the batch.
 
 ## RL and simulator integration
@@ -229,9 +230,10 @@ That gather is the fixed-base shape. A floating-base solver takes the full
 
 `reset_mask` and `valid_mask` are boolean tensors of shape `[batch_size]`.
 Resetting selected worlds zeros command-acceleration history without rebuilding
-the solver. Inactive worlds hold their configuration and do not advance stored
-history. One non-finite or out-of-limit world sets
-`WORLD_STATUS_INVALID_INPUT` on that row and does not reject the batch.
+the solver. Inactive worlds hold the caller's configuration and do not advance
+stored history. One non-finite world sets `WORLD_STATUS_INVALID_INPUT` on that
+row and does not reject the batch. A finite position outside its URDF limit is
+projected before the solve and is not invalid input.
 
 Provided tensors for a participating world are contemporaneous this tick.
 Omitted `previous_velocity` retains the accepted command. There is no separate

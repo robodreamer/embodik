@@ -1727,7 +1727,7 @@ class DeviceResidentMultiFramePoseSolver:
 
         torch = self.torch
         if not self.robot_spec.floating_base:
-            return torch.maximum(torch.minimum(q, self._joint_upper), self._joint_lower)
+            return self._clamp_finite_positions(q, self._joint_lower, self._joint_upper)
         rows = self._limitable_position_rows
         if int(rows.numel()) == 0:
             return q
@@ -1740,9 +1740,15 @@ class DeviceResidentMultiFramePoseSolver:
         projected.index_copy_(
             1,
             config_columns,
-            torch.maximum(lower, torch.minimum(upper, current)),
+            self._clamp_finite_positions(current, lower, upper),
         )
         return projected
+
+    def _clamp_finite_positions(self, current: Any, lower: Any, upper: Any) -> Any:
+        """Clamp finite coordinates. Infinities and NaNs stay unchanged."""
+
+        clamped = self.torch.maximum(lower, self.torch.minimum(upper, current))
+        return self.torch.where(self.torch.isfinite(current), clamped, current)
 
     def _world_input_valid(
         self,
@@ -3868,10 +3874,10 @@ class DeviceResidentMultiFramePoseSolver:
             self.config.standalone_cuda_graph_enabled
             and self.config.velocity_solver in {"warp_srinv", "cusolver_srinv"}
         )
+        q_hold = q_start
         q_start = self._project_configuration_into_limits(q_start)
         input_valid = self._world_input_valid(q_start, target, previous_velocity, current_velocity)
         participate = valid_mask & input_valid
-        q_hold = q_start
         q_start = torch.where(participate[:, None], q_start, self._default_q.expand_as(q_start))
         q = q_start.clone()
         target = torch.where(
