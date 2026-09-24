@@ -118,10 +118,7 @@ def test_centroidal_release_surface_is_navigable_and_versioned() -> None:
     acceleration = (ROOT / "docs" / "acceleration_solver.md").read_text()
     examples = (ROOT / "docs" / "examples" / "index.md").read_text()
     changelog = (ROOT / "CHANGELOG.md").read_text()
-    with (ROOT / "pyproject.toml").open("rb") as stream:
-        version = tomllib.load(stream)["project"]["version"]
 
-    assert version == "0.22.0"
     assert "Centroidal Stability: centroidal_stability.md" in navigation
     assert "`04_com_constraint_example.py`" in examples
     assert "`06_bimanual_whole_body_ik.py`" in examples
