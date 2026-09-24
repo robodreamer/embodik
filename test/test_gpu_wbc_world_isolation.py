@@ -100,6 +100,34 @@ def test_invalid_world_does_not_reject_the_device_batch(tmp_path: Path) -> None:
     assert torch.equal(result.accepted_velocity[1], torch.zeros_like(result.accepted_velocity[1]))
 
 
+def test_infinite_joint_position_stays_invalid_and_unmodified(tmp_path: Path) -> None:
+    torch = _cuda()
+    solver = _solver(tmp_path, batch_size=2)
+    q = torch.zeros((2, solver.configuration_dim), dtype=torch.float32, device="cuda")
+    target = _identity_targets(2, len(solver.frames), torch)
+    q[1, 0] = float("inf")
+    q[1, 1] = float("-inf")
+
+    result = solver.solve_device_batch(q, target)
+
+    assert int(result.world_status[1]) == GpuWbcMultiFrameSolver.WORLD_STATUS_INVALID_INPUT
+    assert torch.equal(result.q_solution[1], q[1])
+
+
+def test_inactive_out_of_limit_joint_is_not_projected(tmp_path: Path) -> None:
+    torch = _cuda()
+    solver = _solver(tmp_path, batch_size=2)
+    q = torch.zeros((2, solver.configuration_dim), dtype=torch.float32, device="cuda")
+    target = _identity_targets(2, len(solver.frames), torch)
+    q[1, 0] = 5.0
+    valid = torch.tensor([True, False], device="cuda")
+
+    result = solver.solve_device_batch(q, target, valid_mask=valid)
+
+    assert int(result.world_status[1]) == GpuWbcMultiFrameSolver.WORLD_STATUS_INACTIVE
+    assert torch.equal(result.q_solution[1], q[1])
+
+
 def test_valid_mask_holds_inactive_world_history(tmp_path: Path) -> None:
     torch = _cuda()
     solver = _solver(tmp_path, batch_size=2)

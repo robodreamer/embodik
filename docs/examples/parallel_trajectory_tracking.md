@@ -24,26 +24,15 @@ anchored 6D foot tasks.
 
 ## Run the viewer
 
-From a repository checkout, prepare the CUDA environment and sibling Newton
-checkout once:
+From a repository checkout, prepare the CUDA environment once:
 
 ```bash
-git clone --depth 1 https://github.com/newton-physics/newton.git ../newton
-pixi run -e cuda install
-pixi run -e cuda python -m pip install -e ../newton
-pixi run -e cuda check-cuda
+pixi run setup-gpu-wbc
 ```
 
-Skip the clone command if `../newton` already exists. After `check-cuda` passes
-its kernel probe, launch the default 512-world Panda viewer. If the check
-reports that Torch lacks `sm_120`, run the repair once and check again:
-
-```bash
-pixi run -e cuda setup-cuda-sm120
-pixi run -e cuda check-cuda
-```
-
-Then launch:
+That installs EmbodiK, a Torch wheel that can run on this GPU, and Newton.
+After it prints that the kernel probe passed, launch the default 512-world
+Panda viewer:
 
 ```bash
 pixi run -e cuda demo-parallel-tracking

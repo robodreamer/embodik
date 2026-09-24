@@ -248,18 +248,17 @@ compilation and graph capture happen on first use for each model/layout; measure
 performance only after warm-up. See [GPU WBC](gpu_solvers.md) for the model
 envelope, capability matrix, and fail-closed behavior.
 
-For the repository's Pixi CUDA environment, the equivalent one-time setup and
-smoke check are:
+For the repository's Pixi CUDA environment, run the one-step setup:
 
 ```bash
-pixi run -e cuda install
-pixi run -e cuda python -m pip install -e ../newton
-pixi run -e cuda check-cuda
+pixi run setup-gpu-wbc
 ```
 
-If the check reports that the installed Torch wheel lacks `sm_120`, run
-`pixi run -e cuda setup-cuda-sm120` and repeat `check-cuda`. The repair is
-contained inside `.pixi/envs/cuda`.
+That command installs EmbodiK into the `cuda` environment, installs a Torch
+wheel that matches the GPU, and installs a sibling Newton checkout. It clones
+`../newton` when needed. Newton is installed after any `sm_120` Torch repair so
+the repair does not leave the environment without Newton. The repair stays
+inside `.pixi/envs/cuda`.
 
 Then run numbered public Example 10 with
 `pixi run -e cuda demo-parallel-tracking`.

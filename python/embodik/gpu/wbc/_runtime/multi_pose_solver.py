@@ -1485,6 +1485,16 @@ class DeviceResidentMultiFramePoseSolver:
             dtype=torch.long,
             device=self.device,
         )
+        locked_columns = set(self._locked_active_columns)
+        self._limitable_position_rows = torch.tensor(
+            [
+                row
+                for row, column in enumerate(self._position_velocity_indices)
+                if column not in locked_columns
+            ],
+            dtype=torch.long,
+            device=self.device,
+        )
         self._root_quat_start: int | None = None
         if robot_spec.floating_base:
             root = next(
@@ -1515,6 +1525,9 @@ class DeviceResidentMultiFramePoseSolver:
             self._default_q = default_q.index_select(0, compact)
         else:
             raise ValueError(f"default_configuration must have shape {(self.configuration_dim,)}")
+        self._default_q = self._project_configuration_into_limits(
+            self._default_q.unsqueeze(0)
+        ).squeeze(0)
         identity = torch.zeros((self.frame_count, 7), dtype=torch.float32, device=self.device)
         identity[:, 3] = 1.0
         self._default_target = identity
@@ -1701,6 +1714,41 @@ class DeviceResidentMultiFramePoseSolver:
                     f"{name} must be a boolean tensor with shape {(self.batch_size,)} "
                     f"on {self.device}"
                 )
+
+    def _project_configuration_into_limits(self, q: Any) -> Any:
+        """Return a copy whose finite position coordinates lie inside joint limits.
+
+        A URDF home can sit outside a position limit. Projecting those
+        coordinates lets the solve start from the nearest feasible seed.
+        Non-finite values are left unchanged so they still fail input checks.
+        Locked floating-base coordinates are left unchanged because their
+        velocity is fixed at zero.
+        """
+
+        torch = self.torch
+        if not self.robot_spec.floating_base:
+            return self._clamp_finite_positions(q, self._joint_lower, self._joint_upper)
+        rows = self._limitable_position_rows
+        if int(rows.numel()) == 0:
+            return q
+        projected = q.clone()
+        config_columns = self._position_configuration_indices_tensor.index_select(0, rows)
+        velocity_columns = self._position_velocity_indices_tensor.index_select(0, rows)
+        lower = self._joint_lower.index_select(0, velocity_columns)
+        upper = self._joint_upper.index_select(0, velocity_columns)
+        current = projected.index_select(1, config_columns)
+        projected.index_copy_(
+            1,
+            config_columns,
+            self._clamp_finite_positions(current, lower, upper),
+        )
+        return projected
+
+    def _clamp_finite_positions(self, current: Any, lower: Any, upper: Any) -> Any:
+        """Clamp finite coordinates. Infinities and NaNs stay unchanged."""
+
+        clamped = self.torch.maximum(lower, self.torch.minimum(upper, current))
+        return self.torch.where(self.torch.isfinite(current), clamped, current)
 
     def _world_input_valid(
         self,
@@ -3826,9 +3874,10 @@ class DeviceResidentMultiFramePoseSolver:
             self.config.standalone_cuda_graph_enabled
             and self.config.velocity_solver in {"warp_srinv", "cusolver_srinv"}
         )
+        q_hold = q_start
+        q_start = self._project_configuration_into_limits(q_start)
         input_valid = self._world_input_valid(q_start, target, previous_velocity, current_velocity)
         participate = valid_mask & input_valid
-        q_hold = q_start
         q_start = torch.where(participate[:, None], q_start, self._default_q.expand_as(q_start))
         q = q_start.clone()
         target = torch.where(

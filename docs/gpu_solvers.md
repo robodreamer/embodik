@@ -45,28 +45,20 @@ git clone --depth 1 https://github.com/newton-physics/newton.git ../newton
 python -m pip install -e ../newton
 ```
 
-For a Linux x86-64 repository checkout managed by Pixi, create the CUDA environment and
-install both editable source trees once:
+For a Linux x86-64 repository checkout managed by Pixi, one command creates the
+CUDA environment, installs EmbodiK, selects a Torch wheel that can execute on
+the current GPU, and installs Newton:
 
 ```bash
-git clone --depth 1 https://github.com/newton-physics/newton.git ../newton
-pixi run -e cuda install
-pixi run -e cuda python -m pip install -e ../newton
-pixi run -e cuda check-cuda
+pixi run setup-gpu-wbc
 ```
 
-Skip the clone command when the sibling `../newton` checkout already exists.
-`check-cuda` verifies both CUDA visibility and execution of a real kernel for
-the device architecture. If it reports that Torch lacks `sm_120`, repair that
-Pixi environment and check again:
-
-```bash
-pixi run -e cuda setup-cuda-sm120
-pixi run -e cuda check-cuda
-```
-
-The repair task installs the CUDA 12.9 Torch wheel used for `sm_120`; it does
-not modify the system Python environment.
+The script clones `../newton` when that checkout is absent. Set `NEWTON_DIR` to
+use a different Newton source tree. It runs `check-cuda` before and after the
+optional `sm_120` Torch repair. Newton is installed after that repair, because
+replacing the Torch wheel removes packages that were installed into the same
+environment. `check-cuda` verifies both CUDA visibility and execution of a real
+kernel for the device architecture. The repair stays inside `.pixi/envs/cuda`.
 
 The current integration was validated against the Newton 1.6 development
 line with Warp 1.17.0. Older Warp builds can fail during Newton import before
@@ -101,16 +93,26 @@ To solve 1,024 worlds while publishing only 512 robots to the browser, pass
 
 ## Model-derived API
 
+Build a solver with `from_robot()`. That factory selects `warp_srinv` and
+derives the joint layout from the loaded `RobotModel`. The class constructor
+is the legacy artifact path and is not the integration entry point.
+
+Use `GpuWbcMultiFrameSolver` when `robot.is_floating_base` is false. Use
+`GpuWbcFloatingMultiFrameSolver` for one standard free root. Passing the other
+class raises before any CUDA work. A fixed-base call looks like this:
+
 ```python
 from pathlib import Path
 
+import numpy as np
 import torch
 import embodik
 from embodik.gpu.wbc import GpuWbcMultiFrameSolver
 
 urdf = Path("robot.urdf")
 robot = embodik.RobotModel(str(urdf), floating_base=False)
-q0 = robot.neutral_configuration()
+q0 = np.asarray(robot.neutral_configuration(), dtype=np.float64)
+batch_size = 1024
 
 solver = GpuWbcMultiFrameSolver.from_robot(
     urdf,
@@ -120,24 +122,80 @@ solver = GpuWbcMultiFrameSolver.from_robot(
     frames=("tool_frame",),
     frame_task_dimensions=(6,),
     default_configuration=q0,
-    solver_backend="warp_srinv",
-    batch_size=1024,
+    batch_size=batch_size,
+    dt=0.01,
 )
 
-q_cuda = torch.as_tensor(q_batch, dtype=torch.float32, device="cuda")
-target_cuda = torch.as_tensor(target_batch_wxyz, dtype=torch.float32, device="cuda")
+q_active = np.asarray(q0, dtype=np.float32)[list(solver.active_configuration_indices)]
+q_cuda = torch.as_tensor(q_active, dtype=torch.float32, device="cuda").expand(
+    batch_size, -1
+).contiguous()
+target_cuda = torch.zeros(
+    (batch_size, len(solver.frames), 7), dtype=torch.float32, device="cuda"
+)
+target_cuda[..., 3] = 1.0  # identity quaternion, WXYZ
 result = solver.solve_device_batch(q_cuda, target_cuda)
+tracked = result.world_status == solver.WORLD_STATUS_SUCCESS
 q_next_cuda = result.q_solution
 ```
 
-`q_cuda` has shape `[batch_size, configuration_dim]`. Targets have shape
-`[batch_size, frame_count, 7]` in position plus WXYZ quaternion order. Keep the
-returned solution and optional measured velocity on the device between calls.
-The public adapter rejects non-CUDA execution or backend fallback.
+`default_configuration` is the full model vector from `RobotModel`. The tensor
+passed to `solve_device_batch()` is narrower: `[batch_size, configuration_dim]`,
+with one column per name in `active_joint_names`. Gather it with
+`active_configuration_indices`. `q_solution` has that same width, so scatter it
+back with those indices. The factory includes every supported movable joint
+unless you pass `active_joint_names`.
 
-The factory includes every supported movable joint by default. Pass
-`active_joint_names` or `active_velocity_indices` only when deliberately
-building a reduced specialization.
+Finite joint positions that fall outside their URDF limits are projected onto
+the nearest limit before the solve. The Franka Panda description places joint 4
+outside its upper limit at `neutral_configuration()`, and that home is repaired
+automatically. Non-finite values and a zero quaternion still return
+`WORLD_STATUS_INVALID_INPUT` and do not move. `get_joint_limits()` reports the
+limits when an application wants to inspect them.
+
+The fixed-base factory defaults to `dt=0.1` and `iterations=2`. Pass `dt`
+explicitly when the control period is different. The floating-base factory
+defaults to `dt=0.01` and also requires `frame_position_gains`,
+`frame_orientation_gains`, and six positive `base_velocity_limits`. Its `q`
+is the full configuration, shaped `[batch_size, robot.nq]`, not an active-joint
+slice. The first solve for a new model or shape compiles Newton and Warp
+kernels, so exclude it from latency measurements.
+
+### Quaternion layout
+
+These three tensors do not share a quaternion convention:
+
+| Value | Shape | Quaternion |
+| --- | --- | --- |
+| Fixed-base `q` and `q_solution` | `[batch, configuration_dim]` | none; scalar joints only |
+| Floating-base `q` and `q_solution` | `[batch, robot.nq]` | root quaternion is **XYZW**, after the root translation |
+| `target` | `[batch, frame_count, 7]` | position, then **WXYZ** |
+| `evaluate_body_poses_device(q)` | `[batch, body_count, 7]` | position, then **XYZW** |
+
+A body pose cannot be copied into a target without swapping the quaternion.
+A floating-base root packed as WXYZ is still finite, so the solve runs and the
+base orientation is wrong. `current_velocity` and `previous_velocity`, when
+supplied, are float32 tensors of shape `[batch, velocity_dim]` in
+`active_velocity_indices` order.
+
+### Per-world status
+
+`result.status` is always `"solved_or_held_needs_verification"`. The outcome
+of each row is `result.world_status`, an `int8` tensor of shape `[batch_size]`.
+Both adapters publish the same codes:
+
+| Code | Constant | Meaning |
+| --- | --- | --- |
+| 0 | `WORLD_STATUS_SUCCESS` | The world produced an accepted step |
+| 1 | `WORLD_STATUS_INVALID_INPUT` | Non-finite input or a zero quaternion. `q_solution` stays at the caller's configuration |
+| 2 | `WORLD_STATUS_HELD` | No accepted step. `q_solution` stays at the projected seed |
+| 3 | `WORLD_STATUS_NUMERICAL_FAILURE` | The numerical solve failed for that world |
+| 4 | `WORLD_STATUS_INACTIVE` | `valid_mask` excluded the world |
+
+Invalid and inactive rows keep the configuration the caller passed in. A held
+row keeps the seed after finite joint positions have been projected onto their
+limits. Read `world_status` when the application needs to know which worlds
+tracked the target. One bad row does not reject the batch.
 
 ## RL and simulator integration
 
@@ -161,15 +219,21 @@ result = solver.solve_device_batch(
     reset_mask=done_mask,
     valid_mask=active_mask,
 )
-sim.set_joint_position_targets(result.q_solution)
+q_command = q_sim.clone()
+q_command.index_copy_(1, q_index, result.q_solution)
+sim.set_joint_position_targets(q_command)
 ```
+
+That gather is the fixed-base shape. A floating-base solver takes the full
+`[num_envs, robot.nq]` configuration and does not expose
+`active_configuration_indices`. Its root quaternion remains XYZW.
 
 `reset_mask` and `valid_mask` are boolean tensors of shape `[batch_size]`.
 Resetting selected worlds zeros command-acceleration history without rebuilding
-the solver. Inactive worlds hold their configuration and do not advance stored
-history. One non-finite or out-of-limit world reports
-`GpuWbcFloatingMultiFrameSolver.WORLD_STATUS_INVALID_INPUT` for that row and
-does not reject the batch.
+the solver. Inactive worlds hold the caller's configuration and do not advance
+stored history. One non-finite world sets `WORLD_STATUS_INVALID_INPUT` on that
+row and does not reject the batch. A finite position outside its URDF limit is
+projected before the solve and is not invalid input.
 
 Provided tensors for a participating world are contemporaneous this tick.
 Omitted `previous_velocity` retains the accepted command. There is no separate

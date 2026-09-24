@@ -111,7 +111,8 @@ q = model.normalize(q)  # Ensures quaternion part has unit norm
 |--------|-------------|
 | `update_configuration(q)` | Update configuration and compute forward kinematics |
 | `update_kinematics(q, v)` | Update configuration and velocity |
-| `get_frame_pose(frame_name)` | Get SE3 pose of a frame |
+| `get_joint_limits()` | Lower and upper position limits, each shaped `(nq,)` |
+| `get_frame_pose(frame_name)` | Get SE3 pose of a frame. `translation` is xyz and `rotation` is a 3×3 matrix |
 | `get_frame_jacobian(frame_name, ref)` | Get 6xN Jacobian of a frame |
 | `get_com_position()` | Get center of mass position |
 | `get_com_jacobian()` | Get 3xN COM Jacobian |
