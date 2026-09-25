@@ -176,10 +176,12 @@ build-verbosity = 1
 # Keep Linux wheels on hosted x86_64 runners. The aarch64 path currently forces
 # source builds of cmeel dependencies under emulation and is not release-stable.
 archs = ["x86_64"]
-manylinux-x86_64-image = "manylinux_2_28"
+# cibuildwheel 2.23.2 maps the name manylinux_2_28 to the 2025.03.23 image.
+# That image's AlmaLinux 8 repository metadata 404s on current mirrors.
+manylinux-x86_64-image = "quay.io/pypa/manylinux_2_28_x86_64:2026.09.05-1"
 before-build = "python -m pip install scikit-build-core nanobind ninja 'pin>=3.8.0,<4' 'cmeel-urdfdom>=4,<5' 'cmeel-tinyxml2>=10,<11'"
 build-frontend = { name = "pip", args = ["--no-build-isolation"] }
-before-all = "if command -v dnf >/dev/null 2>&1; then dnf install -y eigen3-devel urdfdom-devel urdfdom-headers-devel; elif command -v yum >/dev/null 2>&1; then yum install -y eigen3-devel urdfdom-devel urdfdom-headers-devel; elif command -v microdnf >/dev/null 2>&1; then microdnf install -y eigen3-devel urdfdom-devel urdfdom-headers-devel; else echo 'No supported package manager found for build dependencies' >&2; exit 1; fi"
+before-all = "if command -v dnf >/dev/null 2>&1; then dnf clean all && dnf install -y eigen3-devel urdfdom-devel urdfdom-headers-devel; elif command -v yum >/dev/null 2>&1; then yum clean all && yum install -y eigen3-devel urdfdom-devel urdfdom-headers-devel; elif command -v microdnf >/dev/null 2>&1; then microdnf clean all && microdnf install -y eigen3-devel urdfdom-devel urdfdom-headers-devel; else echo 'No supported package manager found for build dependencies' >&2; exit 1; fi"
 repair-wheel-command = "bash scripts/auditwheel_with_pin_libs.sh {dest_dir} {wheel}"
 
 [tool.cibuildwheel.macos]
