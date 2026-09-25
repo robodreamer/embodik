@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.23.1] - 2026-09-25
+
+### Fixed
+
+- Linux wheels build on the `manylinux_2_28` image dated 2026-09-05. The image
+  selected by the previous cibuildwheel pin could not refresh AlmaLinux 8
+  package metadata, so the 0.23.0 Linux wheels were not published.
+
+### Changed
+
+- The README now leads with the PyPI quick start, and the experimental GPU
+  section uses `pixi run setup-gpu-wbc`.
+
 ## [0.23.0] - 2026-09-24
 
 ### Added
