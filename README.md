@@ -34,64 +34,6 @@ The detailed installation notes, API reference, and example walkthroughs live in
 
 https://robodreamer.github.io/embodik/
 
-## ⚡ GPU WBC at 1,024 Worlds
-
-<a href="https://robodreamer.github.io/embodik/examples/parallel_trajectory_tracking/">
-  <img src="docs/assets/media/gpu_wbc_parallel_showcase_preview.gif?raw=true" alt="Panda, ROBOTIS AI Worker, and Unitree G1 moving through distinct trajectories across 512 fully articulated CUDA worlds" width="960">
-</a>
-
-The experimental `embodik.gpu.wbc` path combines model-derived Newton
-kinematics with Warp directional SRINV. The same batch API above derives its
-joint and task dimensions from Panda, AI Worker, and G1 models—there is no
-robot-family DoF table in the solver. The viewer renders 512 articulated robots
-by default with shared per-link mesh instances. Four colored world bands follow
-circle, figure-eight, helix, or sweep targets, with independent phases and
-speeds inside each band. Pass `--worlds 1024` for the full reference scale.
-
-From a source checkout with a sibling Newton clone, the one-time setup and
-default launch are:
-
-```bash
-pixi run -e cuda install
-pixi run -e cuda python -m pip install -e ../newton
-pixi run -e cuda check-cuda
-pixi run -e cuda demo-parallel-tracking
-```
-
-If the check reports that the installed Torch wheel lacks `sm_120`, run
-`pixi run -e cuda setup-cuda-sm120`, then repeat the check. This replaces only
-Torch's CUDA wheel inside the Pixi environment with an architecture-compatible
-build.
-
-The viewer is available at `http://localhost:8080`. See the
-[parallel example guide](https://robodreamer.github.io/embodik/examples/parallel_trajectory_tracking/)
-for model switches, 1,024-world runs, headless profiling, RL integration, and
-first-run notes.
-
-On a CUDA-capable NVIDIA GPU with approximately 24 GB of device memory, 1,024
-device-resident worlds measured the following warm solve-only latency (50
-samples after 20 warm-up steps, two solver iterations):
-
-| Model | Active DoF | 6D tasks / world | p50 | Throughput |
-| --- | ---: | ---: | ---: | ---: |
-| Franka Panda | 7 | 1 | 0.906 ms | 1.13M worlds/s |
-| ROBOTIS AI Worker SG2 | 15 | 2 | 4.854 ms | 211k worlds/s |
-| Unitree G1 | 29 | 4 | 20.295 ms | 50.4k worlds/s |
-
-### Status, compatibility, and requirements
-
-GPU WBC is experimental and opt-in; the CPU solver remains the stable default.
-It requires an NVIDIA CUDA device recognized by Torch, Warp, and Newton plus
-the `embodik[gpu-wbc]` dependencies and a compatible Newton build. Fixed-base
-scalar-joint models and standard floating-base models are supported; other
-joint manifolds fail explicitly. There is no silent CPU fallback.
-
-These numbers time the CUDA solve only; target generation, browser rendering,
-collision, and host publication are excluded. Read the [GPU WBC guide](https://robodreamer.github.io/embodik/gpu_solvers/)
-for supported constraints, requirements, single-world tradeoffs, and a
-reproducible headless command. It also covers device-resident integration with
-batched RL simulators and selective mjviser publication.
-
 ## 🚀 Quick Start
 
 Fastest path for most users is the wheel-only PyPI install inside a virtual
@@ -105,14 +47,8 @@ python -m pip install --only-binary=:all: embodik
 python -c "import embodik; print(embodik.__version__)"
 ```
 
-If that import works, the core package is installed.
-
-If pip cannot find a compatible wheel, use the one-shot source installer for
-your platform from the [Installation Guide](https://robodreamer.github.io/embodik/installation/).
-It creates the venv, installs native dependencies, builds EmbodiK, and runs an
-import smoke test.
-
-To run copied examples from the same venv:
+If that import works, the core package is installed. Copy the examples and run
+the fixed-base loop:
 
 ```bash
 python -m pip install "embodik[examples]"
@@ -121,83 +57,50 @@ cd embodik_examples
 python 01_basic_ik_simple.py
 ```
 
+If pip cannot find a compatible wheel, use the one-shot source installer for
+your platform from the [Installation Guide](https://robodreamer.github.io/embodik/installation/).
+It creates the venv, installs native dependencies, builds EmbodiK, and runs an
+import smoke test.
+
 Published repaired wheels do not require the Python `pin` package at runtime.
 Source builds use `pin` or a system Pinocchio install as the native library
 provider; keep that provider installed in the environment used to import
 EmbodiK.
 
+## ⚡ Experimental GPU whole-body IK
+
+The animation is the default 512-world viewer. The measured reference scale is
+1,024 worlds (`--worlds 1024`), which is a separate run from this preview.
+
+<a href="https://robodreamer.github.io/embodik/examples/parallel_trajectory_tracking/">
+  <img src="docs/assets/media/gpu_wbc_parallel_showcase_preview.gif?raw=true" alt="Panda, ROBOTIS AI Worker, and Unitree G1 moving through distinct trajectories across 512 fully articulated CUDA worlds" width="960">
+</a>
+
+`embodik.gpu.wbc` is experimental and opt-in. The CPU solver remains the stable
+default. The GPU path derives joint and task dimensions from the loaded model,
+including Panda, AI Worker, and G1. There is no silent CPU fallback.
+
+From a source checkout:
+
+```bash
+pixi run setup-gpu-wbc
+pixi run -e cuda demo-parallel-tracking
+```
+
+The viewer opens at `http://localhost:8080`. Device memory, model switches,
+the 1,024-world latency table, and how those samples were measured are in the
+[GPU WBC guide](https://robodreamer.github.io/embodik/gpu_solvers/). The
+[parallel example guide](https://robodreamer.github.io/embodik/examples/parallel_trajectory_tracking/)
+covers headless profiling and RL integration.
+
 ## 🎮 Examples
 
-The pip-facing examples are intentionally split by purpose:
-
-| Script | Purpose |
-| --- | --- |
-| `01_basic_ik_simple.py` | Minimal fixed-base IK bring-up for a robot preset or new URDF. |
-| `02_collision_aware_IK.py` | Collision-aware IK behavior demo and advanced tuning surface. |
-| `03_teleop_ik.py` | Small adapter showing how teleop input drives the same IK solver path. |
-| `04_com_constraint_example.py` | CoM support-polygon constraint visualization. |
-| `05_dual_arm_ects.py` | Dual-arm ECTS and orthogonal coordination modes. |
-| `06_bimanual_whole_body_ik.py` | Bimanual whole-body teleop, defaulting to AI Worker and optionally supporting RB-Y1, with CoM, collision handling, torso gizmo control, torso/arm contribution controls, adaptive tuning, and optional Seer input. |
-| `07_unitree_g1_retargeting_ik.py` | Unitree G1 whole-body retargeting IK with CoM and optional collision handling. |
-| `08_spot_full_body_ik_viser.py` | Spot full-body IK in regular Viser with arm+torso, torso-only, full-body, and two-stage modes. |
-| `09_spot_locomanip_mjviser.py` | Spot locomanipulation ONNX policy rollout in MuJoCo through mjviser. |
-| `10_parallel_trajectory_tracking.py` | Model-derived Newton/Warp GPU WBC over independently targeted Panda, AI Worker, or G1 worlds. |
-
-Run them from a copied example directory:
-
-```bash
-python 02_collision_aware_IK.py
-python 03_teleop_ik.py
-python 06_bimanual_whole_body_ik.py
-python 07_unitree_g1_retargeting_ik.py
-python 08_spot_full_body_ik_viser.py
-```
-
-For Seer/xvisio controller input in the public teleop examples, install the
-teleop extra and pass the controller port:
-
-```bash
-python -m pip install "embodik[examples,teleop]"
-python 06_bimanual_whole_body_ik.py --controller-port /dev/ttyUSB0
-```
-
-The regular Viser Spot full-body IK example uses the standard example
-dependencies and includes a bundled Spot-with-arm URDF. The
-MuJoCo/mjviser locomanipulation example needs the optional mjviser stack and
-includes a bundled public MuJoCo Menagerie Spot-with-arm MJCF scene.
-`mjviser` is the MuJoCo-backed web viewer environment for policy rollout and
-interactive simulation. `mjviser-teleop` is the same viewer stack plus the
-optional Seer/xvisio controller dependencies, so use it only when running
-`--enable-teleop`:
-
-```bash
-python -m pip install "embodik[mjviser]"
-embodik-examples --copy
-cd embodik_examples
-python 09_spot_locomanip_mjviser.py --policy locomanip
-python 09_spot_locomanip_mjviser.py --policy locomanip-stationary
-# add the optional Seer controller extra when needed:
-python -m pip install "embodik[mjviser,teleop]"
-python 09_spot_locomanip_mjviser.py --enable-teleop --policy locomanip
-```
-
-From a repository checkout, run the same example from the repository root with
-the matching Pixi environment and task:
-
-```bash
-pixi run -e mjviser spot-locomanip-mjviser --policy locomanip
-pixi run -e mjviser-teleop spot-locomanip-mjviser --enable-teleop --policy locomanip
-```
-
-Use the `spot-locomanip-mjviser` Pixi task from a checkout, not raw
-`pixi run -e mjviser-teleop python examples/09_spot_locomanip_mjviser.py`, on
-a fresh environment. The task depends on `install`, so it builds/installs the
-native EmbodiK extension before launching the example.
-
-See the [Spot locomanipulation guide](https://robodreamer.github.io/embodik/examples/spot_locomanip_mjviser/)
-for mjviser, Seer teleop, solver tuning, and headless validation details.
-
-Most examples default to the Panda preset. Use `--robot <key>` when a script supports alternate robot presets. See the [Examples Guide](https://robodreamer.github.io/embodik/examples/) for the full catalog, helper conventions, and clone-only development examples.
+`01_basic_ik_simple.py` is the minimal fixed-base bring-up for a robot preset
+or a new URDF. Most scripts default to the Panda preset. Collision, teleop,
+CoM, dual-arm coordination, bimanual and humanoid whole-body control, Spot,
+and the GPU batch demo are listed in the
+[Examples Guide](https://robodreamer.github.io/embodik/examples/), including
+Seer controller ports and the mjviser policy flags.
 
 ## 🎬 Preview
 
@@ -304,5 +207,6 @@ embodik/
 EmbodiK is released under the Apache License 2.0. See [LICENSE](LICENSE) for details.
 Binary wheels may bundle permissively licensed native dependencies; see
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+Cite the project with [CITATION.cff](CITATION.cff).
 
 Developer: Andy Park <andypark.purdue@gmail.com>
