@@ -88,6 +88,7 @@ nav:
     - Quickstart: quickstart.md
   - Guides:
     - Overview: guides/index.md
+    - Explicit Task Stacks: task_stacks.md
     - Solver Robustness & Recovery: solver_robustness.md
     - Acceleration Solver: acceleration_solver.md
     - Centroidal Stability: centroidal_stability.md

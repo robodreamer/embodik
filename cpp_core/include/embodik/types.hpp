@@ -20,6 +20,7 @@
 #include <Eigen/Core>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace embodik {
@@ -34,6 +35,60 @@ enum class TaskSolveMode {
   /// This keeps more DOFs active, preventing premature task scale collapse.
   /// Uses proven defaults: delta_max=0.05, expand_rate=0.01, decay_rate=0.2.
   kScaleElastic = 2,
+};
+
+/**
+ * @brief One named hierarchy level in an explicit registered-task stack.
+ *
+ * ``task_names`` identify tasks already registered on a KinematicsSolver. The
+ * solver assembles every member into one joint backend objective. The level's
+ * policy is authoritative while the explicit stack is configured; member task
+ * priorities, solve modes, and fallback flags are not mutated.
+ */
+struct TaskLevelSpec {
+  TaskLevelSpec() = default;
+  TaskLevelSpec(std::string level_name, std::vector<std::string> members,
+                TaskSolveMode mode = TaskSolveMode::kScale,
+                bool allow_fallback = false)
+      : name(std::move(level_name)), task_names(std::move(members)),
+        solve_mode(mode), allow_min_error_fallback(allow_fallback) {}
+
+  std::string name;
+  std::vector<std::string> task_names;
+  TaskSolveMode solve_mode = TaskSolveMode::kScale;
+  bool allow_min_error_fallback = false;
+};
+
+/**
+ * @brief Ordered explicit hierarchy for registered KinematicsSolver tasks.
+ *
+ * Level order is highest to lowest priority. Tasks not named by the stack are
+ * omitted from the registered-task solve while this configuration is active.
+ */
+struct TaskStackConfig {
+  TaskStackConfig() = default;
+  explicit TaskStackConfig(std::vector<TaskLevelSpec> task_levels)
+      : levels(std::move(task_levels)) {}
+
+  std::vector<TaskLevelSpec> levels;
+};
+
+/**
+ * @brief Diagnostics for one explicit level mapped from one SNS objective.
+ *
+ * These values describe the jointly assembled level, not individual member
+ * tasks. They are unavailable when constrained weighted fallback replaces the
+ * prioritized backend result.
+ */
+struct TaskLevelDiagnostics {
+  std::string name;
+  std::vector<std::string> task_names;
+  TaskSolveMode configured_solve_mode = TaskSolveMode::kScale;
+  TaskSolveMode effective_solve_mode = TaskSolveMode::kScale;
+  bool allow_min_error_fallback = false;
+  bool used_min_error_fallback = false;
+  double scale = 0.0;
+  double residual_norm = 0.0;
 };
 
 enum class CollisionTuningMode {
@@ -104,6 +159,10 @@ struct VelocitySolverResult : public SolverResult {
   bool limits_applied = false;       // Whether limits were enforced
   Eigen::VectorXd
       joint_velocities; // Convenience access to solution as VectorXd
+
+  /// One entry per explicit task level when the SNS result maps one-to-one to
+  /// configured levels. Empty for legacy priority mode and weighted fallback.
+  std::vector<TaskLevelDiagnostics> task_level_diagnostics;
 
   // Performance breakdown (for debugging)
   double pinocchio_kinematics_time_ms = 0.0; // Forward kinematics time

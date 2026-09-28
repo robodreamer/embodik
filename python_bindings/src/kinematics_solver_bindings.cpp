@@ -29,6 +29,45 @@ void bind_kinematics_solver(nb::module_ &m) {
           const Eigen::VectorXd &, const std::vector<TaskTarget> &,
           const PositionStepOptions &)>(&KinematicsSolver::solve_position_step);
 
+  nb::class_<TaskLevelSpec>(m, "TaskLevelSpec",
+                            "One named level in an explicit registered-task stack")
+      .def(nb::init<>())
+      .def(nb::init<std::string, std::vector<std::string>, TaskSolveMode, bool>(),
+           nb::arg("name"), nb::arg("task_names"),
+           nb::arg("solve_mode") = TaskSolveMode::kScale,
+           nb::arg("allow_min_error_fallback") = false)
+      .def_rw("name", &TaskLevelSpec::name, "Unique level name")
+      .def_rw("task_names", &TaskLevelSpec::task_names,
+              "Registered task names assembled jointly at this level")
+      .def_rw("solve_mode", &TaskLevelSpec::solve_mode,
+              "Single solve mode for the jointly assembled level")
+      .def_rw("allow_min_error_fallback",
+              &TaskLevelSpec::allow_min_error_fallback,
+              "Allow this SCALE-family level to fall back to MIN_ERROR");
+
+  nb::class_<TaskStackConfig>(m, "TaskStackConfig",
+                              "Ordered explicit hierarchy of named task levels")
+      .def(nb::init<>())
+      .def(nb::init<std::vector<TaskLevelSpec>>(), nb::arg("levels"))
+      .def_rw("levels", &TaskStackConfig::levels,
+              "Levels ordered from highest to lowest priority");
+
+  nb::class_<TaskLevelDiagnostics>(
+      m, "TaskLevelDiagnostics",
+      "Backend diagnostics for one jointly assembled explicit task level")
+      .def_ro("name", &TaskLevelDiagnostics::name)
+      .def_ro("task_names", &TaskLevelDiagnostics::task_names)
+      .def_ro("configured_solve_mode",
+              &TaskLevelDiagnostics::configured_solve_mode)
+      .def_ro("effective_solve_mode",
+              &TaskLevelDiagnostics::effective_solve_mode)
+      .def_ro("allow_min_error_fallback",
+              &TaskLevelDiagnostics::allow_min_error_fallback)
+      .def_ro("used_min_error_fallback",
+              &TaskLevelDiagnostics::used_min_error_fallback)
+      .def_ro("scale", &TaskLevelDiagnostics::scale)
+      .def_ro("residual_norm", &TaskLevelDiagnostics::residual_norm);
+
   nb::class_<KinematicsSolver::CollisionDebugInfo>(m, "CollisionDebugInfo")
       .def_prop_ro("object_a",
                    [](const KinematicsSolver::CollisionDebugInfo &self) {
@@ -125,6 +164,25 @@ void bind_kinematics_solver(nb::module_ &m) {
 
       .def("pose_task_group", &KinematicsSolver::pose_task_group,
            nb::arg("name"), "Get a pose task group by name")
+
+      .def("configure_task_stack", &KinematicsSolver::configure_task_stack,
+           nb::arg("config"),
+           "Configure an explicit hierarchy over registered tasks. Level "
+           "order is authoritative; peers are canonicalized by name and "
+           "assembled into one SNS objective. The level solve policy overrides "
+           "member policy fields without mutating the tasks.")
+
+      .def("clear_task_stack", &KinematicsSolver::clear_task_stack,
+           "Clear the explicit stack and restore legacy task-priority behavior")
+
+      .def("has_explicit_task_stack",
+           &KinematicsSolver::has_explicit_task_stack,
+           "Return whether an explicit registered-task stack is configured")
+
+      .def_prop_ro(
+          "task_stack_config",
+          [](const KinematicsSolver &self) { return self.task_stack_config(); },
+          "Normalized explicit stack, or None when legacy priority mode is active")
 
       .def(
           "configure_relative_pose_constraint",

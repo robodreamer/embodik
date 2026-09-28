@@ -111,6 +111,10 @@ NB_MODULE(_embodik_impl, m) {
       .def_prop_ro(
           "joint_velocities",
           [](const eik::VelocitySolverResult &r) { return r.joint_velocities; })
+      .def_ro("task_level_diagnostics",
+              &eik::VelocitySolverResult::task_level_diagnostics,
+              "Per-level SNS diagnostics for an explicit task stack. Empty "
+              "for legacy mode or when weighted fallback replaced hierarchy.")
       .def_ro("pinocchio_kinematics_time_ms",
               &eik::VelocitySolverResult::pinocchio_kinematics_time_ms,
               "Time spent in Pinocchio forward kinematics (ms)")
