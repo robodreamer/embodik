@@ -19,6 +19,23 @@ manipulability metric and does not indicate a separate solver mode. A high but
 finite value can explain weak or unstable-looking motion even when the solve
 returns `SUCCESS`.
 
+When `configure_task_stack()` is active, velocity and position-step results may
+also expose `task_level_diagnostics`. Each entry reports the configured and
+effective mode, fallback state, scale, and residual for one named level. The
+list is empty in legacy priority mode and when constrained weighted fallback
+replaces the prioritized result. See [Explicit Task Stacks](../task_stacks.md).
+
+## Registered-task hierarchy configuration
+
+Registered tasks use their existing integer priorities unless an explicit
+stack is configured. `configure_task_stack(TaskStackConfig)` makes the named
+level order authoritative for `solve_velocity()` and registered-task
+`solve_position_step()` calls while preserving the task objects. Use
+`task_stack_config` to inspect the normalized configuration,
+`has_explicit_task_stack()` to distinguish stack mode from legacy mode, and
+`clear_task_stack()` to restore priority-based assembly. The standalone
+`solve_position()` method keeps its internal objective order.
+
 ## Centroidal Velocity Controls
 
 `add_centroidal_momentum_task()` commands absolute centroidal momentum in row

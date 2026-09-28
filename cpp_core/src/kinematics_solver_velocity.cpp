@@ -341,14 +341,37 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
     }
   }
 
+  const bool explicit_stack_active = task_stack_config_.has_value();
+  if (explicit_stack_active) {
+    if (const auto error = task_stack_validation_error(*task_stack_config_);
+        error.has_value()) {
+      result.status = SolverStatus::kInvalidInput;
+      result.status_message = "configured task stack is invalid: " + *error;
+      result.solution.assign(static_cast<std::size_t>(robot_->nv()), 0.0);
+      result.joint_velocities = Eigen::VectorXd::Zero(robot_->nv());
+      result.limits_applied = apply_limits;
+      last_solution_dq_norm_ = 0.0;
+      return result;
+    }
+  }
+
   // Auto-enable elastic band when any task uses SCALE_ELASTIC mode.
   {
     bool any_scale_elastic = false;
-    for (const auto &task : tasks_) {
-      if (task && task->isActive() &&
-          task->getSolveMode() == TaskSolveMode::kScaleElastic) {
-        any_scale_elastic = true;
-        break;
+    if (explicit_stack_active) {
+      for (const auto &level : task_stack_config_->levels) {
+        if (level.solve_mode == TaskSolveMode::kScaleElastic) {
+          any_scale_elastic = true;
+          break;
+        }
+      }
+    } else {
+      for (const auto &task : tasks_) {
+        if (task && task->isActive() &&
+            task->getSolveMode() == TaskSolveMode::kScaleElastic) {
+          any_scale_elastic = true;
+          break;
+        }
       }
     }
     if (any_scale_elastic && !elastic_band_config_.enabled) {
@@ -359,24 +382,35 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
     }
   }
 
-  // Sort tasks by priority
-  sort_tasks_by_priority();
+  // Preserve the historical task order in legacy mode. Explicit task stacks
+  // use their configured order without mutating task priorities.
+  if (!explicit_stack_active) {
+    sort_tasks_by_priority();
+  }
 
-  // Update all tasks with current robot state
+  auto update_solve_tasks = [&]() {
+    if (explicit_stack_active) {
+      for (const auto &level : task_stack_config_->levels) {
+        for (const auto &task_name : level.task_names) {
+          task_map_.at(task_name)->update(*robot_);
+        }
+      }
+      return;
+    }
+    for (auto &task : tasks_) {
+      if (task->isActive()) {
+        task->update(*robot_);
+      }
+    }
+  };
+
+  // Update tasks that participate in the selected hierarchy.
   if (timing) {
     auto t_task_start = std::chrono::high_resolution_clock::now();
-    for (auto &task : tasks_) {
-      if (task->isActive()) {
-        task->update(*robot_);
-      }
-    }
+    update_solve_tasks();
     result.task_update_time_ms = get_elapsed_ms(t_task_start);
   } else {
-    for (auto &task : tasks_) {
-      if (task->isActive()) {
-        task->update(*robot_);
-      }
-    }
+    update_solve_tasks();
   }
 
   // Collect active tasks: group by priority for order-invariant behavior.
@@ -384,16 +418,19 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
   auto &jacobians = scratch_jacobians_;
   auto &objective_configs = scratch_objective_configs_;
   auto &objective_tasks = scratch_objective_tasks_;
+  auto &objective_task_groups = scratch_objective_task_groups_;
   auto &excluded_union = scratch_excluded_union_;
   goals.clear();
   jacobians.clear();
   objective_configs.clear();
   objective_tasks.clear();
+  objective_task_groups.clear();
   excluded_union.clear();
   goals.reserve(tasks_.size());
   jacobians.reserve(tasks_.size());
   objective_configs.reserve(tasks_.size());
   objective_tasks.reserve(tasks_.size());
+  objective_task_groups.reserve(tasks_.size());
   excluded_union.reserve(tasks_.size());
   std::vector<int> task_exclusion_counts(
       static_cast<std::size_t>(robot_->nv()), 0);
@@ -408,7 +445,7 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
   group_tasks.clear();
   group_tasks.reserve(tasks_.size());
 
-  auto flush_group = [&]() {
+  auto flush_legacy_group = [&]() {
     if (group_tasks.empty()) {
       return;
     }
@@ -463,6 +500,7 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
           use_goal_directed_limit_clamp,
       });
       objective_tasks.push_back(nullptr);
+      objective_task_groups.push_back(group_tasks);
       project_collision_tangent_objective.push_back(all_strict_scale);
       project_elastic_collision_recovery_objective.push_back(
           all_scale_family && !all_strict_scale);
@@ -483,6 +521,7 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
             task->usesGoalDirectedLimitClamp(),
         });
         objective_tasks.push_back(task);
+        objective_task_groups.push_back({task});
         project_collision_tangent_objective.push_back(
             task->getSolveMode() == TaskSolveMode::kScale);
         project_elastic_collision_recovery_objective.push_back(
@@ -493,11 +532,8 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
     group_tasks.clear();
   };
 
-  for (const auto &task : tasks_) {
-    if (!task->isActive()) {
-      continue;
-    }
-    active_task_count++;
+  auto record_task_exclusions = [&](const std::shared_ptr<Task> &task) {
+    ++active_task_count;
     std::unordered_set<int> task_exclusions;
     for (int idx : task->get_excluded_joint_indices()) {
       if (idx >= 0 && idx < robot_->nv() &&
@@ -505,18 +541,76 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
         task_exclusion_counts[static_cast<std::size_t>(idx)]++;
       }
     }
+  };
 
-    const int prio = task->getPriority();
-    if (group_tasks.empty()) {
-      current_priority = prio;
-    } else if (prio != current_priority) {
-      flush_group();
-      current_priority = prio;
+  if (explicit_stack_active) {
+    for (std::size_t level_index = 0;
+         level_index < task_stack_config_->levels.size(); ++level_index) {
+      const auto &level = task_stack_config_->levels[level_index];
+      group_tasks.clear();
+      bool use_goal_directed_limit_clamp = false;
+      int total_rows = 0;
+      for (const auto &task_name : level.task_names) {
+        const auto &task = task_map_.at(task_name);
+        record_task_exclusions(task);
+        group_tasks.push_back(task);
+        total_rows += task->getDimension();
+        use_goal_directed_limit_clamp =
+            use_goal_directed_limit_clamp ||
+            task->usesGoalDirectedLimitClamp();
+      }
+
+      Eigen::VectorXd combined_goal = Eigen::VectorXd::Zero(total_rows);
+      Eigen::MatrixXd combined_jac =
+          Eigen::MatrixXd::Zero(total_rows, robot_->nv());
+      int offset = 0;
+      for (const auto &task : group_tasks) {
+        const Eigen::VectorXd task_goal = task->getVelocity();
+        const Eigen::MatrixXd task_jacobian = task->getJacobian();
+        if (task_goal.rows() > 0) {
+          combined_goal.segment(offset, task_goal.rows()) = task_goal;
+          combined_jac.block(offset, 0, task_jacobian.rows(), robot_->nv()) =
+              task_jacobian;
+          offset += static_cast<int>(task_goal.rows());
+        }
+      }
+
+      const bool strict_scale = level.solve_mode == TaskSolveMode::kScale;
+      const bool elastic_scale =
+          level.solve_mode == TaskSolveMode::kScaleElastic;
+      const TaskSolveMode backend_mode =
+          elastic_scale ? TaskSolveMode::kScale : level.solve_mode;
+      goals.push_back(std::move(combined_goal));
+      jacobians.push_back(std::move(combined_jac));
+      objective_configs.push_back(ObjectiveSolveConfig{
+          static_cast<int>(level_index), backend_mode,
+          level.allow_min_error_fallback, use_goal_directed_limit_clamp});
+      objective_tasks.push_back(group_tasks.size() == 1U ? group_tasks.front()
+                                                        : nullptr);
+      objective_task_groups.push_back(group_tasks);
+      project_collision_tangent_objective.push_back(strict_scale);
+      project_elastic_collision_recovery_objective.push_back(elastic_scale);
     }
+    group_tasks.clear();
+  } else {
+    for (const auto &task : tasks_) {
+      if (!task->isActive()) {
+        continue;
+      }
+      record_task_exclusions(task);
 
-    group_tasks.push_back(task);
+      const int prio = task->getPriority();
+      if (group_tasks.empty()) {
+        current_priority = prio;
+      } else if (prio != current_priority) {
+        flush_legacy_group();
+        current_priority = prio;
+      }
+
+      group_tasks.push_back(task);
+    }
+    flush_legacy_group();
   }
-  flush_group();
 
   // Task-local exclusions define ownership of each objective, not global DoF
   // availability. A hard constraint may use a joint whenever at least one
@@ -986,8 +1080,22 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
     int protected_priority = std::numeric_limits<int>::max();
     for (const auto &spec : pending_position_step_priority_constraints_) {
       if (spec.task && spec.task->isActive()) {
-        protected_priority =
-            std::min(protected_priority, spec.task->getPriority());
+        if (explicit_stack_active) {
+          for (std::size_t level_index = 0;
+               level_index < task_stack_config_->levels.size(); ++level_index) {
+            const auto &members =
+                task_stack_config_->levels[level_index].task_names;
+            if (std::binary_search(members.begin(), members.end(),
+                                   spec.task->getName())) {
+              protected_priority =
+                  std::min(protected_priority, static_cast<int>(level_index));
+              break;
+            }
+          }
+        } else {
+          protected_priority =
+              std::min(protected_priority, spec.task->getPriority());
+        }
       }
     }
     std::vector<bool> project_priority_tangent_objective;
@@ -1687,11 +1795,11 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
                                       ? constrained_weighted_jacobians
                                       : jacobians;
   auto compute_weighted_advisory = [&]() -> WeightedAdvisoryResult {
-    auto weight_at_priority = [&](int priority) -> double {
+    auto weight_for_members = [](const auto &members) -> double {
       double sum = 0.0;
       int count = 0;
-      for (const auto &task : tasks_) {
-        if (!task || !task->isActive() || task->getPriority() != priority) {
+      for (const auto &task : members) {
+        if (!task) {
           continue;
         }
         if (std::isfinite(task->getWeight()) && task->getWeight() >= 0.0) {
@@ -1701,12 +1809,12 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
       }
       return count > 0 ? sum / static_cast<double>(count) : 1.0;
     };
-    auto type_at_priority = [&](int priority) -> TaskType {
+    auto type_for_members = [](const auto &members) -> TaskType {
       bool saw_position = false;
       bool saw_orientation = false;
       bool saw_pose = false;
-      for (const auto &task : tasks_) {
-        if (!task || !task->isActive() || task->getPriority() != priority) {
+      for (const auto &task : members) {
+        if (!task) {
           continue;
         }
         const TaskType type = task->getType();
@@ -1787,10 +1895,10 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
       }
       return row_weights;
     };
-    auto row_weights_at_priority = [&](int priority) {
+    auto row_weights_for_members = [&](const auto &members) {
       int total_rows = 0;
-      for (const auto &task : tasks_) {
-        if (task && task->isActive() && task->getPriority() == priority) {
+      for (const auto &task : members) {
+        if (task) {
           total_rows += task->getDimension();
         }
       }
@@ -1800,8 +1908,8 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
       }
       row_weights.resize(total_rows);
       int offset = 0;
-      for (const auto &task : tasks_) {
-        if (!task || !task->isActive() || task->getPriority() != priority) {
+      for (const auto &task : members) {
+        if (!task) {
           continue;
         }
         const Eigen::VectorXd task_weights = make_task_row_weights(task);
@@ -1824,15 +1932,11 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
     for (size_t i = 0; i < objective_configs.size(); ++i) {
       double w = 1.0;
       TaskType type = TaskType::POSTURE;
-      if (i < objective_tasks.size() && objective_tasks[i]) {
-        w = objective_tasks[i]->getWeight();
-        type = objective_tasks[i]->getType();
-        advisor_row_weights[i] = make_task_row_weights(objective_tasks[i]);
-      } else {
-        w = weight_at_priority(objective_configs[i].priority);
-        type = type_at_priority(objective_configs[i].priority);
-        advisor_row_weights[i] =
-            row_weights_at_priority(objective_configs[i].priority);
+      if (i < objective_task_groups.size()) {
+        const auto &members = objective_task_groups[i];
+        w = weight_for_members(members);
+        type = type_for_members(members);
+        advisor_row_weights[i] = row_weights_for_members(members);
       }
       if (!std::isfinite(w) || w < 0.0) {
         w = 1.0;
@@ -1862,10 +1966,8 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
                        i < out.per_objective_error.size();
          ++i) {
       TaskType type = TaskType::POSTURE;
-      if (i < objective_tasks.size() && objective_tasks[i]) {
-        type = objective_tasks[i]->getType();
-      } else {
-        type = type_at_priority(objective_configs[i].priority);
+      if (i < objective_task_groups.size()) {
+        type = type_for_members(objective_task_groups[i]);
       }
       if (type == TaskType::FRAME_POSITION &&
           !std::isfinite(position_error)) {
@@ -1878,7 +1980,10 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
         const auto &b = advisor_goals[i];
         if (J.rows() >= 6 && b.rows() >= 6 && out.v.size() == J.cols()) {
           const Eigen::VectorXd residual = J * out.v - b;
-          if (i < objective_tasks.size() && objective_tasks[i]) {
+          if (i < objective_task_groups.size() &&
+              objective_task_groups[i].size() == 1U &&
+              objective_task_groups[i].front()->getType() ==
+                  TaskType::FRAME_POSE) {
             if (!std::isfinite(position_error)) {
               position_error = residual.head(3).norm();
             }
@@ -1887,11 +1992,8 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
             }
           } else {
             Eigen::Index offset = 0;
-            for (const auto &task : tasks_) {
-              if (!task || !task->isActive() ||
-                  task->getPriority() != objective_configs[i].priority) {
-                continue;
-              }
+            const auto &members = objective_task_groups[i];
+            for (const auto &task : members) {
               const Eigen::Index dim = task->getDimension();
               if (offset + dim > residual.size()) {
                 break;
@@ -2238,14 +2340,25 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
   auto infer_active_task_layout = [&]() {
     bool saw_pose = false;
     bool saw_split = false;
-    for (const auto &task : objective_tasks) {
-      if (!task) {
-        continue;
+    if (explicit_stack_active) {
+      for (const auto &members : objective_task_groups) {
+        for (const auto &task : members) {
+          const TaskType type = task->getType();
+          saw_pose = saw_pose || type == TaskType::FRAME_POSE;
+          saw_split = saw_split || type == TaskType::FRAME_POSITION ||
+                      type == TaskType::FRAME_ORIENTATION;
+        }
       }
-      const TaskType type = task->getType();
-      saw_pose = saw_pose || type == TaskType::FRAME_POSE;
-      saw_split = saw_split || type == TaskType::FRAME_POSITION ||
-                              type == TaskType::FRAME_ORIENTATION;
+    } else {
+      for (const auto &task : objective_tasks) {
+        if (!task) {
+          continue;
+        }
+        const TaskType type = task->getType();
+        saw_pose = saw_pose || type == TaskType::FRAME_POSE;
+        saw_split = saw_split || type == TaskType::FRAME_POSITION ||
+                    type == TaskType::FRAME_ORIENTATION;
+      }
     }
     if (runtime_config_.enable_auto_task_layout) {
       return current_auto_task_layout_;
@@ -2273,13 +2386,47 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
   result.limits_applied = apply_limits;
   result.condition_number = backend_result.condition_number;
 
-  for (size_t i = 0; i < objective_tasks.size() &&
-                     i < result.task_modes_effective.size() &&
-                     i < result.task_used_fallback.size();
-       ++i) {
-    if (objective_tasks[i]) {
-      objective_tasks[i]->setLastEffectiveMode(result.task_modes_effective[i]);
-      objective_tasks[i]->setUsedMinErrorFallback(result.task_used_fallback[i]);
+  if (explicit_stack_active && !result.weighted_fallback_used &&
+      result.task_scales.size() == task_stack_config_->levels.size() &&
+      result.task_errors.size() == task_stack_config_->levels.size() &&
+      result.task_modes_effective.size() == task_stack_config_->levels.size() &&
+      result.task_used_fallback.size() == task_stack_config_->levels.size()) {
+    result.task_level_diagnostics.reserve(task_stack_config_->levels.size());
+    for (std::size_t level_index = 0;
+         level_index < task_stack_config_->levels.size(); ++level_index) {
+      const auto &level = task_stack_config_->levels[level_index];
+      result.task_level_diagnostics.push_back(TaskLevelDiagnostics{
+          level.name,
+          level.task_names,
+          level.solve_mode,
+          result.task_modes_effective[level_index],
+          level.allow_min_error_fallback,
+          result.task_used_fallback[level_index],
+          result.task_scales[level_index],
+          result.task_errors[level_index],
+      });
+    }
+  }
+
+  if (explicit_stack_active) {
+    for (size_t i = 0; i < objective_task_groups.size() &&
+                       i < result.task_modes_effective.size() &&
+                       i < result.task_used_fallback.size();
+         ++i) {
+      for (const auto &task : objective_task_groups[i]) {
+        task->setLastEffectiveMode(result.task_modes_effective[i]);
+        task->setUsedMinErrorFallback(result.task_used_fallback[i]);
+      }
+    }
+  } else {
+    for (size_t i = 0; i < objective_tasks.size() &&
+                       i < result.task_modes_effective.size() &&
+                       i < result.task_used_fallback.size();
+         ++i) {
+      if (objective_tasks[i]) {
+        objective_tasks[i]->setLastEffectiveMode(result.task_modes_effective[i]);
+        objective_tasks[i]->setUsedMinErrorFallback(result.task_used_fallback[i]);
+      }
     }
   }
 

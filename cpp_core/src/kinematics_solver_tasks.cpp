@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <stdexcept>
+#include <unordered_set>
 
 #include <embodik/kinematics_solver.hpp>
 #include <embodik/tasks.hpp>
@@ -230,6 +231,87 @@ std::shared_ptr<PoseTaskGroup>
 KinematicsSolver::pose_task_group(const std::string &name) const {
   auto it = pose_task_groups_.find(name);
   return (it != pose_task_groups_.end()) ? it->second : nullptr;
+}
+
+std::optional<std::string> KinematicsSolver::task_stack_validation_error(
+    const TaskStackConfig &config) const {
+  if (config.levels.empty()) {
+    return "explicit task stack must contain at least one level";
+  }
+
+  std::unordered_set<std::string> level_names;
+  std::unordered_set<std::string> task_names;
+  for (std::size_t level_index = 0; level_index < config.levels.size();
+       ++level_index) {
+    const auto &level = config.levels[level_index];
+    if (level.name.empty()) {
+      return "explicit task-stack level " + std::to_string(level_index) +
+             " has an empty name";
+    }
+    if (!level_names.insert(level.name).second) {
+      return "duplicate explicit task-stack level name '" + level.name + "'";
+    }
+    if (level.task_names.empty()) {
+      return "explicit task-stack level '" + level.name +
+             "' must contain at least one task";
+    }
+    switch (level.solve_mode) {
+    case TaskSolveMode::kScale:
+    case TaskSolveMode::kScaleElastic:
+      break;
+    case TaskSolveMode::kMinError:
+      if (level.allow_min_error_fallback) {
+        return "explicit task-stack level '" + level.name +
+               "' cannot enable MIN_ERROR fallback when its solve mode is "
+               "already MIN_ERROR";
+      }
+      break;
+    default:
+      return "explicit task-stack level '" + level.name +
+             "' has an unsupported solve mode";
+    }
+
+    for (const auto &task_name : level.task_names) {
+      if (task_name.empty()) {
+        return "explicit task-stack level '" + level.name +
+               "' contains an empty task name";
+      }
+      if (!task_names.insert(task_name).second) {
+        return "task '" + task_name +
+               "' appears more than once in the explicit task stack";
+      }
+      const auto task_it = task_map_.find(task_name);
+      if (task_it == task_map_.end() || !task_it->second) {
+        return "explicit task-stack task '" + task_name +
+               "' is not registered";
+      }
+      if (!task_it->second->isActive()) {
+        return "explicit task-stack task '" + task_name + "' is inactive";
+      }
+    }
+  }
+  return std::nullopt;
+}
+
+void KinematicsSolver::configure_task_stack(const TaskStackConfig &config) {
+  if (const auto error = task_stack_validation_error(config);
+      error.has_value()) {
+    throw std::invalid_argument(*error);
+  }
+
+  TaskStackConfig normalized = config;
+  for (auto &level : normalized.levels) {
+    std::sort(level.task_names.begin(), level.task_names.end());
+  }
+  task_stack_config_ = std::move(normalized);
+  reset_position_step_continuity_state();
+}
+
+void KinematicsSolver::clear_task_stack() {
+  if (task_stack_config_.has_value()) {
+    task_stack_config_.reset();
+    reset_position_step_continuity_state();
+  }
 }
 
 void KinematicsSolver::remove_task(const std::string &name) {
