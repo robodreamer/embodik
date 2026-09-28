@@ -18,6 +18,7 @@
 
 #include <cstdint>
 #include <Eigen/Core>
+#include <limits>
 #include <optional>
 #include <string>
 #include <utility>
@@ -89,6 +90,14 @@ struct TaskLevelDiagnostics {
   bool used_min_error_fallback = false;
   double scale = 0.0;
   double residual_norm = 0.0;
+  double target_norm = 0.0;
+  double normalized_residual = 0.0;
+};
+
+enum class HierarchySolvePath {
+  kLegacyPriority = 0,
+  kExplicitSns = 1,
+  kWeightedFallback = 2,
 };
 
 enum class CollisionTuningMode {
@@ -163,6 +172,19 @@ struct VelocitySolverResult : public SolverResult {
   /// One entry per explicit task level when the SNS result maps one-to-one to
   /// configured levels. Empty for legacy priority mode and weighted fallback.
   std::vector<TaskLevelDiagnostics> task_level_diagnostics;
+
+  /// Registered-task hierarchy path that supplied the accepted velocity.
+  HierarchySolvePath hierarchy_solve_path =
+      HierarchySolvePath::kLegacyPriority;
+  /// True when the accepted velocity came from the prioritized SNS hierarchy,
+  /// so lower levels preserved higher-level achieved outputs. False when a
+  /// non-hierarchical recovery path such as constrained weighted fallback was
+  /// accepted instead.
+  bool higher_level_preservation_active = false;
+  /// Outcome of the prioritized hierarchy solve before any weighted fallback
+  /// replacement.
+  SolverStatus prioritized_status = SolverStatus::kInvalidInput;
+  std::string prioritized_status_message;
 
   // Performance breakdown (for debugging)
   double pinocchio_kinematics_time_ms = 0.0; // Forward kinematics time
@@ -668,6 +690,15 @@ struct SolveDiagnostics {
   bool weighted_advisory_available = false;
   /// Mirrors VelocitySolverResult::weighted_fallback_used.
   bool weighted_fallback_used = false;
+  /// Mirrors VelocitySolverResult::hierarchy_solve_path.
+  HierarchySolvePath hierarchy_solve_path =
+      HierarchySolvePath::kLegacyPriority;
+  /// Mirrors VelocitySolverResult::higher_level_preservation_active.
+  bool higher_level_preservation_active = false;
+  /// Mirrors VelocitySolverResult::prioritized_status.
+  SolverStatus prioritized_status = SolverStatus::kInvalidInput;
+  /// Mirrors VelocitySolverResult::prioritized_status_message.
+  std::string prioritized_status_message;
   /// Mirrors VelocitySolverResult::weighted_advisory_v_norm.
   double weighted_advisory_v_norm = std::numeric_limits<double>::quiet_NaN();
   /// Mirrors VelocitySolverResult::weighted_advisory_pos_task_error_norm.

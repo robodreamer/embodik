@@ -94,6 +94,17 @@ stack or call `clear_task_stack()` to continue. `solve_position()` builds its
 own internal objective sequence and is not controlled by this registered-task
 configuration.
 
+## Current architecture seam
+
+Explicit named levels are assembled first into one small backend-neutral
+internal hierarchy problem: each level carries its canonical member names,
+stacked target velocity, stacked Jacobian, and one solve-policy bundle.
+
+The current production adapter is still SNS-only. It maps each assembled level
+one-to-one onto one SNS objective and then maps the SNS result back onto the
+named levels. This keeps the Phase 1 API and legacy default intact while
+isolating explicit-level assembly from backend-specific result mapping.
+
 ## Per-level diagnostics
 
 When the SNS result maps one-to-one to the configured levels,
@@ -108,12 +119,28 @@ for level in result.task_level_diagnostics:
         level.effective_solve_mode,
         level.scale,
         level.residual_norm,
+        level.target_norm,
+        level.normalized_residual,
     )
 ```
 
-The scale and residual describe the jointly stacked level objective. EmbodiK
-does not split that residual into per-task values because the SNS backend does
-not report such precision.
+`target_norm` is the norm of the stacked requested level velocity.
+`normalized_residual` is `residual_norm / target_norm` when the target norm is
+meaningful; otherwise it is `0` for a near-zero residual and `inf` for a
+non-zero residual against a near-zero target. The scale and residual describe
+the jointly stacked level objective. EmbodiK does not split that residual into
+per-task values because the SNS backend does not report such precision.
+
+Velocity and registered-task position-step results also expose truthful
+contract metadata for the accepted solve path:
+
+- `hierarchy_solve_path` — `LEGACY_PRIORITY`, `EXPLICIT_SNS`, or
+  `WEIGHTED_FALLBACK`.
+- `higher_level_preservation_active` — true only when the accepted velocity
+  came from the prioritized SNS hierarchy, so lower levels preserved higher
+  levels' achieved outputs.
+- `prioritized_status` / `prioritized_status_message` — the prioritized
+  hierarchy outcome before any weighted fallback replacement.
 
 ## Hard constraints and weighted recovery
 
@@ -132,5 +159,18 @@ solver.configure_runtime(runtime)
 
 It is not a hierarchy level and is not configured through `TaskStackConfig`.
 If weighted fallback replaces the prioritized SNS result,
-`weighted_fallback_used` is true and `task_level_diagnostics` is empty rather
-than attributing the weighted result to individual hierarchy levels.
+`weighted_fallback_used` is true, `hierarchy_solve_path` becomes
+`WEIGHTED_FALLBACK`, `higher_level_preservation_active` is false, and
+`task_level_diagnostics` is empty rather than attributing the weighted result
+to individual hierarchy levels.
+
+## Remaining limits
+
+- Only the SNS adapter is implemented today; there is no opt-in lexicographic
+  QP backend yet.
+- Diagnostics report stacked level norms and accepted solve-path metadata, not
+  active sets, KKT multipliers, or per-row preservation drift.
+- Same-level peers are deterministic because assembly is canonicalized by name,
+  but the current backend semantics are still SNS semantics: SCALE preserves
+  direction with a scalar, while MIN_ERROR reports the best feasible residual
+  motion under the active hard constraints.

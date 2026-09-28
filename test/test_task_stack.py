@@ -95,6 +95,9 @@ def test_explicit_two_level_frame_and_posture_stack(tmp_path):
     dq = np.asarray(result.joint_velocities, dtype=float)
 
     assert result.status == eik.SolverStatus.SUCCESS
+    assert result.prioritized_status == eik.SolverStatus.SUCCESS
+    assert result.hierarchy_solve_path == eik.HierarchySolvePath.EXPLICIT_SNS
+    assert result.higher_level_preservation_active is True
     assert len(result.task_scales) == 2
     assert [d.name for d in result.task_level_diagnostics] == [
         "tracking",
@@ -103,6 +106,8 @@ def test_explicit_two_level_frame_and_posture_stack(tmp_path):
     assert result.task_level_diagnostics[0].task_names == ["ee"]
     assert result.task_level_diagnostics[1].effective_solve_mode == eik.TaskSolveMode.MIN_ERROR
     assert np.isfinite(result.task_level_diagnostics[0].residual_norm)
+    assert result.task_level_diagnostics[0].target_norm > 0.0
+    assert result.task_level_diagnostics[0].normalized_residual >= 0.0
 
     achieved = np.asarray(ee.get_jacobian(), dtype=float) @ dq
     scaled_target = result.task_scales[0] * np.asarray(ee.get_velocity(), dtype=float)
@@ -138,6 +143,9 @@ def test_explicit_order_overrides_priority_and_clear_restores_legacy(tmp_path):
     assert solver.has_explicit_task_stack() is False
     assert solver.task_stack_config is None
     assert legacy_result.status == eik.SolverStatus.SUCCESS
+    assert legacy_result.prioritized_status == eik.SolverStatus.SUCCESS
+    assert legacy_result.hierarchy_solve_path == eik.HierarchySolvePath.LEGACY_PRIORITY
+    assert legacy_result.higher_level_preservation_active is True
     assert legacy_result.joint_velocities[0] < -0.5
     assert legacy_result.task_level_diagnostics == []
 
@@ -190,11 +198,15 @@ def test_same_level_peers_are_canonical_and_one_backend_objective(tmp_path):
     first_result = solver.solve_velocity(q, apply_limits=False)
 
     assert solver.task_stack_config.levels[0].task_names == ["a_task", "z_task"]
+    assert first_result.hierarchy_solve_path == eik.HierarchySolvePath.EXPLICIT_SNS
+    assert first_result.higher_level_preservation_active is True
     assert len(first_result.task_scales) == 1
     assert len(first_result.task_level_diagnostics) == 1
     assert (
         first_result.task_level_diagnostics[0].effective_solve_mode == eik.TaskSolveMode.MIN_ERROR
     )
+    assert first_result.task_level_diagnostics[0].target_norm > 0.0
+    assert first_result.task_level_diagnostics[0].normalized_residual >= 0.0
     assert z_task.solve_mode == eik.TaskSolveMode.SCALE
     assert z_task.allow_min_error_fallback is True
     assert a_task.solve_mode == eik.TaskSolveMode.MIN_ERROR
@@ -208,6 +220,98 @@ def test_same_level_peers_are_canonical_and_one_backend_objective(tmp_path):
         np.asarray(first_result.joint_velocities), np.asarray(second_result.joint_velocities)
     )
     assert second_result.task_level_diagnostics[0].task_names == ["a_task", "z_task"]
+    assert second_result.task_level_diagnostics[0].normalized_residual == pytest.approx(
+        first_result.task_level_diagnostics[0].normalized_residual
+    )
+
+
+def test_primary_infeasibility_and_lower_level_degradation_are_distinct(tmp_path):
+    robot = _make_two_joint_robot(tmp_path)
+    solver = eik.KinematicsSolver(robot)
+    runtime = eik.SolverRuntimeConfig()
+    runtime.weighted_fallback_enabled = False
+    solver.configure_runtime(runtime)
+    q = np.array([2.0, 0.0], dtype=float)
+
+    blocked_primary = solver.add_joint_task("blocked_primary", "joint1", target_value=3.0)
+    helpful_secondary = solver.add_joint_task("helpful_secondary", "joint2", target_value=0.8)
+    solver.configure_task_stack(
+        eik.TaskStackConfig(
+            [_level("primary", ["blocked_primary"]), _level("secondary", ["helpful_secondary"])]
+        )
+    )
+
+    infeasible = solver.solve_velocity(q, apply_limits=True)
+
+    assert infeasible.status == eik.SolverStatus.INFEASIBLE
+    assert infeasible.prioritized_status == eik.SolverStatus.INFEASIBLE
+    assert infeasible.hierarchy_solve_path == eik.HierarchySolvePath.EXPLICIT_SNS
+    assert infeasible.higher_level_preservation_active is True
+    assert infeasible.task_level_diagnostics[0].normalized_residual > 0.9
+    assert infeasible.task_level_diagnostics[1].normalized_residual < 1e-9
+    assert infeasible.joint_velocities[1] > 0.1
+
+    solver.clear_tasks()
+    q = np.array([2.0, 0.0], dtype=float)
+    helpful_primary = solver.add_joint_task("helpful_primary", "joint2", target_value=0.8)
+    blocked_secondary = solver.add_joint_task("blocked_secondary", "joint1", target_value=3.0)
+    solver.configure_task_stack(
+        eik.TaskStackConfig(
+            [_level("primary", ["helpful_primary"]), _level("secondary", ["blocked_secondary"])]
+        )
+    )
+
+    degraded = solver.solve_velocity(q, apply_limits=True)
+
+    assert degraded.status == eik.SolverStatus.SUCCESS
+    assert degraded.prioritized_status == eik.SolverStatus.SUCCESS
+    assert degraded.hierarchy_solve_path == eik.HierarchySolvePath.EXPLICIT_SNS
+    assert degraded.higher_level_preservation_active is True
+    assert degraded.task_level_diagnostics[0].normalized_residual < 1e-9
+    assert degraded.task_level_diagnostics[1].normalized_residual > 0.9
+    assert degraded.joint_velocities[1] > 0.1
+
+
+def test_lower_level_addition_preserves_higher_level_achieved_output(tmp_path):
+    robot = _make_two_joint_robot(tmp_path)
+    solver = eik.KinematicsSolver(robot)
+    q = np.array([0.4, -0.7], dtype=float)
+    robot.update_configuration(q)
+
+    ee = solver.add_frame_task("ee", "tool", eik.TaskType.FRAME_POSITION)
+    current_position = np.asarray(robot.get_frame_pose("tool").translation, dtype=float)
+    ee.set_target_position(current_position + np.array([0.0, 0.04, 0.0]))
+
+    posture = solver.add_posture_task("posture")
+    posture.weight = 0.2
+    posture.set_target_configuration(np.zeros(robot.nq, dtype=float))
+
+    solver.configure_task_stack(eik.TaskStackConfig([_level("tracking", ["ee"])]))
+    tracking_only = solver.solve_velocity(q, apply_limits=False)
+
+    solver.configure_task_stack(
+        eik.TaskStackConfig(
+            [
+                _level("tracking", ["ee"]),
+                _level("posture", ["posture"], eik.TaskSolveMode.MIN_ERROR),
+            ]
+        )
+    )
+    stacked = solver.solve_velocity(q, apply_limits=False)
+
+    primary_jacobian = np.asarray(ee.get_jacobian(), dtype=float)
+    achieved_tracking_only = primary_jacobian @ np.asarray(
+        tracking_only.joint_velocities, dtype=float
+    )
+    achieved_stacked = primary_jacobian @ np.asarray(stacked.joint_velocities, dtype=float)
+
+    assert tracking_only.status == eik.SolverStatus.SUCCESS
+    assert stacked.status == eik.SolverStatus.SUCCESS
+    assert stacked.higher_level_preservation_active is True
+    assert np.allclose(achieved_tracking_only, achieved_stacked, atol=5e-4)
+    assert stacked.task_level_diagnostics[0].normalized_residual == pytest.approx(
+        tracking_only.task_level_diagnostics[0].normalized_residual, abs=5e-4
+    )
 
 
 @pytest.mark.parametrize(
@@ -285,7 +389,11 @@ def test_weighted_fallback_stays_separate_from_level_diagnostics(tmp_path):
     result = solver.solve_velocity(q, apply_limits=True)
 
     assert result.status == eik.SolverStatus.SUCCESS
+    assert result.prioritized_status == eik.SolverStatus.INFEASIBLE
+    assert "primary task scale collapsed" in result.prioritized_status_message
     assert result.weighted_fallback_used is True
+    assert result.hierarchy_solve_path == eik.HierarchySolvePath.WEIGHTED_FALLBACK
+    assert result.higher_level_preservation_active is False
     assert result.task_level_diagnostics == []
     assert result.joint_velocities[0] <= 1e-9
 

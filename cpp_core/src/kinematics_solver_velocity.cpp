@@ -438,6 +438,10 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
   project_collision_tangent_objective.reserve(tasks_.size());
   std::vector<bool> project_elastic_collision_recovery_objective;
   project_elastic_collision_recovery_objective.reserve(tasks_.size());
+  std::vector<double> explicit_level_target_norms;
+  if (explicit_stack_active) {
+    explicit_level_target_norms.reserve(task_stack_config_->levels.size());
+  }
   int active_task_count = 0;
 
   int current_priority = std::numeric_limits<int>::min();
@@ -578,6 +582,7 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
       const bool strict_scale = level.solve_mode == TaskSolveMode::kScale;
       const bool elastic_scale =
           level.solve_mode == TaskSolveMode::kScaleElastic;
+      explicit_level_target_norms.push_back(combined_goal.norm());
       const TaskSolveMode backend_mode =
           elastic_scale ? TaskSolveMode::kScale : level.solve_mode;
       goals.push_back(std::move(combined_goal));
@@ -2300,6 +2305,9 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
       classified_velocity.status != SolverStatus::kSuccess &&
       classified_velocity.status != SolverStatus::kNonFiniteInput &&
       !goals.empty();
+  const SolverStatus prioritized_status = classified_velocity.status;
+  const std::string prioritized_status_message =
+      classified_velocity.status_message;
   if (can_try_weighted_fallback && !advisory.available) {
     advisory = compute_weighted_advisory();
   }
@@ -2382,6 +2390,14 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
   result.task_errors = backend_result.task_errors;
   result.task_modes_effective = backend_result.task_modes_effective;
   result.task_used_fallback = backend_result.task_used_fallback;
+  result.prioritized_status = prioritized_status;
+  result.prioritized_status_message = prioritized_status_message;
+  result.hierarchy_solve_path =
+      result.weighted_fallback_used
+          ? HierarchySolvePath::kWeightedFallback
+          : (explicit_stack_active ? HierarchySolvePath::kExplicitSns
+                                   : HierarchySolvePath::kLegacyPriority);
+  result.higher_level_preservation_active = !result.weighted_fallback_used;
   result.status_message = classified_velocity.status_message;
   result.limits_applied = apply_limits;
   result.condition_number = backend_result.condition_number;
@@ -2390,11 +2406,23 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
       result.task_scales.size() == task_stack_config_->levels.size() &&
       result.task_errors.size() == task_stack_config_->levels.size() &&
       result.task_modes_effective.size() == task_stack_config_->levels.size() &&
-      result.task_used_fallback.size() == task_stack_config_->levels.size()) {
+      result.task_used_fallback.size() == task_stack_config_->levels.size() &&
+      explicit_level_target_norms.size() == task_stack_config_->levels.size()) {
     result.task_level_diagnostics.reserve(task_stack_config_->levels.size());
     for (std::size_t level_index = 0;
          level_index < task_stack_config_->levels.size(); ++level_index) {
       const auto &level = task_stack_config_->levels[level_index];
+      const double residual_norm = result.task_errors[level_index];
+      const double target_norm = explicit_level_target_norms[level_index];
+      constexpr double kTargetNormEpsilon = 1e-12;
+      const double normalized_residual =
+          !std::isfinite(residual_norm) || !std::isfinite(target_norm)
+              ? std::numeric_limits<double>::infinity()
+              : (target_norm <= kTargetNormEpsilon
+                     ? (residual_norm <= kTargetNormEpsilon
+                            ? 0.0
+                            : std::numeric_limits<double>::infinity())
+                     : residual_norm / target_norm);
       result.task_level_diagnostics.push_back(TaskLevelDiagnostics{
           level.name,
           level.task_names,
@@ -2403,7 +2431,9 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
           level.allow_min_error_fallback,
           result.task_used_fallback[level_index],
           result.task_scales[level_index],
-          result.task_errors[level_index],
+          residual_norm,
+          target_norm,
+          normalized_residual,
       });
     }
   }
