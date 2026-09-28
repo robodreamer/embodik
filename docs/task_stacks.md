@@ -1,18 +1,17 @@
-# Explicit Task Stacks
+# Explicit task stacks
 
-EmbodiK supports two registered-task hierarchy styles. Existing code keeps the
-legacy behavior: integer `task.priority` values define the hierarchy, tasks at
-the same priority are assembled jointly when their solve settings are
-compatible, and no new configuration is required.
+EmbodiK's explicit task stack is a named, declarative way to assemble registered
+tasks into priority levels. It uses the existing constrained hierarchical
+velocity solver, including its singularity robust inverse (SRI), saturation,
+and `SCALE` / `MIN_ERROR` objective handling. It does not introduce a second
+inverse-kinematics algorithm.
 
-An explicit task stack makes level names, membership, order, and solve policy
-part of one inspectable value. It is opt-in and uses the existing SNS numerical
-backend; this phase does not add a QP dependency or a second lexicographic
-solver.
+The stack can select the existing SNS policy per level, or use
+`LEXICOGRAPHIC_LEAST_SQUARES` as a convenience preset that selects
+`MIN_ERROR` for every level. The preset changes the task objective policy; the
+underlying hierarchy and hard-constraint path are shared.
 
 ## Configure named levels
-
-Register tasks through the existing factory API, then identify them by name:
 
 ```python
 import embodik as eik
@@ -20,157 +19,231 @@ import embodik as eik
 ee = solver.add_frame_task("ee", "tool", eik.TaskType.FRAME_POSE)
 posture = solver.add_posture_task("posture")
 
-stack = eik.TaskStackConfig(
-    [
-        eik.TaskLevelSpec(
-            "tracking",
-            ["ee"],
-            eik.TaskSolveMode.SCALE,
-        ),
-        eik.TaskLevelSpec(
-            "regularization",
-            ["posture"],
-            eik.TaskSolveMode.MIN_ERROR,
-        ),
-    ]
-)
+stack = eik.TaskStackConfig([
+    eik.TaskLevelSpec("tracking", ["ee"], eik.TaskSolveMode.SCALE),
+    eik.TaskLevelSpec("regularization", ["posture"], eik.TaskSolveMode.MIN_ERROR),
+])
 solver.configure_task_stack(stack)
 ```
 
-The first level is highest priority. `configure_task_stack()` copies and
-normalizes the value, so callers can inspect the active configuration without
-retaining task handles:
+Level order is highest to lowest priority. Tasks within one level are peers:
+their rows are assembled into one objective, with member names canonicalized
+for deterministic assembly. The level's mode and fallback policy govern all
+its members; task priorities and task solve settings are not changed. Active
+registered tasks omitted from the stack do not participate in that solve.
+
+Configuration is copied and normalized. Inspect it with
+`solver.task_stack_config`; `solver.clear_task_stack()` restores legacy integer
+priority grouping. The stack applies to `solve_velocity()` and registered-task
+`solve_position_step()`. `solve_position()` constructs its own objective stack.
+
+## Relation to eSNS and minimum error
+
+The original eSNS formulation already combines prioritized objectives with
+inequality constraints and provides variants for direction-preserving task
+scaling and minimum error. EmbodiK's existing multi-objective solver has the
+same relevant division: objectives are passed by level, while the global hard
+constraint matrix and bounds are passed separately. The explicit stack adds
+names, level membership, explicit ordering, normalized configuration, and
+per-level diagnostics around that solver.
+
+For a level with assembled Jacobian \(J_i\), target \(b_i\), and joint
+velocity \(v\), `SCALE` seeks a feasible scalar \(s_i\in[0,1]\) so the solver
+can pursue \(J_i v=s_i b_i\). `MIN_ERROR` minimizes the level's residual
+\(\|J_i v-b_i\|\) subject to the active constraints and the hierarchy already
+established above it. If a target is unreachable, its residual can remain
+nonzero; lower levels use remaining freedom without intentionally degrading
+the higher level's achieved objective. `MIN_ERROR` is already available on
+individual tasks. The stack-wide preset is equivalent to configuring every
+level for that mode, and adds no new inverse or optimization backend.
+
+This differs from the direction-preserving minimum-scaling policy in eSNS:
+`SCALE` retains a level target's direction and reduces its magnitude when
+needed; `MIN_ERROR` can use reachable components even when the full target
+direction is infeasible. Both policies still share the existing SRI and
+constraint-aware hierarchical solve.
+
+## Hard constraints are separate
+
+Hard constraints are not task levels and are not converted into objectives.
+Joint velocity and position limits, collision, CoM, relative-pose, user linear
+bounds, and active contact constraints continue through the solver's global
+constraint and safety path. At the mathematical interface, the solve has
+objective levels \((J_i,b_i)\) and a separate feasible set
+\(\mathcal{F}=\{v: l\le Cv\le u\}\). Hierarchy chooses the task solution
+inside \(\mathcal{F}\); a lower task cannot relax a hard bound.
+
+`TaskStackBackend.LEXICOGRAPHIC_LEAST_SQUARES` maps each level to the existing
+`MIN_ERROR` objective mode. It rejects `SCALE_ELASTIC` and explicit per-level
+`allow_min_error_fallback`, since those flags describe the other SNS policy.
+Global weighted recovery remains a separate runtime option and is reported as
+`WEIGHTED_FALLBACK`, not as a successful prioritized hierarchy.
+
+## Results and expectations
+
+Velocity and registered-task position-step results report
+`task_level_diagnostics` when their prioritized result maps to the configured
+levels. Each record contains the level name and task names, configured and
+effective solve modes, scale, residual norm, target norm, and normalized
+residual. A `MIN_ERROR` level reports effective mode `MIN_ERROR` and scale
+`-1`. Diagnostics describe the stacked level; they do not split values by
+member task or report intermediate active sets.
+
+Results also expose:
+
+- `hierarchy_backend`: configured explicit stack policy.
+- `hierarchy_solve_path`: legacy priority, explicit SNS, the MIN_ERROR stack
+  preset, or weighted fallback.
+- `higher_level_preservation_active`: whether the returned velocity came from
+  a successful prioritized solve, rather than weighted fallback or a failed
+  hierarchy.
+- `prioritized_status` and `prioritized_status_message`: outcome before any
+  weighted fallback replaces the candidate.
+
+An infeasible global constraint set is a solver infeasibility, not a task
+residual. An unreachable but solvable `MIN_ERROR` task can return success with
+a nonzero residual. Callers should inspect both status and per-level residuals.
+
+Configuration rejects empty or duplicate level names, empty stacks or levels,
+duplicate membership, missing/inactive task names, and unsupported policies.
+If a task is removed or made inactive after configuration, the next registered
+task solve reports `INVALID_INPUT` and names the stale member.
+
+## Runtime push/pop and agent requests
+
+The current branch does not yet expose `push_task`, `push_level`, or matching
+`pop` methods. Callers can replace the full configuration with
+`configure_task_stack()`, but that is not a scoped incremental editing API.
+Push/pop can be added without changing the solver algorithm: treat a stack as
+an immutable, validated configuration snapshot, then atomically publish a new
+snapshot between solves.
+
+For agentic applications, the eventual interface should accept a constrained
+intent or patch, not arbitrary Jacobians, constraints, or executable code. A
+policy layer should map the intent to already registered task names and
+permitted priority bands. Global hard constraints remain owned by the solver
+and unavailable for agent reprioritization.
+
+A useful API shape is:
 
 ```python
-assert solver.has_explicit_task_stack()
-print(solver.task_stack_config.levels)
+patch = TaskStackPatch(
+    base_revision=solver.task_stack_revision,
+    source="planner-session-42",
+    push_levels=[TaskLevelSpec("look_at_object", ["camera_gaze"])],
+)
+receipt = solver.apply_task_stack_patch(patch)
+solver.remove_task_stack_patch(receipt.patch_id)  # scoped pop
 ```
 
-Call `solver.clear_task_stack()` to return to legacy integer-priority behavior.
-Task priorities and per-task solve settings are never changed by stack
-configuration.
+This is a design proposal, not an API implemented by this branch. It should
+have these semantics:
 
-The corresponding C++ value types are `embodik::TaskLevelSpec` and
-`embodik::TaskStackConfig`; the solver methods have the same names.
+- Validate the complete candidate stack first; publish all changes together
+  or leave the active snapshot untouched.
+- Require the caller's base revision and return a new monotonically increasing
+  revision. Reject stale edits so concurrent agents cannot silently overwrite
+  one another.
+- Give every patch an opaque ID and source. Removing a patch removes only its
+  own additions; it must not pop an unrelated edit that arrived later.
+- Apply snapshot changes at a solve boundary. Each control tick reads one
+  stable revision for its whole solve; a mid-solve update takes effect on the
+  next tick.
+- Permit idempotency keys and explicit receipts (`accepted`, `rejected`,
+  `active_revision`, and validation reason) for retries and agent feedback.
+- Support optional expiry/lease for temporary intents, with a deterministic
+  fallback stack when the lease expires or its source disconnects.
+- Keep safety policy, global hard constraints, and authority to activate
+  physical motion outside this edit API. The agent may propose task intent;
+  a trusted application layer decides whether to commit it.
 
-## Level semantics
+For a small local application, `push_level(spec) -> token` and
+`pop(token)` can be convenience wrappers over the same patch mechanism. A
+token-scoped pop is safer than a blind `pop()` because multiple planner,
+operator, and recovery sources can update the stack concurrently.
 
-Each explicit level becomes exactly one SNS backend objective:
+## Whole-body APIs for VLA, WAM, and agent callers
 
-- Member tasks are canonicalized lexicographically by registered task name.
-- Their target-velocity and Jacobian rows are stacked into one joint objective.
-- Input order within a level therefore cannot turn peers into sequential
-  priorities.
-- Configured level order is authoritative; member `Task::priority` values are
-  ignored but not mutated.
-- Active registered tasks not named by the explicit stack are omitted from the
-  solve.
+The task-stack API is a solver configuration interface. A VLA or general
+agent usually needs a higher-level whole-body controller interface so it can
+request a motion outcome without constructing task Jacobians or choosing
+priority details. Keep that interface provider-neutral so the same contract
+works with different VLA/WAM policies and frontier models.
 
-A level also has exactly one `solve_mode` and one
-`allow_min_error_fallback` value. These level fields explicitly normalize mixed
-member task settings while the stack is active; member `solve_mode` and
-`allow_min_error_fallback` fields are ignored and remain unchanged.
+Recommended layers:
 
-`MIN_ERROR` with `allow_min_error_fallback=True` is rejected because a level
-already in `MIN_ERROR` cannot fall back to the same policy.
-`SCALE_ELASTIC` continues to use the SNS SCALE objective together with the
-existing elastic-band mechanism.
+1. **Typed intent:** submit an end-effector or body goal with named frame,
+   target pose, tolerances, optional approach/contact mode, time window, and
+   source/expiry metadata. Use typed units and explicit frames. Agents can
+   request registered capabilities such as `reach`, `look_at`, `hold`, or
+   `bimanual_grasp`; a trusted mapper selects EmbodiK tasks and a priority
+   template.
+2. **Preflight:** validate frame freshness, target bounds, robot capability,
+   and current hard constraints. Return a structured accepted/rejected result
+   with a reason and any reachable or limiting information. Preflight is an
+   estimate for the current state, not a promise that the scene will remain
+   unchanged.
+3. **Execution handle:** return an opaque goal ID and revision. Support
+   `get_status`, `cancel`, and `revise` operations. Bound each submitted action
+   chunk by duration or horizon and re-check conditions as execution proceeds.
+4. **Feedback/event stream:** report state timestamp, active stack revision,
+   per-level status/residuals, active hard constraints, progress, and terminal
+   reason (`reached`, `blocked`, `infeasible`, `stale_target`, `cancelled`,
+   etc.). VLA/WAM policies need observations of what happened, not only an
+   opaque success boolean.
+5. **Audit record:** record the intent, validated configuration revision,
+   solver status, applied command interval, and verification result as a
+   structured trace. Keep model identity and prompt/application provenance in
+   the calling orchestration layer.
 
-## Validation and task lifetime
+Keep this request loop asynchronous and lower-rate than the deterministic
+whole-body control loop. VLA action chunks or WAM-predicted trajectories can
+be treated as bounded proposals: validate them, execute a short horizon, then
+observe and replan. They should not replace global hard constraints or directly
+write joint commands around the controller. The policy layer should also
+separate permission to propose an intent from permission to commit motion.
 
-Configuration rejects:
+This direction is consistent with recent interfaces that connect skill
+selection, bounded low-level VLA execution, precondition checks, outcome
+verification, and recovery traces, and with WAM work that composes predictors
+and action generators through explicit video/action interfaces. Those are
+useful design patterns, not dependencies for EmbodiK. See the references in
+the [math and literature note](task_stacks_math.tex).
 
-- empty stacks or levels;
-- empty or duplicate level names;
-- missing or inactive registered tasks;
-- duplicate task membership within or across levels; and
-- unsupported or incompatible level policies.
+## Literature-informed scope and open points
 
-The stack stores names rather than owning extra task handles. If a member task
-is later removed or made inactive, the configuration remains inspectable but
-`solve_velocity()` and registered-task `solve_position_step()` return
-`INVALID_INPUT` with the stale member named in `status_message`. Reconfigure the
-stack or call `clear_task_stack()` to continue. `solve_position()` builds its
-own internal objective sequence and is not controlled by this registered-task
-configuration.
+The literature treats task hierarchies and inequality constraints in several
+ways. eSNS and hierarchical quadratic programming can assign inequality
+constraints to priority levels. This API intentionally chooses a simpler
+contract: global hard constraints are independent of task priority levels.
+That matches the current solver architecture and keeps safety bounds from
+being mistaken for soft task objectives.
 
-## Current architecture seam
+Before broadening the API, the main design questions to resolve are:
 
-Explicit named levels are assembled first into one small backend-neutral
-internal hierarchy problem: each level carries its canonical member names,
-stacked target velocity, stacked Jacobian, and one solve-policy bundle.
+1. **Mixed units within peer levels.** A level minimizes a residual over its
+   stacked rows. Frame position, orientation, momentum, and posture may use
+   different units or scales. Users need explicit row/task weights or a clear
+   normalization policy before combining such peers.
+2. **Constraint priority.** There is no API for a constraint that is hard but
+   only applies at a selected task priority. Keep constraints global unless a
+   concrete use case justifies hierarchical constraints and their feasibility
+   semantics.
+3. **Numerical contract.** SRI damping, rank thresholds, feasibility
+   tolerances, and near-singular behavior affect the practical meaning of
+   strict priority. They should be documented from the existing solver and
+   covered by targeted numerical checks before claiming exact mathematical
+   lexicographic optimality.
+4. **Priority changes over time.** Changing level membership or order between
+   control ticks can change the command discontinuously. Applications that
+   switch stacks may need transition or continuity policies.
+5. **Evidence and performance.** The new API inherits the existing solver's
+   performance and numerical limits. It has no independent timing or
+   optimality claim.
+6. **Runtime editing.** Define conflict resolution, ownership, expiry, and
+   control-tick activation before adding push/pop convenience calls. Dynamic
+   priority changes can alter commands discontinuously, so transition behavior
+   should be explicit and observable.
 
-The current production adapter is still SNS-only. It maps each assembled level
-one-to-one onto one SNS objective and then maps the SNS result back onto the
-named levels. This keeps the Phase 1 API and legacy default intact while
-isolating explicit-level assembly from backend-specific result mapping.
-
-## Per-level diagnostics
-
-When the SNS result maps one-to-one to the configured levels,
-`result.task_level_diagnostics` contains one entry per level:
-
-```python
-result = solver.solve_velocity(q)
-for level in result.task_level_diagnostics:
-    print(
-        level.name,
-        level.task_names,
-        level.effective_solve_mode,
-        level.scale,
-        level.residual_norm,
-        level.target_norm,
-        level.normalized_residual,
-    )
-```
-
-`target_norm` is the norm of the stacked requested level velocity.
-`normalized_residual` is `residual_norm / target_norm` when the target norm is
-meaningful; otherwise it is `0` for a near-zero residual and `inf` for a
-non-zero residual against a near-zero target. The scale and residual describe
-the jointly stacked level objective. EmbodiK does not split that residual into
-per-task values because the SNS backend does not report such precision.
-
-Velocity and registered-task position-step results also expose truthful
-contract metadata for the accepted solve path:
-
-- `hierarchy_solve_path` — `LEGACY_PRIORITY`, `EXPLICIT_SNS`, or
-  `WEIGHTED_FALLBACK`.
-- `higher_level_preservation_active` — true only when the accepted velocity
-  came from the prioritized SNS hierarchy, so lower levels preserved higher
-  levels' achieved outputs.
-- `prioritized_status` / `prioritized_status_message` — the prioritized
-  hierarchy outcome before any weighted fallback replacement.
-
-## Hard constraints and weighted recovery
-
-Explicit hierarchy changes only objective assembly. Joint limits, collision,
-CoM, relative-pose and user linear constraints, contact projection,
-finite-step guards, and other global hard-constraint behavior use the same
-solver path as legacy priority mode.
-
-Constrained weighted fallback remains a separate runtime recovery policy:
-
-```python
-runtime = solver.runtime_config()
-runtime.weighted_fallback_enabled = True
-solver.configure_runtime(runtime)
-```
-
-It is not a hierarchy level and is not configured through `TaskStackConfig`.
-If weighted fallback replaces the prioritized SNS result,
-`weighted_fallback_used` is true, `hierarchy_solve_path` becomes
-`WEIGHTED_FALLBACK`, `higher_level_preservation_active` is false, and
-`task_level_diagnostics` is empty rather than attributing the weighted result
-to individual hierarchy levels.
-
-## Remaining limits
-
-- Only the SNS adapter is implemented today; there is no opt-in lexicographic
-  QP backend yet.
-- Diagnostics report stacked level norms and accepted solve-path metadata, not
-  active sets, KKT multipliers, or per-row preservation drift.
-- Same-level peers are deterministic because assembly is canonicalized by name,
-  but the current backend semantics are still SNS semantics: SCALE preserves
-  direction with a scalar, while MIN_ERROR reports the best feasible residual
-  motion under the active hard constraints.
+See the [math and literature note](task_stacks_math.tex) for the formulations,
+comparison table, references, and detailed scope analysis.

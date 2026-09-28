@@ -184,9 +184,11 @@ public:
    * @brief Configure an explicit hierarchy over registered tasks.
    *
    * Levels are solved in the supplied order. Member names within each level
-   * are canonicalized lexicographically and assembled into one joint SNS
-   * objective using the level solve policy. The configuration is additive and
-   * does not mutate Task::priority, Task::solve_mode, or task fallback flags.
+   * are canonicalized lexicographically and assembled into one joint backend
+   * objective. SNS remains the default; the lexicographic least-squares option
+   * selects the existing MIN_ERROR mode for each level and uses the same
+   * constrained solver. The configuration is additive and does not mutate
+   * Task::priority, Task::solve_mode, or task fallback flags.
    *
    * Throws std::invalid_argument for empty/duplicate names, missing or inactive
    * tasks, duplicate membership, empty levels, and incompatible level policy.

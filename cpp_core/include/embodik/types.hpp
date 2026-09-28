@@ -39,6 +39,18 @@ enum class TaskSolveMode {
 };
 
 /**
+ * @brief Solve policy selected for an explicit registered-task stack.
+ *
+ * SNS remains the default. The lexicographic least-squares option is a
+ * convenience policy that sends every explicit level through the existing
+ * MIN_ERROR mode; it does not select a separate numerical solver.
+ */
+enum class TaskStackBackend {
+  kSns = 0,
+  kLexicographicLeastSquares = 1,
+};
+
+/**
  * @brief One named hierarchy level in an explicit registered-task stack.
  *
  * ``task_names`` identify tasks already registered on a KinematicsSolver. The
@@ -68,14 +80,17 @@ struct TaskLevelSpec {
  */
 struct TaskStackConfig {
   TaskStackConfig() = default;
-  explicit TaskStackConfig(std::vector<TaskLevelSpec> task_levels)
-      : levels(std::move(task_levels)) {}
+  explicit TaskStackConfig(
+      std::vector<TaskLevelSpec> task_levels,
+      TaskStackBackend selected_backend = TaskStackBackend::kSns)
+      : levels(std::move(task_levels)), backend(selected_backend) {}
 
   std::vector<TaskLevelSpec> levels;
+  TaskStackBackend backend = TaskStackBackend::kSns;
 };
 
 /**
- * @brief Diagnostics for one explicit level mapped from one SNS objective.
+ * @brief Diagnostics for one explicit level mapped from one backend objective.
  *
  * These values describe the jointly assembled level, not individual member
  * tasks. They are unavailable when constrained weighted fallback replaces the
@@ -98,6 +113,7 @@ enum class HierarchySolvePath {
   kLegacyPriority = 0,
   kExplicitSns = 1,
   kWeightedFallback = 2,
+  kExplicitLexicographicLeastSquares = 3,
 };
 
 enum class CollisionTuningMode {
@@ -169,17 +185,21 @@ struct VelocitySolverResult : public SolverResult {
   Eigen::VectorXd
       joint_velocities; // Convenience access to solution as VectorXd
 
-  /// One entry per explicit task level when the SNS result maps one-to-one to
-  /// configured levels. Empty for legacy priority mode and weighted fallback.
+  /// One entry per explicit task level when the prioritized result maps
+  /// one-to-one to configured levels. Empty for legacy priority mode and
+  /// weighted fallback.
   std::vector<TaskLevelDiagnostics> task_level_diagnostics;
 
   /// Registered-task hierarchy path that supplied the accepted velocity.
   HierarchySolvePath hierarchy_solve_path =
       HierarchySolvePath::kLegacyPriority;
-  /// True when the accepted velocity came from the prioritized SNS hierarchy,
-  /// so lower levels preserved higher-level achieved outputs. False when a
-  /// non-hierarchical recovery path such as constrained weighted fallback was
-  /// accepted instead.
+  /// Backend attempted by the prioritized hierarchy. This remains the
+  /// configured backend when weighted fallback supplies the accepted result.
+  TaskStackBackend hierarchy_backend = TaskStackBackend::kSns;
+  /// True when the accepted velocity came from a successful prioritized
+  /// hierarchy, so lower levels preserved higher-level achieved outputs. False
+  /// when a non-hierarchical recovery path such as constrained weighted
+  /// fallback was accepted instead.
   bool higher_level_preservation_active = false;
   /// Outcome of the prioritized hierarchy solve before any weighted fallback
   /// replacement.
@@ -693,6 +713,8 @@ struct SolveDiagnostics {
   /// Mirrors VelocitySolverResult::hierarchy_solve_path.
   HierarchySolvePath hierarchy_solve_path =
       HierarchySolvePath::kLegacyPriority;
+  /// Mirrors VelocitySolverResult::hierarchy_backend.
+  TaskStackBackend hierarchy_backend = TaskStackBackend::kSns;
   /// Mirrors VelocitySolverResult::higher_level_preservation_active.
   bool higher_level_preservation_active = false;
   /// Mirrors VelocitySolverResult::prioritized_status.

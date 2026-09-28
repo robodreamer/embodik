@@ -1,0 +1,384 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,booktabs,array}
+\usepackage[hidelinks]{hyperref}
+\usepackage{enumitem}
+\title{EmbodiK Explicit Task Stacks: Formulation, API, and Literature Context}
+\author{EmbodiK developer note}
+\date{September 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This note describes the named task-stack API being added to EmbodiK and how it
+relates to the existing eSNS-style hierarchical solver. The implementation
+does not introduce a new inverse or hard-constraint algorithm. It assembles
+registered objectives by named priority level and routes them through the
+existing constrained solver and singularity robust inverse (SRI). The optional
+\texttt{LEXICOGRAPHIC\_LEAST\_SQUARES} stack policy is a convenience mapping to
+the existing \texttt{MIN\_ERROR} objective mode at every level. Global hard
+constraints remain separate from task objectives.
+\end{abstract}
+
+\section{Problem statement}
+
+Let $v\in\mathbb{R}^{n_v}$ be the commanded generalized velocity. The explicit
+stack contains $K$ levels, ordered from highest to lowest priority. After
+assembling same-level registered tasks, level $i$ is represented by
+\begin{equation}
+  J_i v \simeq b_i,
+  \qquad J_i\in\mathbb{R}^{m_i\times n_v},\quad
+  b_i\in\mathbb{R}^{m_i}.
+  \label{eq:level}
+\end{equation}
+All member tasks at a level are peers: their Jacobians and target velocities
+are row-stacked to form $(J_i,b_i)$. Task names are canonicalized for
+deterministic assembly. The level sequence, not the integer priority stored on
+each task, determines hierarchy while explicit stack configuration is active.
+
+Hard constraints are represented independently as a feasible set
+\begin{equation}
+  \mathcal{F}=\{v\mid \ell_h\le C_hv\le u_h\}.
+  \label{eq:hard}
+\end{equation}
+The global hard rows can include joint velocity/position limits, collision,
+CoM, relative-pose, user linear bounds, and active contact conditions. They
+are passed through the existing constrained solve path. They are not appended
+as task levels and are not converted into residual costs. This is a deliberate
+API boundary: every priority level is an objective, while hard feasibility is
+shared across the whole hierarchy.
+
+\section{Two objective policies already supported}
+
+\subsection{Direction-preserving SCALE}
+The SNS-style scaling policy seeks the largest feasible scalar
+$s_i\in[0,1]$ for the requested target direction, subject to the current
+constraints and higher-level solution:
+\begin{equation}
+  \max_{v,s_i}\;s_i
+  \quad\text{such that}\quad J_i v=s_i b_i,\quad
+  v\in\mathcal{F}_i,\quad 0\le s_i\le 1.
+  \label{eq:scale}
+\end{equation}
+Here $\mathcal{F}_i$ also reflects the hierarchy already established by
+levels $1,\ldots,i-1$. When the complete target is infeasible, reducing $s_i$
+retains its direction while sacrificing magnitude.
+
+\subsection{Minimum residual MIN\_ERROR}
+The existing minimum-error policy instead minimizes the level residual:
+\begin{equation}
+  r_i^*=\min_{v\in\mathcal{F}_{i-1}}
+       \|J_i v-b_i\|_2,
+  \qquad
+  \mathcal{F}_i=\{v\in\mathcal{F}_{i-1}:
+       \|J_i v-b_i\|_2\le r_i^*+\epsilon_i\}.
+  \label{eq:minerr}
+\end{equation}
+Equation~\eqref{eq:minerr} is the ideal lexicographic least-squares statement:
+each level minimizes its error without worsening the achieved higher-level
+solutions. In the implementation, SRI damping, rank thresholds, active
+constraints, and finite precision determine the numerical approximation and
+the effective preservation tolerance. Thus the API promises the existing
+hierarchical solver's behavior and status reporting; it does not claim exact
+arithmetic optimality for every ill-conditioned case.
+
+With an unreachable target, $r_i^*>0$ can be valid. A lower level may use
+remaining directions, but should not trade away a higher-level achieved
+solution. Global hard infeasibility is a solver infeasibility and is distinct
+from a nonzero task residual.
+
+The two policies differ in their local objective. SCALE preserves the
+requested target direction as much as feasibility permits. MIN\_ERROR can use
+reachable components even when the full target direction is infeasible. Both
+are objective policies in the existing hierarchical solver; MIN\_ERROR is not
+a new backend added by task stacks.
+
+\section{What the stack API adds}
+
+The current C++ and Python surface is:
+\begin{verbatim}
+TaskLevelSpec(name, task_names, solve_mode=SCALE,
+              allow_min_error_fallback=false)
+TaskStackConfig(levels, backend=SNS)
+solver.configure_task_stack(config)
+solver.task_stack_config
+solver.has_explicit_task_stack()
+solver.clear_task_stack()
+\end{verbatim}
+
+The C++ types are \texttt{embodik::TaskLevelSpec} and
+\texttt{embodik::TaskStackConfig}; Python exposes them as
+\texttt{TaskLevelSpec} and \texttt{TaskStackConfig}. The selector applies to
+velocity solves and registered-task position steps. Standalone position
+solves build their own objective sequence.
+
+The default \texttt{SNS} policy retains each level's configured mode. The
+explicit least-squares policy maps each level to the existing \texttt{MIN\_ERROR}
+mode and uses the same multi-objective solve route, global constraint rows,
+active-set machinery, and SRI as the default route. It is a named convenience
+preset, not a separate dense QP solver. \texttt{SCALE\_ELASTIC}
+and per-level SNS fallback flags are rejected under that preset rather than
+silently discarded.
+
+The stack additionally defines observable behavior for membership and
+configuration: levels are explicitly ordered; same-level tasks form one
+objective; tasks omitted from the explicit stack are omitted from that
+registered-task solve; member task priorities and policies are not mutated;
+and stale/missing members are reported as invalid input.
+
+\subsection{Runtime push/pop for agentic applications}
+
+The current API replaces the complete value with
+\texttt{configure\_task\_stack}; it does not yet provide scoped
+\texttt{push}/\texttt{pop} operations. A safe extension is an immutable
+snapshot plus validated patches, for example:
+\begin{verbatim}
+patch = TaskStackPatch(base_revision=solver.task_stack_revision,
+                       source="planner-session-42",
+                       push_levels=[level_spec])
+receipt = solver.apply_task_stack_patch(patch)
+solver.remove_task_stack_patch(receipt.patch_id)
+\end{verbatim}
+The shorthand \texttt{push\_level(spec) -> token} and \texttt{pop(token)}
+should be wrappers around that patch mechanism. A blind global \texttt{pop()}
+is ambiguous when planner, operator, and recovery sources can all edit a
+stack.
+
+For this interface to work well with agentic APIs, it should have the
+following contract:
+\begin{enumerate}[leftmargin=*,nosep]
+  \item Each patch names a base revision; accepted edits produce a monotonic
+        revision and stale edits are rejected instead of overwriting a newer
+        intent.
+  \item Validation is transactional: either the full candidate configuration
+        is valid and published, or the active snapshot is unchanged.
+  \item Each patch has an opaque ID, source, and optional idempotency key.
+        Removing a patch reverses only that patch's contribution.
+  \item A solve reads one stable immutable snapshot. Updates become visible
+        between control ticks, never halfway through a solve.
+  \item Optional leases expire temporary intents to a deterministic fallback
+        snapshot if the source disconnects or stops renewing.
+  \item Agents submit bounded task intents or registered task names. They do
+        not submit arbitrary Jacobians, constraints, executable code, or
+        changes to global hard bounds. A trusted policy layer decides whether
+        an intent may be committed.
+\end{enumerate}
+The update receipt should make the state observable: accepted/rejected,
+active revision, patch ID, and a validation or conflict reason. The solver
+should not silently accept stale or partially valid edits. These are
+architectural recommendations, not APIs implemented in this branch.
+
+\subsection{A model-neutral whole-body controller contract}
+
+The task-stack API configures the solver. VLA, WAM, and general-purpose agent
+callers should usually use a higher-level typed controller API instead of
+building Jacobians or manipulating priority directly. A useful request record
+has the form
+\begin{equation}
+  g=(\text{capability},\text{target},\text{frame},\text{tolerances},
+      \text{contact/approach},\text{time window},\text{source},\text{expiry}),
+\end{equation}
+where the capability is an allowed operation such as reach, look-at, hold, or
+bimanual grasp, and the target is expressed in a named frame with explicit
+units. A trusted mapper resolves the capability to registered tasks and an
+approved stack template. The agent does not choose the global hard bounds.
+
+The controller contract should then provide:
+\begin{enumerate}[leftmargin=*,nosep]
+  \item \textbf{Preflight} that checks target/frame validity, current robot
+        capability, and constraints, returning structured reasons and
+        relevant limits rather than only a Boolean.
+  \item \textbf{Execution handles} with \texttt{status}, \texttt{cancel},
+        and \texttt{revise}; action proposals have a bounded time horizon and
+        are revalidated as state changes.
+  \item \textbf{Feedback events} containing state timestamps, active stack
+        revision, task residuals, binding hard constraints, progress, and a
+        terminal reason such as reached, blocked, infeasible, stale target,
+        or cancelled.
+  \item \textbf{Structured traces} joining intent, revision, solver result,
+        executed interval, and outcome verification. Model/prompt identity
+        belongs in the orchestration layer and should not be hard-coded into
+        the numerical solver.
+\end{enumerate}
+
+Keep the agent loop asynchronous and lower-rate than the deterministic
+whole-body control loop. VLA action chunks and WAM-predicted trajectories are
+bounded proposals: preflight them, execute a short segment, observe the
+result, then replan. This is compatible with different model providers and
+versions (including models referred to as Astra or Fable) without coupling
+the controller ABI to any one model's tool schema. Permission to propose an
+intent and permission to commit physical motion should be separate policy
+decisions. Recent VLA-agent work makes prerequisite checks, bounded execution,
+post-action verification, and structured recovery traces explicit
+\cite{embodiedskills2026}; WAM work emphasizes compatible video/action
+interfaces when composing independently trained components
+\cite{openwam2026}. A published Astra/Fable robot-control trial exposes
+camera/proprioceptive observations and end-effector pose/gripper actions via
+an agent tool interface, though its reported setup has experimental limits
+\cite{robottoolapi2026}. These examples motivate an interoperable controller
+contract, not model-specific solver APIs.
+
+\section{Results and caller expectations}
+
+For an explicit prioritized solve, velocity and position-step results expose
+per-level diagnostics when the backend returns a one-to-one result:
+\begin{itemize}[nosep]
+  \item level name and canonical member task names;
+  \item configured and effective solve modes;
+  \item task scale, residual norm, requested target norm, and normalized
+        residual;
+  \item hierarchy backend and accepted solve path;
+  \item prioritized status before any constrained weighted fallback.
+\end{itemize}
+For MIN\_ERROR, scale is reported as $-1$. Residuals describe the combined
+level, not separate member tasks. If weighted recovery replaces a failed
+prioritized result, the result path says \texttt{WEIGHTED\_FALLBACK},
+preservation is reported false, and per-level diagnostics are empty.
+
+Callers should use both the top-level status and the per-level residuals. A
+successful solve can have nonzero error on an unreachable target. Conversely,
+global hard infeasibility must not be interpreted as ordinary task degradation.
+
+\section{Relation to the literature}
+
+The stack-of-tasks (SoT) idea is a representation of ordered objectives, not a
+single unique numerical algorithm. Classical null-space methods, SNS/eSNS,
+hierarchical quadratic programming (HQP), and sequential hierarchical
+least-squares methods differ in how they enforce hierarchy, handle
+inequalities, and trade numerical accuracy against computation.
+
+\begin{center}
+\small
+\begin{tabular}{>{\raggedright\arraybackslash}p{0.23\linewidth}
+                >{\raggedright\arraybackslash}p{0.34\linewidth}
+                >{\raggedright\arraybackslash}p{0.34\linewidth}}
+\toprule
+\textbf{Approach} & \textbf{Hierarchy and constraints} &
+\textbf{Relation to this API} \\
+\midrule
+SNS/eSNS & Saturation-based redundancy resolution; eSNS generalizes the
+formulation to equality and inequality constraints at multiple levels. &
+Closest algorithmic family. EmbodiK reuses its existing constrained
+multi-objective solver and SRI path. \\
+HQP & A sequence of constrained quadratic programs can place inequality
+constraints at priority levels. & More general constraint hierarchy than
+this API, which keeps hard constraints global. \\
+Sequential hierarchical least squares & Directly solves ordered least-squares
+objectives; recent methods study speed, numerical stability, and optimality. &
+Conceptually describes the MIN\_ERROR hierarchy; no independent solver is
+added here. \\
+Explicit stack surface & Names, memberships, order, modes, result diagnostics,
+and scoped configuration. & Configuration/API layer around the current
+solver, not a new algorithm family. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Flacco et al.'s SNS handles hard joint motion bounds and prioritized tasks by
+saturating constraints in the task null space; it integrates task scaling
+when the requested task is infeasible~\cite{flacco2015}. Fiore et al.'s eSNS
+generalizes the SNS formulation to arbitrary equality and inequality
+constraints at multiple priority levels, control-effort weights, and residual
+redundancy inputs, with basic, fast, and optimality-oriented
+variants~\cite{fiore2022}. Escande, Mansard, and Wieber formulate strict
+hierarchies of equality and inequality least-squares problems using HQP
+machinery~\cite{escande2014}. Recent sequential hierarchical least-squares
+work studies solver efficiency, infeasible constraints, numerical stability,
+and optimality for robot control and planning~\cite{chefchaouni2024}.
+
+This literature comparison yields an important boundary for this API:
+eSNS/HQP formulations can place inequality constraints at priority levels,
+whereas EmbodiK's explicit stack keeps its hard constraints global and
+independent of task order. This is consistent with the current architecture
+and the desired separation between hard constraints and prioritized tasks,
+but it is a narrower specification than full hierarchical constraint
+programming.
+
+\section{Potential gaps to resolve}
+
+The literature suggests several areas to make explicit before describing the
+API as a general-purpose SoT solver:
+\begin{enumerate}[leftmargin=*,nosep]
+  \item \textbf{Peer-task scaling.} Equation~\eqref{eq:minerr} uses the
+        assembled row residual. Position, rotation, momentum, and posture
+        errors have different units and magnitudes. The current stack surface
+        does not define a general per-task normalization/weight policy for
+        every objective family. Specify weights or a normalization contract
+        before recommending heterogeneous tasks as peers.
+  \item \textbf{Constraint hierarchy.} There is no per-level inequality
+        objective/constraint API. Keep safety and hard bounds globally active;
+        only add constraint priority levels for a concrete use case with
+        explicit feasibility and relaxation semantics.
+  \item \textbf{Numerical strictness.} SRI damping and rank/feasibility
+        thresholds make practical preservation approximate near singularities.
+        Document the existing tolerances, and distinguish nominal hierarchy
+        semantics from finite-precision guarantees.
+  \item \textbf{Stack transitions.} Changing order or membership between
+        control ticks can change the command discontinuously. Applications
+        that switch stacks may need continuity logic or state-transition
+        smoothing.
+  \item \textbf{Runtime evidence.} The named stack inherits existing solver
+        costs and behavior. It needs no independent real-time claim; any
+        performance statement should be measured against the current solver
+        on representative problem sizes.
+  \item \textbf{Validation coverage.} Cover same-level unit scaling,
+        conflicting/unreachable levels, redundant and rank-deficient rows,
+        hard-bound infeasibility, near-singular Jacobians, and transitions
+        between legacy and explicit stacks.
+\end{enumerate}
+
+These are API clarity and validation gaps, not evidence that a new optimizer
+is missing. The implementation choice is to reuse the established solver and
+make its existing objective modes easier to configure and inspect.
+
+\begin{thebibliography}{9}
+\bibitem{flacco2015}
+F. Flacco, A. De Luca, and O. Khatib, ``Control of Redundant Robots Under
+Hard Joint Constraints: Saturation in the Null Space,'' \emph{IEEE
+Transactions on Robotics}, vol. 31, no. 3, pp. 637--654, 2015.
+\href{https://doi.org/10.1109/TRO.2015.2418582}{doi:10.1109/TRO.2015.2418582}.
+\href{https://www.diag.uniroma1.it/~labrob/pub/papers/TRO_SNS_Jun2015.pdf}{Author PDF}.
+
+\bibitem{fiore2022}
+M. D. Fiore, G. Meli, A. Ziese, B. Siciliano, and C. Natale, ``A General
+Framework for Hierarchical Redundancy Resolution Under Arbitrary Constraints,''
+\emph{IEEE Transactions on Robotics}, 2023.
+\href{https://arxiv.org/abs/2204.03974}{arXiv:2204.03974}.
+
+\bibitem{escande2014}
+A. Escande, N. Mansard, and P.-B. Wieber, ``Hierarchical Quadratic
+Programming: Fast Online Humanoid-Robot Motion Generation,'' \emph{The
+International Journal of Robotics Research}, vol. 33, no. 7, pp. 1006--1028,
+2014. \href{https://doi.org/10.1177/0278364914521306}{doi:10.1177/0278364914521306}.
+\href{https://hal.science/hal-00751924}{HAL record}.
+
+\bibitem{chefchaouni2024}
+S. Chefchaouni, M. Benallegue, A. Escande, and P.-B. Wieber, ``Efficient
+Lexicographic Optimization for Prioritized Robot Control and Planning,'' 2024.
+\href{https://arxiv.org/abs/2403.09160}{arXiv:2403.09160}.
+
+\bibitem{openvla2025}
+M. J. Kim et al., ``OpenVLA: An Open-Source Vision-Language-Action Model,''
+\emph{Proceedings of the 8th Conference on Robot Learning}, PMLR vol. 270,
+2025. \href{https://proceedings.mlr.press/v270/kim25c.html}{PMLR paper}.
+
+\bibitem{openwam2026}
+OpenWAM Team, ``OpenWAM: An Open Framework for Composable World-Action
+Models,'' Stanford University project and technical overview, 2026.
+\href{https://openwam.stanford.edu/}{Project overview}.
+
+\bibitem{embodiedskills2026}
+``EmbodiedSkills: A Unified Framework for Orchestrating, Training, and
+Deploying VLA Agents,'' arXiv:2609.01281, 2026.
+\href{https://arxiv.org/abs/2609.01281}{arXiv paper}.
+
+\bibitem{robottoolapi2026}
+Robocurve, ``GPT-6 Astra on robot arms,'' technical setup and trial report,
+2026. Its documented agent interface uses camera/proprioceptive observations
+and absolute end-effector pose plus gripper commands; the page also reports
+trial and setup limitations.
+\href{https://openai.robocurve.org/gpt-6-astra/}{Technical report}.
+\end{thebibliography}
+
+\end{document}

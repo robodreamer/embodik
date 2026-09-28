@@ -36,6 +36,12 @@ level order authoritative for `solve_velocity()` and registered-task
 `clear_task_stack()` to restore priority-based assembly. The standalone
 `solve_position()` method keeps its internal objective order.
 
+`TaskStackBackend.LEXICOGRAPHIC_LEAST_SQUARES` selects the existing
+`MIN_ERROR` mode for each configured level. It is a convenience policy over the
+same constrained hierarchical solver and singularity robust inverse, not a
+separate optimization implementation. See [Explicit Task Stacks](../task_stacks.md)
+and the [math and literature note](../task_stacks_math.tex).
+
 ## Centroidal Velocity Controls
 
 `add_centroidal_momentum_task()` commands absolute centroidal momentum in row
