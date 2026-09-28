@@ -48,9 +48,13 @@ void bind_kinematics_solver(nb::module_ &m) {
   nb::class_<TaskStackConfig>(m, "TaskStackConfig",
                               "Ordered explicit hierarchy of named task levels")
       .def(nb::init<>())
-      .def(nb::init<std::vector<TaskLevelSpec>>(), nb::arg("levels"))
+      .def(nb::init<std::vector<TaskLevelSpec>, TaskStackBackend>(),
+           nb::arg("levels"), nb::arg("backend") = TaskStackBackend::kSns)
       .def_rw("levels", &TaskStackConfig::levels,
-              "Levels ordered from highest to lowest priority");
+              "Levels ordered from highest to lowest priority")
+      .def_rw("backend", &TaskStackConfig::backend,
+              "Solve policy; SNS is the default and the lexicographic policy "
+              "selects MIN_ERROR at every level");
 
   nb::class_<TaskLevelDiagnostics>(
       m, "TaskLevelDiagnostics",

@@ -81,7 +81,15 @@ NB_MODULE(_embodik_impl, m) {
       .value("LEGACY_PRIORITY", eik::HierarchySolvePath::kLegacyPriority)
       .value("EXPLICIT_SNS", eik::HierarchySolvePath::kExplicitSns)
       .value("WEIGHTED_FALLBACK",
-             eik::HierarchySolvePath::kWeightedFallback);
+             eik::HierarchySolvePath::kWeightedFallback)
+      .value("EXPLICIT_LEXICOGRAPHIC_LEAST_SQUARES",
+             eik::HierarchySolvePath::kExplicitLexicographicLeastSquares);
+
+  nb::enum_<eik::TaskStackBackend>(
+      m, "TaskStackBackend", "Solve policy for an explicit task stack")
+      .value("SNS", eik::TaskStackBackend::kSns)
+      .value("LEXICOGRAPHIC_LEAST_SQUARES",
+             eik::TaskStackBackend::kLexicographicLeastSquares);
 
   // Types
   nb::class_<eik::BasicSolverConfig>(m, "BasicSolverConfig",
@@ -121,11 +129,14 @@ NB_MODULE(_embodik_impl, m) {
           [](const eik::VelocitySolverResult &r) { return r.joint_velocities; })
       .def_ro("task_level_diagnostics",
               &eik::VelocitySolverResult::task_level_diagnostics,
-              "Per-level SNS diagnostics for an explicit task stack. Empty "
+              "Per-level backend diagnostics for an explicit task stack. Empty "
               "for legacy mode or when weighted fallback replaced hierarchy.")
       .def_ro("hierarchy_solve_path",
               &eik::VelocitySolverResult::hierarchy_solve_path,
               "Registered-task hierarchy path that supplied the accepted velocity")
+      .def_ro("hierarchy_backend",
+              &eik::VelocitySolverResult::hierarchy_backend,
+              "Backend attempted by the prioritized hierarchy, including when weighted fallback replaced it")
       .def_ro("higher_level_preservation_active",
               &eik::VelocitySolverResult::higher_level_preservation_active,
               "Whether the accepted velocity came from the prioritized hierarchy and therefore preserves higher-level achieved outputs")
@@ -633,6 +644,7 @@ NB_MODULE(_embodik_impl, m) {
               &eik::SolveDiagnostics::weighted_fallback_used)
       .def_ro("hierarchy_solve_path",
               &eik::SolveDiagnostics::hierarchy_solve_path)
+      .def_ro("hierarchy_backend", &eik::SolveDiagnostics::hierarchy_backend)
       .def_ro("higher_level_preservation_active",
               &eik::SolveDiagnostics::higher_level_preservation_active)
       .def_ro("prioritized_status",
@@ -765,6 +777,7 @@ NB_MODULE(_embodik_impl, m) {
             d.weighted_advisory_available = r.weighted_advisory_available;
             d.weighted_fallback_used = r.weighted_fallback_used;
             d.hierarchy_solve_path = r.hierarchy_solve_path;
+            d.hierarchy_backend = r.hierarchy_backend;
             d.higher_level_preservation_active =
                 r.higher_level_preservation_active;
             d.prioritized_status = r.prioritized_status;

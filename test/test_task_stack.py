@@ -64,6 +64,10 @@ def _level(
     return eik.TaskLevelSpec(name, task_names, solve_mode, allow_min_error_fallback)
 
 
+def _lex_stack(levels: list[eik.TaskLevelSpec]) -> eik.TaskStackConfig:
+    return eik.TaskStackConfig(levels, eik.TaskStackBackend.LEXICOGRAPHIC_LEAST_SQUARES)
+
+
 def test_explicit_two_level_frame_and_posture_stack(tmp_path):
     """An EE level is preserved while posture uses its remaining null space."""
     robot = _make_two_joint_robot(tmp_path)
@@ -97,6 +101,7 @@ def test_explicit_two_level_frame_and_posture_stack(tmp_path):
     assert result.status == eik.SolverStatus.SUCCESS
     assert result.prioritized_status == eik.SolverStatus.SUCCESS
     assert result.hierarchy_solve_path == eik.HierarchySolvePath.EXPLICIT_SNS
+    assert result.hierarchy_backend == eik.TaskStackBackend.SNS
     assert result.higher_level_preservation_active is True
     assert len(result.task_scales) == 2
     assert [d.name for d in result.task_level_diagnostics] == [
@@ -393,6 +398,7 @@ def test_weighted_fallback_stays_separate_from_level_diagnostics(tmp_path):
     assert "primary task scale collapsed" in result.prioritized_status_message
     assert result.weighted_fallback_used is True
     assert result.hierarchy_solve_path == eik.HierarchySolvePath.WEIGHTED_FALLBACK
+    assert result.hierarchy_backend == eik.TaskStackBackend.SNS
     assert result.higher_level_preservation_active is False
     assert result.task_level_diagnostics == []
     assert result.joint_velocities[0] <= 1e-9
@@ -444,3 +450,195 @@ def test_registered_position_step_reports_explicit_level_diagnostics(tmp_path):
         assert diagnostic.scale == pytest.approx(result.task_scales[index])
         assert diagnostic.residual_norm == pytest.approx(result.task_errors[index])
     assert result.task_level_diagnostics[1].effective_solve_mode == eik.TaskSolveMode.MIN_ERROR
+
+
+def test_lexicographic_backend_uses_reachable_primary_components(tmp_path):
+    """Minimum residual uses free rows where direction-preserving SNS collapses."""
+    robot = _make_two_joint_robot(tmp_path)
+    solver = eik.KinematicsSolver(robot)
+    q = np.zeros(robot.nq, dtype=float)
+
+    primary = solver.add_posture_task("primary")
+    primary.set_target_velocity(np.array([1.0, 1.0], dtype=float))
+    runtime = solver.runtime_config()
+    runtime.weighted_fallback_enabled = False
+    solver.configure_runtime(runtime)
+    solver.set_linear_velocity_constraints(
+        np.array([[1.0, 0.0]], dtype=float),
+        np.array([0.0], dtype=float),
+        np.array([0.0], dtype=float),
+    )
+
+    default_stack = eik.TaskStackConfig([_level("primary", ["primary"])])
+    assert default_stack.backend == eik.TaskStackBackend.SNS
+    solver.configure_task_stack(default_stack)
+    sns = solver.solve_velocity(q, apply_limits=False)
+
+    solver.configure_task_stack(_lex_stack([_level("primary", ["primary"])]))
+    lex = solver.solve_velocity(q, apply_limits=False)
+
+    assert sns.status == eik.SolverStatus.INFEASIBLE
+    assert sns.hierarchy_solve_path == eik.HierarchySolvePath.EXPLICIT_SNS
+    assert abs(sns.joint_velocities[1]) < 1e-9
+    assert lex.status == eik.SolverStatus.SUCCESS
+    assert lex.prioritized_status == eik.SolverStatus.SUCCESS
+    assert lex.hierarchy_solve_path == eik.HierarchySolvePath.EXPLICIT_LEXICOGRAPHIC_LEAST_SQUARES
+    assert lex.hierarchy_backend == eik.TaskStackBackend.LEXICOGRAPHIC_LEAST_SQUARES
+    assert lex.higher_level_preservation_active is True
+    np.testing.assert_allclose(lex.joint_velocities, np.array([0.0, 1.0]), atol=1e-8)
+    assert lex.task_level_diagnostics[0].configured_solve_mode == eik.TaskSolveMode.SCALE
+    assert lex.task_level_diagnostics[0].effective_solve_mode == eik.TaskSolveMode.MIN_ERROR
+    assert lex.task_level_diagnostics[0].scale == pytest.approx(-1.0)
+    assert lex.task_level_diagnostics[0].residual_norm == pytest.approx(1.0, abs=1e-8)
+
+
+def test_lexicographic_primary_is_preserved_under_conflicting_secondary(tmp_path):
+    robot = _make_two_joint_robot(tmp_path)
+    solver = eik.KinematicsSolver(robot)
+    q = np.zeros(robot.nq, dtype=float)
+
+    primary = solver.add_joint_task("primary", "joint1", target_value=0.5)
+    secondary = solver.add_joint_task("secondary", "joint1", target_value=-1.0)
+    solver.configure_task_stack(
+        _lex_stack([_level("primary", ["primary"]), _level("secondary", ["secondary"])])
+    )
+
+    result = solver.solve_velocity(q, apply_limits=False)
+
+    assert result.status == eik.SolverStatus.SUCCESS
+    assert result.joint_velocities[0] == pytest.approx(0.5, abs=1e-8)
+    assert result.task_level_diagnostics[0].residual_norm == pytest.approx(0.0, abs=1e-8)
+    assert result.task_level_diagnostics[1].residual_norm > 1.4
+    assert primary.solve_mode == eik.TaskSolveMode.SCALE
+    assert secondary.solve_mode == eik.TaskSolveMode.SCALE
+
+
+def test_lexicographic_same_level_permutation_is_invariant(tmp_path):
+    robot = _make_two_joint_robot(tmp_path)
+    solver = eik.KinematicsSolver(robot)
+    q = np.zeros(robot.nq, dtype=float)
+
+    solver.add_joint_task("z_positive", "joint1", target_value=0.5)
+    solver.add_joint_task("a_negative", "joint1", target_value=-1.0)
+    solver.add_joint_task("middle", "joint2", target_value=0.3)
+    solver.configure_task_stack(
+        _lex_stack([_level("peers", ["z_positive", "middle", "a_negative"])])
+    )
+    forward = solver.solve_velocity(q, apply_limits=False)
+
+    solver.configure_task_stack(
+        _lex_stack([_level("peers", ["a_negative", "z_positive", "middle"])])
+    )
+    reverse = solver.solve_velocity(q, apply_limits=False)
+
+    assert forward.status == eik.SolverStatus.SUCCESS
+    assert reverse.status == eik.SolverStatus.SUCCESS
+    assert solver.task_stack_config.levels[0].task_names == [
+        "a_negative",
+        "middle",
+        "z_positive",
+    ]
+    np.testing.assert_array_equal(forward.joint_velocities, reverse.joint_velocities)
+    assert forward.joint_velocities[0] == pytest.approx(-0.25, abs=1e-8)
+    assert forward.joint_velocities[1] == pytest.approx(0.3, abs=1e-8)
+
+
+def test_lexicographic_rank_deficient_primary_leaves_secondary_freedom(tmp_path):
+    robot = _make_two_joint_robot(tmp_path)
+    solver = eik.KinematicsSolver(robot)
+    q = np.zeros(robot.nq, dtype=float)
+
+    solver.add_joint_task("primary_a", "joint1", target_value=0.3)
+    solver.add_joint_task("primary_b", "joint1", target_value=0.3)
+    solver.add_joint_task("secondary", "joint2", target_value=0.4)
+    solver.set_joint_metric_weights(np.array([4.0, 1.0], dtype=float))
+    solver.configure_task_stack(
+        _lex_stack(
+            [
+                _level("rank_deficient", ["primary_b", "primary_a"]),
+                _level("secondary", ["secondary"]),
+            ]
+        )
+    )
+
+    result = solver.solve_velocity(q, apply_limits=False)
+
+    assert result.status == eik.SolverStatus.SUCCESS
+    np.testing.assert_allclose(result.joint_velocities, np.array([0.3, 0.4]), atol=1e-8)
+    assert [level.residual_norm for level in result.task_level_diagnostics] == pytest.approx(
+        [0.0, 0.0], abs=1e-8
+    )
+
+
+def test_lexicographic_global_infeasibility_is_not_task_degradation(tmp_path):
+    robot = _make_two_joint_robot(tmp_path)
+    solver = eik.KinematicsSolver(robot)
+    q = np.zeros(robot.nq, dtype=float)
+    solver.add_joint_task("task", "joint2", target_value=0.4)
+    solver.configure_task_stack(_lex_stack([_level("task", ["task"])]))
+    solver.set_linear_velocity_constraints(
+        np.array([[1.0, 0.0], [1.0, 0.0]], dtype=float),
+        np.array([1.0, -1e10], dtype=float),
+        np.array([1e10, 0.0], dtype=float),
+    )
+
+    result = solver.solve_velocity(q, apply_limits=False)
+
+    assert result.status == eik.SolverStatus.INFEASIBLE
+    assert result.prioritized_status == eik.SolverStatus.INFEASIBLE
+    assert "global linear constraints are infeasible" in result.status_message
+    assert result.hierarchy_backend == eik.TaskStackBackend.LEXICOGRAPHIC_LEAST_SQUARES
+    assert (
+        result.hierarchy_solve_path == eik.HierarchySolvePath.EXPLICIT_LEXICOGRAPHIC_LEAST_SQUARES
+    )
+    assert result.higher_level_preservation_active is False
+    assert result.weighted_fallback_used is False
+    assert result.task_level_diagnostics == []
+
+
+def test_registered_position_step_reports_lexicographic_backend(tmp_path):
+    robot = _make_two_joint_robot(tmp_path)
+    solver = eik.KinematicsSolver(robot)
+    q = np.array([0.2, -0.4], dtype=float)
+    robot.update_configuration(q)
+
+    tracking = solver.add_frame_task("tracking", "tool", eik.TaskType.FRAME_POSITION)
+    current_position = np.asarray(robot.get_frame_pose("tool").translation, dtype=float)
+    posture = solver.add_posture_task("posture")
+    posture.set_target_configuration(np.zeros(robot.nq, dtype=float))
+    solver.configure_task_stack(
+        _lex_stack([_level("tracking", ["tracking"]), _level("posture", ["posture"])])
+    )
+
+    target = np.eye(4, dtype=float)
+    target[:3, 3] = current_position + np.array([0.0, 0.02, 0.0])
+    options = eik.PositionStepOptions()
+    options.position_gain = 2.0
+    options.max_steps = 1
+    options.dt = 0.01
+
+    result = solver.solve_position_step(q, target, "tracking", options)
+
+    assert result.status == eik.SolverStatus.SUCCESS
+    assert result.hierarchy_backend == eik.TaskStackBackend.LEXICOGRAPHIC_LEAST_SQUARES
+    assert result.diagnostics.hierarchy_backend == eik.TaskStackBackend.LEXICOGRAPHIC_LEAST_SQUARES
+    assert (
+        result.hierarchy_solve_path == eik.HierarchySolvePath.EXPLICIT_LEXICOGRAPHIC_LEAST_SQUARES
+    )
+    assert result.higher_level_preservation_active is True
+    assert len(result.task_level_diagnostics) == 2
+
+
+def test_lexicographic_rejects_sns_only_level_recovery_policies(tmp_path):
+    robot = _make_two_joint_robot(tmp_path)
+    solver = eik.KinematicsSolver(robot)
+    solver.add_joint_task("task", "joint1", target_value=0.1)
+
+    with pytest.raises(ValueError, match="cannot use SCALE_ELASTIC"):
+        solver.configure_task_stack(
+            _lex_stack([_level("task", ["task"], eik.TaskSolveMode.SCALE_ELASTIC)])
+        )
+    with pytest.raises(ValueError, match="cannot enable an SNS MIN_ERROR fallback"):
+        solver.configure_task_stack(
+            _lex_stack([_level("task", ["task"], allow_min_error_fallback=True)])
+        )

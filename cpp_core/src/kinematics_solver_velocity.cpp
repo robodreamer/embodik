@@ -260,6 +260,9 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
   };
 
   VelocitySolverResult result;
+  result.hierarchy_backend = task_stack_config_.has_value()
+                                 ? task_stack_config_->backend
+                                 : TaskStackBackend::kSns;
   select_auto_task_layout();
   struct ClearPendingVelocityLocks {
     KinematicsSolver *solver;
@@ -342,6 +345,10 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
   }
 
   const bool explicit_stack_active = task_stack_config_.has_value();
+  const bool explicit_lexicographic_backend =
+      explicit_stack_active &&
+      task_stack_config_->backend ==
+          TaskStackBackend::kLexicographicLeastSquares;
   if (explicit_stack_active) {
     if (const auto error = task_stack_validation_error(*task_stack_config_);
         error.has_value()) {
@@ -359,10 +366,12 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
   {
     bool any_scale_elastic = false;
     if (explicit_stack_active) {
-      for (const auto &level : task_stack_config_->levels) {
-        if (level.solve_mode == TaskSolveMode::kScaleElastic) {
-          any_scale_elastic = true;
-          break;
+      if (!explicit_lexicographic_backend) {
+        for (const auto &level : task_stack_config_->levels) {
+          if (level.solve_mode == TaskSolveMode::kScaleElastic) {
+            any_scale_elastic = true;
+            break;
+          }
         }
       }
     } else {
@@ -579,17 +588,22 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
         }
       }
 
-      const bool strict_scale = level.solve_mode == TaskSolveMode::kScale;
-      const bool elastic_scale =
-          level.solve_mode == TaskSolveMode::kScaleElastic;
+      const bool strict_scale = !explicit_lexicographic_backend &&
+                                level.solve_mode == TaskSolveMode::kScale;
+      const bool elastic_scale = !explicit_lexicographic_backend &&
+                                 level.solve_mode == TaskSolveMode::kScaleElastic;
       explicit_level_target_norms.push_back(combined_goal.norm());
       const TaskSolveMode backend_mode =
-          elastic_scale ? TaskSolveMode::kScale : level.solve_mode;
+          explicit_lexicographic_backend
+              ? level.solve_mode
+              : (elastic_scale ? TaskSolveMode::kScale : level.solve_mode);
       goals.push_back(std::move(combined_goal));
       jacobians.push_back(std::move(combined_jac));
       objective_configs.push_back(ObjectiveSolveConfig{
           static_cast<int>(level_index), backend_mode,
-          level.allow_min_error_fallback, use_goal_directed_limit_clamp});
+          explicit_lexicographic_backend ? false
+                                         : level.allow_min_error_fallback,
+          use_goal_directed_limit_clamp});
       objective_tasks.push_back(group_tasks.size() == 1U ? group_tasks.front()
                                                         : nullptr);
       objective_task_groups.push_back(group_tasks);
@@ -2094,9 +2108,23 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
     solve_jacobians = &metric_jacobians;
     solve_C = &metric_C;
   }
-  auto backend_result = computeMultiObjectiveVelocitySolutionEigen(
-      goals, *solve_jacobians, *solve_C, c_lower, c_upper, config,
-      objective_configs, has_soft_rows ? &max_softening_factors : nullptr);
+  SolverResult backend_result;
+  if (explicit_lexicographic_backend) {
+    std::vector<ObjectiveSolveConfig> min_error_configs;
+    min_error_configs.reserve(objective_configs.size());
+    for (std::size_t level = 0; level < objective_configs.size(); ++level) {
+      min_error_configs.push_back(ObjectiveSolveConfig{
+          static_cast<int>(level), TaskSolveMode::kMinError, false,
+          objective_configs[level].use_goal_directed_limit_clamp});
+    }
+    backend_result = computeMultiObjectiveVelocitySolutionEigen(
+        goals, *solve_jacobians, *solve_C, c_lower, c_upper, config,
+        min_error_configs, has_soft_rows ? &max_softening_factors : nullptr);
+  } else {
+    backend_result = computeMultiObjectiveVelocitySolutionEigen(
+        goals, *solve_jacobians, *solve_C, c_lower, c_upper, config,
+        objective_configs, has_soft_rows ? &max_softening_factors : nullptr);
+  }
   if (metric_active &&
       static_cast<int>(backend_result.solution.size()) == robot_->nv()) {
     for (int j = 0; j < robot_->nv(); ++j)
@@ -2395,9 +2423,14 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
   result.hierarchy_solve_path =
       result.weighted_fallback_used
           ? HierarchySolvePath::kWeightedFallback
-          : (explicit_stack_active ? HierarchySolvePath::kExplicitSns
-                                   : HierarchySolvePath::kLegacyPriority);
-  result.higher_level_preservation_active = !result.weighted_fallback_used;
+          : (explicit_lexicographic_backend
+                 ? HierarchySolvePath::kExplicitLexicographicLeastSquares
+                 : (explicit_stack_active ? HierarchySolvePath::kExplicitSns
+                                          : HierarchySolvePath::kLegacyPriority));
+  result.higher_level_preservation_active =
+      !result.weighted_fallback_used && !goals.empty() &&
+      (!explicit_lexicographic_backend ||
+       prioritized_status == SolverStatus::kSuccess);
   result.status_message = classified_velocity.status_message;
   result.limits_applied = apply_limits;
   result.condition_number = backend_result.condition_number;

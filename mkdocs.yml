@@ -89,6 +89,7 @@ nav:
   - Guides:
     - Overview: guides/index.md
     - Explicit Task Stacks: task_stacks.md
+    - Task Stack Math and Literature: task_stacks_math.tex
     - Solver Robustness & Recovery: solver_robustness.md
     - Acceleration Solver: acceleration_solver.md
     - Centroidal Stability: centroidal_stability.md

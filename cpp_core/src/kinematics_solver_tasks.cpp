@@ -238,6 +238,13 @@ std::optional<std::string> KinematicsSolver::task_stack_validation_error(
   if (config.levels.empty()) {
     return "explicit task stack must contain at least one level";
   }
+  switch (config.backend) {
+  case TaskStackBackend::kSns:
+  case TaskStackBackend::kLexicographicLeastSquares:
+    break;
+  default:
+    return "explicit task stack has an unsupported backend";
+  }
 
   std::unordered_set<std::string> level_names;
   std::unordered_set<std::string> task_names;
@@ -269,6 +276,16 @@ std::optional<std::string> KinematicsSolver::task_stack_validation_error(
     default:
       return "explicit task-stack level '" + level.name +
              "' has an unsupported solve mode";
+    }
+    if (config.backend == TaskStackBackend::kLexicographicLeastSquares) {
+      if (level.solve_mode == TaskSolveMode::kScaleElastic) {
+        return "explicit lexicographic task-stack level '" + level.name +
+               "' cannot use SCALE_ELASTIC";
+      }
+      if (level.allow_min_error_fallback) {
+        return "explicit lexicographic task-stack level '" + level.name +
+               "' cannot enable an SNS MIN_ERROR fallback policy";
+      }
     }
 
     for (const auto &task_name : level.task_names) {
