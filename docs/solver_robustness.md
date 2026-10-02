@@ -26,6 +26,17 @@ contact projection, and linear inequalities.
 
 ## Runtime policy (`SolverRuntimeConfig`)
 
+### Rank and target reachability
+
+During hierarchical task scaling, the ESNS rank check compares the projected
+Jacobian with the task's independent rank, not its row count. A consistent zero
+or dependent row is the same task: it does not end the loop, inflate damping, or
+report a rank failure. When that target is still achievable, bounds violated by
+the full-scale step are saturated together. An inconsistent redundant row has no
+nonzero exact scale, so the solver keeps scale at zero instead of failing the
+rank check. Inconsistent targets still require scaling or an explicitly enabled
+error-reduction fallback; this check does not relax hard constraints.
+
 Most interactive examples call `configure_solver_runtime_policy(solver)` to enable the default
 robust teleop bundle:
 
@@ -119,6 +130,25 @@ Per-task `TaskSolveMode` controls how strictly a frame task must be met each vel
 `PositionStepOptions.primary_allow_min_error_fallback = True` retries a stalled primary
 `SCALE` / `SCALE_ELASTIC` step once with **MIN_ERROR** while keeping collision and CoM active —
 see [Collision-Aware IK](examples/collision_aware_ik.md).
+
+At an exact joint position limit, the permitted outward velocity is zero.
+`SCALE` retains its direction-preserving behavior: a blocked component can
+reduce the entire task scale to zero. Set the task's
+`allow_min_error_fallback = True` to allow constrained partial error reduction
+when scaling collapses, including at an exact upper or lower limit. This keeps
+the position bounds unchanged; it does not enable elastic margins. Task-level
+fallback and the runtime weighted fallback are separate recovery mechanisms.
+
+For a CPU-only reproduction with a generated two-slider robot, run:
+
+```bash
+pixi run python examples/harnesses/joint_limit_recovery_harness.py
+```
+
+The harness compares strict scaling, task fallback, explicit minimum error and
+weighted fallback. It also demonstrates redundant-joint redistribution and an
+active-constraint release case. Its algebraic global-scaling comparator is not
+a GPU execution or a performance benchmark.
 
 ## Stationary-target continuity
 
