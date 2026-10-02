@@ -28,14 +28,15 @@ contact projection, and linear inequalities.
 
 ### Rank and target reachability
 
-During hierarchical task scaling, the ESNS rank check compares the projected
-Jacobian with the task's independent rank, not its row count. A consistent zero
-or dependent row is the same task: it does not end the loop, inflate damping, or
+During hierarchical task scaling, the ESNS rank check still stops the active-set
+loop when the projected Jacobian falls below the task's rank budget. That budget
+is the row count. A consistent explicit zero or repeated row is the same task,
+so it is left out of the budget: it does not end the loop, inflate damping, or
 report a rank failure. When that target is still achievable, bounds violated by
-the full-scale step are saturated together. An inconsistent redundant row has no
-nonzero exact scale, so the solver keeps scale at zero instead of failing the
-rank check. Inconsistent targets still require scaling or an explicitly enabled
-error-reduction fallback; this check does not relax hard constraints.
+the full-scale step are saturated together. A structurally singular Jacobian, or
+an inconsistent extra row, keeps the original row-count check. Inconsistent
+targets still require scaling or an explicitly enabled error-reduction fallback;
+this check does not relax hard constraints.
 
 Most interactive examples call `configure_solver_runtime_policy(solver)` to enable the default
 robust teleop bundle:

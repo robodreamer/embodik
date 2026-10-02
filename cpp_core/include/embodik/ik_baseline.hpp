@@ -1241,6 +1241,48 @@ inline SolverResult solveHierarchicalLinearSystemEigen(
     target_rank_qr.setThreshold(solver_config.epsilon);
     const bool redundant_rows_consistent =
         target_rank_qr.rank() == independent_task_rank;
+    // Only an explicit zero or repeated row changes the ESNS rank budget.
+    // A structurally singular Jacobian keeps the original row-count check.
+    const double jacobian_scale = std::max(1.0, current_jacobian.norm());
+    auto row_explicitly_redundant = [&](Eigen::Index row) -> bool {
+      const auto row_vector = current_jacobian.row(row);
+      const double row_norm = row_vector.norm();
+      if (row_norm <= solver_config.epsilon * jacobian_scale) {
+        return true;
+      }
+      for (Eigen::Index earlier = 0; earlier < row; ++earlier) {
+        const auto earlier_vector = current_jacobian.row(earlier);
+        const double earlier_norm = earlier_vector.norm();
+        if (earlier_norm <= solver_config.epsilon * jacobian_scale) {
+          continue;
+        }
+        const double alignment = row_vector.dot(earlier_vector);
+        const double parallel_gap = std::sqrt(std::max(
+            0.0, row_norm * row_norm * earlier_norm * earlier_norm -
+                     alignment * alignment));
+        if (parallel_gap <= solver_config.epsilon * row_norm * earlier_norm) {
+          return true;
+        }
+      }
+      return false;
+    };
+    Eigen::Index explicit_redundant_row_count = 0;
+    for (Eigen::Index row = 0; row < target_dimension; ++row) {
+      if (row_explicitly_redundant(row)) {
+        ++explicit_redundant_row_count;
+      }
+    }
+    const bool explicit_row_redundancy =
+        explicit_redundant_row_count > 0 &&
+        independent_task_rank + explicit_redundant_row_count ==
+            target_dimension;
+    // An inconsistent extra row still uses the original row-count budget.
+    // Only a consistent zero or repeated row is the same solvable task.
+    const bool explicit_consistent_redundancy =
+        explicit_row_redundancy && redundant_rows_consistent;
+    const Eigen::Index task_rank_budget = explicit_consistent_redundancy
+                                              ? independent_task_rank
+                                              : target_dimension;
     Eigen::VectorXd objective_min_bounds_storage = min_bounds;
     Eigen::VectorXd objective_max_bounds_storage = max_bounds;
     Eigen::VectorXd objective_min_bounds_original = min_bounds;
@@ -1284,16 +1326,6 @@ inline SolverResult solveHierarchicalLinearSystemEigen(
                                                   .template lpNorm<1>() <
                                               solver_config.precision_threshold;
     if (skip_objective) {
-      velocity_solution = previous_velocity;
-      constraints_violated = false;
-    } else if (independent_task_rank < target_dimension &&
-               !redundant_rows_consistent &&
-               (current_jacobian * previous_velocity).norm() <=
-                   objective_equality_tolerance *
-                       std::max(1.0, current_full_target.norm())) {
-      // No nonzero scale can satisfy an inconsistent duplicate row. Keep the
-      // higher-priority velocity instead of failing the rank check.
-      velocity_scale = 0.0;
       velocity_solution = previous_velocity;
       constraints_violated = false;
     }
@@ -1474,7 +1506,7 @@ inline SolverResult solveHierarchicalLinearSystemEigen(
             current_jacobian * projector_after_saturation);
         rank_analysis.setThreshold(solver_config.epsilon);
         saturation_preserves_task_rank =
-            rank_analysis.rank() >= independent_task_rank;
+            rank_analysis.rank() >= task_rank_budget;
       }
 
       const bool should_use_min_error_fallback =
@@ -1695,10 +1727,9 @@ inline SolverResult solveHierarchicalLinearSystemEigen(
                              std::max(1.0, saturated_values.norm());
             };
             const bool independent_rank_lost =
-                effective_rank < independent_task_rank;
+                effective_rank < task_rank_budget;
             const bool redundant_but_consistent =
-                independent_task_rank < target_dimension &&
-                redundant_rows_consistent && !independent_rank_lost;
+                explicit_consistent_redundancy && !independent_rank_lost;
             if (redundant_but_consistent && residual_reachable()) {
               // One joint per pass cannot finish before the iteration cap
               // once many bounds block an otherwise achievable target.
@@ -1872,11 +1903,10 @@ inline SolverResult solveHierarchicalLinearSystemEigen(
               }
               double cond_tmp = 1.0;
               auto adaptive_regularization = solver_config.regularization_config;
-              if (!objective_is_min_error && independent_task_rank > 0 &&
-                  effective_rank > 0 &&
-                  effective_rank < independent_task_rank) {
+              if (!objective_is_min_error && task_rank_budget > 0 &&
+                  effective_rank > 0 && effective_rank < task_rank_budget) {
                 const double rank_ratio =
-                    static_cast<double>(independent_task_rank) /
+                    static_cast<double>(task_rank_budget) /
                     static_cast<double>(effective_rank);
                 adaptive_regularization.regularization_factor *= rank_ratio;
               }
