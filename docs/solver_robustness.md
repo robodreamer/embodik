@@ -36,7 +36,11 @@ report a rank failure. When that target is still achievable, bounds violated by
 the full-scale step are saturated together. A structurally singular Jacobian, or
 an inconsistent extra row, keeps the original row-count check. Inconsistent
 targets still require scaling or an explicitly enabled error-reduction fallback;
-this check does not relax hard constraints.
+this check does not relax hard constraints. The GPU native velocity solve,
+FI-PeSNS, and PPH-SNS apply the same completion for one consistent repeated
+row: every bound violated by the full-scale step is saturated together, a
+zero-width bound stays pinned, and the free joints resolve that task without
+extra rank damping. Other GPU tasks keep uniform bound scaling.
 
 Most interactive examples call `configure_solver_runtime_policy(solver)` to enable the default
 robust teleop bundle:

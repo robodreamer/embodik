@@ -29,6 +29,7 @@ from .gpu_constraints import (
 from .gpu_priority import (
     PostureTaskRows,
     _configuration_indices_for_velocity_rows,
+    complete_consistent_redundant_velocity,
     ordered_priority_velocity,
 )
 from .newton_model import NewtonModelKinematics
@@ -1887,15 +1888,40 @@ class DeviceResidentMultiFramePoseSolver:
             velocity.index_copy_(1, self._unlocked_active_columns_tensor, solved_velocity)
         else:
             velocity = solved_velocity
-        lower = lower.to(self._fi_dtype)
-        upper = upper.to(self._fi_dtype)
-        needs_upper_scale = velocity > upper
-        needs_lower_scale = velocity < lower
-        scales = torch.ones_like(velocity)
-        scales = torch.where(needs_upper_scale, upper / torch.clamp(velocity, min=1e-30), scales)
-        scales = torch.where(needs_lower_scale, lower / torch.clamp(velocity, max=-1e-30), scales)
+        return self._finish_bounded_velocity(jacobian, twist, lower, upper, velocity)
+
+    def _finish_bounded_velocity(
+        self, jacobian: Any, twist: Any, lower: Any, upper: Any, unscaled: Any
+    ):
+        """Scale into the velocity box, completing one consistent repeated task."""
+
+        torch = self.torch
+        lower = lower.to(dtype=unscaled.dtype)
+        upper = upper.to(dtype=unscaled.dtype)
+        scales = torch.ones_like(unscaled)
+        scales = torch.where(
+            unscaled > upper,
+            upper / torch.clamp(unscaled, min=1e-30),
+            scales,
+        )
+        scales = torch.where(
+            unscaled < lower,
+            lower / torch.clamp(unscaled, max=-1e-30),
+            scales,
+        )
         scale = torch.clamp(torch.amin(scales, dim=-1), min=0.0, max=1.0)
-        return (velocity * scale[:, None]).to(torch.float32)
+        scaled = unscaled * scale[:, None]
+        residual_tolerance = 1.0e-5 if unscaled.dtype == torch.float32 else 1.0e-8
+        completed = complete_consistent_redundant_velocity(
+            jacobian.to(dtype=unscaled.dtype),
+            twist.to(dtype=unscaled.dtype),
+            lower,
+            upper,
+            unscaled,
+            scaled,
+            residual_tolerance=residual_tolerance,
+        )
+        return completed.to(torch.float32)
 
     def _native_velocity(self, twist: Any, jacobian: Any, lower: Any, upper: Any):
         if getattr(self, "_cusolver_srinv", None) is not None:
@@ -1953,20 +1979,7 @@ class DeviceResidentMultiFramePoseSolver:
             else:
                 velocity = solved_velocity
                 self._cusolver_primary_inverse = outputs[2]
-            lower32, upper32 = lower.to(torch.float32), upper.to(torch.float32)
-            scales = torch.ones_like(velocity)
-            scales = torch.where(
-                velocity > upper32,
-                upper32 / torch.clamp(velocity, min=1e-30),
-                scales,
-            )
-            scales = torch.where(
-                velocity < lower32,
-                lower32 / torch.clamp(velocity, max=-1e-30),
-                scales,
-            )
-            scale = torch.clamp(torch.amin(scales, dim=-1), min=0.0, max=1.0)
-            return velocity * scale[:, None]
+            return self._finish_bounded_velocity(jacobian, twist, lower, upper, velocity)
         if self._warp_srinv is not None:
             torch = self.torch
             matrix = jacobian
@@ -1984,20 +1997,7 @@ class DeviceResidentMultiFramePoseSolver:
                 velocity.index_copy_(1, self._unlocked_active_columns_tensor, solved_velocity)
             else:
                 velocity = solved_velocity
-            lower32, upper32 = lower.to(torch.float32), upper.to(torch.float32)
-            scales = torch.ones_like(velocity)
-            scales = torch.where(
-                velocity > upper32,
-                upper32 / torch.clamp(velocity, min=1e-30),
-                scales,
-            )
-            scales = torch.where(
-                velocity < lower32,
-                lower32 / torch.clamp(velocity, max=-1e-30),
-                scales,
-            )
-            scale = torch.clamp(torch.amin(scales, dim=-1), min=0.0, max=1.0)
-            return velocity * scale[:, None]
+            return self._finish_bounded_velocity(jacobian, twist, lower, upper, velocity)
         if self._compiled_native_velocity is None:
             return self._native_velocity_eager(twist, jacobian, lower, upper)
         return self._compiled_native_velocity(twist, jacobian, lower, upper)

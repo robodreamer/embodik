@@ -267,6 +267,109 @@ def undamped_generalized_inverse(
     )
 
 
+def consistent_redundant_task_mask(
+    jacobian: torch.Tensor,
+    target: torch.Tensor,
+    *,
+    rank_tolerance: float = 1.0e-6,
+) -> torch.Tensor:
+    """Return whether each batch item is one consistent explicit repeated task.
+
+    The mask is true only when every missing row is a zero row or a scalar
+    multiple of an earlier row, and the target lies in that same row space.
+    A structurally singular Jacobian stays false.
+    """
+
+    if jacobian.ndim < 2 or jacobian.shape[-2] != target.shape[-1]:
+        raise ValueError("target width must match jacobian rows")
+    rows = jacobian.shape[-2]
+    row_norm = torch.linalg.vector_norm(jacobian, dim=-1)
+    jacobian_scale = torch.linalg.vector_norm(jacobian, dim=(-2, -1)).clamp_min(1.0)
+    zero_row = row_norm <= rank_tolerance * jacobian_scale.unsqueeze(-1)
+    products = jacobian @ jacobian.transpose(-1, -2)
+    left_norm = row_norm.unsqueeze(-1)
+    right_norm = row_norm.unsqueeze(-2)
+    parallel_gap = torch.sqrt(
+        torch.clamp(left_norm.square() * right_norm.square() - products.square(), min=0.0)
+    )
+    parallel = parallel_gap <= rank_tolerance * left_norm * right_norm
+    index = torch.arange(rows, device=jacobian.device)
+    earlier = index.view((1,) * (parallel.ndim - 2) + (rows, 1)) > index.view(
+        (1,) * (parallel.ndim - 2) + (1, rows)
+    )
+    nonzero = ~zero_row
+    duplicate = (parallel & earlier & nonzero.unsqueeze(-1) & nonzero.unsqueeze(-2)).any(dim=-1)
+    redundant = zero_row | duplicate
+    singular_values = torch.linalg.svdvals(jacobian)
+    largest = singular_values.amax(dim=-1, keepdim=True)
+    task_rank = (singular_values > rank_tolerance * largest).sum(dim=-1)
+    augmented = torch.cat((jacobian, target.unsqueeze(-1)), dim=-1)
+    augmented_values = torch.linalg.svdvals(augmented)
+    augmented_largest = augmented_values.amax(dim=-1, keepdim=True)
+    augmented_rank = (augmented_values > rank_tolerance * augmented_largest).sum(dim=-1)
+    redundant_count = redundant.sum(dim=-1)
+    return (
+        (redundant_count > 0)
+        & (task_rank + redundant_count == rows)
+        & (augmented_rank == task_rank)
+    )
+
+
+def complete_consistent_redundant_velocity(
+    jacobian: torch.Tensor,
+    target: torch.Tensor,
+    lower: torch.Tensor,
+    upper: torch.Tensor,
+    unscaled: torch.Tensor,
+    scaled: torch.Tensor,
+    *,
+    rank_tolerance: float = 1.0e-6,
+    bound_tolerance: float = 1.0e-6,
+    residual_tolerance: float = 1.0e-6,
+) -> torch.Tensor:
+    """Pin every full-scale violation of a consistent repeated task.
+
+    The returned velocity keeps ``scaled`` for every other task. Pinned joints
+    hold the violated bound, and the free joints are an undamped solution of
+    the same target. The result is used only when that solution stays inside
+    the original bounds and realizes the task.
+    """
+
+    applies = consistent_redundant_task_mask(jacobian, target, rank_tolerance=rank_tolerance)
+    violated = (unscaled < lower - bound_tolerance) | (unscaled > upper + bound_tolerance)
+    # A zero-width bound is already saturated. Leaving it free lets the
+    # re-solve move a locked joint.
+    fixed = upper - lower <= bound_tolerance
+    pinned = (violated | fixed) & applies.unsqueeze(-1)
+    particular = torch.where(
+        pinned,
+        torch.clamp(unscaled, min=lower, max=upper),
+        torch.zeros_like(unscaled),
+    )
+    free = (~pinned).to(jacobian.dtype)
+    reduced = jacobian * free.unsqueeze(-2)
+    task_residual = target - (jacobian @ particular.unsqueeze(-1)).squeeze(-1)
+    correction = (
+        undamped_generalized_inverse(reduced, rank_tolerance) @ task_residual.unsqueeze(-1)
+    ).squeeze(-1) * free
+    candidate = particular + correction
+    achieved = jacobian @ candidate.unsqueeze(-1)
+    residual_norm = torch.linalg.vector_norm(achieved.squeeze(-1) - target, dim=-1)
+    target_scale = torch.linalg.vector_norm(target, dim=-1).clamp_min(1.0)
+    within_bounds = (
+        (candidate >= lower - bound_tolerance) & (candidate <= upper + bound_tolerance)
+    ).all(dim=-1)
+    reachable = residual_norm <= residual_tolerance * target_scale
+    use_completion = (
+        applies
+        & pinned.any(dim=-1)
+        & reachable
+        & within_bounds
+        & torch.isfinite(candidate).all(dim=-1)
+    )
+    return torch.where(use_completion.unsqueeze(-1), candidate, scaled)
+
+
 def undamped_nullspace_projector(
     matrix: torch.Tensor,
     relative_rank_tolerance: float = 1.0e-6,
