@@ -1227,6 +1227,18 @@ public:
       const Eigen::VectorXd &current_q = Eigen::VectorXd());
 
   /**
+   * @brief Fresh exact distances for all allowed active collision pairs at q.
+   *
+   * Returns configured global or active per-pair clearance, not a recovery
+   * floor. Preserves robot configuration and solver policy/history. Requires
+   * finite full nq; throws on invalid configuration or nonfinite distance.
+   * Returns nullopt when geometry, enabled policy, or active pairs are absent.
+   * This diagnostic is independent of the constraint-row selection budget.
+   */
+  std::optional<std::vector<CollisionPairDistance>>
+  evaluate_collision_pair_distances(const Eigen::VectorXd &q);
+
+  /**
    * @brief Evaluate the scalar collision distance used by post-step safety
    * checks.
    *

@@ -235,6 +235,34 @@ pixi run python scripts/prove_sweep_collision_metric.py
 pixi run python scripts/validate_wbc_segments.py
 ```
 
+## Fresh per-pair endpoint evaluation
+
+`solver.evaluate_collision_pair_distances(q)` evaluates every currently allowed
+and active collision geometry pair at a finite, full-size configuration. It
+returns read-only `CollisionPairDistance` records with `geometry_a`,
+`geometry_b`, `distance`, and `minimum_distance`. Each minimum is the currently
+active pair override or configured global margin. Pending overrides and recovery
+floors are not activated by this diagnostic query.
+
+```python
+records = solver.evaluate_collision_pair_distances(q_command)
+if records is not None:
+    for pair in records:
+        print(pair.geometry_a, pair.geometry_b, pair.distance, pair.minimum_distance)
+```
+
+The query preserves robot configuration, velocity, collision policy and shared
+geometry results. It uses local geometry data for fresh distances. Missing
+geometry, a disabled collision policy, or no active allowed pairs returns
+`None`; invalid configurations or nonfinite distances raise an error. It does
+not limit evaluation to the constraint row budget or a cached closest pair.
+
+When checking a command modified after solving, compare complete previous and
+candidate pair snapshots. Require each pair's configured margin; for a pair
+already inside its margin, require nonworsening clearance relative to that
+pair's previous distance. A single minimum distance and the largest override
+margin cannot establish this per-pair condition.
+
 ## API reference
 
 - [KinematicsSolver](api/kinematics_solver.md) — `configure_collision_constraint`, tuning presets, floors

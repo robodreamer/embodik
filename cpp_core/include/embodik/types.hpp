@@ -200,6 +200,14 @@ struct CollisionGeometryPair {
   std::string geometry_b;
 };
 
+/** @brief Fresh signed distance and configured clearance for one active pair. */
+struct CollisionPairDistance {
+  std::string geometry_a;
+  std::string geometry_b;
+  double distance = 0.0;
+  double minimum_distance = 0.0;
+};
+
 /**
  * @brief Exact unordered geometry pair with an immutable clearance override.
  *
