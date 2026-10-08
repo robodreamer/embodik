@@ -907,6 +907,13 @@ inline SolverResult solveHierarchicalLinearSystemEigen(
   const bool preserve_legacy_velocity_behavior =
       execution_options.policy ==
       detail::HierarchicalLinearSolverPolicy::kLegacyVelocity;
+  // Feasibility epsilon bounds the final row residual; using it as an active
+  // row rank cutoff can discard a narrow but physically independent direction.
+  // Certified explicit tasks retain those directions at numerical precision.
+  const double active_constraint_rank_tolerance =
+      solver_config.certify_explicit_task_modes && !preserve_legacy_velocity_behavior
+          ? std::min(solver_config.epsilon, solver_config.precision_threshold)
+          : solver_config.epsilon;
   const double objective_equality_tolerance =
       std::max(std::max(solver_config.epsilon,
                         solver_config.precision_threshold),
@@ -1366,7 +1373,7 @@ inline SolverResult solveHierarchicalLinearSystemEigen(
 
       // Compute augmented projection operator
       detail::ComputeGeneralizedInverse(
-          saturated_constraints_on_previous_space, solver_config.epsilon,
+          saturated_constraints_on_previous_space, active_constraint_rank_tolerance,
           &inverse_saturated_constraints_projected);
       augmented_projector.noalias() =
           (Eigen::MatrixXd::Identity(damped_inverse_projected_jacobian.rows(),
@@ -1674,7 +1681,7 @@ inline SolverResult solveHierarchicalLinearSystemEigen(
               saturated_constraint_matrix * previous_null_space;
 
           detail::ComputeGeneralizedInverse(
-              saturated_constraints_on_previous_space, solver_config.epsilon,
+              saturated_constraints_on_previous_space, active_constraint_rank_tolerance,
               &inverse_saturated_constraints_projected);
           constrained_projector.noalias() =
               previous_null_space - inverse_saturated_constraints_projected *
@@ -1882,7 +1889,7 @@ inline SolverResult solveHierarchicalLinearSystemEigen(
                   saturated_constraint_matrix * previous_null_space;
               detail::ComputeGeneralizedInverse(
                   saturated_constraints_on_previous_space,
-                  solver_config.epsilon,
+                  active_constraint_rank_tolerance,
                   &inverse_saturated_constraints_projected);
               double augmented_cond = 1.0;
               const Eigen::MatrixXd final_task_inverse =
