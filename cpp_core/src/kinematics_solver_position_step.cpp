@@ -4149,9 +4149,11 @@ PositionIKResult KinematicsSolver::solve_position_step(
             candidate_merits.size() != resolved.size()) {
           return false;
         }
+        constexpr double kPriorityMeritNumericalTolerance = 1e-9;
         for (int priority : protected_target_priorities) {
           for (int block = 0; block < 2; ++block) {
             double acceptable_total = 0.0;
+            double protected_tolerance_total = 0.0;
             double candidate_total = 0.0;
             bool saw_task = false;
             for (std::size_t index = 0; index < resolved.size(); ++index) {
@@ -4176,9 +4178,16 @@ PositionIKResult KinematicsSolver::solve_position_step(
                 return false;
               }
               acceptable_total += std::max(baseline, protected_tolerance);
+              protected_tolerance_total += protected_tolerance;
               candidate_total += candidate;
             }
-            if (saw_task && candidate_total > acceptable_total + 1e-9) {
+            // Numerical slack belongs to the configured budget, not to the
+            // previous candidate. Adding it to an already exceeded baseline
+            // would ratchet the permitted error upward on every control tick.
+            const double stable_acceptable_total = std::max(
+                acceptable_total,
+                protected_tolerance_total + kPriorityMeritNumericalTolerance);
+            if (saw_task && candidate_total > stable_acceptable_total) {
               return false;
             }
           }
