@@ -559,10 +559,13 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
     }
   }
 
-  // Near a joint position limit, zero Jacobian entries that would command
-  // motion further into that limit. This avoids whole-task SNS scale collapse
-  // and preserves partial solutions through remaining DOFs.
-  if (apply_limits && use_position_limits_) {
+  // Preserve the legacy SNS heuristic unless explicit objectives are
+  // certified against physical hard rows. In the certified path the position
+  // bounds constrain joint velocity direction; clipping task Jacobian signs
+  // would also erase valid inward motion and distort the physical objective.
+  const bool certified_explicit_objectives =
+      velocity_task_mode_certification_enabled_ && !objective_configs.empty();
+  if (apply_limits && use_position_limits_ && !certified_explicit_objectives) {
     clamp_jacobians_near_joint_limits(jacobians, goals, objective_configs,
                                       velocity_to_config_index);
   }
@@ -1668,6 +1671,7 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
 
   // Configure solver
   VelocitySolverConfig config;
+  config.certify_explicit_task_modes = velocity_task_mode_certification_enabled_;
   config.epsilon = constraint_tolerance_;
   config.precision_threshold = tight_tolerance_;
   config.iteration_limit = max_iterations_;
@@ -2040,7 +2044,7 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
     if (apply_limits && c_lower.size() >= robot_->nv() &&
         !use_contact_projection) {
       clamp_joint_velocity_solution_in_place(
-          candidate, c_lower, c_upper, use_position_limits_, robot_->nv());
+          candidate, c_lower, c_upper, false, robot_->nv());
       if (use_position_limits_) {
         const int n_dq = static_cast<int>(candidate.size());
         const int n_dens = static_cast<int>(dense_pos_lower_sp.size());
@@ -2292,7 +2296,7 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
                                      result.solution.size());
       // Velocity-box clamping (always applies to first nv rows).
       clamp_joint_velocity_solution_in_place(
-          dq, c_lower, c_upper, use_position_limits_, robot_->nv());
+          dq, c_lower, c_upper, false, robot_->nv());
       // Sparse position-limit clamping using dense per-joint bounds array.
       if (use_position_limits_) {
         const int n_dq = static_cast<int>(dq.size());
@@ -2359,6 +2363,22 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
     last_solution_dq_norm_ = 0.0;
   }
 
+  if (velocity_task_mode_certification_enabled_ &&
+      (result.status == SolverStatus::kSuccess ||
+       result.status == SolverStatus::kNoProgress) &&
+      result.joint_velocities.size() == robot_->nv()) {
+    const Eigen::VectorXd values = C * result.joint_velocities;
+    for (Eigen::Index row = 0; row < values.size(); ++row) {
+      if (max_softening_factors(row) <= 1.0 &&
+          (!std::isfinite(values(row)) ||
+           values(row) < c_lower(row) - constraint_tolerance_ ||
+           values(row) > c_upper(row) + constraint_tolerance_)) {
+        result.status = SolverStatus::kNumericalError;
+        result.status_message = "returned physical velocity violates original hard constraint rows";
+        break;
+      }
+    }
+  }
   stall_handler_update(result);
   elastic_band_update(result);
   update_auto_task_layout_feedback(result);

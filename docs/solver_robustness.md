@@ -1,5 +1,15 @@
 # Solver robustness and recovery
 
+## Rectangular singular-inverse damping
+
+The legacy inverse path retains full left singular vectors. For a tall matrix,
+per-singular-value damping uses only the columns corresponding to the singular
+values. Multiplying the full matrix by the shorter damping diagonal produces
+incompatible dimensions and can generate non-finite state in release builds.
+The correction preserves the other inverse branches and physical constraints.
+Regression coverage compares tall, wide, square and singular problems with an
+independent regularized-Gram result and repeats exact-limit fallback recovery.
+
 EmbodiK keeps **recovery policy in the C++ solver**, not in example-side guard code. The same
 `KinematicsSolver` that tracks your end-effector also decides how to unstick near joint limits,
 collision margins, and singular layouts — while still respecting hard constraints.
@@ -25,6 +35,22 @@ Hard constraints stay in C++ for all of the above: joint limits, collision, CoM 
 contact projection, and linear inequalities.
 
 ## Runtime policy (`SolverRuntimeConfig`)
+
+### Rank and target reachability
+
+During hierarchical task scaling, the ESNS rank check still stops the active-set
+loop when the projected Jacobian falls below the task's rank budget. That budget
+is the row count. A consistent explicit zero or repeated row is the same task,
+so it is left out of the budget: it does not end the loop, inflate damping, or
+report a rank failure. When that target is still achievable, bounds violated by
+the full-scale step are saturated together. A structurally singular Jacobian, or
+an inconsistent extra row, keeps the original row-count check. Inconsistent
+targets still require scaling or an explicitly enabled error-reduction fallback;
+this check does not relax hard constraints. The GPU native velocity solve,
+FI-PeSNS, and PPH-SNS apply the same completion for one consistent repeated
+row: every bound violated by the full-scale step is saturated together, a
+zero-width bound stays pinned, and the free joints resolve that task without
+extra rank damping. Other GPU tasks keep uniform bound scaling.
 
 Most interactive examples call `configure_solver_runtime_policy(solver)` to enable the default
 robust teleop bundle:
@@ -119,6 +145,25 @@ Per-task `TaskSolveMode` controls how strictly a frame task must be met each vel
 `PositionStepOptions.primary_allow_min_error_fallback = True` retries a stalled primary
 `SCALE` / `SCALE_ELASTIC` step once with **MIN_ERROR** while keeping collision and CoM active —
 see [Collision-Aware IK](examples/collision_aware_ik.md).
+
+At an exact joint position limit, the permitted outward velocity is zero.
+`SCALE` retains its direction-preserving behavior: a blocked component can
+reduce the entire task scale to zero. Set the task's
+`allow_min_error_fallback = True` to allow constrained partial error reduction
+when scaling collapses, including at an exact upper or lower limit. This keeps
+the position bounds unchanged; it does not enable elastic margins. Task-level
+fallback and the runtime weighted fallback are separate recovery mechanisms.
+
+For a CPU-only reproduction with a generated two-slider robot, run:
+
+```bash
+pixi run python examples/harnesses/joint_limit_recovery_harness.py
+```
+
+The harness compares strict scaling, task fallback, explicit minimum error and
+weighted fallback. It also demonstrates redundant-joint redistribution and an
+active-constraint release case. Its algebraic global-scaling comparator is not
+a GPU execution or a performance benchmark.
 
 ## Stationary-target continuity
 

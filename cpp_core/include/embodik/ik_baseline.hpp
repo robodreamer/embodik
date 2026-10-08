@@ -626,10 +626,14 @@ inline Eigen::MatrixXd ComputeRegularizedInverse(
     }
 
     if ((per_sv_damping > 0.0).any()) {
+      // A tall matrix's full U has more columns than singular values.
+      // Only the corresponding singular directions have damping entries.
+      const auto damped_left_singular_vectors =
+          left_singular_vectors.leftCols(sigma_values.size());
       regularized_gram.noalias() +=
-          left_singular_vectors *
+          damped_left_singular_vectors *
           per_sv_damping.matrix().asDiagonal() *
-          left_singular_vectors.transpose();
+          damped_left_singular_vectors.transpose();
     }
   }
 
@@ -903,6 +907,13 @@ inline SolverResult solveHierarchicalLinearSystemEigen(
   const bool preserve_legacy_velocity_behavior =
       execution_options.policy ==
       detail::HierarchicalLinearSolverPolicy::kLegacyVelocity;
+  // Feasibility epsilon bounds the final row residual; using it as an active
+  // row rank cutoff can discard a narrow but physically independent direction.
+  // Certified explicit tasks retain those directions at numerical precision.
+  const double active_constraint_rank_tolerance =
+      solver_config.certify_explicit_task_modes && !preserve_legacy_velocity_behavior
+          ? std::min(solver_config.epsilon, solver_config.precision_threshold)
+          : solver_config.epsilon;
   const double objective_equality_tolerance =
       std::max(std::max(solver_config.epsilon,
                         solver_config.precision_threshold),
@@ -1226,6 +1237,63 @@ inline SolverResult solveHierarchicalLinearSystemEigen(
             ? current_target
             : current_target - affine_objective_biases[objective_index];
     const auto target_dimension = current_jacobian.rows();
+    // Row count is not the ESNS rank budget. A zero or repeated row that
+    // agrees with the target is the same task; counting it as lost rank
+    // aborts a solvable objective.
+    Eigen::ColPivHouseholderQR<Eigen::MatrixXd> task_rank_qr(current_jacobian);
+    task_rank_qr.setThreshold(solver_config.epsilon);
+    const Eigen::Index independent_task_rank = task_rank_qr.rank();
+    Eigen::MatrixXd jacobian_and_target(current_jacobian.rows(),
+                                        current_jacobian.cols() + 1);
+    jacobian_and_target.leftCols(current_jacobian.cols()) = current_jacobian;
+    jacobian_and_target.col(current_jacobian.cols()) = current_full_target;
+    Eigen::ColPivHouseholderQR<Eigen::MatrixXd> target_rank_qr(
+        jacobian_and_target);
+    target_rank_qr.setThreshold(solver_config.epsilon);
+    const bool redundant_rows_consistent =
+        target_rank_qr.rank() == independent_task_rank;
+    // Only an explicit zero or repeated row changes the ESNS rank budget.
+    // A structurally singular Jacobian keeps the original row-count check.
+    const double jacobian_scale = std::max(1.0, current_jacobian.norm());
+    auto row_explicitly_redundant = [&](Eigen::Index row) -> bool {
+      const auto row_vector = current_jacobian.row(row);
+      const double row_norm = row_vector.norm();
+      if (row_norm <= solver_config.epsilon * jacobian_scale) {
+        return true;
+      }
+      for (Eigen::Index earlier = 0; earlier < row; ++earlier) {
+        const auto earlier_vector = current_jacobian.row(earlier);
+        const double earlier_norm = earlier_vector.norm();
+        if (earlier_norm <= solver_config.epsilon * jacobian_scale) {
+          continue;
+        }
+        const double alignment = row_vector.dot(earlier_vector);
+        const double parallel_gap = std::sqrt(std::max(
+            0.0, row_norm * row_norm * earlier_norm * earlier_norm -
+                     alignment * alignment));
+        if (parallel_gap <= solver_config.epsilon * row_norm * earlier_norm) {
+          return true;
+        }
+      }
+      return false;
+    };
+    Eigen::Index explicit_redundant_row_count = 0;
+    for (Eigen::Index row = 0; row < target_dimension; ++row) {
+      if (row_explicitly_redundant(row)) {
+        ++explicit_redundant_row_count;
+      }
+    }
+    const bool explicit_row_redundancy =
+        explicit_redundant_row_count > 0 &&
+        independent_task_rank + explicit_redundant_row_count ==
+            target_dimension;
+    // An inconsistent extra row still uses the original row-count budget.
+    // Only a consistent zero or repeated row is the same solvable task.
+    const bool explicit_consistent_redundancy =
+        explicit_row_redundancy && redundant_rows_consistent;
+    const Eigen::Index task_rank_budget = explicit_consistent_redundancy
+                                              ? independent_task_rank
+                                              : target_dimension;
     Eigen::VectorXd objective_min_bounds_storage = min_bounds;
     Eigen::VectorXd objective_max_bounds_storage = max_bounds;
     Eigen::VectorXd objective_min_bounds_original = min_bounds;
@@ -1305,7 +1373,7 @@ inline SolverResult solveHierarchicalLinearSystemEigen(
 
       // Compute augmented projection operator
       detail::ComputeGeneralizedInverse(
-          saturated_constraints_on_previous_space, solver_config.epsilon,
+          saturated_constraints_on_previous_space, active_constraint_rank_tolerance,
           &inverse_saturated_constraints_projected);
       augmented_projector.noalias() =
           (Eigen::MatrixXd::Identity(damped_inverse_projected_jacobian.rows(),
@@ -1324,6 +1392,10 @@ inline SolverResult solveHierarchicalLinearSystemEigen(
       // Evaluate constraint satisfaction
       constraint_evaluation.noalias() =
           constraint_coefficients * velocity_solution;
+      // Retained for the rank-termination pass below. The scaled-target
+      // evaluation overwrites constraint_evaluation after this point.
+      const Eigen::VectorXd full_scale_constraint_evaluation =
+          constraint_evaluation;
       const bool full_scale_constraints_violated =
           (constraint_evaluation.array() <
            (active_min_bounds->array() - solver_config.epsilon))
@@ -1445,7 +1517,7 @@ inline SolverResult solveHierarchicalLinearSystemEigen(
             current_jacobian * projector_after_saturation);
         rank_analysis.setThreshold(solver_config.epsilon);
         saturation_preserves_task_rank =
-            rank_analysis.rank() >= target_dimension;
+            rank_analysis.rank() >= task_rank_budget;
       }
 
       const bool should_use_min_error_fallback =
@@ -1609,7 +1681,7 @@ inline SolverResult solveHierarchicalLinearSystemEigen(
               saturated_constraint_matrix * previous_null_space;
 
           detail::ComputeGeneralizedInverse(
-              saturated_constraints_on_previous_space, solver_config.epsilon,
+              saturated_constraints_on_previous_space, active_constraint_rank_tolerance,
               &inverse_saturated_constraints_projected);
           constrained_projector.noalias() =
               previous_null_space - inverse_saturated_constraints_projected *
@@ -1623,10 +1695,9 @@ inline SolverResult solveHierarchicalLinearSystemEigen(
             effective_rank = rank_analysis.rank();
           }
 
-          // Termination criteria: objective redundancy exhausted or no progress
-          // detected The algorithm saturates constraints until the effective
-          // rank drops below target dimension, indicating all available degrees
-          // of freedom have been utilized.
+          // Terminate when active bounds make the requested target unreachable,
+          // or when saturation makes no progress. Dependent task rows alone do
+          // not establish that the requested target is unreachable.
           bool should_terminate = false;
           if (objective_is_min_error) {
             // MIN_ERROR: keep refining active-set until constraints are
@@ -1639,8 +1710,109 @@ inline SolverResult solveHierarchicalLinearSystemEigen(
             should_terminate = (consecutive_min_error_no_progress >
                                 solver_config.stall_detection_count);
           } else {
-            should_terminate =
-                effective_rank < target_dimension; // redundancy exhausted
+            // Rank still ends the loop, including the legacy ESNS entry point.
+            // The budget is the independent task rank, so a consistent
+            // duplicate row is not a rank failure.
+            auto residual_reachable = [&]() -> bool {
+              const Eigen::MatrixXd projected_task =
+                  current_jacobian * constrained_projector;
+              Eigen::MatrixXd task_inverse;
+              detail::ComputeGeneralizedInverse(
+                  projected_task, solver_config.epsilon, &task_inverse);
+              const Eigen::VectorXd constraint_offset =
+                  previous_velocity + inverse_saturated_constraints_projected *
+                      (saturated_values -
+                       saturated_constraint_matrix * previous_velocity);
+              const Eigen::VectorXd task_rhs =
+                  current_full_target - current_jacobian * constraint_offset;
+              const Eigen::VectorXd residual =
+                  task_rhs - projected_task * (task_inverse * task_rhs);
+              const Eigen::VectorXd saturation_residual =
+                  saturated_constraint_matrix * constraint_offset -
+                  saturated_values;
+              return residual.allFinite() && saturation_residual.allFinite() &&
+                     residual.norm() <= solver_config.precision_threshold *
+                                            std::max(1.0, task_rhs.norm()) &&
+                     saturation_residual.norm() <=
+                         solver_config.precision_threshold *
+                             std::max(1.0, saturated_values.norm());
+            };
+            const bool independent_rank_lost =
+                effective_rank < task_rank_budget;
+            const bool redundant_but_consistent =
+                explicit_consistent_redundancy && !independent_rank_lost;
+            if (redundant_but_consistent && residual_reachable()) {
+              // One joint per pass cannot finish before the iteration cap
+              // once many bounds block an otherwise achievable target.
+              // Saturate every full-scale violation together, then allow one
+              // completion pass. Stop if that set is already stable.
+              const Eigen::MatrixXd saved_selector =
+                  saturated_constraint_selector;
+              const Eigen::VectorXd saved_values = saturated_values;
+              bool pinned_redundant_bounds = false;
+              for (Eigen::Index constraint_idx = 0;
+                   constraint_idx < full_scale_constraint_evaluation.size();
+                   ++constraint_idx) {
+                if (saturated_constraint_selector(constraint_idx,
+                                                  constraint_idx) != 0) {
+                  continue;
+                }
+                const double value =
+                    full_scale_constraint_evaluation(constraint_idx);
+                if (value >= (*active_min_bounds)(constraint_idx) -
+                                 solver_config.epsilon &&
+                    value <= (*active_max_bounds)(constraint_idx) +
+                                 solver_config.epsilon) {
+                  continue;
+                }
+                saturated_constraint_selector(constraint_idx,
+                                              constraint_idx) = 1;
+                saturated_values(constraint_idx, 0) = std::min(
+                    std::max((*active_min_bounds)(constraint_idx), value),
+                    (*active_max_bounds)(constraint_idx));
+                pinned_redundant_bounds = true;
+              }
+              if (pinned_redundant_bounds) {
+                saturated_constraint_matrix.noalias() =
+                    saturated_constraint_selector * constraint_coefficients;
+                saturated_constraints_on_previous_space.noalias() =
+                    saturated_constraint_matrix * previous_null_space;
+                detail::ComputeGeneralizedInverse(
+                    saturated_constraints_on_previous_space,
+                    active_constraint_rank_tolerance,
+                    &inverse_saturated_constraints_projected);
+                constrained_projector.noalias() =
+                    previous_null_space -
+                    inverse_saturated_constraints_projected *
+                        saturated_constraints_on_previous_space;
+                if (!residual_reachable()) {
+                  saturated_constraint_selector = saved_selector;
+                  saturated_values = saved_values;
+                  saturated_constraint_matrix.noalias() =
+                      saturated_constraint_selector * constraint_coefficients;
+                  saturated_constraints_on_previous_space.noalias() =
+                      saturated_constraint_matrix * previous_null_space;
+                  detail::ComputeGeneralizedInverse(
+                      saturated_constraints_on_previous_space,
+                      active_constraint_rank_tolerance,
+                      &inverse_saturated_constraints_projected);
+                  constrained_projector.noalias() =
+                      previous_null_space -
+                      inverse_saturated_constraints_projected *
+                          saturated_constraints_on_previous_space;
+                  // Full scale does not fit these bounds. Stop with the best
+                  // feasible scale instead of walking every joint into the
+                  // iteration-limit failure.
+                  if (has_feasible_scale_snapshot) {
+                    should_terminate = true;
+                  }
+                }
+              } else if (!made_saturation_progress) {
+                should_terminate = true;
+              }
+            } else {
+              should_terminate = independent_rank_lost;
+            }
             should_terminate =
                 should_terminate ||
                 (consecutive_zero_scales >
@@ -1717,7 +1889,7 @@ inline SolverResult solveHierarchicalLinearSystemEigen(
                   saturated_constraint_matrix * previous_null_space;
               detail::ComputeGeneralizedInverse(
                   saturated_constraints_on_previous_space,
-                  solver_config.epsilon,
+                  active_constraint_rank_tolerance,
                   &inverse_saturated_constraints_projected);
               double augmented_cond = 1.0;
               const Eigen::MatrixXd final_task_inverse =
@@ -1742,10 +1914,10 @@ inline SolverResult solveHierarchicalLinearSystemEigen(
               }
               double cond_tmp = 1.0;
               auto adaptive_regularization = solver_config.regularization_config;
-              if (!objective_is_min_error && target_dimension > 0 &&
-                  effective_rank > 0 && effective_rank < target_dimension) {
+              if (!objective_is_min_error && task_rank_budget > 0 &&
+                  effective_rank > 0 && effective_rank < task_rank_budget) {
                 const double rank_ratio =
-                    static_cast<double>(target_dimension) /
+                    static_cast<double>(task_rank_budget) /
                     static_cast<double>(effective_rank);
                 adaptive_regularization.regularization_factor *= rank_ratio;
               }
@@ -1963,6 +2135,43 @@ inline SolverResult solveHierarchicalLinearSystemEigen(
     status_message = "solver failed with input/status error";
   }
 
+  // Saturation can terminate with a zero best scale after the in-loop fallback
+  // check (notably at exact zero headroom). Retry explicitly configured tasks
+  // from the original problem so failed trial active rows do not carry over.
+  // Each retry converts one SCALE objective to MIN_ERROR, bounding recursion by
+  // the number of objectives. The implicit legacy low-level policy is unchanged.
+  if (solver_status == SolverStatus::kSuccess ||
+      solver_status == SolverStatus::kNoProgress) {
+    for (size_t index = 0; index < objective_configs.size() &&
+                           index < applied_scales.size(); ++index) {
+      const auto &objective_config = objective_configs[index];
+      if (objective_config.allow_min_error_fallback &&
+          objective_config.solve_mode != TaskSolveMode::kMinError &&
+          objective_effective_modes[index] != TaskSolveMode::kMinError &&
+          applied_scales[index] <= solver_config.epsilon &&
+          objective_errors[index] > solver_config.precision_threshold) {
+        auto retry_configs = objective_configs;
+        retry_configs[index].solve_mode = TaskSolveMode::kMinError;
+        retry_configs[index].allow_min_error_fallback = false;
+        SolverResult retry = solveHierarchicalLinearSystemEigen(
+            scalable_objective_targets, affine_objective_biases,
+            objective_matrices, constraint_coefficients, min_bounds, max_bounds,
+            solver_config, retry_configs, max_constraint_softening_factors,
+            execution_options);
+        if (retry.task_used_fallback.size() > index) {
+          retry.task_used_fallback[index] = true;
+          for (size_t prior = 0; prior < objective_used_fallback.size() &&
+                                 prior < retry.task_used_fallback.size(); ++prior) {
+            retry.task_used_fallback[prior] =
+                retry.task_used_fallback[prior] || objective_used_fallback[prior];
+          }
+        }
+        retry.computation_time_ms += elapsed_milliseconds;
+        return retry;
+      }
+    }
+  }
+
   return SolverResult{
       std::move(final_velocities),
       solver_status,
@@ -2042,6 +2251,36 @@ inline SolverResult computeMultiObjectiveVelocitySolutionEigen(
     const VelocitySolverConfig &solver_config,
     const std::vector<ObjectiveSolveConfig> &objective_configs,
     const Eigen::VectorXd *max_constraint_softening_factors) {
+  if (solver_config.certify_explicit_task_modes && !objective_configs.empty()) {
+    std::vector<Eigen::VectorXd> zero_biases;
+    zero_biases.reserve(objective_targets.size());
+    for (const Eigen::VectorXd &target : objective_targets) {
+      zero_biases.push_back(Eigen::VectorXd::Zero(target.size()));
+    }
+    SolverResult result = solveHierarchicalLinearSystemEigen(
+        objective_targets, zero_biases, objective_jacobians,
+        constraint_coefficients, min_bounds, max_bounds, solver_config,
+        objective_configs, max_constraint_softening_factors);
+    if (result.status == SolverStatus::kSuccess ||
+        result.status == SolverStatus::kNoProgress) {
+      const Eigen::Map<const Eigen::VectorXd> solution(
+          result.solution.data(), result.solution.size());
+      const Eigen::VectorXd values = constraint_coefficients * solution;
+      for (Eigen::Index row = 0; row < values.size(); ++row) {
+        const bool hard_row = max_constraint_softening_factors == nullptr ||
+                              (*max_constraint_softening_factors)(row) <= 1.0;
+        if (hard_row &&
+            (!std::isfinite(values(row)) ||
+             values(row) < min_bounds(row) - solver_config.epsilon ||
+             values(row) > max_bounds(row) + solver_config.epsilon)) {
+          result.status = SolverStatus::kNumericalError;
+          result.status_message = "original hard constraint violation after certified velocity solve";
+          break;
+        }
+      }
+    }
+    return result;
+  }
   return solveHierarchicalLinearSystemEigen(
       objective_targets, {}, objective_jacobians,
       constraint_coefficients, min_bounds, max_bounds, solver_config,

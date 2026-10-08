@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.23.2] - 2026-10-02
+
+### Fixed
+
+- A consistent explicit zero or repeated task row is no longer a rank failure.
+  The ESNS loop saturates every bound violated by the full-scale step, so a
+  reachable task still finishes at scale 1 past the default 20-iteration cap.
+  A structurally singular Jacobian or an inconsistent extra row keeps the
+  original row-count stop. Inconsistent targets still scale, and hard bounds
+  stay in force.
+- The GPU native velocity solve, FI-PeSNS, and PPH-SNS use that same completion
+  for one consistent repeated row, including a pinned zero-width bound. Other
+  GPU tasks keep uniform bound scaling.
+
 ## [0.23.1] - 2026-09-25
 
 ### Fixed

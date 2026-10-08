@@ -22,6 +22,7 @@ try:
 except ImportError:
     ca = None
 
+from embodik.gpu.casadi_srinv import complete_consistent_redundant_velocity
 from embodik.gpu.casadi_srinv import srinv as _casadi_srinv
 
 # Match the public KinematicsSolver SRINV defaults. Its 1e-6 constraint
@@ -202,14 +203,14 @@ def build_fi_pesns_velocity_solve(
 
         projected_jacobian = jacobian @ projector
         jacobian_inverse = srinv(projected_jacobian, tol, damping)
-        prepared_tasks.append((task_idx, target, jacobian, jacobian_inverse))
+        prepared_tasks.append((task_idx, target, jacobian, jacobian_inverse, projector))
 
         projector = projector - jacobian_inverse @ projected_jacobian
         projector = ca.if_else(ca.fabs(projector) < tol, 0.0, projector)
 
     # Apply each hierarchical task exactly once, as in the CPU eSNS task pass.
     # Only feasibility penalties are fixed-iteration refinements.
-    for task_idx, target, jacobian, jacobian_inverse in prepared_tasks:
+    for task_idx, target, jacobian, jacobian_inverse, task_projector in prepared_tasks:
         residual = target - jacobian @ dq
         delta_dq = jacobian_inverse @ residual
 
@@ -219,9 +220,21 @@ def build_fi_pesns_velocity_solve(
         b = C @ dq  # Unscaled (current)
         scale = get_feasible_task_scale(a, b, lower, upper, n_constraints)
 
-        # Apply scaled delta
-        dq = dq + scale * delta_dq
-        task_scales[task_idx] = scale
+        # A consistent zero or repeated row is one task. Saturate every bound
+        # the full-scale step violates, then resolve the free joints. Every
+        # other task keeps this uniform scale.
+        completed, accepted = complete_consistent_redundant_velocity(
+            jacobian,
+            target,
+            dq,
+            delta_dq,
+            C,
+            lower,
+            upper,
+            projector=task_projector,
+        )
+        dq = accepted * completed + (1.0 - accepted) * (dq + scale * delta_dq)
+        task_scales[task_idx] = accepted + (1.0 - accepted) * scale
 
     # Fixed-iteration penalty loop. Only feasibility corrections evolve.
     for _ in range(k_max):

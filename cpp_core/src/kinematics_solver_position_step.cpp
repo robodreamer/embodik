@@ -4149,9 +4149,11 @@ PositionIKResult KinematicsSolver::solve_position_step(
             candidate_merits.size() != resolved.size()) {
           return false;
         }
+        constexpr double kPriorityMeritNumericalTolerance = 1e-9;
         for (int priority : protected_target_priorities) {
           for (int block = 0; block < 2; ++block) {
             double acceptable_total = 0.0;
+            double protected_tolerance_total = 0.0;
             double candidate_total = 0.0;
             bool saw_task = false;
             for (std::size_t index = 0; index < resolved.size(); ++index) {
@@ -4175,10 +4177,31 @@ PositionIKResult KinematicsSolver::solve_position_step(
               if (!std::isfinite(baseline) || !std::isfinite(candidate)) {
                 return false;
               }
+              // Certified ordinary velocity steps retain explicit per-target
+              // angular budgets even when same-priority tasks trade error.
+              // Merits already honor masks and commanded gains. Acceleration
+              // retains its separate priority policy; legacy callers are unchanged.
+              if (velocity_task_mode_certification_enabled_ &&
+                  !acceleration_limits_enabled_ && block == 1 &&
+                  has_configured_tolerance) {
+                const double per_target_limit = std::max(
+                    baseline,
+                    protected_tolerance + kPriorityMeritNumericalTolerance);
+                if (candidate > per_target_limit) {
+                  return false;
+                }
+              }
               acceptable_total += std::max(baseline, protected_tolerance);
+              protected_tolerance_total += protected_tolerance;
               candidate_total += candidate;
             }
-            if (saw_task && candidate_total > acceptable_total + 1e-9) {
+            // Numerical slack belongs to the configured budget, not to the
+            // previous candidate. Adding it to an already exceeded baseline
+            // would ratchet the permitted error upward on every control tick.
+            const double stable_acceptable_total = std::max(
+                acceptable_total,
+                protected_tolerance_total + kPriorityMeritNumericalTolerance);
+            if (saw_task && candidate_total > stable_acceptable_total) {
               return false;
             }
           }
@@ -4194,8 +4217,12 @@ PositionIKResult KinematicsSolver::solve_position_step(
         }
         const Eigen::VectorXd delta =
             pinocchio::difference(robot_->model(), q_before, q_after);
-        if (!delta.allFinite() ||
-            delta.squaredNorm() <= kCollisionEscapeNormEps) {
+        if (!delta.allFinite()) {
+          return 0.0;
+        }
+        // Even tiny nonzero steps can exceed or accumulate past a protected
+        // merit budget. Only exactly unchanged configurations skip validation.
+        if (delta.isZero(0.0)) {
           robot_->update_configuration(q_after);
           return 1.0;
         }

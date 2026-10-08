@@ -46,6 +46,7 @@ add_test(NAME test_kinematics_solver_header
 
 add_executable(test_hierarchical_linear_solver
     test_hierarchical_linear_solver.cpp
+    test_velocity_hard_row_certification.cpp
 )
 
 target_link_libraries(test_hierarchical_linear_solver

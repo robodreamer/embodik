@@ -276,6 +276,9 @@ Eigen::MatrixXd FrameTask::buildPhysicalJacobian() const {
 
 Eigen::MatrixXd FrameTask::getJacobian() const {
   if (!cache_valid_) {
+    // The validity flag covers both quantities. Refresh the error before
+    // marking it valid, including when callers request the Jacobian first.
+    (void)getError();
     jacobian_cache_ = apply_excluded_joint_columns(buildPhysicalJacobian());
     cache_valid_ = true;
   }

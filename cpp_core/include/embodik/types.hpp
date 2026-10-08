@@ -179,6 +179,8 @@ struct VelocitySolverConfig {
   double magnitude_limit = 1e10;
   unsigned int stall_detection_count = 2;
   RegularizedInverseConfig regularization_config{};
+  // Opt-in certification for explicit task modes; implicit legacy API is unchanged.
+  bool certify_explicit_task_modes = false;
 };
 
 struct ObjectiveSolveConfig {
@@ -198,6 +200,14 @@ struct ObjectiveSolveConfig {
 struct CollisionGeometryPair {
   std::string geometry_a;
   std::string geometry_b;
+};
+
+/** @brief Fresh signed distance and configured clearance for one active pair. */
+struct CollisionPairDistance {
+  std::string geometry_a;
+  std::string geometry_b;
+  double distance = 0.0;
+  double minimum_distance = 0.0;
 };
 
 /**

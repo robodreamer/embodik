@@ -225,3 +225,22 @@ result = solver.solve_position(seed_q, target, "end_effector", opts)
     options:
       show_root_heading: true
       show_root_toc_entry: true
+
+
+### Experimental explicit velocity task-mode certification
+
+CPU callers can opt in with
+`solver.enable_velocity_task_mode_certification(True)`. The default is disabled.
+For explicit task-mode configurations, it uses the generalized hierarchical
+solver's feasibility phase and checks successful results against the original
+hard constraint rows and original tolerance. MIN_ERROR may trade task error,
+but cannot report success while violating those hard rows. Infeasible hard
+problems remain infeasible; this option does not relax collision recovery rows.
+
+C++ low-level callers can set
+`VelocitySolverConfig::certify_explicit_task_modes`. Calls without explicit
+objective configurations retain the legacy velocity API, including when this
+flag is enabled. Soft rows retain their existing configured softening semantics.
+This option certifies the assembled linear velocity problem; final nonlinear
+position, collision and priority validation remain necessary. It does not
+establish that a particular robot marker goal is reachable or accepted.

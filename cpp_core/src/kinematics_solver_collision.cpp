@@ -230,6 +230,65 @@ KinematicsSolver::evaluate_collision_debug(const Eigen::VectorXd &current_q) {
 #endif
 }
 
+std::optional<std::vector<CollisionPairDistance>>
+KinematicsSolver::evaluate_collision_pair_distances(const Eigen::VectorXd &q) {
+  if (q.size() != robot_->nq() || !q.allFinite()) {
+    throw std::invalid_argument(
+        "Collision pair evaluation configuration must be finite full nq.");
+  }
+#ifdef PINOCCHIO_WITH_HPP_FCL
+  if (!robot_->has_collision_geometry() || !collision_constraint_.has_value() ||
+      !collision_constraint_->enabled) {
+    return std::nullopt;
+  }
+  const auto *collision_model =
+      static_cast<const RobotModel &>(*robot_).collision_model();
+  auto *collision_data = robot_->collision_data();
+  if (collision_model == nullptr || collision_data == nullptr) {
+    return std::nullopt;
+  }
+  // Diagnostics must not overwrite shared placements/results used by later
+  // solver collision certificates. Copy request/filter settings locally.
+  pinocchio::GeometryData query_data(*collision_data);
+  const ScopedRobotKinematicsRestore restore_robot_state(*robot_);
+  robot_->update_kinematics(q);
+  pinocchio::updateGeometryPlacements(robot_->model(), robot_->data(),
+                                      *collision_model, query_data);
+  std::vector<CollisionPairDistance> records;
+  const auto &pairs = collision_model->collisionPairs;
+  for (std::size_t pair_index = 0; pair_index < pairs.size(); ++pair_index) {
+    if ((!collision_data->activeCollisionPairs.empty() &&
+         !collision_data->activeCollisionPairs[pair_index]) ||
+        (!collision_allowed_pair_mask_.empty() &&
+         !collision_allowed_pair_mask_[pair_index])) {
+      continue;
+    }
+    const auto &pair = pairs[pair_index];
+    const auto &geometry_a = collision_model->geometryObjects[pair.first].name;
+    const auto &geometry_b = collision_model->geometryObjects[pair.second].name;
+    pinocchio::computeDistance(*collision_model, query_data, pair_index);
+    const double distance = query_data.distanceResults[pair_index].min_distance;
+    if (!std::isfinite(distance)) {
+      throw std::runtime_error("Nonfinite collision pair distance for " +
+                               geometry_a + " / " + geometry_b);
+    }
+    double minimum_distance = collision_constraint_->min_distance;
+    const auto override_iterator = per_pair_min_distance_overrides_.find(
+        canonical_pair_key(geometry_a, geometry_b));
+    if (override_iterator != per_pair_min_distance_overrides_.end()) {
+      minimum_distance = override_iterator->second;
+    }
+    records.push_back({geometry_a, geometry_b, distance, minimum_distance});
+  }
+  if (records.empty()) {
+    return std::nullopt;
+  }
+  return records;
+#else
+  return std::nullopt;
+#endif
+}
+
 std::optional<double>
 KinematicsSolver::evaluate_min_collision_distance(const Eigen::VectorXd &current_q) {
 #ifdef PINOCCHIO_WITH_HPP_FCL
