@@ -1668,6 +1668,7 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
 
   // Configure solver
   VelocitySolverConfig config;
+  config.certify_explicit_task_modes = velocity_task_mode_certification_enabled_;
   config.epsilon = constraint_tolerance_;
   config.precision_threshold = tight_tolerance_;
   config.iteration_limit = max_iterations_;
@@ -2359,6 +2360,22 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
     last_solution_dq_norm_ = 0.0;
   }
 
+  if (velocity_task_mode_certification_enabled_ &&
+      (result.status == SolverStatus::kSuccess ||
+       result.status == SolverStatus::kNoProgress) &&
+      result.joint_velocities.size() == robot_->nv()) {
+    const Eigen::VectorXd values = C * result.joint_velocities;
+    for (Eigen::Index row = 0; row < values.size(); ++row) {
+      if (max_softening_factors(row) <= 1.0 &&
+          (!std::isfinite(values(row)) ||
+           values(row) < c_lower(row) - constraint_tolerance_ ||
+           values(row) > c_upper(row) + constraint_tolerance_)) {
+        result.status = SolverStatus::kNumericalError;
+        result.status_message = "returned physical velocity violates original hard constraint rows";
+        break;
+      }
+    }
+  }
   stall_handler_update(result);
   elastic_band_update(result);
   update_auto_task_layout_feedback(result);

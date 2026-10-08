@@ -60,6 +60,11 @@ public:
    */
   explicit KinematicsSolver(std::shared_ptr<RobotModel> robot);
 
+  /// Opt in to phase-I feasibility and original-row certification for CPU task modes.
+  void enable_velocity_task_mode_certification(bool enabled) {
+    velocity_task_mode_certification_enabled_ = enabled;
+  }
+
   /**
    * @brief Add a frame tracking task
    * @param name Unique task name
@@ -1316,6 +1321,7 @@ public:
       double headroom_activation_margin = 0.01) const;
 
 private:
+  bool velocity_task_mode_certification_enabled_ = false;
   struct ContactFrameConfig {
     std::string frame_name;
     ContactType type = ContactType::kRigidContact;

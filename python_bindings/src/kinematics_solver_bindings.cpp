@@ -67,6 +67,10 @@ void bind_kinematics_solver(nb::module_ &m) {
       .def(nb::init<std::shared_ptr<RobotModel>>(), nb::arg("robot"),
            "Create a kinematics solver for the given robot model")
 
+      .def("enable_velocity_task_mode_certification",
+           &KinematicsSolver::enable_velocity_task_mode_certification,
+           nb::arg("enabled"), "Opt in to certified explicit CPU velocity task modes.")
+
       // Task management
       .def("add_frame_task", &KinematicsSolver::add_frame_task, nb::arg("name"),
            nb::arg("frame_name"), nb::arg("task_type") = TaskType::FRAME_POSE,

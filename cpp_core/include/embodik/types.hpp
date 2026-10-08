@@ -179,6 +179,8 @@ struct VelocitySolverConfig {
   double magnitude_limit = 1e10;
   unsigned int stall_detection_count = 2;
   RegularizedInverseConfig regularization_config{};
+  // Opt-in certification for explicit task modes; implicit legacy API is unchanged.
+  bool certify_explicit_task_modes = false;
 };
 
 struct ObjectiveSolveConfig {

@@ -2244,6 +2244,36 @@ inline SolverResult computeMultiObjectiveVelocitySolutionEigen(
     const VelocitySolverConfig &solver_config,
     const std::vector<ObjectiveSolveConfig> &objective_configs,
     const Eigen::VectorXd *max_constraint_softening_factors) {
+  if (solver_config.certify_explicit_task_modes && !objective_configs.empty()) {
+    std::vector<Eigen::VectorXd> zero_biases;
+    zero_biases.reserve(objective_targets.size());
+    for (const Eigen::VectorXd &target : objective_targets) {
+      zero_biases.push_back(Eigen::VectorXd::Zero(target.size()));
+    }
+    SolverResult result = solveHierarchicalLinearSystemEigen(
+        objective_targets, zero_biases, objective_jacobians,
+        constraint_coefficients, min_bounds, max_bounds, solver_config,
+        objective_configs, max_constraint_softening_factors);
+    if (result.status == SolverStatus::kSuccess ||
+        result.status == SolverStatus::kNoProgress) {
+      const Eigen::Map<const Eigen::VectorXd> solution(
+          result.solution.data(), result.solution.size());
+      const Eigen::VectorXd values = constraint_coefficients * solution;
+      for (Eigen::Index row = 0; row < values.size(); ++row) {
+        const bool hard_row = max_constraint_softening_factors == nullptr ||
+                              (*max_constraint_softening_factors)(row) <= 1.0;
+        if (hard_row &&
+            (!std::isfinite(values(row)) ||
+             values(row) < min_bounds(row) - solver_config.epsilon ||
+             values(row) > max_bounds(row) + solver_config.epsilon)) {
+          result.status = SolverStatus::kNumericalError;
+          result.status_message = "original hard constraint violation after certified velocity solve";
+          break;
+        }
+      }
+    }
+    return result;
+  }
   return solveHierarchicalLinearSystemEigen(
       objective_targets, {}, objective_jacobians,
       constraint_coefficients, min_bounds, max_bounds, solver_config,
