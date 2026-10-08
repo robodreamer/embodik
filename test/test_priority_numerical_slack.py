@@ -28,11 +28,7 @@ URDF = f'''<robot name="numerical_merit_budget">
 <link name="ee"/><joint name="offset" type="fixed"><parent link="wrist"/><child link="ee"/><origin xyz="{LEVER_LENGTH} 0 0"/></joint></robot>'''
 
 
-@pytest.mark.parametrize('mode', [
-    eik.TaskSolveMode.MIN_ERROR, eik.TaskSolveMode.SCALE, eik.TaskSolveMode.SCALE_ELASTIC,
-])
-@pytest.mark.parametrize('initial_error', [ORIENTATION_TOLERANCE, OUTSIDE_BUDGET_ERROR])
-def test_priority_numerical_allowance_does_not_ratchet(tmp_path, mode, initial_error):
+def run_merit_budget_steps(tmp_path, mode, initial_error, *, lock_translation=False):
     urdf_path = tmp_path / 'numerical_merit_budget.urdf'
     urdf_path.write_text(URDF)
     robot = eik.RobotModel(str(urdf_path), floating_base=False)
@@ -60,12 +56,23 @@ def test_priority_numerical_allowance_does_not_ratchet(tmp_path, mode, initial_e
     options = eik.PositionStepOptions()
     options.dt = STEP_DT
     options.max_steps = 1
+    if lock_translation:
+        options.locked_joint_indices = [0]
     options.primary_solve_mode = mode
     options.primary_allow_min_error_fallback = False
-    maximum_error = max(initial_error, ORIENTATION_TOLERANCE + NUMERICAL_MERIT_TOLERANCE)
     for _ in range(STEP_COUNT):
         result = solver.solve_position_step(configuration, [target, secondary_target], options)
         configuration = np.asarray(result.q_solution).copy()
+        yield result
+
+
+@pytest.mark.parametrize('mode', [
+    eik.TaskSolveMode.MIN_ERROR, eik.TaskSolveMode.SCALE, eik.TaskSolveMode.SCALE_ELASTIC,
+])
+@pytest.mark.parametrize('initial_error', [ORIENTATION_TOLERANCE, OUTSIDE_BUDGET_ERROR])
+def test_priority_numerical_allowance_does_not_ratchet(tmp_path, mode, initial_error):
+    maximum_error = max(initial_error, ORIENTATION_TOLERANCE + NUMERICAL_MERIT_TOLERANCE)
+    for result in run_merit_budget_steps(tmp_path, mode, initial_error):
         # Translation keeps the configuration step above the no-motion shortcut,
         # while the slow yaw hits the numerical allowance rather than a large
         # violation. Reusing it every tick was enough to break the fixed budget.

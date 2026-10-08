@@ -4203,8 +4203,12 @@ PositionIKResult KinematicsSolver::solve_position_step(
         }
         const Eigen::VectorXd delta =
             pinocchio::difference(robot_->model(), q_before, q_after);
-        if (!delta.allFinite() ||
-            delta.squaredNorm() <= kCollisionEscapeNormEps) {
+        if (!delta.allFinite()) {
+          return 0.0;
+        }
+        // Even tiny nonzero steps can exceed or accumulate past a protected
+        // merit budget. Only exactly unchanged configurations skip validation.
+        if (delta.isZero(0.0)) {
           robot_->update_configuration(q_after);
           return 1.0;
         }
