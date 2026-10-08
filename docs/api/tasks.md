@@ -251,3 +251,7 @@ This behavior is consistent with a diagonal selection/weighting matrix:
 ::: embodik.MultiJointTask
     options:
       show_root_heading: true
+
+`FrameTask.get_error()` and `get_jacobian()` can be read in either order after
+updating the task or changing its target, masks, or excluded joints; both caches
+reflect the updated task state.
