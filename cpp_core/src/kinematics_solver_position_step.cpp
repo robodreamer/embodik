@@ -4177,6 +4177,20 @@ PositionIKResult KinematicsSolver::solve_position_step(
               if (!std::isfinite(baseline) || !std::isfinite(candidate)) {
                 return false;
               }
+              // Certified ordinary velocity steps retain explicit per-target
+              // angular budgets even when same-priority tasks trade error.
+              // Merits already honor masks and commanded gains. Acceleration
+              // retains its separate priority policy; legacy callers are unchanged.
+              if (velocity_task_mode_certification_enabled_ &&
+                  !acceleration_limits_enabled_ && block == 1 &&
+                  has_configured_tolerance) {
+                const double per_target_limit = std::max(
+                    baseline,
+                    protected_tolerance + kPriorityMeritNumericalTolerance);
+                if (candidate > per_target_limit) {
+                  return false;
+                }
+              }
               acceptable_total += std::max(baseline, protected_tolerance);
               protected_tolerance_total += protected_tolerance;
               candidate_total += candidate;
