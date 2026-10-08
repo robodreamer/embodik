@@ -626,10 +626,14 @@ inline Eigen::MatrixXd ComputeRegularizedInverse(
     }
 
     if ((per_sv_damping > 0.0).any()) {
+      // A tall matrix's full U has more columns than singular values.
+      // Only the corresponding singular directions have damping entries.
+      const auto damped_left_singular_vectors =
+          left_singular_vectors.leftCols(sigma_values.size());
       regularized_gram.noalias() +=
-          left_singular_vectors *
+          damped_left_singular_vectors *
           per_sv_damping.matrix().asDiagonal() *
-          left_singular_vectors.transpose();
+          damped_left_singular_vectors.transpose();
     }
   }
 

@@ -1,5 +1,15 @@
 # Solver robustness and recovery
 
+## Rectangular singular-inverse damping
+
+The legacy inverse path retains full left singular vectors. For a tall matrix,
+per-singular-value damping uses only the columns corresponding to the singular
+values. Multiplying the full matrix by the shorter damping diagonal produces
+incompatible dimensions and can generate non-finite state in release builds.
+The correction preserves the other inverse branches and physical constraints.
+Regression coverage compares tall, wide, square and singular problems with an
+independent regularized-Gram result and repeats exact-limit fallback recovery.
+
 EmbodiK keeps **recovery policy in the C++ solver**, not in example-side guard code. The same
 `KinematicsSolver` that tracks your end-effector also decides how to unstick near joint limits,
 collision margins, and singular layouts — while still respecting hard constraints.
