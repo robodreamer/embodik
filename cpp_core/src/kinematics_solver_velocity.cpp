@@ -2040,7 +2040,7 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
     if (apply_limits && c_lower.size() >= robot_->nv() &&
         !use_contact_projection) {
       clamp_joint_velocity_solution_in_place(
-          candidate, c_lower, c_upper, use_position_limits_, robot_->nv());
+          candidate, c_lower, c_upper, false, robot_->nv());
       if (use_position_limits_) {
         const int n_dq = static_cast<int>(candidate.size());
         const int n_dens = static_cast<int>(dense_pos_lower_sp.size());
@@ -2292,7 +2292,7 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
                                      result.solution.size());
       // Velocity-box clamping (always applies to first nv rows).
       clamp_joint_velocity_solution_in_place(
-          dq, c_lower, c_upper, use_position_limits_, robot_->nv());
+          dq, c_lower, c_upper, false, robot_->nv());
       // Sparse position-limit clamping using dense per-joint bounds array.
       if (use_position_limits_) {
         const int n_dq = static_cast<int>(dq.size());
