@@ -559,10 +559,13 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
     }
   }
 
-  // Near a joint position limit, zero Jacobian entries that would command
-  // motion further into that limit. This avoids whole-task SNS scale collapse
-  // and preserves partial solutions through remaining DOFs.
-  if (apply_limits && use_position_limits_) {
+  // Preserve the legacy SNS heuristic unless explicit objectives are
+  // certified against physical hard rows. In the certified path the position
+  // bounds constrain joint velocity direction; clipping task Jacobian signs
+  // would also erase valid inward motion and distort the physical objective.
+  const bool certified_explicit_objectives =
+      velocity_task_mode_certification_enabled_ && !objective_configs.empty();
+  if (apply_limits && use_position_limits_ && !certified_explicit_objectives) {
     clamp_jacobians_near_joint_limits(jacobians, goals, objective_configs,
                                       velocity_to_config_index);
   }
