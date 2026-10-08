@@ -1779,7 +1779,7 @@ inline SolverResult solveHierarchicalLinearSystemEigen(
                     saturated_constraint_matrix * previous_null_space;
                 detail::ComputeGeneralizedInverse(
                     saturated_constraints_on_previous_space,
-                    solver_config.epsilon,
+                    active_constraint_rank_tolerance,
                     &inverse_saturated_constraints_projected);
                 constrained_projector.noalias() =
                     previous_null_space -
@@ -1794,7 +1794,7 @@ inline SolverResult solveHierarchicalLinearSystemEigen(
                       saturated_constraint_matrix * previous_null_space;
                   detail::ComputeGeneralizedInverse(
                       saturated_constraints_on_previous_space,
-                      solver_config.epsilon,
+                      active_constraint_rank_tolerance,
                       &inverse_saturated_constraints_projected);
                   constrained_projector.noalias() =
                       previous_null_space -

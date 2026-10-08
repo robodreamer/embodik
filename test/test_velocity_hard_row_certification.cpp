@@ -2,6 +2,7 @@
 #include <gtest/gtest.h>
 
 #include <array>
+#include <tuple>
 
 namespace embodik::test {
 namespace {
@@ -226,5 +227,69 @@ TEST_P(CertifiedNearlyParallelRows, FeasibleThinConeRetainsIndependentHardRows) 
 INSTANTIATE_TEST_SUITE_P(AllPolicies, CertifiedNearlyParallelRows,
     ::testing::Values(TaskSolveMode::kMinError, TaskSolveMode::kScale,
                       TaskSolveMode::kScaleElastic));
+} // namespace
+} // namespace embodik::test
+
+namespace embodik::test {
+namespace {
+constexpr int kCompletionDecisionColumns = 21;
+constexpr double kCompletionGoal = 1000.0;
+constexpr double kDependentTaskRowScale = 2.0;
+constexpr double kWellSeparatedCompletionCoupling = 1e-3;
+using CompletionCase = std::tuple<TaskSolveMode, double, bool, bool>;
+class CertifiedRedundantCompletion : public ::testing::TestWithParam<CompletionCase> {};
+
+TEST_P(CertifiedRedundantCompletion, NearParallelPinnedRowsRetainReachableScaledTask) {
+  const TaskSolveMode mode = std::get<0>(GetParam());
+  const double coupling = std::get<1>(GetParam());
+  const bool dependent_task_row = std::get<2>(GetParam());
+  const bool certified = std::get<3>(GetParam());
+  Eigen::MatrixXd objective = Eigen::MatrixXd::Ones(kDecisionColumns, kCompletionDecisionColumns);
+  const double redundant_row_scale = dependent_task_row ? kDependentTaskRowScale : 0.0;
+  objective.row(1) *= redundant_row_scale;
+  Eigen::VectorXd goal(kDecisionColumns);
+  goal << kCompletionGoal, redundant_row_scale * kCompletionGoal;
+  Eigen::MatrixXd rows = Eigen::MatrixXd::Identity(kCompletionDecisionColumns, kCompletionDecisionColumns);
+  rows.row(1).setZero();
+  rows(1, 0) = 1.0;
+  rows(1, 1) = coupling;
+  const Eigen::VectorXd lower = Eigen::VectorXd::Zero(kCompletionDecisionColumns);
+  Eigen::VectorXd upper = lower;
+  upper(kCompletionDecisionColumns - 1) = kDependentTaskRowScale * kCompletionGoal;
+  Eigen::VectorXd witness = lower;
+  witness(kCompletionDecisionColumns - 1) = kCompletionGoal;
+  ASSERT_TRUE(((rows * witness).array() >= lower.array()).all());
+  ASSERT_TRUE(((rows * witness).array() <= upper.array()).all());
+  ASSERT_LE((objective * witness - goal).norm(), kTolerance);
+  VelocitySolverConfig config;
+  config.certify_explicit_task_modes = certified;
+  config.epsilon = kTolerance;
+  config.precision_threshold = kActiveRankPrecision;
+  ObjectiveSolveConfig policy;
+  policy.solve_mode = mode;
+  policy.allow_min_error_fallback = false;
+  const SolverResult result = computeMultiObjectiveVelocitySolutionEigen(
+      {goal}, {objective}, rows, lower, upper, config, {policy});
+  ASSERT_EQ(result.status, SolverStatus::kSuccess) << result.status_message;
+  ASSERT_EQ(result.solution.size(), kCompletionDecisionColumns);
+  const Eigen::Map<const Eigen::VectorXd> velocity(result.solution.data(), kCompletionDecisionColumns);
+  // Freeze the existing default collapse for the narrow cone; the opt-in fix
+  // must not alter uncertified execution. Well-separated defaults still move.
+  const bool full_scale_expected = certified || coupling == kWellSeparatedCompletionCoupling;
+  const double expected_scale = full_scale_expected ? 1.0 : 0.0;
+  EXPECT_NEAR(result.task_scales.front(), expected_scale, kTolerance);
+  EXPECT_LE((objective * velocity - expected_scale * goal).norm(), kTolerance);
+  EXPECT_LE((velocity - expected_scale * witness).norm(), kTolerance);
+  for (int row = 0; row < kCompletionDecisionColumns; ++row) {
+    const double value = rows.row(row).dot(velocity);
+    EXPECT_LE(std::max(lower(row) - value, value - upper(row)) / rows.row(row).norm(),
+              kTolerance);
+  }
+}
+
+INSTANTIATE_TEST_SUITE_P(ScaledPolicies, CertifiedRedundantCompletion,
+    ::testing::Combine(::testing::Values(TaskSolveMode::kScale, TaskSolveMode::kScaleElastic),
+                       ::testing::Values(kNearlyParallelCoupling, kWellSeparatedCompletionCoupling),
+                       ::testing::Bool(), ::testing::Bool()));
 } // namespace
 } // namespace embodik::test
