@@ -6,10 +6,32 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from test_priority_velocity_orientation_guard import URDF
 
 import embodik as eik
 from embodik import _embodik_impl as native
+
+JOINT_POSITION_LIMIT = 1.0
+JOINT_VELOCITY_LIMIT = 1.0
+JOINT_EFFORT_LIMIT = 100.0
+LEVER_ARM = 1.0
+URDF = f"""<robot name="frame_cache_order">
+<link name="world"/><link name="slider"/>
+<joint name="slide" type="prismatic">
+  <parent link="world"/><child link="slider"/><axis xyz="0 1 0"/>
+  <limit lower="{-JOINT_POSITION_LIMIT}" upper="{JOINT_POSITION_LIMIT}"
+    effort="{JOINT_EFFORT_LIMIT}" velocity="{JOINT_VELOCITY_LIMIT}"/>
+</joint>
+<link name="wrist"/>
+<joint name="yaw" type="revolute">
+  <parent link="slider"/><child link="wrist"/><axis xyz="0 0 1"/>
+  <limit lower="{-JOINT_POSITION_LIMIT}" upper="{JOINT_POSITION_LIMIT}"
+    effort="{JOINT_EFFORT_LIMIT}" velocity="{JOINT_VELOCITY_LIMIT}"/>
+</joint>
+<link name="ee"/>
+<joint name="ee_fixed" type="fixed">
+  <parent link="wrist"/><child link="ee"/><origin xyz="{LEVER_ARM} 0 0"/>
+</joint>
+</robot>"""
 
 FRAME_NAME = "ee"
 INITIAL_CONFIGURATION = np.array([0.03, 0.1])
