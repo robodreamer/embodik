@@ -142,6 +142,7 @@ add_library(embodik_core SHARED
     cpp_core/src/kinematics_solver_velocity.cpp
     cpp_core/src/kinematics_solver_position_step.cpp
     cpp_core/src/pose_metrics.cpp
+    cpp_core/src/cartesian_corridor_recovery.cpp
     cpp_core/src/sphere_broadphase.cpp
 )
 
