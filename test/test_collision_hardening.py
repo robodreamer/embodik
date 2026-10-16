@@ -1043,7 +1043,12 @@ class TestViolatedSeedNeverReturnsCollisionViolated:
         q_sol = np.asarray(result.q_solution, dtype=float)
         sol_dist = panda_solver.evaluate_min_collision_distance(q_sol)
 
-        assert int(getattr(result, "stall_escape_count", 0)) > 0
+        # This seed's collision recovery rows exceed what its velocity box can
+        # realize. A direct escape must preserve those hard rows and hold the
+        # seed instead of bypassing them to manufacture recovery motion.
+        assert np.isfinite(q_sol).all()
+        np.testing.assert_allclose(q_sol, q0, atol=1e-12, rtol=0)
+        assert sol_dist >= seed_dist - 1e-8
         assert sol_dist < min_dist
         assert result.status != embodik.SolverStatus.SUCCESS
 

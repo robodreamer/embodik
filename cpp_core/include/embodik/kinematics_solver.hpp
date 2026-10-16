@@ -60,11 +60,6 @@ public:
    */
   explicit KinematicsSolver(std::shared_ptr<RobotModel> robot);
 
-  /// Opt in to phase-I feasibility and original-row certification for CPU task modes.
-  void enable_velocity_task_mode_certification(bool enabled) {
-    velocity_task_mode_certification_enabled_ = enabled;
-  }
-
   /**
    * @brief Add a frame tracking task
    * @param name Unique task name
@@ -345,11 +340,19 @@ public:
    */
   void enable_acceleration_limits(bool enable) {
     acceleration_limits_enabled_ = enable;
+    // Collision braking bounds change even when q and row dt are unchanged.
+    last_collision_constraint_result_.reset();
+    last_collision_constraint_row_dt_ =
+        std::numeric_limits<double>::quiet_NaN();
     if (enable) {
       previous_dq_ = Eigen::VectorXd::Zero(robot_->nv());
     } else {
       previous_dq_ = Eigen::VectorXd();
     }
+  }
+
+  bool get_acceleration_limits_enabled() const {
+    return acceleration_limits_enabled_;
   }
 
   /**
@@ -367,6 +370,9 @@ public:
       }
     }
     acceleration_limits_ = limits;
+    last_collision_constraint_result_.reset();
+    last_collision_constraint_row_dt_ =
+        std::numeric_limits<double>::quiet_NaN();
   }
 
   /**
@@ -497,6 +503,18 @@ public:
       throw std::invalid_argument(
           "joint_limit_non_worsening_margin must be finite and > 0 when "
           "joint_limit_non_worsening_enabled is true");
+    }
+    if (cfg.normalized_pose_recovery_enabled &&
+        (!std::isfinite(cfg.normalized_pose_position_tolerance) ||
+         cfg.normalized_pose_position_tolerance <= 0.0 ||
+         !std::isfinite(cfg.normalized_pose_orientation_tolerance) ||
+         cfg.normalized_pose_orientation_tolerance <= 0.0)) {
+      throw std::invalid_argument("normalized pose tolerances must be finite and positive");
+    }
+    if (cfg.normalized_pose_recovery_reference.size() != 0 &&
+        (cfg.normalized_pose_recovery_reference.size() != robot_->nq() ||
+         !cfg.normalized_pose_recovery_reference.allFinite())) {
+      throw std::invalid_argument("normalized recovery reference must be finite and size nq");
     }
     runtime_config_ = cfg;
     damping_ = cfg.damping;
@@ -1321,7 +1339,6 @@ public:
       double headroom_activation_margin = 0.01) const;
 
 private:
-  bool velocity_task_mode_certification_enabled_ = false;
   struct ContactFrameConfig {
     std::string frame_name;
     ContactType type = ContactType::kRigidContact;
@@ -1416,6 +1433,35 @@ private:
   /// the same frozen set the velocity solve used, so the collision debug list
   /// and the QP constraint slots agree on which pairs are controllable.
   std::vector<int> position_step_locked_indices_;
+  // Stack-owned by solve_position_step. Only stalled or failed position-step
+  // solves copy physical hard rows; speculative solves retain matching rows.
+  struct PositionStepHardConstraints {
+    bool valid = false;
+    Eigen::VectorXd q;
+    double dt = 0.0;
+    Eigen::MatrixXd matrix;
+    Eigen::VectorXd lower;
+    Eigen::VectorXd upper;
+  };
+  PositionStepHardConstraints *position_step_hard_constraints_ = nullptr;
+  /// Immutable outer-command corridor, independent of movable diagnostic captures.
+  /// Scalar configuration coordinates use the existing nv-to-nq mapping.
+  struct PositionStepSeedCorridor {
+    Eigen::VectorXd reference_q;
+    Eigen::VectorXd velocity_limits;
+    double outer_dt = 0.0;
+    std::vector<int> scalar_velocity_to_config;
+  };
+  const PositionStepSeedCorridor *position_step_seed_corridor_ = nullptr;
+  PositionStepSeedCorridor make_position_step_seed_corridor(
+      const Eigen::VectorXd &reference_q, double outer_dt) const;
+  bool position_step_seed_corridor_acceptable(const Eigen::VectorXd &q);
+  bool make_position_step_escape_candidate(
+      const Eigen::VectorXd &step_origin,
+      const Eigen::VectorXd &escape_origin,
+      const Eigen::VectorXd &proposed_delta, double integration_dt,
+      const Eigen::VectorXd &command_origin,
+      const PositionStepOptions &options, Eigen::VectorXd &candidate);
   /// Frozen nv-index set the collision code should honor: the inner velocity
   /// solve's pending set when active, otherwise the step-scoped set.
   const std::vector<int> &active_collision_lock_indices() const {
@@ -1469,14 +1515,27 @@ private:
   std::optional<int> position_step_merit_priority_;
   std::optional<std::vector<double>>
       position_step_stationary_anchor_blocks_;
+  std::optional<double> position_step_collision_best_merit_;
   double position_step_merit_window_motion_ = 0.0;
   int position_step_merit_window_samples_ = 0;
   std::optional<Eigen::VectorXd> position_step_merit_window_last_delta_;
   int position_step_merit_window_direction_reversals_ = 0;
   std::optional<std::vector<double>> position_step_merit_window_last_merits_;
   int position_step_merit_window_error_increases_ = 0;
-  bool position_step_stationary_guard_active_ = false;
-  bool position_step_stationary_guard_can_reopen_ = true;
+  // Command continuity has three valid states. A constrained all-block
+  // improvement or a changed command can reopen either holding state; only
+  // kReopenableHolding also accepts ordinary aggregate progress.
+  enum class PositionStepContinuityState {
+    kMonitoring,
+    kHolding,
+    kReopenableHolding,
+  };
+  PositionStepContinuityState position_step_continuity_state_ =
+      PositionStepContinuityState::kMonitoring;
+  // Keep an accepted physical-model recovery for the unchanged command;
+  // reverting to the failed local model can recreate its stall immediately.
+  bool position_step_physical_recovery_active_ = false;
+  std::vector<double> position_step_physical_recovery_anchor_blocks_;
   bool update_position_step_target_signature(
       PositionStepTargetSignature signature);
   void update_position_step_target_motion_blocks(
@@ -1554,7 +1613,9 @@ private:
       const Eigen::VectorXd &current_q,
       const Eigen::VectorXd &previous_applied_velocity,
       const PositionStepOptions &options, double outer_dt,
-      Eigen::VectorXd &q_candidate);
+      Eigen::VectorXd &q_candidate,
+      Eigen::VectorXd *intended_velocity_out = nullptr,
+      bool *outer_com_constraints_satisfied_out = nullptr);
 
   bool compute_position_step_continuity_brake(
       const Eigen::VectorXd &current_q,
@@ -1590,6 +1651,7 @@ private:
       std::vector<Eigen::MatrixXd> &jacobians,
       const std::vector<Eigen::VectorXd> &goals,
       const std::vector<ObjectiveSolveConfig> &objective_configs,
+      const std::vector<bool> &preserve_physical_jacobians,
       const std::vector<int> &velocity_to_config_index) const;
 
   struct CollisionConstraintConfig {
@@ -1734,6 +1796,9 @@ private:
 
   std::optional<ComConstraintConfig> com_constraint_;
   std::optional<ComConstraintResult> compute_com_constraint();
+  bool position_step_com_recovery_acceptable(
+      const Eigen::VectorXd &reference_q,
+      const Eigen::VectorXd &candidate_q);
 
   struct CentroidalMomentumBoundsConfig {
     bool enabled = false;
@@ -1944,7 +2009,7 @@ private:
 
   std::optional<CollisionConstraintResult> compute_collision_constraint();
   std::optional<CollisionConstraintResult>
-  compute_collision_constraint(double row_dt);
+  compute_collision_constraint(double row_dt, bool require_current_catalog = false);
   struct CollisionRecoveryDistances {
     double effective_min_distance = 0.0;
     double recovery_target = 0.0;
@@ -1974,6 +2039,9 @@ private:
     std::uint64_t failed_pair_model_index =
         std::numeric_limits<std::uint64_t>::max();
     std::string failed_pair_key;
+    double failed_sample_distance = std::numeric_limits<double>::quiet_NaN();
+    double failed_seed_distance = std::numeric_limits<double>::quiet_NaN();
+    double failed_required_distance = std::numeric_limits<double>::quiet_NaN();
   };
   CollisionSampleValidationResult validate_collision_samples(
       const Eigen::VectorXd &q_from,
@@ -2031,14 +2099,17 @@ private:
     std::optional<int> position_step_merit_priority;
     std::optional<std::vector<double>>
         position_step_stationary_anchor_blocks;
+    std::optional<double> position_step_collision_best_merit;
     double position_step_merit_window_motion = 0.0;
     int position_step_merit_window_samples = 0;
     std::optional<Eigen::VectorXd> position_step_merit_window_last_delta;
     int position_step_merit_window_direction_reversals = 0;
     std::optional<std::vector<double>> position_step_merit_window_last_merits;
     int position_step_merit_window_error_increases = 0;
-    bool position_step_stationary_guard_active = false;
-    bool position_step_stationary_guard_can_reopen = true;
+    PositionStepContinuityState position_step_continuity_state =
+        PositionStepContinuityState::kMonitoring;
+    bool position_step_physical_recovery_active = false;
+    std::vector<double> position_step_physical_recovery_anchor_blocks;
     StallHandlerConfig stall_config;
     StallHandlerState stall_state;
     bool stall_user_configured = false;

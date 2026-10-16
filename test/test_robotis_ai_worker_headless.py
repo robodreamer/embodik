@@ -40,6 +40,8 @@ from examples.example_helpers.common_bimanual_teleop_app import (  # noqa: E402
     _generate_consecutive_collision_exclusions,
     _is_left_arm_joint,
     _is_right_arm_joint,
+    _polygon_slack,
+    _shrink_polygon_2d,
 )
 from examples.example_helpers.ik_common import (  # noqa: E402
     configure_solver_runtime_policy,
@@ -201,6 +203,9 @@ def _run_limited_bimanual_pose_group_case(
             targets.extend(group.task_targets())
         result = solver.solve_position_step(q, targets, opts)
         q_next = np.asarray(result.q_solution, dtype=float)
+        assert np.isfinite(q_next).all()
+        assert np.all(q_next >= lower - 1e-8)
+        assert np.all(q_next <= upper + 1e-8)
         if float(np.linalg.norm(q_next - q)) > 1e-9:
             moved_frames += 1
         q = q_next
@@ -260,16 +265,19 @@ def test_ai_worker_auto_pose_layout_keeps_bimanual_case_productive() -> None:
     assert all(layout == embodik.TaskLayout.SPLIT for layout in split_layouts)
     assert auto_layouts[0] == embodik.TaskLayout.SPLIT
     assert all(layout == embodik.TaskLayout.SPLIT for layout in auto_layouts)
-    assert merged_statuses[-1] != embodik.SolverStatus.SUCCESS
     productive_terminal_statuses = {
         embodik.SolverStatus.SUCCESS,
         embodik.SolverStatus.NO_PROGRESS,
     }
+    assert merged_statuses[-1] in productive_terminal_statuses
     assert split_statuses[-1] in productive_terminal_statuses
     assert auto_statuses[-1] in productive_terminal_statuses
-    assert merged_moved < 15
+    # Bound release keeps the merged layout productive too. A successful
+    # scaled velocity does not imply this narrowly constrained pose is reached.
+    assert merged_moved >= 4
     assert split_moved >= 4
     assert auto_moved >= 4
+    assert merged_errors[-1] <= merged_errors[0] - 0.01
     assert split_errors[-1] <= split_errors[0] - 0.01
     assert auto_errors[-1] <= auto_errors[0] - 0.01
     assert split_errors[-1] <= merged_errors[-1]
@@ -1254,12 +1262,7 @@ def test_worker_far_ramp_holds_immediately_when_stationary_target_regresses() ->
     assert ramp_then_hold["tail_backsteps"] == 0, ramp_then_hold
 
 
-def _held_arm_drift_when_dragging_other(*, solve_mode, protect_held: bool = False) -> float:
-    """Hold the right tool target fixed while ramping the left tool through a
-    CoM-shifting reach; return the max drift (m) of the held right EEF.
-
-    When ``protect_held`` is set, the held (right) arm is given priority over the
-    moving (left) arm, mirroring the app's held-arm protection."""
+def _build_worker_bimanual_solver(*, solve_mode, protect_held: bool = False):
     robot, frames, collision_urdf = _load_worker_collision_robot()
     q = robot.neutral_configuration()
     robot.update_configuration(q)
@@ -1335,6 +1338,19 @@ def _held_arm_drift_when_dragging_other(*, solve_mode, protect_held: bool = Fals
             proximity_fraction=0.05,
         )
 
+    return robot, frames, solver, q
+
+
+def _held_arm_drift_when_dragging_other(*, solve_mode, protect_held: bool = False) -> float:
+    """Hold the right tool target fixed while ramping the left tool through a
+    CoM-shifting reach; return the max drift (m) of the held right EEF.
+
+    When ``protect_held`` is set, the held (right) arm is given priority over the
+    moving (left) arm, mirroring the app's held-arm protection."""
+    robot, frames, solver, q = _build_worker_bimanual_solver(
+        solve_mode=solve_mode, protect_held=protect_held
+    )
+
     left0 = _frame_pose_matrix(robot, frames["left_tool"])
     right0 = _frame_pose_matrix(robot, frames["right_tool"])
     left_start = left0[:3, 3].copy()
@@ -1366,6 +1382,90 @@ def _held_arm_drift_when_dragging_other(*, solve_mode, protect_held: bool = Fals
         )
         max_drift = max(max_drift, drift)
     return max_drift
+
+
+@pytest.mark.parametrize("control_dt", [0.02, 0.025])
+def test_worker_saved_feasible_pose_returns_without_reset(control_dt: float) -> None:
+    robot, frames, solver, witness_q = _build_worker_bimanual_solver(
+        solve_mode=embodik.TaskSolveMode.SCALE
+    )
+    saved_poses = [_frame_pose_matrix(robot, frames[name]) for name in ("right_tool", "left_tool")]
+    seed = {
+        "lift_joint": -0.13154975827795434,
+        "arm_l_joint1": -0.14468760052345694,
+        "arm_l_joint2": 0.0001,
+        "arm_l_joint3": -0.002525703334023091,
+        "arm_l_joint4": -0.28387037712790314,
+        "arm_l_joint5": 0.0019292672904734015,
+        "arm_l_joint6": 0.4306213729763197,
+        "arm_l_joint7": -0.0003745453104337952,
+        "arm_r_joint1": -0.07098083381505485,
+        "arm_r_joint2": -0.6014467224541249,
+        "arm_r_joint3": -1.4522341311894835,
+        "arm_r_joint4": 1.0785,
+        "arm_r_joint5": 1.5113134177397731,
+        "arm_r_joint6": -0.06566861982527816,
+        "arm_r_joint7": -0.5126794056359353,
+    }
+    assert set(seed) == set(robot.get_joint_names())
+    q = witness_q.copy()
+    for name, value in seed.items():
+        q[int(robot.get_joint_config_index(name))] = value
+    q_lower, q_upper = robot.get_joint_limits()
+    pairs = solver.evaluate_collision_pair_distances(q)
+    assert pairs
+    keys = [(p.geometry_a, p.geometry_b) for p in pairs]
+    floors = np.minimum([p.distance for p in pairs], [p.minimum_distance for p in pairs])
+    witness_pairs = solver.evaluate_collision_pair_distances(witness_q)
+    assert [(p.geometry_a, p.geometry_b) for p in witness_pairs] == keys
+    assert np.all(np.asarray([p.distance for p in witness_pairs]) >= floors - 1e-4)
+    assert np.all(witness_q >= q_lower) and np.all(witness_q <= q_upper)
+    polygon = _compute_support_polygon_from_contacts(robot, COMMON_BIMANUAL_SUPPORT_CONTACT_FRAMES)
+    inner = _shrink_polygon_2d(polygon, 0.10)
+
+    def com_slack(configuration: np.ndarray) -> float:
+        robot.update_configuration(configuration)
+        base = robot.get_frame_pose(frames["base"])
+        com = np.asarray(base.rotation).T @ (
+            np.asarray(robot.get_com_position()) - np.asarray(base.translation)
+        )
+        return float(_polygon_slack(inner, com[:2]).min())
+
+    assert com_slack(witness_q) >= -1e-4
+    com_floor = min(0.0, com_slack(q))
+    solver.dt = control_dt
+    options = embodik.PositionStepOptions()
+    options.max_steps = 1
+    targets = [
+        embodik.TaskTarget(name, pose, 12.0, 12.0)
+        for name, pose in zip(("right_tool_pose", "left_tool_pose"), saved_poses)
+    ]
+    first_motion = None
+    errors = []
+    for tick in range(round(2.0 / control_dt)):
+        before = q.copy()
+        result = solver.solve_position_step(q, targets, options)
+        q = np.asarray(result.q_solution).copy()
+        assert np.isfinite(q).all()
+        assert np.all(q >= q_lower - 1e-8) and np.all(q <= q_upper + 1e-8)
+        if first_motion is None and np.linalg.norm(robot.difference(before, q)) > 1e-8:
+            first_motion = tick + 1
+        observed = solver.evaluate_collision_pair_distances(q)
+        assert [(p.geometry_a, p.geometry_b) for p in observed] == keys
+        assert np.all(np.asarray([p.distance for p in observed]) >= floors - 1e-4)
+        assert com_slack(q) >= com_floor - 1e-4
+        errors = []
+        for name in ("right_tool_pose", "left_tool_pose"):
+            task = solver.get_task(name)
+            task.update(robot)
+            error = np.asarray(task.get_error())
+            errors.append((np.linalg.norm(error[:3]), np.linalg.norm(error[3:])))
+        if all(position <= 0.005 and orientation <= 0.01 for position, orientation in errors):
+            break
+    assert first_motion is not None and first_motion <= 5
+    assert all(
+        position <= 0.005 and orientation <= 0.01 for position, orientation in errors
+    ), errors
 
 
 def test_worker_held_arm_stays_put_in_scale_mode() -> None:

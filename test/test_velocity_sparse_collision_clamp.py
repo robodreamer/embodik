@@ -55,7 +55,6 @@ def _urdf():
 def _solve(
     tmp_path,
     position_limits,
-    certification=False,
     mode=eik.TaskSolveMode.MIN_ERROR,
     primary_velocity=RECOVERY_DIRECTION,
 ):
@@ -66,8 +65,6 @@ def _solve(
     solver.dt = STEP_DT
     solver.enable_velocity_limits(True)
     solver.enable_position_limits(position_limits)
-    if certification:
-        solver.enable_velocity_task_mode_certification(True)
     primary = solver.add_joint_task("primary", "slide_x")
     primary.priority = 0
     primary.solve_mode = mode

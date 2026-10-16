@@ -14,6 +14,50 @@ QUERY_DISPLACEMENT = 0.03
 INITIAL_VELOCITY = 0.1
 
 
+def test_query_reports_initialized_persistent_floor_without_seeding_it(pair_solver):
+    robot, solver = pair_solver
+    solver.configure_collision_constraint(min_distance=0.15)
+    solver.set_non_worsening_collision_floor_enabled(True)
+    solver.set_collision_structural_floor(0.01)
+    q = robot.get_current_configuration().copy()
+    for _ in range(2):
+        records = solver.evaluate_collision_pair_distances(q)
+        assert all(record.persistent_floor_m is None for record in records)
+    task = solver.add_frame_task("prime", "world", embodik.TaskType.FRAME_POSITION)
+    task.set_target_velocity(np.zeros(3))
+    result = solver.solve_velocity(q)
+    assert result.status == embodik.SolverStatus.SUCCESS
+    records = solver.evaluate_collision_pair_distances(q)
+    near = next(
+        record
+        for record in records
+        if {record.geometry_a, record.geometry_b} == {"near_0", "moving_0"}
+    )
+    assert near.persistent_floor_m == pytest.approx(0.01)
+    assert near.minimum_distance == pytest.approx(0.15)
+    # Observing a recovered state must not ratchet the initialized floor.
+    recovered = solver.evaluate_collision_pair_distances(np.array([0.1]))
+    near_recovered = next(
+        record
+        for record in recovered
+        if {record.geometry_a, record.geometry_b} == {"near_0", "moving_0"}
+    )
+    assert near_recovered.persistent_floor_m == pytest.approx(0.01)
+    np.testing.assert_array_equal(robot.get_current_configuration(), q)
+    solver.set_collision_pair_min_distance("near", "moving", 0.005, activate_when_clear=False)
+    lowered = solver.evaluate_collision_pair_distances(q)
+    near_lowered = next(
+        record
+        for record in lowered
+        if {record.geometry_a, record.geometry_b} == {"near_0", "moving_0"}
+    )
+    assert near_lowered.persistent_floor_m == pytest.approx(0.005)
+    solver.set_non_worsening_collision_floor_enabled(False)
+    assert all(
+        record.persistent_floor_m is None for record in solver.evaluate_collision_pair_distances(q)
+    )
+
+
 @pytest.fixture
 def pair_solver(tmp_path):
     urdf = tmp_path / "pair_query.urdf"

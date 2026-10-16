@@ -2,9 +2,12 @@
 #include <embodik/robot_model.hpp>
 #include <gtest/gtest.h>
 #include <pinocchio/algorithm/centroidal.hpp>
+#include <pinocchio/algorithm/center-of-mass.hpp>
 #include <pinocchio/algorithm/joint-configuration.hpp>
 
 #include <cmath>
+#include <algorithm>
+#include <array>
 #include <cstdio>
 #include <fstream>
 #include <string>
@@ -197,6 +200,59 @@ TEST(RobotModelCentroidalTest, FloatingBaseCentroidalQuantitiesMatchPinocchio) {
   RobotModel robot(urdf.path(), true);
   expect_centroidal_outputs(robot, floating_q(robot), floating_v(),
                             floating_a());
+}
+
+TEST(RobotModelCentroidalTest, ComGettersAreIndependentOfOrderAndVelocityScale) {
+  ScopedUrdf urdf("embodik_com_getter_order.urdf", asymmetric_centroidal_urdf());
+  for (bool floating : {false, true}) {
+    SCOPED_TRACE(floating);
+    RobotModel robot(urdf.path(), floating);
+    const Eigen::VectorXd q = floating ? floating_q(robot) : fixed_q();
+    const Eigen::VectorXd nominal_v = floating ? floating_v() : fixed_v();
+    for (double scale : {1.0, 1e-14, 0.0}) {
+      SCOPED_TRACE(scale);
+      const Eigen::VectorXd v = scale * nominal_v;
+      pinocchio::Data expected(robot.model());
+      pinocchio::centerOfMass(robot.model(), expected, q, v,
+                              Eigen::VectorXd::Zero(robot.nv()), false);
+      const Eigen::Vector3d position = expected.com[0];
+      const Eigen::Vector3d velocity = expected.vcom[0];
+      const Eigen::Vector3d bias = expected.acom[0];
+      const Eigen::MatrixXd jacobian =
+          pinocchio::jacobianCenterOfMass(robot.model(), expected, q, false);
+      EXPECT_TRUE(velocity.isApprox(jacobian * v, 1e-12));
+      if (scale > 0.0) {
+        ASSERT_GT(velocity.norm(), 0.0);
+      }
+      // Includes position -> velocity -> Jacobian -> bias, and every permutation.
+      std::array<int, 4> order{{0, 1, 2, 3}};
+      do {
+        // Seed a different cached velocity to expose stale-data reuse after an
+        // update, including the exact-zero and very small nonzero cases.
+        robot.update_kinematics(q, -nominal_v);
+        (void)robot.get_com_jacobian_bias();
+        robot.update_kinematics(q, v);
+        for (int getter : order) {
+          switch (getter) {
+          case 0:
+            EXPECT_TRUE(robot.get_com_position().isApprox(position, 1e-12));
+            break;
+          case 1:
+            EXPECT_TRUE(robot.get_com_velocity().isApprox(velocity, 1e-12));
+            break;
+          case 2:
+            EXPECT_TRUE(robot.get_com_jacobian().isApprox(jacobian, 1e-12));
+            break;
+          case 3:
+            EXPECT_TRUE(robot.get_com_jacobian_bias().isApprox(bias, 1e-12));
+            break;
+          }
+        }
+        // Jacobian/bias queries must not change the observable velocity either.
+        EXPECT_TRUE(robot.get_com_velocity().isApprox(velocity, 1e-12));
+      } while (std::next_permutation(order.begin(), order.end()));
+    }
+  }
 }
 
 TEST(RobotModelCentroidalTest, RejectsWrongSizeAndNonFiniteInputs) {

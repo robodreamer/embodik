@@ -25,4 +25,13 @@ So3LogCoordinateDifferential evaluate_so3_log_differential(
     const Eigen::Vector3d &right_angular_affine_bias,
     const Eigen::VectorXd &velocity);
 
+// Differentiate the log-coordinate rate under arbitrary configuration
+// perturbations. The two input matrices use the same perturbation columns;
+// angular quantities are expressed in the current frame (right trivialized).
+Eigen::MatrixXd evaluate_so3_log_rate_configuration_gradient(
+    const Eigen::Matrix3d &error_rotation,
+    const Eigen::MatrixXd &right_angular_jacobian,
+    const Eigen::Vector3d &right_angular_rate,
+    const Eigen::MatrixXd &right_angular_rate_configuration_gradient);
+
 } // namespace embodik::detail

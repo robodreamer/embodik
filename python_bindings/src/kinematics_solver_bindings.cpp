@@ -33,7 +33,8 @@ void bind_kinematics_solver(nb::module_ &m) {
       .def_ro("geometry_a", &CollisionPairDistance::geometry_a)
       .def_ro("geometry_b", &CollisionPairDistance::geometry_b)
       .def_ro("distance", &CollisionPairDistance::distance)
-      .def_ro("minimum_distance", &CollisionPairDistance::minimum_distance);
+      .def_ro("minimum_distance", &CollisionPairDistance::minimum_distance)
+      .def_ro("persistent_floor_m", &CollisionPairDistance::persistent_floor_m);
 
   nb::class_<KinematicsSolver::CollisionDebugInfo>(m, "CollisionDebugInfo")
       .def_prop_ro("object_a",
@@ -66,10 +67,6 @@ void bind_kinematics_solver(nb::module_ &m) {
       "High-level kinematics solver providing simple API for IK problems")
       .def(nb::init<std::shared_ptr<RobotModel>>(), nb::arg("robot"),
            "Create a kinematics solver for the given robot model")
-
-      .def("enable_velocity_task_mode_certification",
-           &KinematicsSolver::enable_velocity_task_mode_certification,
-           nb::arg("enabled"), "Opt in to certified explicit CPU velocity task modes.")
 
       // Task management
       .def("add_frame_task", &KinematicsSolver::add_frame_task, nb::arg("name"),
@@ -234,6 +231,10 @@ void bind_kinematics_solver(nb::module_ &m) {
       .def("enable_acceleration_limits",
            &KinematicsSolver::enable_acceleration_limits, nb::arg("enable"),
            "Enable or disable inter-tick acceleration limit constraints")
+
+      .def("get_acceleration_limits_enabled",
+           &KinematicsSolver::get_acceleration_limits_enabled,
+           "Return whether inter-tick acceleration limits are enabled")
 
       .def("set_acceleration_limits",
            &KinematicsSolver::set_acceleration_limits, nb::arg("limits"),
@@ -577,9 +578,9 @@ void bind_kinematics_solver(nb::module_ &m) {
            &KinematicsSolver::get_collision_recovery_scale)
       .def("set_non_worsening_collision_floor_enabled",
            &KinematicsSolver::set_non_worsening_collision_floor_enabled, nb::arg("enable"),
-           "Enable the per-pair non-worsening (ratcheting) collision recovery floor.  "
-           "When enabled, links that rest closer than min_distance are maintained "
-           "at their achievable distance instead of triggering an infeasible recovery.  "
+           "Enable the per-pair structural collision recovery floor.  "
+           "Pairs first seen below nominal clearance recover toward the configured "
+           "structural floor; that persistent floor does not ratchet upward as clearance improves.  "
            "Off by default on a new solver; the bimanual teleop app opts in.")
       .def("get_non_worsening_collision_floor_enabled",
            &KinematicsSolver::get_non_worsening_collision_floor_enabled)

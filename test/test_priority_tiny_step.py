@@ -14,9 +14,14 @@ from test_priority_numerical_slack import (
 import embodik as eik
 
 
-@pytest.mark.parametrize("mode", [
-    eik.TaskSolveMode.MIN_ERROR, eik.TaskSolveMode.SCALE, eik.TaskSolveMode.SCALE_ELASTIC,
-])
+@pytest.mark.parametrize(
+    "mode",
+    [
+        eik.TaskSolveMode.MIN_ERROR,
+        eik.TaskSolveMode.SCALE,
+        eik.TaskSolveMode.SCALE_ELASTIC,
+    ],
+)
 @pytest.mark.parametrize("initial_error", [ORIENTATION_TOLERANCE, OUTSIDE_BUDGET_ERROR])
 def test_tiny_step_cannot_bypass_priority_validation(tmp_path, mode, initial_error):
     maximum_error = max(initial_error, ORIENTATION_TOLERANCE + NUMERICAL_MERIT_TOLERANCE)

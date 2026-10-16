@@ -1021,7 +1021,9 @@ def test_reference_corridor_limits_total_displacement_from_seed():
         robot = eik.RobotModel(urdf_path, floating_base=False)
         solver = eik.KinematicsSolver(robot)
         solver.dt = 0.01
-        ee_task = solver.add_frame_task("ee_task", "ee")
+        # Joint 2 rotates at the tool origin, providing actual position-task
+        # nullspace. A full-pose hold has no free DOF in this two-joint model.
+        ee_task = solver.add_frame_task("ee_task", "ee", eik.TaskType.FRAME_POSITION)
         ee_task.priority = 0
         ee_task.weight = 1.0
         posture = solver.add_posture_task("posture")
@@ -1050,6 +1052,11 @@ def test_reference_corridor_limits_total_displacement_from_seed():
         corridor_cap = 0.1 * solver.dt + 1e-9
         assert np.max(dq_total_yes) <= corridor_cap
         assert np.max(dq_total_no) > np.max(dq_total_yes) + 1e-6
+        for result in (out_no_corridor, out_corridor):
+            robot.update_configuration(np.asarray(result.q_solution, dtype=float))
+            np.testing.assert_allclose(
+                robot.get_frame_pose("ee").translation, target[:3, 3], atol=1e-8
+            )
     finally:
         os.unlink(urdf_path)
 

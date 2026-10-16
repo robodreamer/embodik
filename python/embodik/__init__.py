@@ -209,6 +209,7 @@ __all__ = [
     "AccelerationCollisionRegime",
     "PositionIKOptions",
     "PositionIKResult",
+    "PositionStepCollisionCandidate",
     "get_solver_status_hint",
     # Python utilities
     "get_pose_error_vector",

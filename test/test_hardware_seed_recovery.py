@@ -1,7 +1,7 @@
 """Hardware-style seed recovery: joint-limit violations and self-collision.
 
 Documents current EmbodiK behavior when ``q`` starts slightly out of limits or in
-penetration/shallow contact. See ``docs/recovery_robustness.md``.
+penetration/shallow contact. See ``docs/solver_robustness.md``.
 """
 
 from __future__ import annotations

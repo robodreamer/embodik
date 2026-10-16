@@ -46,7 +46,10 @@ add_test(NAME test_kinematics_solver_header
 
 add_executable(test_hierarchical_linear_solver
     test_hierarchical_linear_solver.cpp
+    test_min_error_active_pin_release.cpp
     test_velocity_hard_row_certification.cpp
+    test_best_effort_lower_checkpoint.cpp
+    test_projected_inverse_cache.cpp
 )
 
 target_link_libraries(test_hierarchical_linear_solver
@@ -80,6 +83,8 @@ add_test(NAME test_acceleration_task_differential
 
 add_executable(test_velocity_collision_linearization
     test_velocity_collision_linearization.cpp
+    test_velocity_task_projection.cpp
+    test_collision_acceleration_cache.cpp
 )
 
 target_link_libraries(test_velocity_collision_linearization

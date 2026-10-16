@@ -60,6 +60,9 @@ struct VelocityCollisionSampleValidationResult {
   std::uint64_t failed_pair_model_index =
       std::numeric_limits<std::uint64_t>::max();
   std::string failed_pair_key;
+  double failed_sample_distance = std::numeric_limits<double>::quiet_NaN();
+  double failed_seed_distance = std::numeric_limits<double>::quiet_NaN();
+  double failed_required_distance = std::numeric_limits<double>::quiet_NaN();
 };
 
 class VelocityCollisionConstraintProvider {
@@ -136,6 +139,9 @@ public:
     out.failed_pair_catalog_index = validation.failed_pair_catalog_index;
     out.failed_pair_model_index = validation.failed_pair_model_index;
     out.failed_pair_key = validation.failed_pair_key;
+    out.failed_sample_distance = validation.failed_sample_distance;
+    out.failed_seed_distance = validation.failed_seed_distance;
+    out.failed_required_distance = validation.failed_required_distance;
     return out;
   }
 

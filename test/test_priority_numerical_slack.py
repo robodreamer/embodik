@@ -20,38 +20,44 @@ JOINT_LIMIT = 1.0
 JOINT_EFFORT = 100.0
 LEVER_LENGTH = 1.0
 OUTSIDE_BUDGET_ERROR = 2 * ORIENTATION_TOLERANCE
-URDF = f'''<robot name="numerical_merit_budget">
+URDF = f"""<robot name="numerical_merit_budget">
 <link name="world"/><link name="slider"/>
 <joint name="slide" type="prismatic"><parent link="world"/><child link="slider"/><axis xyz="0 1 0"/><limit lower="{-JOINT_LIMIT}" upper="{JOINT_LIMIT}" effort="{JOINT_EFFORT}" velocity="{SLIDER_SPEED}"/></joint>
 <link name="wrist"/>
 <joint name="yaw" type="revolute"><parent link="slider"/><child link="wrist"/><axis xyz="0 0 1"/><limit lower="{-JOINT_LIMIT}" upper="{JOINT_LIMIT}" effort="{JOINT_EFFORT}" velocity="{YAW_SPEED}"/></joint>
-<link name="ee"/><joint name="offset" type="fixed"><parent link="wrist"/><child link="ee"/><origin xyz="{LEVER_LENGTH} 0 0"/></joint></robot>'''
+<link name="ee"/><joint name="offset" type="fixed"><parent link="wrist"/><child link="ee"/><origin xyz="{LEVER_LENGTH} 0 0"/></joint></robot>"""
 
 
 def run_merit_budget_steps(tmp_path, mode, initial_error, *, lock_translation=False):
-    urdf_path = tmp_path / 'numerical_merit_budget.urdf'
+    urdf_path = tmp_path / "numerical_merit_budget.urdf"
     urdf_path.write_text(URDF)
     robot = eik.RobotModel(str(urdf_path), floating_base=False)
     solver = eik.KinematicsSolver(robot)
     solver.dt = STEP_DT
     solver.enable_position_limits(True)
     solver.enable_velocity_limits(True)
-    primary = solver.add_frame_task('primary', 'ee')
+    primary = solver.add_frame_task("primary", "ee")
     primary.priority = 0
-    secondary = solver.add_frame_task('secondary', 'world')
+    secondary = solver.add_frame_task("secondary", "world")
     secondary.priority = 1
     configuration = np.zeros(robot.nv)
     robot.update_configuration(configuration)
-    pose = robot.get_frame_pose('ee')
+    pose = robot.get_frame_pose("ee")
     target = eik.TaskTarget.from_se3(
-        'primary', eik.SE3(
+        "primary",
+        eik.SE3(
             rotation=Rotation.from_rotvec([0.0, 0.0, -initial_error]).as_matrix(),
             translation=np.asarray(pose.translation) + np.array([0.0, GOAL_DISTANCE, 0.0]),
-        ), 1.0, 1.0,
+        ),
+        1.0,
+        1.0,
     )
     target.priority_orientation_tolerance = ORIENTATION_TOLERANCE
     secondary_target = eik.TaskTarget.from_se3(
-        'secondary', robot.get_frame_pose('world'), 1.0, 1.0,
+        "secondary",
+        robot.get_frame_pose("world"),
+        1.0,
+        1.0,
     )
     options = eik.PositionStepOptions()
     options.dt = STEP_DT
@@ -66,10 +72,15 @@ def run_merit_budget_steps(tmp_path, mode, initial_error, *, lock_translation=Fa
         yield result
 
 
-@pytest.mark.parametrize('mode', [
-    eik.TaskSolveMode.MIN_ERROR, eik.TaskSolveMode.SCALE, eik.TaskSolveMode.SCALE_ELASTIC,
-])
-@pytest.mark.parametrize('initial_error', [ORIENTATION_TOLERANCE, OUTSIDE_BUDGET_ERROR])
+@pytest.mark.parametrize(
+    "mode",
+    [
+        eik.TaskSolveMode.MIN_ERROR,
+        eik.TaskSolveMode.SCALE,
+        eik.TaskSolveMode.SCALE_ELASTIC,
+    ],
+)
+@pytest.mark.parametrize("initial_error", [ORIENTATION_TOLERANCE, OUTSIDE_BUDGET_ERROR])
 def test_priority_numerical_allowance_does_not_ratchet(tmp_path, mode, initial_error):
     maximum_error = max(initial_error, ORIENTATION_TOLERANCE + NUMERICAL_MERIT_TOLERANCE)
     for result in run_merit_budget_steps(tmp_path, mode, initial_error):

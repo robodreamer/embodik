@@ -4,6 +4,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from support_scale_cases import ScaleCase, cases_for
 
 import embodik as eik
 from examples.harnesses.joint_limit_recovery_harness import (
@@ -160,20 +161,74 @@ def test_consistent_redundant_row_terminates_past_default_iteration_limit(
     assert np.all(velocity <= upper + 1e-8)
 
 
+def _solve_box(matrix: np.ndarray, target: np.ndarray, lower: np.ndarray, upper: np.ndarray):
+    matrix = np.atleast_2d(np.asarray(matrix, dtype=float))
+    result = eik.computeMultiObjectiveVelocitySolutionEigen(
+        [np.asarray(target, dtype=float).ravel()],
+        [np.asfortranarray(matrix)],
+        np.eye(matrix.shape[1]),
+        np.asarray(lower, dtype=float).ravel(),
+        np.asarray(upper, dtype=float).ravel(),
+    )
+    return result, np.asarray(result.solution)
+
+
+def _assert_scale(matrix, target, lower, upper, expected_scale: float, velocity_atol: float = 1e-6):
+    matrix = np.atleast_2d(np.asarray(matrix, dtype=float))
+    target = np.asarray(target, dtype=float).ravel()
+    result, velocity = _solve_box(matrix, target, lower, upper)
+    assert result.status == eik.SolverStatus.SUCCESS
+    np.testing.assert_allclose(result.task_scales[0], expected_scale, atol=1e-6)
+    np.testing.assert_allclose(matrix @ velocity, expected_scale * target, atol=velocity_atol)
+    assert np.all(velocity >= np.asarray(lower) - 1e-6)
+    assert np.all(velocity <= np.asarray(upper) + 1e-6)
+    return velocity
+
+
 def test_inconsistent_redundant_row_scales_instead_of_rank_error() -> None:
     matrix = np.array([[1.0, 1.0], [2.0, 2.0]])
     target = np.array([1.0, 2.01])
     lower, upper = np.array([-2.0, -2.0]), np.array([2.0, 0.0])
-    result = eik.computeMultiObjectiveVelocitySolutionEigen(
-        [target],
-        [matrix],
-        np.eye(2),
-        lower,
-        upper,
-    )
-    velocity = np.asarray(result.solution)
+    result, velocity = _solve_box(matrix, target, lower, upper)
     assert result.status == eik.SolverStatus.SUCCESS
     np.testing.assert_allclose(result.task_scales[0], 0.0, atol=1e-8)
     np.testing.assert_allclose(matrix @ velocity, 0.0, atol=1e-8)
     assert np.all(velocity >= lower - 1e-8)
     assert np.all(velocity <= upper + 1e-8)
+
+
+@pytest.mark.parametrize("case", cases_for("cpu"), ids=lambda case: case.name)
+def test_box_scale_matches_the_numerical_contract(case: ScaleCase) -> None:
+    """Every named box problem keeps its scale, direction, and hard bounds."""
+
+    velocity = _assert_scale(
+        case.matrix,
+        case.target,
+        case.lower,
+        case.upper,
+        case.scale,
+        velocity_atol=max(case.velocity_atol, case.scale_atol),
+    )
+    np.testing.assert_allclose(np.asarray(velocity).ravel(), case.velocity, atol=case.velocity_atol)
+
+
+@pytest.mark.parametrize(
+    "case",
+    [case for case in cases_for("cpu") if case.optimal],
+    ids=lambda case: case.name,
+)
+def test_optimal_box_scale_matches_linear_program(case: ScaleCase) -> None:
+    """Cases marked optimal report the largest scale that the box allows."""
+
+    from scipy.optimize import linprog
+
+    columns = case.matrix.shape[1]
+    reference = linprog(
+        np.r_[np.zeros(columns), -1.0],
+        A_eq=np.column_stack((case.matrix, -case.target)),
+        b_eq=np.zeros(case.matrix.shape[0]),
+        bounds=[*zip(case.lower, case.upper, strict=True), (0.0, 1.0)],
+        method="highs",
+    )
+    assert reference.success
+    np.testing.assert_allclose(reference.x[-1], case.scale, atol=1e-6)

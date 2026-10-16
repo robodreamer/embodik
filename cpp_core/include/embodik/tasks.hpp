@@ -344,6 +344,12 @@ private:
     std::string frame_name_;
     TaskType task_type_;
 
+    friend class KinematicsSolver;
+    bool hasConfiguredReference() const {
+        return target_velocity_.has_value() || target_position_.has_value() ||
+               target_orientation_.has_value();
+    }
+
     // Target values
     std::optional<Eigen::Vector3d> target_position_;
     std::optional<Eigen::Matrix3d> target_orientation_;

@@ -4,6 +4,7 @@
  */
 
 #include "kinematics_solver_internal.hpp"
+#include <cstdlib>
 
 namespace embodik {
 
@@ -168,6 +169,7 @@ void KinematicsSolver::clamp_jacobians_near_joint_limits(
     std::vector<Eigen::MatrixXd> &jacobians,
     const std::vector<Eigen::VectorXd> &goals,
     const std::vector<ObjectiveSolveConfig> &objective_configs,
+    const std::vector<bool> &preserve_physical_jacobians,
     const std::vector<int> &velocity_to_config_index) const {
   constexpr double kJointLimitClampMargin = 5e-4;
   const int nv_clamp = robot_->nv();
@@ -209,6 +211,14 @@ void KinematicsSolver::clamp_jacobians_near_joint_limits(
     for (size_t objective_index = 0; objective_index < jacobians.size();
          ++objective_index) {
       auto &J = jacobians[objective_index];
+      // Preserved frame objectives retain the physical motion model. Removing
+      // a column based on its gradient can also remove an inward nullspace
+      // direction needed to leave a singular boundary configuration. The
+      // position-derived velocity bounds enforce the allowed joint motion.
+      if (objective_index < preserve_physical_jacobians.size() &&
+          preserve_physical_jacobians[objective_index]) {
+        continue;
+      }
       if (J.cols() != nv_clamp || J.rows() <= 0) {
         continue;
       }
@@ -260,6 +270,9 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
   };
 
   VelocitySolverResult result;
+  if (position_step_hard_constraints_ != nullptr) {
+    position_step_hard_constraints_->valid = false;
+  }
   select_auto_task_layout();
   struct ClearPendingVelocityLocks {
     KinematicsSolver *solver;
@@ -402,11 +415,30 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
   std::vector<bool> project_elastic_collision_recovery_objective;
   project_elastic_collision_recovery_objective.reserve(tasks_.size());
   int active_task_count = 0;
+  std::vector<bool> preserve_physical_jacobians;
+  preserve_physical_jacobians.reserve(tasks_.size());
 
   int current_priority = std::numeric_limits<int>::min();
   auto &group_tasks = scratch_group_tasks_;
   group_tasks.clear();
   group_tasks.reserve(tasks_.size());
+
+  auto velocity_task_jacobian = [&](const std::shared_ptr<Task> &task,
+                                    const Eigen::VectorXd &goal) {
+    Eigen::MatrixXd jacobian = task->getJacobian();
+    const auto *frame = dynamic_cast<const FrameTask *>(task.get());
+    const bool unconfigured_frame = frame && !frame->hasConfiguredReference();
+    const bool inactive_conditioning =
+        dynamic_cast<const ManipulabilityTask *>(task.get()) != nullptr &&
+        !task->target_velocity_.has_value() &&
+        goal.template lpNorm<1>() < tight_tolerance_;
+    if (unconfigured_frame || inactive_conditioning) {
+      // An unused frame or a stationary conditioning gradient is not a
+      // commanded hold. Retain the row layout without consuming nullspace.
+      jacobian.setZero();
+    }
+    return jacobian;
+  };
 
   auto flush_group = [&]() {
     if (group_tasks.empty()) {
@@ -416,6 +448,8 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
     bool all_scale_family = true;
     bool all_strict_scale = true;
     bool all_min_error = true;
+    bool all_frame_components = true;
+    const bool direct_velocity_solve = !pending_step_validation_dt_.has_value();
     bool fallback_value = group_tasks.front()->getAllowMinErrorFallback();
     bool fallback_consistent = true;
     bool use_goal_directed_limit_clamp = false;
@@ -426,6 +460,13 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
           (mode == TaskSolveMode::kScale || mode == TaskSolveMode::kScaleElastic);
       all_strict_scale = all_strict_scale && mode == TaskSolveMode::kScale;
       all_min_error = all_min_error && (mode == TaskSolveMode::kMinError);
+      all_frame_components = all_frame_components &&
+          (task->getType() == TaskType::FRAME_POSITION ||
+           task->getType() == TaskType::FRAME_ORIENTATION ||
+           (task->getType() == TaskType::FRAME_POSE &&
+            (direct_velocity_solve || acceleration_limits_enabled_)) ||
+           (direct_velocity_solve &&
+            dynamic_cast<const PostureTask *>(task.get()) != nullptr));
       fallback_consistent =
           fallback_consistent &&
           (task->getAllowMinErrorFallback() == fallback_value);
@@ -447,7 +488,7 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
       int offset = 0;
       for (const auto &task : group_tasks) {
         Eigen::VectorXd g = task->getVelocity();
-        Eigen::MatrixXd J = task->getJacobian();
+        Eigen::MatrixXd J = velocity_task_jacobian(task, g);
         if (g.rows() > 0) {
           combined_goal.segment(offset, g.rows()) = g;
           combined_jac.block(offset, 0, J.rows(), robot_->nv()) = J;
@@ -455,6 +496,7 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
         }
       }
       goals.push_back(std::move(combined_goal));
+      preserve_physical_jacobians.push_back(all_frame_components);
       jacobians.push_back(std::move(combined_jac));
       objective_configs.push_back(ObjectiveSolveConfig{
           current_priority,
@@ -469,7 +511,14 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
     } else {
       for (const auto &task : group_tasks) {
         goals.push_back(task->getVelocity());
-        jacobians.push_back(task->getJacobian());
+        preserve_physical_jacobians.push_back(
+            task->getType() == TaskType::FRAME_POSITION ||
+            task->getType() == TaskType::FRAME_ORIENTATION ||
+            (task->getType() == TaskType::FRAME_POSE &&
+             (direct_velocity_solve || acceleration_limits_enabled_)) ||
+            (direct_velocity_solve &&
+             dynamic_cast<const PostureTask *>(task.get()) != nullptr));
+        jacobians.push_back(velocity_task_jacobian(task, goals.back()));
         // SCALE_ELASTIC is treated as SCALE in the SNS solver;
         // the elastic band mechanism handles the limit expansion.
         const auto effective_mode =
@@ -559,15 +608,67 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
     }
   }
 
-  // Preserve the legacy SNS heuristic unless explicit objectives are
-  // certified against physical hard rows. In the certified path the position
-  // bounds constrain joint velocity direction; clipping task Jacobian signs
-  // would also erase valid inward motion and distort the physical objective.
-  const bool certified_explicit_objectives =
-      velocity_task_mode_certification_enabled_ && !objective_configs.empty();
-  if (apply_limits && use_position_limits_ && !certified_explicit_objectives) {
+  const Eigen::MatrixXd physical_primary_jacobian =
+      jacobians.empty() ? Eigen::MatrixXd{} : jacobians.front();
+  // A held position command may need a different, model-consistent local
+  // realization. Capture its physical task before proximity/tangent edits.
+  Eigen::MatrixXd recovery_jacobian;
+  Eigen::VectorXd recovery_goal;
+  std::vector<std::shared_ptr<Task>> recovery_tasks;
+  bool recovery_has_full_pose = false;
+  if (pending_step_validation_dt_.has_value() && !goals.empty() &&
+      !acceleration_limits_enabled_ && !use_contact_projection &&
+      robot_->nq() == robot_->nv() &&
+      !has_active_velocity_centroidal_hard_constraints() &&
+      objective_configs.front().solve_mode == TaskSolveMode::kScale) {
+    const int priority = objective_configs.front().priority;
+    bool pose_only = true;
+    for (const auto &task : tasks_) {
+      if (!task->isActive() || task->getPriority() != priority) {
+        continue;
+      }
+      const auto type = task->getType();
+      recovery_has_full_pose = recovery_has_full_pose || type == TaskType::FRAME_POSE;
+      pose_only = pose_only && (type == TaskType::FRAME_POSE ||
+                                type == TaskType::FRAME_POSITION ||
+                                type == TaskType::FRAME_ORIENTATION);
+      recovery_tasks.push_back(task);
+    }
+    if (pose_only && !recovery_tasks.empty()) {
+      recovery_jacobian = jacobians.front();
+      recovery_goal = goals.front();
+      recovery_tasks.clear();
+      for (const auto &task : tasks_) {
+        const auto type = task->getType();
+        if (task->isActive() &&
+            (type == TaskType::FRAME_POSE || type == TaskType::FRAME_POSITION ||
+             type == TaskType::FRAME_ORIENTATION)) {
+          recovery_tasks.push_back(task);
+        }
+      }
+    }
+  }
+
+  const bool min_error_integration_box =
+      apply_limits && use_position_limits_ && !objective_configs.empty() &&
+      objective_configs.front().solve_mode == TaskSolveMode::kMinError &&
+      pending_step_validation_dt_.has_value() &&
+      std::isfinite(*pending_step_validation_dt_) &&
+      *pending_step_validation_dt_ > 0.0;
+  const bool acceleration_position_integration_box =
+      apply_limits && use_position_limits_ && acceleration_limits_enabled_ &&
+      pending_step_validation_dt_.has_value() &&
+      std::isfinite(*pending_step_validation_dt_) &&
+      *pending_step_validation_dt_ > 0.0;
+  if (min_error_integration_box && !preserve_physical_jacobians.empty()) {
+    // The primary residual must use its physical motion model when the actual
+    // integration box enforces the permitted joint directions.
+    preserve_physical_jacobians.front() = true;
+  }
+  if (apply_limits && use_position_limits_) {
     clamp_jacobians_near_joint_limits(jacobians, goals, objective_configs,
-                                      velocity_to_config_index);
+                                    preserve_physical_jacobians,
+                                    velocity_to_config_index);
   }
 
   // If no active tasks, return early
@@ -654,7 +755,7 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
   // unconstrained velocity would violate an active collision row. The projected
   // goal is recomputed from the achievable tangent velocity, so SCALE does not
   // collapse on an objective component that was intentionally removed. A task
-  // that already satisfies the separating lower bound is left unchanged.
+  // that already satisfies every separating lower bound is left unchanged.
   bool collision_projection_applied = false;
   if (apply_limits && collision_constraint_result.has_value()) {
     const auto &coll = collision_constraint_result.value();
@@ -1191,6 +1292,62 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
     num_constraints += static_cast<int>(sparse_pos_limits.size());
   }
 
+  Eigen::VectorXd true_integration_lower;
+  Eigen::VectorXd true_integration_upper;
+  std::vector<int> true_integration_indices;
+  if (acceleration_position_integration_box) {
+    if (acceleration_limits_.size() != robot_->nv()) {
+      result.status = SolverStatus::kInvalidInput;
+      result.status_message =
+          "position integration requires configured acceleration limits";
+      return result;
+    }
+    const auto [q_min, q_max] = robot_->get_joint_limits();
+    const Eigen::VectorXd velocity_limits = robot_->get_velocity_limits();
+    const auto &model = robot_->model();
+    const double horizon = *pending_step_validation_dt_;
+    true_integration_lower = Eigen::VectorXd::Constant(
+        robot_->nv(), -kUnboundedConstraintLimit);
+    true_integration_upper = Eigen::VectorXd::Constant(
+        robot_->nv(), kUnboundedConstraintLimit);
+    // Only scalar joints have additive q += dt*v integration. Quaternion and
+    // floating-base coordinates must not be treated as scalar joint bounds.
+    for (pinocchio::JointIndex joint = 1; joint < model.joints.size(); ++joint) {
+      if (model.nqs[joint] != 1 || model.nvs[joint] != 1) {
+        continue;
+      }
+      const int qi = model.idx_qs[joint];
+      const int vi = model.idx_vs[joint];
+      if (!std::isfinite(q_min[qi]) || !std::isfinite(q_max[qi])) {
+        continue;
+      }
+      true_integration_lower[vi] = std::max(
+          -kUnboundedConstraintLimit, (q_min[qi] - q_eval[qi]) / horizon);
+      true_integration_upper[vi] = std::min(
+          kUnboundedConstraintLimit, (q_max[qi] - q_eval[qi]) / horizon);
+      // Match the existing outer realization's inset/stopping policy before
+      // solving, so its later scalar limiter cannot change the task image.
+      constexpr double kOuterPositionMargin = 1e-4;
+      const double velocity_limit =
+          vi < velocity_limits.size() && std::isfinite(velocity_limits[vi]) &&
+                  velocity_limits[vi] > 0.0
+              ? velocity_limits[vi] : kUnboundedConstraintLimit;
+      const auto [viability_lower, viability_upper] =
+          calculate_velocity_box_constraint(
+              q_eval[qi] - q_min[qi] - kOuterPositionMargin,
+              q_max[qi] - q_eval[qi] - kOuterPositionMargin, velocity_limit,
+              acceleration_limits_[vi], horizon, 0.0, 0.0);
+      true_integration_lower[vi] =
+          std::max(true_integration_lower[vi], viability_lower);
+      true_integration_upper[vi] =
+          std::min(true_integration_upper[vi], viability_upper);
+      true_integration_indices.push_back(vi);
+    }
+    if (use_contact_projection) {
+      num_constraints += static_cast<int>(true_integration_indices.size());
+    }
+  }
+
   if (use_contact_projection &&
       joint_limit_non_worsening_result.has_value()) {
     num_constraints += static_cast<int>(
@@ -1293,6 +1450,65 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
       c_lower(constraint_idx + idx) = 0.0;
       c_upper(constraint_idx + idx) = 0.0;
     }
+  }
+  if (position_step_seed_corridor_ != nullptr) {
+    const auto &corridor = *position_step_seed_corridor_;
+    if (!pending_step_validation_dt_.has_value() ||
+        !std::isfinite(*pending_step_validation_dt_) ||
+        *pending_step_validation_dt_ <= 0.0) {
+      result.status = SolverStatus::kInvalidInput;
+      result.status_message = "seed corridor requires an actual integration interval";
+      result.joint_velocities = Eigen::VectorXd::Zero(robot_->nv());
+      result.solution.assign(static_cast<std::size_t>(robot_->nv()), 0.0);
+      return result;
+    }
+    tighten_bounds_with_reference_corridor(
+        c_lower, c_upper, corridor.reference_q, q_eval,
+        corridor.velocity_limits, corridor.outer_dt,
+        *pending_step_validation_dt_, corridor.scalar_velocity_to_config,
+        robot_->nv());
+    // Do not let legacy input sanitization midpoint-collapse a contradictory
+    // intersection outside the original physical velocity box.
+    if ((c_lower.head(robot_->nv()).array() >
+         c_upper.head(robot_->nv()).array()).any()) {
+      result.status = SolverStatus::kInfeasible;
+      result.status_message = "seed corridor conflicts with the physical velocity box";
+      result.joint_velocities = Eigen::VectorXd::Zero(robot_->nv());
+      result.solution.assign(static_cast<std::size_t>(robot_->nv()), 0.0);
+      return result;
+    }
+  }
+  // Solve against the actual scalar integration box rather than changing the
+  // achieved Cartesian velocity through component clipping afterwards.
+  if (min_error_integration_box) {
+    const auto [q_min, q_max] = robot_->get_joint_limits();
+    const double horizon = *pending_step_validation_dt_;
+    for (int vi = 0; vi < robot_->nv(); ++vi) {
+      const int qi = velocity_to_config_index[vi];
+      if (qi < 0 || qi >= q_eval.size() ||
+          !std::isfinite(q_min[qi]) || !std::isfinite(q_max[qi]) ||
+          q_eval[qi] < q_min[qi] || q_eval[qi] > q_max[qi] ||
+          excluded_union.count(vi) > 0 ||
+          std::find(pending_velocity_lock_indices_.begin(),
+                    pending_velocity_lock_indices_.end(), vi) !=
+              pending_velocity_lock_indices_.end()) {
+        continue;
+      }
+      const double lower = (q_min[qi] + 1e-4 - q_eval[qi]) / horizon;
+      const double upper = (q_max[qi] - 1e-4 - q_eval[qi]) / horizon;
+      if (lower <= upper) {
+        c_lower(constraint_idx + vi) = std::max(c_lower(constraint_idx + vi), lower);
+        c_upper(constraint_idx + vi) = std::min(c_upper(constraint_idx + vi), upper);
+      }
+    }
+  }
+  if (acceleration_position_integration_box && !use_contact_projection) {
+    // Elastic limits may shape task selection, but the accepted position
+    // command is integrated against the unchanged true model limits.
+    c_lower.head(robot_->nv()) =
+        c_lower.head(robot_->nv()).cwiseMax(true_integration_lower);
+    c_upper.head(robot_->nv()) =
+        c_upper.head(robot_->nv()).cwiseMin(true_integration_upper);
   }
   constraint_idx += robot_->nv();
 
@@ -1482,6 +1698,17 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
         joint_limit_non_worsening_result->upper_bounds);
   }
 
+  if (acceleration_position_integration_box && use_contact_projection) {
+    // The backend variable is projected before publication. Bound P_c*v,
+    // rather than assuming a box on the unprojected variable bounds its image.
+    for (int vi : true_integration_indices) {
+      C.row(constraint_idx) = contact_P_c.row(vi);
+      c_lower[constraint_idx] = true_integration_lower[vi];
+      c_upper[constraint_idx] = true_integration_upper[vi];
+      ++constraint_idx;
+    }
+  }
+
   if (collision_constraint_result.has_value()) {
     constraint_idx = append_constraint_block(
         C, c_lower, c_upper, constraint_idx, robot_->nv(),
@@ -1574,8 +1801,6 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
   // Acceleration-level constraint cascading: tighten the first nv rows
   // of c_lower/c_upper (the velocity limit block) based on previous tick's
   // velocity and the configured acceleration limits.
-  // A deadband of 1% of the acceleration step prevents oscillation when
-  // the velocity is small and the acceleration limit is tight.
   const bool acceleration_corridor_active =
       acceleration_limits_enabled_ &&
       (position_step_call_depth_ == 0 ||
@@ -1589,14 +1814,45 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
   if (acceleration_corridor_active) {
     const int nv = robot_->nv();
     for (int i = 0; i < nv; ++i) {
-      const double accel_step = acceleration_limits_[i] * dt_;
-      const double deadband = accel_step * 0.01;
-      double a_lb = previous_dq_[i] - accel_step - deadband;
-      double a_ub = previous_dq_[i] + accel_step + deadband;
+      const double accel_step =
+          acceleration_velocity_step(acceleration_limits_[i], dt_);
+      double a_lb = previous_dq_[i] - accel_step;
+      double a_ub = previous_dq_[i] + accel_step;
       c_lower[i] = std::max(c_lower[i], a_lb);
       c_upper[i] = std::min(c_upper[i], a_ub);
     }
   }
+  if (acceleration_position_integration_box && acceleration_corridor_active &&
+      !use_contact_projection) {
+    for (int vi : true_integration_indices) {
+      const double lower = velocity_lower_before_acceleration[vi];
+      const double upper = velocity_upper_before_acceleration[vi];
+      if (c_lower[vi] <= c_upper[vi] || !std::isfinite(lower) ||
+          !std::isfinite(upper) || lower > upper) {
+        continue;
+      }
+      const double face = std::clamp(previous_dq_[vi], lower, upper);
+      const double step =
+          acceleration_velocity_step(acceleration_limits_[vi], dt_);
+      const double change = std::abs(face - previous_dq_[vi]);
+      const double tolerance = acceleration_velocity_comparison_tolerance(
+          previous_dq_[vi], face, step);
+      if (std::isfinite(face) && std::isfinite(step) && std::isfinite(change) &&
+          change <= step + tolerance) {
+        // An applied integration roundtrip can place the previous velocity an
+        // ulp beyond a braking face. Keep the physical face, using the same
+        // dimensioned comparison as outer realization; do not midpoint a gap.
+        c_lower[vi] = face;
+        c_upper[vi] = face;
+      }
+    }
+  }
+  const Eigen::VectorXd position_acceleration_lower =
+      acceleration_position_integration_box
+          ? Eigen::VectorXd(c_lower.head(robot_->nv())) : Eigen::VectorXd();
+  const Eigen::VectorXd position_acceleration_upper =
+      acceleration_position_integration_box
+          ? Eigen::VectorXd(c_upper.head(robot_->nv())) : Eigen::VectorXd();
 
   // The active-limit viability interval is a hard safety invariant. If an
   // externally synchronized state leaves stale acceleration history outside
@@ -1648,6 +1904,41 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
     }
   }
 
+  if (position_step_seed_corridor_ != nullptr) {
+    // Stale acceleration-history repair must not replace the immutable seed,
+    // velocity-override or lock intersection with an out-of-corridor midpoint.
+    c_lower.head(robot_->nv()) = c_lower.head(robot_->nv()).cwiseMax(
+        velocity_lower_before_acceleration);
+    c_upper.head(robot_->nv()) = c_upper.head(robot_->nv()).cwiseMin(
+        velocity_upper_before_acceleration);
+    if ((c_lower.head(robot_->nv()).array() >
+         c_upper.head(robot_->nv()).array()).any()) {
+      result.status = SolverStatus::kInfeasible;
+      result.status_message = "seed corridor conflicts with the physical velocity interval";
+      result.joint_velocities = Eigen::VectorXd::Zero(robot_->nv());
+      result.solution.assign(static_cast<std::size_t>(robot_->nv()), 0.0);
+      return result;
+    }
+  }
+  if (acceleration_position_integration_box) {
+    // A stale-history repair must not erase the original acceleration/true
+    // integration intersection, and sanitization must not midpoint-collapse it.
+    c_lower.head(robot_->nv()) = c_lower.head(robot_->nv()).cwiseMax(
+        position_acceleration_lower);
+    c_upper.head(robot_->nv()) = c_upper.head(robot_->nv()).cwiseMin(
+        position_acceleration_upper);
+    if ((c_lower.head(robot_->nv()).array() >
+         c_upper.head(robot_->nv()).array()).any() ||
+        (true_integration_lower.array() >
+         true_integration_upper.array()).any()) {
+      result.status = SolverStatus::kInfeasible;
+      result.status_message =
+          "true integration box conflicts with the physical velocity interval";
+      result.joint_velocities = Eigen::VectorXd::Zero(robot_->nv());
+      result.solution.assign(static_cast<std::size_t>(robot_->nv()), 0.0);
+      return result;
+    }
+  }
   sanitize_solver_inputs(goals, jacobians, C, c_lower, c_upper);
   const bool has_soft_rows = max_softening_factors.maxCoeff() > 1.0;
   if (has_soft_rows) {
@@ -1671,7 +1962,6 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
 
   // Configure solver
   VelocitySolverConfig config;
-  config.certify_explicit_task_modes = velocity_task_mode_certification_enabled_;
   config.epsilon = constraint_tolerance_;
   config.precision_threshold = tight_tolerance_;
   config.iteration_limit = max_iterations_;
@@ -1682,6 +1972,7 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
   }
   config.regularization_config.epsilon = solver_tolerance_;
   config.regularization_config.regularization_factor = damping_;
+  config.refine_partial_scale = runtime_config_.refine_partial_scale;
 
   WeightedAdvisoryResult advisory;
   const auto &advisor_goals = use_constrained_weighted_objectives
@@ -1991,9 +2282,16 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
     solve_jacobians = &metric_jacobians;
     solve_C = &metric_C;
   }
-  auto backend_result = computeMultiObjectiveVelocitySolutionEigen(
-      goals, *solve_jacobians, *solve_C, c_lower, c_upper, config,
-      objective_configs, has_soft_rows ? &max_softening_factors : nullptr);
+  Eigen::MatrixXd protected_stationary_primary = physical_primary_jacobian;
+  if (metric_active)
+    protected_stationary_primary =
+        physical_primary_jacobian * joint_metric_col_scale_.asDiagonal();
+  auto backend_result = solveHierarchicalLinearSystemEigen(
+      goals, {}, *solve_jacobians, *solve_C, c_lower, c_upper, config,
+      objective_configs, has_soft_rows ? &max_softening_factors : nullptr,
+      detail::HierarchicalLinearSolverExecutionOptions{
+          detail::HierarchicalLinearSolverPolicy::kLegacyVelocity, 0.0, false,
+          &protected_stationary_primary, position_step_call_depth_ == 0});
   if (metric_active &&
       static_cast<int>(backend_result.solution.size()) == robot_->nv()) {
     for (int j = 0; j < robot_->nv(); ++j)
@@ -2197,6 +2495,835 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
         }
         return true;
       };
+  bool normalized_recovery_accepted = false;
+  bool bounded_preference_accepted = false;
+  bool normalized_scope = runtime_config_.normalized_pose_recovery_enabled &&
+      recovery_has_full_pose && recovery_jacobian.size() > 0 &&
+      objective_configs.size() == 2 && objective_configs.front().allow_min_error_fallback;
+  bool saw_posture = false;
+  for (const auto &task : tasks_) {
+    if (!task->isActive() || !normalized_scope) continue;
+    if (task->getPriority() == objective_configs[1].priority) {
+      saw_posture = true;
+      normalized_scope = task->getType() == TaskType::POSTURE;
+    } else if (task->getPriority() == objective_configs.front().priority) {
+      normalized_scope = task->getType() == TaskType::FRAME_POSE;
+    }
+  }
+  normalized_scope = normalized_scope && saw_posture;
+  if (normalized_scope) {
+    const bool trace = std::getenv("EMBODIK_NORMALIZED_RECOVERY_TRACE") != nullptr;
+    const int nv = robot_->nv();
+    const double horizon = fallback_validation_dt;
+    const auto [q_min, q_max] = robot_->get_joint_limits();
+    const auto limits = robot_->get_velocity_limits();
+    Eigen::MatrixXd execution_C(C.rows() + nv, nv);
+    execution_C.topRows(C.rows()) = C;
+    execution_C.bottomRows(nv).setIdentity();
+    Eigen::VectorXd lower(C.rows() + nv), upper(C.rows() + nv);
+    lower.head(C.rows()) = c_lower; upper.head(C.rows()) = c_upper;
+    lower.tail(nv) = -limits; upper.tail(nv) = limits;
+    for (int j = 0; j < nv; ++j) {
+      const int qi = velocity_to_config_index[j];
+      if (qi < 0) continue;
+      lower(C.rows() + j) = std::max(lower(C.rows() + j), (q_min[qi] - q_eval[qi]) / horizon);
+      upper(C.rows() + j) = std::min(upper(C.rows() + j), (q_max[qi] - q_eval[qi]) / horizon);
+    }
+    auto blocks_at = [&](const Eigen::VectorXd &configuration) {
+      robot_->update_kinematics(configuration);
+      std::vector<double> blocks;
+      for (const auto &task : recovery_tasks) {
+        task->update(*robot_);
+        const auto &error = task->getError();
+        if (error.size() != 6) return std::vector<double>{};
+        blocks.push_back(error.head<3>().norm());
+        blocks.push_back(error.tail<3>().norm());
+      }
+      return blocks;
+    };
+    const auto initial_blocks = blocks_at(q_eval);
+    const auto &reference = runtime_config_.normalized_pose_recovery_reference;
+    bool guide_compatible = reference.size() == nv && reference.allFinite() &&
+        (reference.array() >= q_min.array()).all() &&
+        (reference.array() <= q_max.array()).all();
+    Eigen::VectorXd guide_velocity;
+    if (guide_compatible) {
+      const auto reference_blocks = blocks_at(reference);
+      guide_compatible = reference_blocks.size() == initial_blocks.size();
+      for (size_t i = 0; guide_compatible && i < reference_blocks.size(); i += 2)
+        guide_compatible = reference_blocks[i] <= runtime_config_.normalized_pose_position_tolerance &&
+                           reference_blocks[i + 1] <= runtime_config_.normalized_pose_orientation_tolerance;
+      blocks_at(q_eval);
+      bool all_targets_satisfied = true;
+      for (size_t i = 0; i < initial_blocks.size(); i += 2)
+        all_targets_satisfied = all_targets_satisfied &&
+            initial_blocks[i] <= runtime_config_.normalized_pose_position_tolerance &&
+            initial_blocks[i + 1] <= runtime_config_.normalized_pose_orientation_tolerance;
+      guide_compatible = guide_compatible && !all_targets_satisfied;
+      if (guide_compatible) {
+        guide_velocity = pinocchio::difference(robot_->model(), q_eval, reference);
+        double fraction = 1.0;
+        for (int j = 0; j < nv; ++j)
+          if (std::abs(guide_velocity[j]) > limits[j] && limits[j] > 0.0)
+            fraction = std::min(fraction, limits[j] / std::abs(guide_velocity[j]));
+        guide_velocity *= fraction;
+        // A pose-valid endpoint is not an executable local route. Only let
+        // guide-distance consistency veto Cartesian progress when at least
+        // one bounded guide step meets the same nonlinear admission contract.
+        // Otherwise keep the physical SCALE/recovery paths available.
+        bool usable_step = false;
+        for (int backoff = 0; backoff < 8 && !usable_step; ++backoff) {
+          const Eigen::VectorXd candidate = std::ldexp(1.0, -backoff) * guide_velocity;
+          if (detail::ComputeMaxLinearConstraintViolation(
+                  execution_C, lower, upper, candidate) > 1e-8) continue;
+          const Eigen::VectorXd endpoint = pinocchio::integrate(
+              robot_->model(), q_eval, horizon * candidate);
+          const auto after = blocks_at(endpoint);
+          const bool progress = normalized_pose_progress(initial_blocks, after, runtime_config_);
+          blocks_at(q_eval);
+          usable_step = progress && weighted_fallback_candidate_acceptable(candidate);
+        }
+        guide_compatible = usable_step;
+        if (trace) std::cerr << "normalized_guide_usable=" << usable_step << "\n";
+      }
+    }
+    Eigen::MatrixXd normalized_J = recovery_jacobian;
+    Eigen::VectorXd normalized_goal = recovery_goal;
+    for (int row = 0; row < normalized_J.rows(); ++row) {
+      const double scale = 1.0 / (row % 6 < 3
+          ? runtime_config_.normalized_pose_position_tolerance
+          : runtime_config_.normalized_pose_orientation_tolerance);
+      normalized_J.row(row) *= scale; normalized_goal[row] *= scale;
+    }
+    Eigen::VectorXd proposed;
+    if (backend_result.solution.size() == static_cast<size_t>(nv)) {
+      proposed = Eigen::Map<const Eigen::VectorXd>(backend_result.solution.data(), nv);
+      auto expanded_min = q_min, expanded_max = q_max;
+      if (elastic_band_config_.enabled && elastic_band_state_.delta.size() == nv)
+        expand_scalar_joint_limits_for_velocity_delta(expanded_min, expanded_max,
+            elastic_band_state_.delta, velocity_to_config_index, nv);
+      clamp_joint_velocity_to_position_limits_for_integration(proposed, q_eval,
+          expanded_min, expanded_max, velocity_to_config_index, horizon, nv,
+          pending_velocity_lock_indices_, tasks_);
+      Eigen::VectorXd endpoint = pinocchio::integrate(robot_->model(), q_eval, horizon * proposed);
+      project_scalar_configuration_to_true_joint_limits(endpoint, q_min, q_max,
+          velocity_to_config_index, nv);
+      proposed = pinocchio::difference(robot_->model(), q_eval, endpoint) / horizon;
+    }
+    for (int proposal = 0; proposal < 7 && !normalized_recovery_accepted; ++proposal) {
+      // A compatible guide selects the joint realization of the maximum
+      // physical SCALE ray below; it does not replace the primary task.
+      if (proposal == 0 && guide_compatible) continue;
+      if (proposal == 1) {
+        Eigen::MatrixXd ray_C = Eigen::MatrixXd::Zero(
+            execution_C.rows() + recovery_jacobian.rows() + 1, nv + 1);
+        ray_C.topLeftCorner(execution_C.rows(), nv) = execution_C;
+        ray_C.block(execution_C.rows(), 0, recovery_jacobian.rows(), nv) = recovery_jacobian;
+        ray_C.block(execution_C.rows(), nv, recovery_goal.size(), 1) = -recovery_goal;
+        ray_C(ray_C.rows() - 1, nv) = 1.0;
+        Eigen::VectorXd ray_lower = Eigen::VectorXd::Zero(ray_C.rows());
+        Eigen::VectorXd ray_upper = Eigen::VectorXd::Zero(ray_C.rows());
+        ray_lower.head(execution_C.rows()) = lower;
+        ray_upper.head(execution_C.rows()) = upper;
+        ray_upper[ray_C.rows() - 1] = 1.0;
+        Eigen::MatrixXd objective = Eigen::MatrixXd::Zero(1, nv + 1);
+        objective(0, nv) = 1.0;
+        auto fit_config = config; fit_config.epsilon = 1e-8; fit_config.iteration_limit = 128;
+        const auto ray = computeConstrainedWeightedVelocitySolutionEigen(
+            {Eigen::VectorXd::Ones(1)}, {objective}, ray_C, ray_lower, ray_upper, {}, fit_config);
+        if (trace) std::cerr << "normalized_exact_ray status=" << static_cast<int>(ray.status)
+            << " scale=" << (ray.solution.size() == static_cast<size_t>(nv + 1) ? ray.solution[nv] : -1.0) << "\n";
+        if (ray.status != SolverStatus::kSuccess || ray.solution.size() != static_cast<size_t>(nv + 1) || ray.solution[nv] <= kSoftInfeasibleScaleHoldThreshold) continue;
+        proposed = Eigen::Map<const Eigen::VectorXd>(ray.solution.data(), nv);
+        if (guide_compatible) {
+          Eigen::VectorXd seed = Eigen::Map<const Eigen::VectorXd>(ray.solution.data(), nv + 1);
+          ray_lower[ray_C.rows() - 1] = seed[nv];
+          ray_upper[ray_C.rows() - 1] = seed[nv];
+          Eigen::MatrixXd guide_objective = Eigen::MatrixXd::Zero(nv, nv + 1);
+          guide_objective.leftCols(nv).setIdentity();
+          const auto guided_ray = computeConstrainedWeightedVelocitySolutionEigen(
+              {guide_velocity}, {guide_objective}, ray_C, ray_lower,
+              ray_upper, {}, fit_config, {}, &seed);
+          if (trace) std::cerr << "normalized_guided_ray status=" << static_cast<int>(guided_ray.status) << "\n";
+          if (guided_ray.status == SolverStatus::kSuccess && guided_ray.solution.size() == static_cast<size_t>(nv + 1))
+            proposed = Eigen::Map<const Eigen::VectorXd>(guided_ray.solution.data(), nv);
+        }
+      }
+      if (proposal == 2) {
+        if (!guide_compatible) continue;
+        // One-second feedback time constant; execution is still checked below.
+        proposed = guide_velocity;
+      }
+      if (proposal == 3) {
+        // Component bounds imply a Euclidean translation/orientation deviation
+        // of at most 5 mm / 10 mrad over this integration horizon.
+        Eigen::MatrixXd tube_C = Eigen::MatrixXd::Zero(
+            execution_C.rows() + recovery_jacobian.rows() + 1, nv + 1);
+        tube_C.topLeftCorner(execution_C.rows(), nv) = execution_C;
+        tube_C.block(execution_C.rows(), 0, recovery_jacobian.rows(), nv) = recovery_jacobian;
+        tube_C.block(execution_C.rows(), nv, recovery_goal.size(), 1) = -recovery_goal;
+        tube_C(tube_C.rows() - 1, nv) = 1.0;
+        Eigen::VectorXd tube_lower = Eigen::VectorXd::Zero(tube_C.rows());
+        Eigen::VectorXd tube_upper = Eigen::VectorXd::Zero(tube_C.rows());
+        tube_lower.head(execution_C.rows()) = lower;
+        tube_upper.head(execution_C.rows()) = upper;
+        for (int row = 0; row < recovery_jacobian.rows(); ++row) {
+          const double budget = (row % 6 < 3 ? 0.005 : 0.01) / (std::sqrt(3.0) * horizon);
+          tube_lower[execution_C.rows() + row] = -budget;
+          tube_upper[execution_C.rows() + row] = budget;
+        }
+        tube_upper[tube_C.rows() - 1] = 1.0;
+        Eigen::MatrixXd rate_objective = Eigen::MatrixXd::Zero(1, nv + 1);
+        rate_objective(0, nv) = 1.0;
+        auto fit_config = config; fit_config.epsilon = 1e-8; fit_config.iteration_limit = 128;
+        const auto rate = computeConstrainedWeightedVelocitySolutionEigen(
+            {Eigen::VectorXd::Ones(1)}, {rate_objective}, tube_C, tube_lower, tube_upper, {}, fit_config);
+        if (rate.status != SolverStatus::kSuccess || rate.solution.size() != static_cast<size_t>(nv + 1) ||
+            rate.solution[nv] <= kSoftInfeasibleScaleHoldThreshold) continue;
+        const double alpha = std::min(1.0, rate.solution[nv]);
+        tube_lower[tube_C.rows() - 1] = alpha;
+        tube_upper[tube_C.rows() - 1] = alpha;
+        Eigen::MatrixXd direction_objective = Eigen::MatrixXd::Zero(normalized_J.rows(), nv + 1);
+        direction_objective.leftCols(nv) = normalized_J;
+        const Eigen::VectorXd seed = Eigen::Map<const Eigen::VectorXd>(rate.solution.data(), nv + 1);
+        const auto direction = computeConstrainedWeightedVelocitySolutionEigen(
+            {alpha * normalized_goal}, {direction_objective}, tube_C,
+            tube_lower, tube_upper, {}, fit_config, {}, &seed);
+        if (trace) std::cerr << "normalized_direction_tube status=" << static_cast<int>(direction.status)
+            << " scale=" << alpha << "\n";
+        if (direction.status != SolverStatus::kSuccess || direction.solution.size() != static_cast<size_t>(nv + 1)) continue;
+        proposed = Eigen::Map<const Eigen::VectorXd>(direction.solution.data(), nv);
+      }
+      if (proposal == 4) {
+        auto fit_config = config;
+        fit_config.epsilon = 1e-8;
+        fit_config.iteration_limit = 128;
+        Eigen::VectorXd seed = proposed;
+        const bool feasible_seed = seed.size() == nv && seed.allFinite() &&
+            detail::ComputeMaxLinearConstraintViolation(execution_C, lower, upper, seed) <= fit_config.epsilon;
+        const auto fit = computeConstrainedWeightedVelocitySolutionEigen(
+            {normalized_goal}, {normalized_J}, execution_C, lower, upper, {},
+            fit_config, {}, feasible_seed ? &seed : nullptr);
+        if (trace) std::cerr << "normalized_fit status=" << static_cast<int>(fit.status) << " message=" << fit.status_message << "\n";
+        if (fit.status != SolverStatus::kSuccess || fit.solution.size() != static_cast<size_t>(nv)) continue;
+        proposed = Eigen::Map<const Eigen::VectorXd>(fit.solution.data(), nv);
+      }
+      if (proposal == 5) {
+        std::vector<Eigen::RowVectorXd> gradients;
+        blocks_at(q_eval);
+        for (const auto &task : recovery_tasks) {
+          const Eigen::VectorXd error = task->getError();
+          if (error.head<3>().norm() <= runtime_config_.normalized_pose_position_tolerance &&
+              error.tail<3>().norm() <= runtime_config_.normalized_pose_orientation_tolerance) continue;
+          Eigen::VectorXd weighted_error = error;
+          weighted_error.head<3>() /= runtime_config_.normalized_pose_position_tolerance;
+          weighted_error.tail<3>() /= runtime_config_.normalized_pose_orientation_tolerance;
+          Eigen::MatrixXd J = task->getJacobian();
+          J.topRows(3) /= runtime_config_.normalized_pose_position_tolerance;
+          J.bottomRows(3) /= runtime_config_.normalized_pose_orientation_tolerance;
+          gradients.push_back(-2.0 * weighted_error.transpose() * J /
+              std::max(1.0, weighted_error.squaredNorm()));
+        }
+        if (gradients.empty()) continue;
+        Eigen::MatrixXd common_C = Eigen::MatrixXd::Zero(execution_C.rows() + gradients.size() + 1, nv + 1);
+        common_C.topLeftCorner(execution_C.rows(), nv) = execution_C;
+        Eigen::VectorXd common_lower(common_C.rows()), common_upper(common_C.rows());
+        common_lower.head(execution_C.rows()) = lower; common_upper.head(execution_C.rows()) = upper;
+        for (size_t i = 0; i < gradients.size(); ++i) {
+          common_C.row(execution_C.rows() + i).head(nv) = gradients[i];
+          common_C(execution_C.rows() + i, nv) = 1.0;
+          common_lower[execution_C.rows() + i] = -std::numeric_limits<double>::infinity();
+          common_upper[execution_C.rows() + i] = 0.0;
+        }
+        common_C(common_C.rows() - 1, nv) = 1.0;
+        common_lower[common_C.rows() - 1] = 0.0; common_upper[common_C.rows() - 1] = 1.0;
+        Eigen::MatrixXd objective = Eigen::MatrixXd::Zero(1, nv + 1); objective(0, nv) = 1.0;
+        Eigen::VectorXd goal = Eigen::VectorXd::Ones(1);
+        auto fit_config = config; fit_config.epsilon = 1e-8; fit_config.iteration_limit = 128;
+        const auto common = computeConstrainedWeightedVelocitySolutionEigen(
+            {goal}, {objective}, common_C, common_lower, common_upper, {}, fit_config);
+        if (trace) std::cerr << "normalized_common status=" << static_cast<int>(common.status) << " message=" << common.status_message << "\n";
+        if (common.status != SolverStatus::kSuccess || common.solution.size() != static_cast<size_t>(nv + 1) || common.solution[nv] <= 1e-8) continue;
+        if (trace) std::cerr << "normalized_common rate=" << common.solution[nv] << "\n";
+        proposed = Eigen::Map<const Eigen::VectorXd>(common.solution.data(), nv);
+      }
+      if (proposal == 6) {
+        Eigen::JacobiSVD<Eigen::MatrixXd> decomposition(recovery_jacobian, Eigen::ComputeFullV);
+        decomposition.setThreshold(1e-10);
+        const Eigen::MatrixXd free = decomposition.matrixV().rightCols(nv - decomposition.rank());
+        if (free.cols() == 0) continue;
+        Eigen::VectorXd seed = Eigen::VectorXd::Zero(free.cols());
+        auto fit_config = config; fit_config.epsilon = 1e-8; fit_config.iteration_limit = 128;
+        const bool zero_feasible = detail::ComputeMaxLinearConstraintViolation(
+            execution_C * free, lower, upper, seed) <= fit_config.epsilon;
+        const auto posture = computeConstrainedWeightedVelocitySolutionEigen(
+            {goals[1]}, {jacobians[1] * free}, execution_C * free, lower, upper,
+            {}, fit_config, {}, zero_feasible ? &seed : nullptr);
+        if (trace) std::cerr << "normalized_posture status=" << static_cast<int>(posture.status) << " message=" << posture.status_message << "\n";
+        if (posture.status != SolverStatus::kSuccess || posture.solution.size() != static_cast<size_t>(free.cols())) continue;
+        proposed = free * Eigen::Map<const Eigen::VectorXd>(posture.solution.data(), free.cols());
+        if ((recovery_jacobian * proposed).norm() > 1e-8) continue;
+      }
+      if (proposed.size() != nv || !proposed.allFinite()) continue;
+      const int max_backoffs = proposal == 5 ? 20 : 8;
+      for (int backoff = 0; backoff < max_backoffs; ++backoff) {
+        const Eigen::VectorXd candidate = std::ldexp(1.0, -backoff) * proposed;
+        const double residual = (normalized_J * candidate - normalized_goal).norm();
+        const double violation = detail::ComputeMaxLinearConstraintViolation(execution_C, lower, upper, candidate);
+        // Common descent optimizes physical pose energy, not the separately
+        // capped velocity reference. Admission still requires actual nonlinear
+        // descent for each hand and the original safety constraints below.
+        const bool linear = proposal == 2 || proposal == 5 || (proposal == 6
+            ? residual <= normalized_goal.norm() + 1e-8
+            : residual < normalized_goal.norm() - 1e-8);
+        if (!linear || violation > 1e-8) {
+          if (trace) std::cerr << "normalized_gate proposal=" << proposal << " backoff=" << backoff << " linear=" << linear << " violation=" << violation << " residual=" << residual << " baseline=" << normalized_goal.norm() << "\n";
+          continue;
+        }
+        const Eigen::VectorXd endpoint = pinocchio::integrate(robot_->model(), q_eval, horizon * candidate);
+        if (guide_compatible &&
+            (reference - endpoint).squaredNorm() >= (reference - q_eval).squaredNorm() - 1e-10) {
+          if (trace) std::cerr << "normalized_guide_progress_rejected proposal=" << proposal
+              << " backoff=" << backoff << "\n";
+          continue;
+        }
+        const auto after = blocks_at(endpoint);
+        const bool progress = normalized_pose_progress(initial_blocks, after, runtime_config_);
+        blocks_at(q_eval);
+        const bool safety = progress && weighted_fallback_candidate_acceptable(candidate);
+        if (trace) {
+          std::cerr << "normalized_gate proposal=" << proposal << " backoff=" << backoff << " pose=" << progress << " safety=" << safety << " before=";
+          for (double value : initial_blocks) std::cerr << value << ',';
+          std::cerr << " after=";
+          for (double value : after) std::cerr << value << ',';
+          std::cerr << "\n";
+        }
+        if (!progress || !safety) continue;
+        backend_result.solution.assign(candidate.data(), candidate.data() + nv);
+        backend_result.status = SolverStatus::kSuccess;
+        backend_result.status_message = proposal == 2
+            ? "bounded pose-solution guide accepted"
+            : proposal == 6
+            ? "normalized nullspace posture recovery accepted"
+            : "execution-validated normalized pose recovery accepted";
+        backend_result.task_scales.assign(goals.size(), -1.0);
+        backend_result.task_modes_effective.assign(goals.size(), TaskSolveMode::kMinError);
+        backend_result.task_used_fallback.assign(goals.size(), true);
+        const Eigen::VectorXd image = recovery_jacobian * candidate;
+        const double alpha = recovery_goal.dot(image) / std::max(1e-30, recovery_goal.squaredNorm());
+        if (alpha > kSoftInfeasibleScaleHoldThreshold && alpha <= 1.0 + 1e-8 &&
+            (image - alpha * recovery_goal).norm() <= 1e-8) {
+          backend_result.task_scales.front() = std::min(1.0, alpha);
+          backend_result.task_modes_effective.front() = TaskSolveMode::kScale;
+          backend_result.task_used_fallback.front() = false;
+          backend_result.status_message = "execution-validated physical SCALE ray accepted";
+        }
+        backend_result.task_errors.resize(goals.size());
+        for (size_t i = 0; i < goals.size(); ++i)
+          backend_result.task_errors[i] = ((i == 0 ? recovery_jacobian : jacobians[i]) * candidate -
+              (i == 0 ? recovery_goal : goals[i])).norm();
+        classified_velocity = classify_velocity_outcome(backend_result.status,
+            backend_result.status_message, backend_result.task_scales, recovery_goal.norm(),
+            backend_result.task_modes_effective, backend_result.task_used_fallback);
+        normalized_recovery_accepted = true;
+        break;
+      }
+    }
+    blocks_at(q_eval);
+  }
+  // An expanded position band can select a ray whose joint realization is
+  // clipped at the true limits during integration. Prefer an executable SCALE
+  // ray before accepting that change in Cartesian direction.
+  bool elastic_execution_changes_primary = false;
+  if (backend_result.status == SolverStatus::kSuccess &&
+      apply_limits && use_position_limits_ &&
+      pending_step_validation_dt_.has_value() &&
+      !project_elastic_collision_recovery_objective.empty() &&
+      project_elastic_collision_recovery_objective.front() &&
+      recovery_has_full_pose && recovery_jacobian.size() > 0 &&
+      backend_result.solution.size() == static_cast<std::size_t>(robot_->nv())) {
+    const auto [q_min, q_max] = robot_->get_joint_limits();
+    bool valid_seed = true;
+    for (int vi = 0; vi < robot_->nv(); ++vi) {
+      const int qi = velocity_to_config_index[vi];
+      if (qi >= 0 && qi < q_eval.size() &&
+          (q_eval[qi] < q_min[qi] || q_eval[qi] > q_max[qi])) {
+        valid_seed = false;
+        break;
+      }
+    }
+    const Eigen::VectorXd nominal = Eigen::Map<const Eigen::VectorXd>(
+        backend_result.solution.data(), robot_->nv());
+    if (valid_seed && nominal.allFinite()) {
+      auto expanded_min = q_min, expanded_max = q_max;
+      if (elastic_band_config_.enabled)
+        expand_scalar_joint_limits_for_velocity_delta(
+            expanded_min, expanded_max, elastic_band_state_.delta,
+            velocity_to_config_index, robot_->nv());
+      Eigen::VectorXd executable = nominal;
+      clamp_joint_velocity_to_position_limits_for_integration(
+          executable, q_eval, expanded_min, expanded_max,
+          velocity_to_config_index, fallback_validation_dt, robot_->nv(),
+          pending_velocity_lock_indices_, tasks_);
+      Eigen::VectorXd endpoint = pinocchio::integrate(
+          robot_->model(), q_eval, fallback_validation_dt * executable);
+      project_scalar_configuration_to_true_joint_limits(
+          endpoint, q_min, q_max, velocity_to_config_index, robot_->nv());
+      executable = pinocchio::difference(robot_->model(), q_eval, endpoint) /
+                   fallback_validation_dt;
+      elastic_execution_changes_primary =
+          (recovery_jacobian * (executable - nominal)).norm() > 1e-8;
+    }
+  }
+  const bool recovery_model_changed =
+      recovery_has_full_pose && recovery_jacobian.size() > 0 && !jacobians.empty() &&
+      (recovery_jacobian.rows() != jacobians.front().rows() ||
+       (recovery_jacobian - jacobians.front()).norm() > 1e-10);
+  const bool legacy_recovery_requested =
+      position_step_physical_recovery_active_ ||
+      position_step_continuity_state_ != PositionStepContinuityState::kMonitoring;
+  const bool recovery_requested = legacy_recovery_requested || recovery_model_changed ||
+                                  elastic_execution_changes_primary;
+  if (!normalized_recovery_accepted && recovery_requested && recovery_goal.size() > 0 && recovery_goal.norm() > 1e-8 &&
+      recovery_jacobian.cols() == robot_->nv()) {
+    const int nv = robot_->nv();
+    const double horizon = fallback_validation_dt;
+    const Eigen::VectorXd limits = robot_->get_velocity_limits();
+    const auto [q_min, q_max] = robot_->get_joint_limits();
+    Eigen::MatrixXd recovery_C(C.rows() + nv, nv);
+    recovery_C.topRows(C.rows()) = C;
+    recovery_C.bottomRows(nv).setIdentity();
+    Eigen::VectorXd lower(C.rows() + nv), upper(C.rows() + nv);
+    lower.head(C.rows()) = c_lower;
+    upper.head(C.rows()) = c_upper;
+    Eigen::JacobiSVD<Eigen::MatrixXd> decomposition(recovery_jacobian,
+                                                  Eigen::ComputeFullV);
+    decomposition.setThreshold(1e-10);
+    const Eigen::MatrixXd free =
+        decomposition.matrixV().rightCols(nv - decomposition.rank());
+    const Eigen::VectorXd metric = limits.cwiseMax(1e-6).cwiseInverse();
+    auto pose_blocks = [&]() {
+      std::vector<double> blocks;
+      for (const auto &task : recovery_tasks) {
+        task->update(*robot_);
+        const auto &error = task->getError();
+        if (error.size() >= 6) {
+          blocks.push_back(error.head<3>().norm());
+          blocks.push_back(error.segment<3>(3).norm());
+        } else {
+          blocks.push_back(error.norm());
+        }
+      }
+      return blocks;
+    };
+    const auto initial_blocks = pose_blocks();
+    if (legacy_recovery_requested && position_step_physical_recovery_anchor_blocks_.size() !=
+        initial_blocks.size()) {
+      position_step_physical_recovery_anchor_blocks_ = initial_blocks;
+    }
+    const auto recovery_anchor_blocks = legacy_recovery_requested
+        ? position_step_physical_recovery_anchor_blocks_ : initial_blocks;
+    auto task_merits = [&]() {
+      std::vector<double> merits;
+      for (const auto &task : recovery_tasks) {
+        merits.push_back(task->getError().norm());
+      }
+      return merits;
+    };
+    const auto initial_merits = task_merits();
+    double incumbent_reduction = 0.0;
+    if (backend_result.solution.size() == static_cast<std::size_t>(nv)) {
+      Eigen::VectorXd incumbent = Eigen::Map<const Eigen::VectorXd>(
+          backend_result.solution.data(), nv);
+      if (use_position_limits_) {
+        clamp_joint_velocity_to_position_limits_for_integration(
+            incumbent, q_eval, q_min, q_max, velocity_to_config_index, horizon,
+            nv, pending_velocity_lock_indices_, tasks_);
+      }
+      const Eigen::VectorXd endpoint = pinocchio::integrate(
+          robot_->model(), q_eval, horizon * incumbent);
+      bool inside_limits = endpoint.allFinite();
+      for (int qi = 0; inside_limits && qi < endpoint.size(); ++qi) {
+        inside_limits = endpoint[qi] >= q_min[qi] && endpoint[qi] <= q_max[qi];
+      }
+      if (inside_limits && weighted_fallback_candidate_acceptable(incumbent)) {
+        robot_->update_kinematics(endpoint);
+        const auto incumbent_blocks = pose_blocks();
+        for (std::size_t index = 0; index < initial_blocks.size(); ++index) {
+          incumbent_reduction += initial_blocks[index] - incumbent_blocks[index];
+        }
+        robot_->update_kinematics(q_eval);
+        pose_blocks();
+      }
+    }
+    double failed_fraction = 1.0;
+    double accepted_fraction = 0.0;
+    double full_preference_scale = 0.0;
+    bool preference_backoff_enabled = false;
+    int refinements = 0;
+    // Once a safe radius is found, refine its bracket without accepting an
+    // unverified endpoint. Limit the extra solves to three.
+    for (int trial = elastic_execution_changes_primary ? -4 : 0; trial < 15; ++trial) {
+      const bool bounded_ray_preference = trial < 0;
+      const int preference_retry = bounded_ray_preference ? trial + 4 : 0;
+      if (bounded_ray_preference && preference_retry > 0 &&
+          !preference_backoff_enabled) continue;
+      if (!legacy_recovery_requested && trial > 0) break;
+      if (accepted_fraction <= 0.0 && trial >= 12) {
+        break;
+      }
+      if (accepted_fraction > 0.0 && refinements++ >= 3) {
+        break;
+      }
+      const double fraction =
+          bounded_ray_preference ? 1.0 : accepted_fraction > 0.0
+              ? 0.5 * (accepted_fraction + failed_fraction)
+              : std::ldexp(1.0, -trial);
+      const double previous_failed_fraction = failed_fraction;
+      failed_fraction = fraction;
+      lower.tail(nv) = -fraction * limits;
+      upper.tail(nv) = fraction * limits;
+      if (use_position_limits_) {
+        for (int index = 0; index < nv; ++index) {
+          const int qi = velocity_to_config_index[index];
+          if (qi < 0 || qi >= q_eval.size()) {
+            continue;
+          }
+          if (excluded_union.count(index) > 0 ||
+              std::find(pending_velocity_lock_indices_.begin(),
+                        pending_velocity_lock_indices_.end(), index) !=
+                  pending_velocity_lock_indices_.end()) {
+            continue;
+          }
+          const double execution_lower =
+              (q_min(qi) + 1e-4 - q_eval(qi)) / horizon;
+          const double execution_upper =
+              (q_max(qi) - 1e-4 - q_eval(qi)) / horizon;
+          lower(C.rows() + index) =
+              std::max(lower(C.rows() + index),
+                       bounded_ray_preference ? std::min(0.0, execution_lower)
+                                              : execution_lower);
+          upper(C.rows() + index) =
+              std::min(upper(C.rows() + index),
+                       bounded_ray_preference ? std::max(0.0, execution_upper)
+                                              : execution_upper);
+        }
+      }
+      Eigen::VectorXd candidate;
+      double scale = 0.0;
+      SolverResult generalized_result;
+      bool generalized_candidate = false;
+      bool generalized_min_error_candidate = false;
+      if (bounded_ray_preference || (trial == 0 && recovery_model_changed)) {
+        auto alternative_jacobians = jacobians;
+        auto alternative_goals = goals;
+        alternative_jacobians.front() = recovery_jacobian;
+        alternative_goals.front() = recovery_goal;
+        // Re-solve the hierarchy with a smaller primary request after a valid
+        // full ray fails its nonlinear endpoint checks. Keep all hard rows and
+        // lower objectives intact; scaling a velocity would change affine
+        // task equations and need not preserve an origin-excluding hard row.
+        const double primary_request_scale =
+            bounded_ray_preference && preference_retry > 0
+                ? std::ldexp(full_preference_scale, -preference_retry) : 1.0;
+        alternative_goals.front() *= primary_request_scale;
+        std::vector<Eigen::VectorXd> biases;
+        for (const auto &goal : alternative_goals) {
+          biases.push_back(Eigen::VectorXd::Zero(goal.size()));
+        }
+        Eigen::MatrixXd alternative_C = recovery_C;
+        if (metric_active) {
+          const auto D = joint_metric_col_scale_.asDiagonal();
+          for (auto &J : alternative_jacobians) J = J * D;
+          alternative_C = alternative_C * D;
+        }
+        auto alternative_config = config;
+        // This candidate must realize the original task ray. Damping the
+        // supported directions of a redundant row set can make a feasible
+        // equality fail the recovery check. Bounds and endpoint checks provide
+        // the trust region for this exact-inverse trial.
+        alternative_config.epsilon = 1e-8;
+        alternative_config.regularization_config.epsilon = 1e-8;
+        alternative_config.regularization_config.regularization_factor = 0.0;
+        auto alternative_objectives = objective_configs;
+        if (bounded_ray_preference) {
+          alternative_objectives.front().solve_mode = TaskSolveMode::kScale;
+          alternative_objectives.front().allow_min_error_fallback = false;
+        }
+        generalized_result = solveHierarchicalLinearSystemEigen(
+            alternative_goals, biases, alternative_jacobians, alternative_C,
+            lower, upper, alternative_config, alternative_objectives, nullptr,
+            detail::HierarchicalLinearSolverExecutionOptions{});
+        const bool authorized_min_error =
+            alternative_objectives.front().allow_min_error_fallback &&
+            !generalized_result.task_scales.empty() &&
+            generalized_result.task_scales.front() == -1.0 &&
+            !generalized_result.task_modes_effective.empty() &&
+            generalized_result.task_modes_effective.front() == TaskSolveMode::kMinError &&
+            !generalized_result.task_used_fallback.empty() &&
+            generalized_result.task_used_fallback.front();
+        // A lower SCALE task can have no feasible equality while the primary
+        // ray remains valid. The preference candidate still has to pass the
+        // physical equality and every executable hard row below.
+        const bool usable_status =
+            generalized_result.status == SolverStatus::kSuccess ||
+            (bounded_ray_preference &&
+             generalized_result.status == SolverStatus::kNoProgress);
+        if (usable_status &&
+            generalized_result.solution.size() == static_cast<std::size_t>(nv) &&
+            !generalized_result.task_scales.empty() &&
+            ((generalized_result.task_scales.front() > 0.0 &&
+              generalized_result.task_scales.front() <= 1.0) || authorized_min_error)) {
+          candidate = Eigen::Map<const Eigen::VectorXd>(
+              generalized_result.solution.data(), nv);
+          if (metric_active) candidate.array() *= joint_metric_col_scale_.array();
+          scale = generalized_result.task_scales.front();
+          if (bounded_ray_preference) {
+            scale *= primary_request_scale;
+            generalized_result.task_scales.front() = scale;
+          }
+          generalized_candidate = true;
+          generalized_min_error_candidate = authorized_min_error;
+        }
+      }
+
+      if (!generalized_candidate &&
+          (bounded_ray_preference || !legacy_recovery_requested)) continue;
+      if (!generalized_candidate && !detail::RecoverZeroScaleTask(
+              recovery_jacobian, recovery_goal,
+              Eigen::VectorXd::Zero(recovery_goal.size()), Eigen::MatrixXd(0, nv),
+              recovery_C, lower, upper, Eigen::VectorXd::Zero(nv), &candidate,
+              &scale)) {
+        continue;
+      }
+
+      if (!generalized_candidate && free.cols() > 0) {
+        VelocitySolverConfig polish_config = config;
+        polish_config.epsilon = 1e-8;
+        polish_config.iteration_limit = 128;
+        const Eigen::VectorXd value = recovery_C * candidate;
+        const auto polished = computeConstrainedWeightedVelocitySolutionEigen(
+            {metric.asDiagonal() * (-candidate)}, {metric.asDiagonal() * free},
+            recovery_C * free, lower - value, upper - value, {}, polish_config);
+        if (polished.status != SolverStatus::kSuccess) {
+          continue;
+        }
+        candidate += free * Eigen::Map<const Eigen::VectorXd>(
+            polished.solution.data(), polished.solution.size());
+      }
+      const double physical_residual =
+          (recovery_jacobian * candidate - recovery_goal).norm();
+      if (!candidate.allFinite() ||
+          (bounded_ray_preference &&
+           detail::ComputeMaxLinearConstraintViolation(
+               recovery_C, lower, upper, candidate) > 1e-8) ||
+          (generalized_min_error_candidate
+               ? physical_residual >= recovery_goal.norm() - 1e-8
+               : (recovery_jacobian * candidate - scale * recovery_goal).norm() > 1e-8)) {
+        continue;
+      }
+      robot_->update_kinematics(pinocchio::integrate(robot_->model(), q_eval,
+                                                  horizon * candidate));
+      const auto proposed_blocks = pose_blocks();
+      const auto proposed_merits = task_merits();
+      robot_->update_kinematics(q_eval);
+      pose_blocks();
+      bool improving = proposed_blocks.size() == initial_blocks.size();
+      double reduction = 0.0;
+      for (std::size_t index = 0; index < initial_blocks.size() && improving;
+           ++index) {
+        const double tolerance = 64.0 * std::numeric_limits<double>::epsilon() *
+            std::max({1.0, initial_blocks[index], proposed_blocks[index]});
+        improving = proposed_blocks[index] <=
+                    recovery_anchor_blocks[index] +
+                        tolerance;
+        reduction += initial_blocks[index] - proposed_blocks[index];
+      }
+      for (std::size_t index = 0; index < initial_merits.size() && improving;
+           ++index) {
+        const double tolerance = 64.0 * std::numeric_limits<double>::epsilon() *
+            std::max({1.0, initial_merits[index], proposed_merits[index]});
+        improving = proposed_merits[index] <= initial_merits[index] + tolerance;
+      }
+      const double required_reduction = generalized_candidate && !bounded_ray_preference
+          ? std::max(1e-8, incumbent_reduction + 1e-8) : 1e-8;
+      if (!improving || reduction <= required_reduction) {
+        if (bounded_ray_preference && preference_retry == 0) {
+          full_preference_scale = scale;
+          preference_backoff_enabled = true;
+        }
+        continue;
+      }
+      if (!weighted_fallback_candidate_acceptable(candidate)) {
+        if (bounded_ray_preference && preference_retry == 0) {
+          full_preference_scale = scale;
+          preference_backoff_enabled = true;
+        }
+        continue;
+      }
+
+      failed_fraction = previous_failed_fraction;
+      accepted_fraction = fraction;
+      if (!bounded_ray_preference) {
+        position_step_physical_recovery_active_ = true;
+        position_step_physical_recovery_anchor_blocks_ = recovery_anchor_blocks;
+      }
+      if (generalized_candidate) {
+        backend_result = std::move(generalized_result);
+      }
+      bounded_preference_accepted = bounded_ray_preference;
+      backend_result.solution.assign(candidate.data(), candidate.data() + nv);
+      backend_result.status = SolverStatus::kSuccess;
+      backend_result.status_message =
+          bounded_ray_preference
+              ? (preference_retry > 0
+                     ? "bounded physical SCALE ray accepted after primary goal backoff"
+                     : "bounded physical SCALE ray preferred to elastic clipping")
+              : generalized_candidate
+              ? "guarded generalized physical-task position recovery accepted"
+              : "bounded physical-task position recovery accepted";
+      if (!generalized_candidate) {
+        backend_result.task_scales.assign(goals.size(), 0.0);
+        backend_result.task_scales.front() = scale;
+        backend_result.task_modes_effective.clear();
+        for (const auto &objective : objective_configs) {
+          backend_result.task_modes_effective.push_back(objective.solve_mode);
+        }
+        backend_result.task_used_fallback.assign(goals.size(), false);
+      }
+      backend_result.task_errors.resize(goals.size());
+      for (std::size_t index = 0; index < goals.size(); ++index) {
+        backend_result.task_errors[index] =
+            ((generalized_candidate && index == 0 ? recovery_jacobian : jacobians[index]) *
+                 candidate - (generalized_candidate && index == 0 ? recovery_goal : goals[index])).norm();
+      }
+      classified_velocity = classify_velocity_outcome(
+          backend_result.status, backend_result.status_message,
+          backend_result.task_scales, recovery_goal.norm(),
+          backend_result.task_modes_effective, backend_result.task_used_fallback);
+      if (fraction == 1.0) {
+        break;
+      }
+    }
+  }
+  // An invalid realization need not discard its achieved primary motion.
+  // Repair native bounds, or elastic position integration, without changing
+  // the hierarchy's initial problem or its already achieved primary image.
+  const bool elastic_position_realization = !bounded_preference_accepted &&
+      backend_result.status == SolverStatus::kSuccess && apply_limits &&
+      use_position_limits_ && pending_step_validation_dt_.has_value() &&
+      !use_contact_projection && !project_elastic_collision_recovery_objective.empty() &&
+      project_elastic_collision_recovery_objective.front();
+  // Normalized recovery already validates the original hard rows and true
+  // executable bounds. A later nullspace repair can invalidate its nonlinear
+  // pose descent even when it preserves the linear primary image.
+  if (!normalized_recovery_accepted &&
+      (backend_result.status == SolverStatus::kNumericalError ||
+       elastic_position_realization) &&
+      !goals.empty() && physical_primary_jacobian.rows() > 0 &&
+      static_cast<int>(backend_result.solution.size()) == robot_->nv()) {
+    const Eigen::VectorXd nominal = Eigen::Map<const Eigen::VectorXd>(
+        backend_result.solution.data(), backend_result.solution.size());
+    Eigen::MatrixXd repair_C = C;
+    Eigen::VectorXd repair_lower = c_lower;
+    Eigen::VectorXd repair_upper = c_upper;
+    if (elastic_position_realization && nominal.allFinite()) {
+      const int nv = robot_->nv();
+      const auto [q_min, q_max] = robot_->get_joint_limits();
+      Eigen::VectorXd lower = Eigen::VectorXd::Constant(nv, -kUnboundedConstraintLimit);
+      Eigen::VectorXd upper = Eigen::VectorXd::Constant(nv, kUnboundedConstraintLimit);
+      bool valid_seed = true;
+      for (int vi = 0; vi < nv; ++vi) {
+        const int qi = velocity_to_config_index[vi];
+        if (qi < 0 || qi >= q_eval.size() || !std::isfinite(q_min[qi]) ||
+            !std::isfinite(q_max[qi])) continue;
+        if (q_eval[qi] < q_min[qi] || q_eval[qi] > q_max[qi]) {
+          valid_seed = false;
+          break;
+        }
+        if (excluded_union.count(vi) > 0 ||
+            std::find(pending_velocity_lock_indices_.begin(),
+                      pending_velocity_lock_indices_.end(), vi) !=
+                pending_velocity_lock_indices_.end()) {
+          lower[vi] = upper[vi] = 0.0;
+        } else {
+          lower[vi] = (q_min[qi] + 1e-4 - q_eval[qi]) / fallback_validation_dt;
+          upper[vi] = (q_max[qi] - 1e-4 - q_eval[qi]) / fallback_validation_dt;
+        }
+      }
+      Eigen::VectorXd clipped = nominal;
+      clamp_joint_velocity_solution_in_place(clipped, lower, upper, false, nv);
+      if (valid_seed && (lower.array() <= upper.array()).all() &&
+          (physical_primary_jacobian * nominal).norm() > 1e-8 &&
+          (physical_primary_jacobian * (clipped - nominal)).norm() > 1e-8) {
+        repair_C.conservativeResize(C.rows() + nv, nv);
+        repair_C.bottomRows(nv).setIdentity();
+        repair_lower.conservativeResize(C.rows() + nv);
+        repair_upper.conservativeResize(C.rows() + nv);
+        repair_lower.tail(nv) = lower;
+        repair_upper.tail(nv) = upper;
+      }
+    }
+    if (nominal.allFinite() &&
+        detail::ComputeMaxLinearConstraintViolation(repair_C, repair_lower, repair_upper,
+                                                    nominal) > config.epsilon) {
+      Eigen::MatrixXd protected_primary(
+          physical_primary_jacobian.rows() + jacobians.front().rows(),
+          robot_->nv());
+      protected_primary.topRows(physical_primary_jacobian.rows()) =
+          physical_primary_jacobian;
+      protected_primary.bottomRows(jacobians.front().rows()) = jacobians.front();
+      Eigen::JacobiSVD<Eigen::MatrixXd> decomposition(protected_primary,
+                                                     Eigen::ComputeFullV);
+      decomposition.setThreshold(1e-10);
+      const Eigen::MatrixXd free = decomposition.matrixV().rightCols(
+          robot_->nv() - decomposition.rank());
+      if (free.cols() > 0) {
+        Eigen::VectorXd clipped = nominal;
+        clamp_final_velocity_candidate(clipped);
+        if (repair_C.rows() > C.rows()) {
+          clamp_joint_velocity_solution_in_place(clipped, repair_lower.tail(robot_->nv()),
+                                                repair_upper.tail(robot_->nv()), false, robot_->nv());
+        }
+        const Eigen::VectorXd values = repair_C * nominal;
+        VelocitySolverConfig repair_config = config;
+        repair_config.epsilon = 1e-10;
+        repair_config.iteration_limit = 128;
+        repair_config.regularization_config.regularization_factor = 0.0;
+        const auto repaired = computeConstrainedWeightedVelocitySolutionEigen(
+            {clipped - nominal}, {free}, repair_C * free, repair_lower - values,
+            repair_upper - values, {}, repair_config);
+        if (repaired.status == SolverStatus::kSuccess &&
+            static_cast<int>(repaired.solution.size()) == free.cols()) {
+          const Eigen::VectorXd candidate = nominal + free *
+              Eigen::Map<const Eigen::VectorXd>(repaired.solution.data(),
+                                               repaired.solution.size());
+          if ((protected_primary * (candidate - nominal)).norm() <= 1e-8 &&
+              detail::ComputeMaxLinearConstraintViolation(
+                  repair_C, repair_lower, repair_upper, candidate) <= 1e-8 &&
+              weighted_fallback_candidate_acceptable(candidate)) {
+            backend_result.solution.assign(candidate.data(),
+                                           candidate.data() + candidate.size());
+            backend_result.status = SolverStatus::kSuccess;
+            backend_result.status_message =
+                repair_C.rows() > C.rows()
+                    ? "elastic integration realization repaired with primary motion preserved"
+                    : "native hard bounds repaired with primary motion preserved";
+            for (std::size_t index = 0; index < goals.size(); ++index) {
+              if (index < backend_result.task_errors.size())
+                backend_result.task_errors[index] =
+                    (jacobians[index] * candidate - goals[index]).norm();
+            }
+            classified_velocity = classify_velocity_outcome(
+                backend_result.status, backend_result.status_message,
+                backend_result.task_scales, primary_goal_norm,
+                backend_result.task_modes_effective,
+                backend_result.task_used_fallback);
+          }
+        }
+      }
+    }
+  }
   const bool can_try_weighted_fallback =
       runtime_config_.weighted_fallback_enabled &&
       classified_velocity.status != SolverStatus::kSuccess &&
@@ -2242,17 +3369,16 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
   auto infer_active_task_layout = [&]() {
     bool saw_pose = false;
     bool saw_split = false;
-    for (const auto &task : objective_tasks) {
-      if (!task) {
+    // Grouped objectives have no single task pointer. Inspect the active
+    // source tasks rather than the policy state, which cannot split raw tasks.
+    for (const auto &task : tasks_) {
+      if (!task || !task->isActive()) {
         continue;
       }
       const TaskType type = task->getType();
       saw_pose = saw_pose || type == TaskType::FRAME_POSE;
       saw_split = saw_split || type == TaskType::FRAME_POSITION ||
                               type == TaskType::FRAME_ORIENTATION;
-    }
-    if (runtime_config_.enable_auto_task_layout) {
-      return current_auto_task_layout_;
     }
     if (saw_pose && !saw_split) {
       return TaskLayout::kMerged;
@@ -2363,21 +3489,24 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
     last_solution_dq_norm_ = 0.0;
   }
 
-  if (velocity_task_mode_certification_enabled_ &&
-      (result.status == SolverStatus::kSuccess ||
-       result.status == SolverStatus::kNoProgress) &&
-      result.joint_velocities.size() == robot_->nv()) {
-    const Eigen::VectorXd values = C * result.joint_velocities;
-    for (Eigen::Index row = 0; row < values.size(); ++row) {
-      if (max_softening_factors(row) <= 1.0 &&
-          (!std::isfinite(values(row)) ||
-           values(row) < c_lower(row) - constraint_tolerance_ ||
-           values(row) > c_upper(row) + constraint_tolerance_)) {
-        result.status = SolverStatus::kNumericalError;
-        result.status_message = "returned physical velocity violates original hard constraint rows";
-        break;
-      }
-    }
+  // C is still physical here: the metric solve uses a separate C*D copy.
+  // Capture only for a stalled/failing position step. Direct escape does not
+  // certify softened rows, contact projection, or dynamic braking/history.
+  if (position_step_hard_constraints_ != nullptr && !has_soft_rows &&
+      contact_frames_.empty() && !acceleration_limits_enabled_ &&
+      !has_active_velocity_centroidal_hard_constraints() &&
+      pending_step_validation_dt_.has_value() &&
+      std::isfinite(*pending_step_validation_dt_) &&
+      *pending_step_validation_dt_ > 0.0 &&
+      (result.status != SolverStatus::kSuccess ||
+       result.joint_velocities.norm() < stall_config_.dq_stall_eps)) {
+    auto &hard = *position_step_hard_constraints_;
+    hard.q = current_q;
+    hard.dt = *pending_step_validation_dt_;
+    hard.matrix = C;
+    hard.lower = c_lower;
+    hard.upper = c_upper;
+    hard.valid = C.allFinite() && c_lower.allFinite() && c_upper.allFinite();
   }
   stall_handler_update(result);
   elastic_band_update(result);

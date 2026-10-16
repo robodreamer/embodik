@@ -200,8 +200,9 @@ def test_lower_priority_motion_preserves_satisfied_relative_grasp(
             options,
         )
         q_next = np.asarray(result.q_solution, dtype=float)
-        if initial_relative_orientation_error > 0.0:
-            assert result.status == eik.SolverStatus.SUCCESS, result.status_message
+        # A diagnostic hold after a failed solve is not an executable command
+        # under the incoming acceleration history, even if q remains bounded.
+        assert result.status == eik.SolverStatus.SUCCESS, (tick, result.status_message)
         moving_ticks += int(np.linalg.norm(q_next - q1) > 1e-8)
         if acceleration_limits_enabled:
             applied_velocity = (q_next - q1) / options.dt

@@ -4,6 +4,7 @@
  */
 
 #include "kinematics_solver_internal.hpp"
+#include "sphere_pair_distance_lower_bound.hpp"
 
 namespace embodik {
 
@@ -278,7 +279,14 @@ KinematicsSolver::evaluate_collision_pair_distances(const Eigen::VectorXd &q) {
     if (override_iterator != per_pair_min_distance_overrides_.end()) {
       minimum_distance = override_iterator->second;
     }
-    records.push_back({geometry_a, geometry_b, distance, minimum_distance});
+    std::optional<double> persistent_floor;
+    if (non_worsening_collision_floor_enabled_) {
+      const auto floor = collision_pair_distance_floor_.find(
+          canonical_pair_key(geometry_a, geometry_b));
+      if (floor != collision_pair_distance_floor_.end())
+        persistent_floor = std::min(floor->second, minimum_distance);
+    }
+    records.push_back({geometry_a, geometry_b, distance, minimum_distance, persistent_floor});
   }
   if (records.empty()) {
     return std::nullopt;
@@ -1392,7 +1400,8 @@ KinematicsSolver::compute_collision_constraint() {
 }
 
 std::optional<KinematicsSolver::CollisionConstraintResult>
-KinematicsSolver::compute_collision_constraint(double row_dt) {
+KinematicsSolver::compute_collision_constraint(double row_dt,
+                                               bool require_current_catalog) {
   if (row_dt <= 0.0 || !std::isfinite(row_dt)) {
     throw std::invalid_argument(
         "collision constraint row_dt must be finite and positive");
@@ -1415,7 +1424,8 @@ KinematicsSolver::compute_collision_constraint(double row_dt) {
   {
     const bool constraint_active_for_reuse =
         collision_constraint_.has_value() && collision_constraint_->enabled;
-    if (constraint_active_for_reuse && collision_pair_cache_enabled_ &&
+    if (!require_current_catalog && constraint_active_for_reuse &&
+        collision_pair_cache_enabled_ &&
         !acceleration_braking_lookahead_active &&
         last_collision_constraint_result_.has_value() &&
         std::isfinite(last_collision_constraint_row_dt_) &&
@@ -1494,7 +1504,7 @@ KinematicsSolver::compute_collision_constraint(double row_dt) {
       (robot_->get_current_configuration() - last_collision_constraint_q_)
               .squaredNorm() <= kFastPathMaxDqSqNorm;
 
-  if (constraint_active && collision_pair_cache_enabled_ &&
+  if (!require_current_catalog && constraint_active && collision_pair_cache_enabled_ &&
       !acceleration_braking_lookahead_active &&
       collision_pair_cache_has_full_scan_ && robot_q_stable &&
       !last_collision_budget_exhausted_ &&
@@ -1532,10 +1542,8 @@ KinematicsSolver::compute_collision_constraint(double row_dt) {
     int braking_steps = 0;
     braking_lookahead_certified = true;
     for (int index = 0; index < robot_->nv(); ++index) {
-      const double acceleration_step =
-          acceleration_limits_[index] * constraint_dt;
-      const double deadband = acceleration_step * 0.01;
-      const double step = acceleration_step + deadband;
+      const double step = acceleration_velocity_step(
+          acceleration_limits_[index], constraint_dt);
       if (step <= constraint_tolerance_) {
         if (std::abs(previous_dq_[index]) > constraint_tolerance_) {
           braking_lookahead_certified = false;
@@ -1556,10 +1564,8 @@ KinematicsSolver::compute_collision_constraint(double row_dt) {
       braking_placement_samples.reserve(braking_steps);
       for (int step_index = 0; step_index < braking_steps; ++step_index) {
         for (int index = 0; index < robot_->nv(); ++index) {
-          const double acceleration_step =
-              acceleration_limits_[index] * constraint_dt;
-          const double deadband = acceleration_step * 0.01;
-          const double step = acceleration_step + deadband;
+          const double step = acceleration_velocity_step(
+              acceleration_limits_[index], constraint_dt);
           if (rollout_velocity[index] > step) {
             rollout_velocity[index] -= step;
           } else if (rollout_velocity[index] < -step) {
@@ -1593,7 +1599,7 @@ KinematicsSolver::compute_collision_constraint(double row_dt) {
   // Keep cache mode active even when the candidate set is currently empty:
   // in clear-space regimes this avoids an expensive full scan on every tick.
   // A full scan is still forced periodically by refresh_interval.
-  if (collision_pair_cache_enabled_ && constraint_active &&
+  if (!require_current_catalog && collision_pair_cache_enabled_ && constraint_active &&
       collision_pair_cache_has_full_scan_ &&
       collision_pair_cache_steps_since_refresh_ <
           collision_pair_cache_refresh_interval_) {
@@ -2370,7 +2376,11 @@ KinematicsSolver::compute_collision_constraint(double row_dt) {
 
 std::optional<KinematicsSolver::CollisionVelocityConstraintLinearization>
 KinematicsSolver::linearize_collision_velocity_constraint(double row_dt) {
-  auto rows = compute_collision_constraint(row_dt);
+  // Explicit-state acceleration callers and their hypothetical stopping
+  // rollouts need current rows. A historical candidate subset can omit a pair
+  // that entered the activation shell since the last full scan. Keep current
+  // geometry broadphase culling, but bypass historical row/subset shortcuts.
+  auto rows = compute_collision_constraint(row_dt, true);
   if (!rows.has_value()) {
     return std::nullopt;
   }
@@ -2529,7 +2539,7 @@ KinematicsSolver::validate_collision_samples(
   }
 
   const auto pair_sphere_lower_bound =
-      [&](const CollisionValidationPairMetadata &metadata)
+      [&](const CollisionValidationPairMetadata &metadata, double required_distance)
       -> std::optional<double> {
     if (!sphere_broadphase_enabled_ || !sphere_broadphase_.is_built()) {
       return std::nullopt;
@@ -2545,6 +2555,18 @@ KinematicsSolver::validate_collision_samples(
             static_cast<pinocchio::JointIndex>(
                 collision_validation_data_->oMi.size())) {
       return std::nullopt;
+    }
+    const double sphere_bound = detail::sphere_pair_distance_lower_bound(
+        sphere_broadphase_.sphere(metadata.object_a),
+        sphere_broadphase_.sphere(metadata.object_b),
+        collision_validation_data_->oMi[joint_a_id].translation(),
+        collision_validation_data_->oMi[joint_a_id].rotation(),
+        collision_validation_data_->oMi[joint_b_id].translation(),
+        collision_validation_data_->oMi[joint_b_id].rotation());
+    // Once the cheapest enclosing bound certifies the unchanged floor, the
+    // stronger box/SAT bound cannot change this sample's acceptance decision.
+    if (std::isfinite(sphere_bound) && sphere_bound >= required_distance) {
+      return sphere_bound;
     }
     const double lower_bound = sphere_broadphase_.compute_pair_lower_bound(
         metadata.object_a, metadata.object_b,
@@ -2702,7 +2724,11 @@ KinematicsSolver::validate_collision_samples(
       double sample_distance = std::numeric_limits<double>::quiet_NaN();
       bool sample_certified = false;
       ++result.conservative_bound_checks;
-      if (const auto lower_bound = pair_sphere_lower_bound(metadata);
+      const double required_distance =
+          seed_distance >= floor - kSampleNonWorseningTolerance
+              ? floor - kSampleNonWorseningTolerance
+              : seed_distance - kSampleNonWorseningTolerance;
+      if (const auto lower_bound = pair_sphere_lower_bound(metadata, required_distance);
           lower_bound.has_value()) {
         sample_distance = *lower_bound;
         if (seed_distance >= floor - kSampleNonWorseningTolerance &&
@@ -2728,6 +2754,9 @@ KinematicsSolver::validate_collision_samples(
           result.failed_pair_catalog_index = cursor;
           result.failed_pair_model_index = metadata.pair_index;
           result.failed_pair_key = metadata.key;
+          result.failed_sample_distance = sample_distance;
+          result.failed_seed_distance = seed_distance;
+          result.failed_required_distance = floor;
           return fail(
               SolverStatus::kCollisionViolated,
               "collision sample violated an effective collision floor");
@@ -2738,6 +2767,9 @@ KinematicsSolver::validate_collision_samples(
         result.failed_pair_catalog_index = cursor;
         result.failed_pair_model_index = metadata.pair_index;
         result.failed_pair_key = metadata.key;
+        result.failed_sample_distance = sample_distance;
+        result.failed_seed_distance = seed_distance;
+        result.failed_required_distance = seed_distance;
         return fail(
             SolverStatus::kCollisionViolated,
             "collision sample worsened an initially violated pair");

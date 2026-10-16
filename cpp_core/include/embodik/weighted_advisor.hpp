@@ -145,6 +145,8 @@ inline void populate_weighted_advisory_residuals(
   }
 }
 
+
+
 inline SolverResult computeConstrainedWeightedVelocitySolutionEigen(
     const std::vector<Eigen::VectorXd> &objective_targets,
     const std::vector<Eigen::MatrixXd> &objective_jacobians,
@@ -153,7 +155,8 @@ inline SolverResult computeConstrainedWeightedVelocitySolutionEigen(
     const std::vector<double> &objective_weights,
     const VelocitySolverConfig &solver_config,
     const std::vector<Eigen::VectorXd> &objective_row_weights =
-        std::vector<Eigen::VectorXd>{}) {
+        std::vector<Eigen::VectorXd>{},
+    const Eigen::VectorXd *initial_solution = nullptr) {
   auto fail = [](SolverStatus status, const char *msg) {
     SolverResult out{};
     out.status = status;
@@ -175,6 +178,15 @@ inline SolverResult computeConstrainedWeightedVelocitySolutionEigen(
       max_bounds.size() != constraint_coefficients.rows()) {
     return fail(SolverStatus::kConstraintBoundsMismatch,
                 "constraint dimensions do not match weighted objective");
+  }
+  if (initial_solution != nullptr &&
+      (initial_solution->size() != J_stack.cols() ||
+       !initial_solution->allFinite() ||
+       detail::ComputeMaxLinearConstraintViolation(
+           constraint_coefficients, min_bounds, max_bounds, *initial_solution) >
+           solver_config.epsilon)) {
+    return fail(SolverStatus::kInvalidInput,
+                "initial solution must be finite, correctly sized and feasible");
   }
 
   struct InequalityRow {
@@ -245,7 +257,23 @@ inline SolverResult computeConstrainedWeightedVelocitySolutionEigen(
       std::max<size_t>(solver_config.iteration_limit,
                        inequalities.size() + kExtraIterations);
   unsigned int iterations = 0;
-  for (; iterations < iteration_limit; ++iterations) {
+  bool primal_recovered = false;
+  auto recover_feasible_primal = [&]() {
+    unsigned int recovery_iterations = 0;
+    Eigen::VectorXd recovered;
+    if (!detail::RecoverFeasibleWeightedQuadratic(
+            H, g, constraint_coefficients, min_bounds, max_bounds, solver_config,
+            &recovered, &recovery_iterations, initial_solution)) return false;
+    v = std::move(recovered);
+    iterations += recovery_iterations;
+    primal_recovered = true;
+    return true;
+  };
+  if (initial_solution != nullptr && !recover_feasible_primal()) {
+    return fail(SolverStatus::kNumericalError,
+                "constrained weighted optimization from initial solution failed");
+  }
+  for (; !primal_recovered && iterations < iteration_limit; ++iterations) {
     Eigen::VectorXd lambda;
     v = solve_with_active_set(active, &lambda);
     if (!v.allFinite()) {
@@ -268,6 +296,7 @@ inline SolverResult computeConstrainedWeightedVelocitySolutionEigen(
         already_active = already_active || idx == most_violated;
       }
       if (already_active) {
+        if (recover_feasible_primal()) break;
         return fail(SolverStatus::kNumericalError,
                     "active constrained weighted row remained violated");
       }
@@ -286,7 +315,8 @@ inline SolverResult computeConstrainedWeightedVelocitySolutionEigen(
     break;
   }
 
-  if (iterations >= iteration_limit) {
+  if (iterations >= iteration_limit && !primal_recovered &&
+      !recover_feasible_primal()) {
     return fail(SolverStatus::kNoProgress,
                 "constrained weighted active set did not converge");
   }

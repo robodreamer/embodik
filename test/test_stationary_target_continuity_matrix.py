@@ -1343,8 +1343,23 @@ def test_rejected_priority_candidate_remains_fail_closed_after_continuity_guard(
         if settled.position_step_hold_active:
             break
     assert settled.position_step_hold_active is True
+    assert settled.status in (eik.SolverStatus.SUCCESS, eik.SolverStatus.NO_PROGRESS)
+    np.testing.assert_array_equal(
+        solver.get_previous_joint_velocities(), np.zeros(robot.nv, dtype=float)
+    )
 
-    solver.set_previous_joint_velocities(np.array([-0.5, 0.0], dtype=float))
+    incoming_velocity = np.array([-0.5, 0.0], dtype=float)
+    acceleration_step = 0.1 * options.dt
+    protected_lower_x = (
+        np.asarray(targets[0].target_pose, dtype=float)[0, 3]
+        - targets[0].priority_position_tolerance
+    )
+    minimum_priority_velocity = (protected_lower_x - q[0]) / options.dt
+    # Even the least-negative acceleration-feasible velocity crosses the
+    # protected interval's lower face. This is an empty interval, rather than
+    # merely a bounded search that failed to find a candidate.
+    assert incoming_velocity[0] + acceleration_step < minimum_priority_velocity
+    solver.set_previous_joint_velocities(incoming_velocity)
     result = solver.solve_position_step(q, targets, options)
     q_next = np.asarray(result.q_solution, dtype=float)
     robot.update_configuration(q_next)
@@ -1360,9 +1375,17 @@ def test_rejected_priority_candidate_remains_fail_closed_after_continuity_guard(
         q_next,
     )
     assert np.linalg.norm(protected_error) <= 5e-3
-    assert result.status == eik.SolverStatus.NO_PROGRESS
-    assert result.position_step_hold_active is True
-    assert "no priority-safe candidate" in result.status_message
+    # A diagnostic hold cannot represent a feasible stop when the incoming
+    # acceleration interval excludes zero. No rejected command advances history.
+    assert abs(incoming_velocity[0]) > acceleration_step
+    assert result.status == eik.SolverStatus.INFEASIBLE, (
+        result.status,
+        result.status_message,
+    )
+    # The command can fail in the native feasibility check before reaching
+    # the later priority-hold guard. Neither path accepts a physical hold.
+    assert result.status_message
+    np.testing.assert_array_equal(solver.get_previous_joint_velocities(), incoming_velocity)
 
 
 def test_priority_tolerance_change_reopens_latched_continuity_state(

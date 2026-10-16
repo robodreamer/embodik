@@ -179,8 +179,8 @@ struct VelocitySolverConfig {
   double magnitude_limit = 1e10;
   unsigned int stall_detection_count = 2;
   RegularizedInverseConfig regularization_config{};
-  // Opt-in certification for explicit task modes; implicit legacy API is unchanged.
-  bool certify_explicit_task_modes = false;
+  // Optional active-set improvement of a feasible partial SCALE realization.
+  bool refine_partial_scale = false;
 };
 
 struct ObjectiveSolveConfig {
@@ -208,6 +208,8 @@ struct CollisionPairDistance {
   std::string geometry_b;
   double distance = 0.0;
   double minimum_distance = 0.0;
+  /// Initialized persistent recovery floor; absent if disabled or unseeded.
+  std::optional<double> persistent_floor_m;
 };
 
 /**
@@ -432,6 +434,12 @@ struct PositionStepOptions {
   double position_gain = 1.0;    // Multiplier on the linear error → velocity
   double orientation_gain = 1.0; // Multiplier on the angular error → velocity
   int max_steps = 1;             // Number of velocity-IK iterations
+  /// Capture nominal collision checks and their backoff candidates for diagnosis.
+  /// Disabled by default; records are sampled configurations, not swept volumes.
+  bool record_collision_candidates = false;
+  /// Capture the native velocity and nominal integrated configuration per step.
+  /// These records precede candidate acceptance/backoff guards.
+  bool record_velocity_candidates = false;
   double dt = -1.0;              // Integration timestep per step (≤0 → solver.dt)
   /// Optional caller-owned current generalized velocity (size nv). Required
   /// when a velocity-ZMP constraint is active so solve_position_step can form
@@ -502,9 +510,10 @@ struct PositionStepOptions {
   /// solve_position_step calls. Uses proven defaults (delta_max=0.05).
   /// Default false (opt-in).
   bool elastic_band = false;
-  // Optional seed-referenced bound tightening:
-  // each inner step constrains dq so integrated q stays within
-  // initial_current_q ± v_limit*dt.
+  // Bound scalar (nq=nv=1) joint displacement for the whole call to
+  // initial_current_q ± effective_velocity_cap * outer dt, including adaptive
+  // inner integration. Multiple/adaptive iterations do not certify arbitrary
+  // outer hard-linear rows or acceleration/contact histories.
   bool limit_change_from_seed = false;
   // Optional early exit when progress is below threshold for consecutive steps.
   // Set <=0 to disable (default).
@@ -572,8 +581,32 @@ struct TaskTarget {
   double priority_orientation_tolerance = -1.0;
 };
 
+struct PositionStepCollisionCandidate {
+  std::string stage;
+  Eigen::VectorXd reference_q;
+  Eigen::VectorXd candidate_q;
+  std::vector<double> reference_margins;
+  std::vector<double> candidate_margins;
+  double reference_min_distance = 0.0;
+  double candidate_min_distance = 0.0;
+  double global_distance_threshold = 0.0;
+  bool floor_acceptable = false;
+};
+
+struct PositionStepVelocityCandidate {
+  int step_index = 0;
+  double integration_dt = 0.0;
+  Eigen::VectorXd reference_q;
+  Eigen::VectorXd solver_velocity;
+  Eigen::VectorXd integrated_velocity;
+  Eigen::VectorXd candidate_q;
+  std::vector<double> task_scales;
+};
+
 // Position IK result
 struct PositionIKResult : public VelocitySolverResult {
+  std::vector<PositionStepCollisionCandidate> collision_candidates;
+  std::vector<PositionStepVelocityCandidate> velocity_candidates;
   Eigen::VectorXd q_solution;               // Final joint configuration
   Eigen::Matrix4d achieved_pose;            // Final achieved pose
   double position_error = 0.0;              // Final position error
@@ -663,6 +696,8 @@ struct SolveDiagnostics {
 struct SolverRuntimeConfig {
   /// Singular-value damping for the regularized pseudoinverse.
   double damping = 0.1;
+  /// Opt in to improving feasible partial SCALE rates under the same bounds.
+  bool refine_partial_scale = false;
   /// Default PositionStepOptions::max_steps value.
   int position_step_max_steps = 1;
   /// Default PositionStepOptions::adaptive_dt value.
@@ -686,6 +721,12 @@ struct SolverRuntimeConfig {
   /// Default true; the candidate is computed lazily only after a non-success
   /// prioritized solve unless weighted_advisor_enabled is also true.
   bool weighted_fallback_enabled = true;
+  /// Opt-in experimental pose recovery using tolerance-normalized error.
+  bool normalized_pose_recovery_enabled = false;
+  double normalized_pose_position_tolerance = 0.005;
+  double normalized_pose_orientation_tolerance = 0.01;
+  /// Experimental pose-solution guide; never replaces the current configuration.
+  Eigen::VectorXd normalized_pose_recovery_reference;
   /// Multiplicative weight scale for FRAME_POSITION objectives in the
   /// diagnostic advisor only. Non-finite or negative values are treated as 1.0.
   double advisor_position_weight_scale = 1.0;

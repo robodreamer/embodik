@@ -618,6 +618,20 @@ def test_stationary_collision_bound_target_settles_after_sliding(tmp_path, solve
     assert float(speeds.max(initial=0.0)) <= 0.02
     assert float(np.sum(np.linalg.norm(np.diff(velocities, axis=0), axis=1))) <= 0.05
     assert float(np.linalg.norm(q_tail[-1] - q_tail[0])) <= 0.005
+    # A completed collision-bound dwell must still reopen for a new reachable
+    # Cartesian command, without clearing history or resetting joint poses.
+    before_return = q.copy()
+    next_target = np.eye(4)
+    next_target[:3, 3] = np.asarray(robot.get_frame_pose("tool").translation) + 0.03 * tangent
+    options.continuity_command_revision = 2
+    for _ in range(2):
+        result = solver.solve_position_step(q, next_target, "stationary_contact", options)
+        q = np.asarray(result.q_solution, dtype=float)
+        robot.update_configuration(q)
+    assert np.linalg.norm(q - before_return) > 1e-4
+    assert (
+        np.linalg.norm(next_target[:3, 3] - robot.get_frame_pose("tool").translation) < 0.03 - 1e-4
+    )
     assert int(np.sum((products < 0.0) & active)) <= 2
     assert int(np.sum(np.diff(error_tail) > 1e-4)) <= 1
     assert int(np.sum(np.diff(progress_tail) < -1e-4)) <= 1

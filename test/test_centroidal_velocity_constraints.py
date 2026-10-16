@@ -615,9 +615,11 @@ def test_position_step_revalidates_continuity_brake_against_centroidal_bounds(
     assert result.status is eik.SolverStatus.INFEASIBLE
     npt.assert_allclose(result.q_solution, q, rtol=0.0, atol=0.0)
     npt.assert_allclose(result.joint_velocities, np.zeros(robot.nv), rtol=0.0, atol=0.0)
+    # Rejected braking is not an accepted instantaneous stop. Keep the
+    # incoming physical history rather than committing the diagnostic zero.
     npt.assert_allclose(
         solver.get_previous_joint_velocities(),
-        np.zeros(robot.nv),
+        previous_velocity,
         rtol=0.0,
         atol=0.0,
     )
