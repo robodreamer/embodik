@@ -182,6 +182,12 @@ can exit penetration without treating interpenetration as a valid rest pose. A p
 above the floor but below `min_distance` may move toward the floor instead of being pinned to its
 initial clearance, preserving safe tangential and whole-body motion.
 
+The persistent floor does not increase merely because a pair moves above nominal
+clearance. Position and position-step rejection check the effective per-pair floor, including
+pair overrides and command-local anchors, rather than applying the global nominal
+distance a second time. An independent penetration guard remains active. With the
+structural policy disabled, configured nominal pair clearances remain enforced.
+
 See [KinematicsSolver — Collision recovery floor](api/kinematics_solver.md#collision-recovery-floor).
 
 ### Tangential sliding at an active boundary
@@ -240,9 +246,17 @@ pixi run python scripts/validate_wbc_segments.py
 `solver.evaluate_collision_pair_distances(q)` evaluates every currently allowed
 and active collision geometry pair at a finite, full-size configuration. It
 returns read-only `CollisionPairDistance` records with `geometry_a`,
-`geometry_b`, `distance`, and `minimum_distance`. Each minimum is the currently
+`geometry_b`, `distance`, `minimum_distance`, and `persistent_floor_m`. Each minimum is the currently
 active pair override or configured global margin. Pending overrides and recovery
 floors are not activated by this diagnostic query.
+
+`persistent_floor_m` reports the initialized persistent recovery floor, capped
+by the active pair minimum. It is `None` while that policy is disabled or the
+pair has not been seeded by solving. Queries neither seed nor ratchet floors.
+This value does not include command-local anchors or certify a candidate or
+swept trajectory; retain those checks separately. A persistent structural floor
+can permit clearance loss above that floor, so a per-step no-clearance-loss
+test measures a different policy.
 
 ```python
 records = solver.evaluate_collision_pair_distances(q_command)
