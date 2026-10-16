@@ -320,14 +320,54 @@ void bind_acceleration_solver(nb::module_ &m) {
               &AccelerationSolveOptions::apply_velocity_limits)
       .def_rw("apply_position_limits",
               &AccelerationSolveOptions::apply_position_limits)
+      .def_prop_rw(
+          "nominal_position_lower_bounds",
+          [](const AccelerationSolveOptions &self) {
+            return self.nominal_position_lower_bounds;
+          },
+          [](AccelerationSolveOptions &self,
+             std::optional<Eigen::VectorXd> value) {
+            self.nominal_position_lower_bounds = std::move(value);
+          })
+      .def_prop_rw(
+          "nominal_position_upper_bounds",
+          [](const AccelerationSolveOptions &self) {
+            return self.nominal_position_upper_bounds;
+          },
+          [](AccelerationSolveOptions &self,
+             std::optional<Eigen::VectorXd> value) {
+            self.nominal_position_upper_bounds = std::move(value);
+          })
+      .def_rw("elastic_delta_max", &AccelerationSolveOptions::elastic_delta_max)
+      .def_rw("elastic_expand_rate",
+              &AccelerationSolveOptions::elastic_expand_rate)
+      .def_rw("elastic_decay_rate", &AccelerationSolveOptions::elastic_decay_rate)
+      .def_rw("elastic_expand_only_saturated",
+              &AccelerationSolveOptions::elastic_expand_only_saturated)
       .def_rw("allow_state_box_task_fallback",
               &AccelerationSolveOptions::allow_state_box_task_fallback,
               "Allow an explicit MIN_ERROR fallback when the compatible "
               "state box requires nonzero braking acceleration.")
+      .def_rw("allow_best_effort_lower_tasks",
+              &AccelerationSolveOptions::allow_best_effort_lower_tasks,
+              "Retain a validated higher-priority command if numerical "
+              "recovery cannot optimize a trailing MIN_ERROR task. Lower-task "
+              "optimality is not certified; hard and nonlinear checks remain.")
       .def_rw("collect_task_diagnostics",
               &AccelerationSolveOptions::collect_task_diagnostics,
               "Retain rich per-task acceleration diagnostics. Disable in "
               "latency-sensitive loops that only require scales and errors.")
+      .def_rw("refine_partial_scale",
+              &AccelerationSolveOptions::refine_partial_scale,
+              "Opt in to bounded refinement of feasible partial SCALE "
+              "commands, preserving earlier task images and hard bounds. "
+              "An improved primary scale can change lower task errors.")
+      .def_rw("prefer_direct_min_error_qp",
+              &AccelerationSolveOptions::prefer_direct_min_error_qp,
+              "Prefer a feasible-primal quadratic solve for an all-MIN_ERROR "
+              "hierarchy after hard feasibility is established. Scaling and "
+              "fallback authorization remain unchanged. An unsuccessful direct "
+              "attempt returns to the established search.")
       .def_prop_rw(
           "generalized_acceleration_allocation",
           [](const AccelerationSolveOptions &self) {
@@ -346,33 +386,19 @@ void bind_acceleration_solver(nb::module_ &m) {
              std::optional<EffortConstraintOptions> value) {
             self.effort_constraints = std::move(value);
           })
-      .def_rw("affine_constraints",
-              &AccelerationSolveOptions::affine_constraints)
-      .def_rw("frozen_next_velocity_constraints",
-              &AccelerationSolveOptions::frozen_next_velocity_constraints)
-      .def_rw("task_acceleration_bounds",
-              &AccelerationSolveOptions::task_acceleration_bounds)
-      .def_rw("centroidal_momentum_rate_objectives",
-              &AccelerationSolveOptions::
-                  centroidal_momentum_rate_objectives)
-      .def_rw("centroidal_momentum_rate_bounds",
-              &AccelerationSolveOptions::centroidal_momentum_rate_bounds)
-      .def_rw("contact_acceleration_constraints",
-              &AccelerationSolveOptions::contact_acceleration_constraints)
-      .def_rw("tight_point_constraints",
-              &AccelerationSolveOptions::tight_point_constraints)
-      .def_rw("tight_frame_pose_constraints",
-              &AccelerationSolveOptions::tight_frame_pose_constraints)
-      .def_rw("relative_pose_constraints",
-              &AccelerationSolveOptions::relative_pose_constraints)
-      .def_rw("torso_pose_bound_constraints",
-              &AccelerationSolveOptions::torso_pose_bound_constraints)
-      .def_rw("com_support_polygon_constraints",
-              &AccelerationSolveOptions::com_support_polygon_constraints)
-      .def_rw("capture_point_constraints",
-              &AccelerationSolveOptions::capture_point_constraints)
-      .def_rw("zmp_constraints",
-              &AccelerationSolveOptions::zmp_constraints)
+      DEF_VALUE_PROP(AccelerationSolveOptions, affine_constraints)
+      DEF_VALUE_PROP(AccelerationSolveOptions, frozen_next_velocity_constraints)
+      DEF_VALUE_PROP(AccelerationSolveOptions, task_acceleration_bounds)
+      DEF_VALUE_PROP(AccelerationSolveOptions, centroidal_momentum_rate_objectives)
+      DEF_VALUE_PROP(AccelerationSolveOptions, centroidal_momentum_rate_bounds)
+      DEF_VALUE_PROP(AccelerationSolveOptions, contact_acceleration_constraints)
+      DEF_VALUE_PROP(AccelerationSolveOptions, tight_point_constraints)
+      DEF_VALUE_PROP(AccelerationSolveOptions, tight_frame_pose_constraints)
+      DEF_VALUE_PROP(AccelerationSolveOptions, relative_pose_constraints)
+      DEF_VALUE_PROP(AccelerationSolveOptions, torso_pose_bound_constraints)
+      DEF_VALUE_PROP(AccelerationSolveOptions, com_support_polygon_constraints)
+      DEF_VALUE_PROP(AccelerationSolveOptions, capture_point_constraints)
+      DEF_VALUE_PROP(AccelerationSolveOptions, zmp_constraints)
       .def_rw("zero_acceleration_joint_indices",
               &AccelerationSolveOptions::zero_acceleration_joint_indices)
       .def_rw("zero_next_velocity_joint_indices",
@@ -384,7 +410,13 @@ void bind_acceleration_solver(nb::module_ &m) {
       m, "VelocityCollisionLiftOptions")
       .def(nb::init<>())
       .def_rw("validation_substeps",
-              &VelocityCollisionLiftOptions::validation_substeps);
+              &VelocityCollisionLiftOptions::validation_substeps)
+      .def_rw("max_refinement_iterations",
+              &VelocityCollisionLiftOptions::max_refinement_iterations)
+      .def_rw("refinement_trust_radius",
+              &VelocityCollisionLiftOptions::refinement_trust_radius)
+      .def_rw("refinement_clearance_reserve",
+              &VelocityCollisionLiftOptions::refinement_clearance_reserve);
 
   nb::class_<CollisionConstraintAccelerationPolicy>(
       m, "CollisionConstraintAccelerationPolicy")
@@ -577,6 +609,9 @@ void bind_acceleration_solver(nb::module_ &m) {
               &AccelerationSolverResult::backend_computation_time_ms)
       .def_ro("postprocessing_time_ms",
               &AccelerationSolverResult::postprocessing_time_ms)
+      .def_ro("nonlinear_refinement_iterations",
+              &AccelerationSolverResult::nonlinear_refinement_iterations,
+              "Number of bounded nonlinear CoM or tight-frame translation corrective solves.")
       .def_prop_ro("joint_accelerations",
                    [](const AccelerationSolverResult &self) {
                      return self.joint_accelerations;
@@ -588,6 +623,28 @@ void bind_acceleration_solver(nb::module_ &m) {
       .def_prop_ro("q_solution",
                    [](const AccelerationSolverResult &self) {
                      return self.q_solution;
+                   })
+      .def_ro("elastic_band_enabled",
+              &AccelerationSolverResult::elastic_band_enabled)
+      .def_prop_ro("elastic_band_delta",
+                   [](const AccelerationSolverResult &self) {
+                     return self.elastic_band_delta;
+                   })
+      .def_prop_ro("elastic_band_capacity_lower",
+                   [](const AccelerationSolverResult &self) {
+                     return self.elastic_band_capacity_lower;
+                   })
+      .def_prop_ro("elastic_band_capacity_upper",
+                   [](const AccelerationSolverResult &self) {
+                     return self.elastic_band_capacity_upper;
+                   })
+      .def_prop_ro("elastic_effective_position_lower_bounds",
+                   [](const AccelerationSolverResult &self) {
+                     return self.elastic_effective_position_lower_bounds;
+                   })
+      .def_prop_ro("elastic_effective_position_upper_bounds",
+                   [](const AccelerationSolverResult &self) {
+                     return self.elastic_effective_position_upper_bounds;
                    })
       .def_ro("acceleration_limits_applied",
               &AccelerationSolverResult::acceleration_limits_applied)
@@ -659,6 +716,22 @@ void bind_acceleration_solver(nb::module_ &m) {
               &AccelerationSolverResult::collision_lift_pairs_considered)
       .def_ro("collision_lift_row_pairs",
               &AccelerationSolverResult::collision_lift_row_pairs)
+      .def_ro("collision_refinement_iterations",
+              &AccelerationSolverResult::collision_refinement_iterations)
+      .def_ro("collision_refinement_exact_queries",
+              &AccelerationSolverResult::collision_refinement_exact_queries)
+      .def_ro("collision_refinement_kinematics_updates",
+              &AccelerationSolverResult::collision_refinement_kinematics_updates)
+      .def_ro("collision_refinement_geometry_updates",
+              &AccelerationSolverResult::collision_refinement_geometry_updates)
+      .def_ro("collision_refinement_last_failed_sample_index",
+              &AccelerationSolverResult::collision_refinement_last_failed_sample_index)
+      .def_ro("collision_refinement_last_failed_pair_key",
+              &AccelerationSolverResult::collision_refinement_last_failed_pair_key)
+      .def_ro("collision_refinement_last_failed_distance",
+              &AccelerationSolverResult::collision_refinement_last_failed_distance)
+      .def_ro("collision_refinement_last_required_distance",
+              &AccelerationSolverResult::collision_refinement_last_required_distance)
       .def_ro("collision_lift_row_exact_queries",
               &AccelerationSolverResult::collision_lift_row_exact_queries)
       .def_ro("native_collision_constraint_applied",
@@ -746,6 +819,9 @@ void bind_acceleration_solver(nb::module_ &m) {
       .def("get_task", &AccelerationSolver::get_task, nb::arg("name"))
       .def("remove_task", &AccelerationSolver::remove_task, nb::arg("name"))
       .def("clear_tasks", &AccelerationSolver::clear_tasks)
+      .def("reset_elastic_band", &AccelerationSolver::reset_elastic_band)
+      .def("get_elastic_band_deltas",
+           &AccelerationSolver::get_elastic_band_deltas)
       .def("configure_collision_constraint",
            &AccelerationSolver::configure_collision_constraint,
            nb::arg("definition"), nb::arg("policy"))

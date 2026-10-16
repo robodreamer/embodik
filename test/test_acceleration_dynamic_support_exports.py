@@ -154,7 +154,10 @@ def test_dynamic_support_records_export_and_solve(tmp_path):
     assert np.isclose(zmp_diag.min_slack, np.min(zmp_diag.half_plane_slacks))
     assert zmp_diag.min_slack > 0.0
 
-    options.zmp_constraints[0].fz_min = 1e9
+    # Record lists are owned snapshots; reassign edits to update the options.
+    constraints = options.zmp_constraints
+    constraints[0].fz_min = 1e9
+    options.zmp_constraints = constraints
     failed = solver.solve(q, dq, 0.01, options)
     assert failed.status == eik.SolverStatus.INFEASIBLE
     assert failed.q_solution.size == 0

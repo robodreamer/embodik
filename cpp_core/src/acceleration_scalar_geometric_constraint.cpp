@@ -1,6 +1,7 @@
 #include "acceleration_scalar_geometric_constraint.hpp"
 
 #include "acceleration_geometric_constraint_policy.hpp"
+#include "acceleration_state_box_tolerance.hpp"
 #include "so3_log_differential.hpp"
 
 #include <algorithm>
@@ -401,13 +402,19 @@ ScalarGeometricConstraintResult validate_scalar_geometric_sample_acceptance(
     const double lower = specification.state_lower_bounds(axis);
     const double upper = specification.state_upper_bounds(axis);
     if (sample.value(axis) <
-            lower - comparison_tolerance(sample.value(axis), lower) ||
+            lower - (endpoint ? state_box_comparison_tolerance(sample.value(axis), lower)
+                              : comparison_tolerance(sample.value(axis), lower)) ||
         sample.value(axis) >
-            upper + comparison_tolerance(sample.value(axis), upper)) {
-      return failure(SolverStatus::kNumericalError,
+            upper + (endpoint ? state_box_comparison_tolerance(sample.value(axis), upper)
+                              : comparison_tolerance(sample.value(axis), upper))) {
+      auto result = failure(SolverStatus::kNumericalError,
                      accepted_constraint_identity(specification) +
                          " nonlinear path violated axis " +
                          std::to_string(axis) + " state bound");
+      result.violation = ScalarGeometricViolation{
+          ScalarGeometricViolationKind::kStateBound, axis,
+          sample.value(axis) > upper, 0.0};
+      return result;
     }
     const double rate_limit = specification.policy.rate_limits(axis);
     if (std::abs(sample.rate(axis)) >
@@ -431,36 +438,46 @@ ScalarGeometricConstraintResult validate_scalar_geometric_sample_acceptance(
     if (!endpoint) {
       continue;
     }
+    // Match the next solve's clamped incoming coordinate and its strict
+    // braking tolerance, including any outward rate at a boundary. Interior
+    // path samples retain their existing geometric comparison tolerances.
+    const double bounded_coordinate = std::clamp(sample.value(axis), lower, upper);
     if (sample.rate(axis) < 0.0) {
-      const double margin = sample.value(axis) - lower;
+      const double margin = bounded_coordinate - lower;
       const double capacity =
           2.0 * specification.policy.lower_braking_accelerations(axis) *
           margin;
-      if (margin < -comparison_tolerance(margin, 0.0) ||
+      if (margin <= 0.0 ||
           sample.rate(axis) * sample.rate(axis) >
-              capacity + comparison_tolerance(
+              capacity + state_box_comparison_tolerance(
                              sample.rate(axis) * sample.rate(axis),
                              capacity)) {
-        return failure(SolverStatus::kNumericalError,
+        auto result = failure(SolverStatus::kNumericalError,
                        accepted_constraint_identity(specification) +
                            " endpoint failed axis " + std::to_string(axis) +
                            " lower braking viability");
+        result.violation = ScalarGeometricViolation{
+            ScalarGeometricViolationKind::kBrakingViability, axis, false, 0.0};
+        return result;
       }
     }
     if (sample.rate(axis) > 0.0) {
-      const double margin = upper - sample.value(axis);
+      const double margin = upper - bounded_coordinate;
       const double capacity =
           2.0 * specification.policy.upper_braking_accelerations(axis) *
           margin;
-      if (margin < -comparison_tolerance(margin, 0.0) ||
+      if (margin <= 0.0 ||
           sample.rate(axis) * sample.rate(axis) >
-              capacity + comparison_tolerance(
+              capacity + state_box_comparison_tolerance(
                              sample.rate(axis) * sample.rate(axis),
                              capacity)) {
-        return failure(SolverStatus::kNumericalError,
+        auto result = failure(SolverStatus::kNumericalError,
                        accepted_constraint_identity(specification) +
                            " endpoint failed axis " + std::to_string(axis) +
                            " upper braking viability");
+        result.violation = ScalarGeometricViolation{
+            ScalarGeometricViolationKind::kBrakingViability, axis, true, 0.0};
+        return result;
       }
     }
   }
@@ -528,6 +545,29 @@ int scalar_geometric_path_segment_count(
                   static_cast<int>(required_segments_value));
 }
 
+std::vector<double> scalar_geometric_path_sample_times(int segment_count,
+                                                       double dt) {
+  if (segment_count <= 0 || !(dt > 0.0) || !std::isfinite(dt)) {
+    return {};
+  }
+  std::vector<double> times;
+  times.reserve(static_cast<std::size_t>(segment_count) + 4);
+  for (int segment = 0; segment <= segment_count; ++segment) {
+    // Preserve multiply-then-divide at existing samples: regrouping this as
+    // dt * (i / N) can change a finite-difference nonlinear correction.
+    times.push_back(dt * static_cast<double>(segment) / segment_count);
+  }
+  // Existing quarter nodes retain their original floating-point times too.
+  if (segment_count % 4 != 0) {
+    times.push_back(0.25 * dt);
+    times.push_back(0.75 * dt);
+  }
+  if (segment_count % 2 != 0) times.push_back(0.5 * dt);
+  std::sort(times.begin(), times.end());
+  times.erase(std::unique(times.begin(), times.end()), times.end());
+  return times;
+}
+
 ScalarGeometricConstraintResult validate_scalar_geometric_path(
     const ScalarGeometricConstraintSpecification &specification,
     const Eigen::VectorXd &dq, const Eigen::VectorXd &ddq, double dt,
@@ -545,14 +585,20 @@ ScalarGeometricConstraintResult validate_scalar_geometric_path(
   if (!segment_count_failure.satisfied()) {
     return segment_count_failure;
   }
+  const auto times = scalar_geometric_path_sample_times(segment_count, dt);
+  const int sample_segments = static_cast<int>(times.size()) - 1;
+  if (sample_segments > options.maximum_segments) {
+    return failure(SolverStatus::kNumericalError,
+                   accepted_constraint_identity(specification) +
+                       " nonlinear path exceeded validation sample budget");
+  }
 
   std::optional<ScalarGeometricPathPoint> previous;
-  for (int segment = 0; segment <= segment_count; ++segment) {
+  for (int segment = 0; segment <= sample_segments; ++segment) {
     ScalarGeometricPathPoint current;
     current.segment_index = segment;
-    current.segment_count = segment_count;
-    current.time = dt * static_cast<double>(segment) /
-                   static_cast<double>(segment_count);
+    current.segment_count = sample_segments;
+    current.time = times[segment];
     current.tangent =
         current.time * dq + 0.5 * current.time * current.time * ddq;
     current.rate = dq + current.time * ddq;
@@ -562,9 +608,10 @@ ScalarGeometricConstraintResult validate_scalar_geometric_path(
       return evaluated;
     }
 
-    const auto sample = validate_scalar_geometric_sample_acceptance(
-        specification, current.coordinates, segment == segment_count);
+    auto sample = validate_scalar_geometric_sample_acceptance(
+        specification, current.coordinates, segment == sample_segments);
     if (!sample.satisfied()) {
+      if (sample.violation) sample.violation->time = current.time;
       return sample;
     }
 

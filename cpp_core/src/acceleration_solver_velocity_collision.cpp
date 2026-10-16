@@ -1,11 +1,26 @@
 #include "acceleration_solver_internal.hpp"
 
+#include <pinocchio/algorithm/geometry.hpp>
+#include <pinocchio/algorithm/jacobian.hpp>
+#include <pinocchio/algorithm/frames.hpp>
+#ifdef PINOCCHIO_WITH_HPP_FCL
+#include <pinocchio/collision/distance.hpp>
+#endif
+
 namespace embodik {
 namespace acceleration_solver_internal {
 
 void apply_velocity_collision_lift_diagnostics(
     AccelerationSolverResult *result,
     const VelocityCollisionLiftDiagnostics &diagnostics) {
+  result->collision_refinement_iterations = diagnostics.refinement_iterations;
+  result->collision_refinement_exact_queries = diagnostics.refinement_exact_queries;
+  result->collision_refinement_kinematics_updates = diagnostics.refinement_kinematics_updates;
+  result->collision_refinement_geometry_updates = diagnostics.refinement_geometry_updates;
+  result->collision_refinement_last_failed_sample_index = diagnostics.refinement_last_failed_sample_index;
+  result->collision_refinement_last_failed_pair_key = diagnostics.refinement_last_failed_pair_key;
+  result->collision_refinement_last_failed_distance = diagnostics.refinement_last_failed_distance;
+  result->collision_refinement_last_required_distance = diagnostics.refinement_last_required_distance;
   result->velocity_collision_lift_applied = diagnostics.applied;
   result->collision_endpoint_validated = diagnostics.endpoint_validated;
   result->collision_step_certified = false;
@@ -47,6 +62,161 @@ AccelerationSolverResult velocity_collision_lift_failure(
 
 using namespace acceleration_solver_internal;
 
+// Source-private local models. They never certify a candidate: acceptance still
+// requires every original physical, objective, CoM, and sampled collision check.
+namespace {
+#ifdef PINOCCHIO_WITH_HPP_FCL
+bool scalar_revolute_prismatic_model(const RobotModel &robot) {
+  if (!fixed_base_scalar_joints_only(robot)) {
+    return false;
+  }
+  for (pinocchio::JointIndex index = 1; index < robot.model().joints.size(); ++index) {
+    const auto &joint = robot.model().joints[index];
+    const std::string name = joint.shortname();
+    if (joint.nq() != 1 || joint.nv() != 1 ||
+        (name != "JointModelRX" && name != "JointModelRY" &&
+         name != "JointModelRZ" && name != "JointModelPX" &&
+         name != "JointModelPY" && name != "JointModelPZ" &&
+         name != "JointModelRevoluteUnaligned" &&
+         name != "JointModelPrismaticUnaligned")) {
+      return false;
+    }
+  }
+  return true;
+}
+#endif
+
+bool make_sample_distance_cut(
+    const RobotModel &robot,
+    const detail::VelocityCollisionSampleValidationResult &validation,
+    const Eigen::VectorXd &sample_q, const Eigen::VectorXd &anchor_ddq,
+    double sample_time, double reserve, AffineAccelerationConstraint *cut,
+    VelocityCollisionLiftDiagnostics *diagnostics) {
+#ifdef PINOCCHIO_WITH_HPP_FCL
+  if (!scalar_revolute_prismatic_model(robot) ||
+      !std::isfinite(sample_time) || sample_time <= 0.0 ||
+      !std::isfinite(validation.failed_sample_distance) ||
+      validation.failed_sample_distance <= 0.0 ||
+      !std::isfinite(validation.failed_seed_distance) ||
+      validation.failed_seed_distance <= 0.0 ||
+      !std::isfinite(validation.failed_required_distance)) {
+    return false;
+  }
+  const auto *geometry = robot.collision_model();
+  if (geometry == nullptr ||
+      validation.failed_pair_model_index >= geometry->collisionPairs.size()) {
+    return false;
+  }
+  const std::size_t pair_index = validation.failed_pair_model_index;
+  const auto &pair = geometry->collisionPairs[pair_index];
+  if (pair.first >= geometry->geometryObjects.size() ||
+      pair.second >= geometry->geometryObjects.size()) {
+    return false;
+  }
+  // These workspaces are deliberately isolated from RobotModel, the velocity
+  // provider, and the validator's cached distance guesses/certificates.
+  pinocchio::Data data(robot.model());
+  pinocchio::GeometryData geometry_data(*geometry);
+  auto &request = geometry_data.distanceRequests[pair_index];
+  request.enable_signed_distance = true;
+  request.enable_nearest_points = true;
+  pinocchio::computeJointJacobians(robot.model(), data, sample_q);
+  pinocchio::updateFramePlacements(robot.model(), data);
+  ++diagnostics->refinement_kinematics_updates;
+  pinocchio::updateGeometryPlacements(robot.model(), data, *geometry,
+                                    geometry_data);
+  ++diagnostics->refinement_geometry_updates;
+  pinocchio::computeDistance(*geometry, geometry_data, pair_index);
+  ++diagnostics->refinement_exact_queries;
+  const auto &distance = geometry_data.distanceResults[pair_index];
+  const double value = distance.min_distance;
+  const Eigen::Vector3d point_a = distance.nearest_points[0].cast<double>();
+  const Eigen::Vector3d point_b = distance.nearest_points[1].cast<double>();
+  const Eigen::Vector3d delta = point_a - point_b;
+  const double norm = delta.norm();
+  if (!std::isfinite(value) || value <= 0.0 || !point_a.allFinite() ||
+      !point_b.allFinite() || !std::isfinite(norm) || norm <= 0.0) {
+    return false;
+  }
+  const Eigen::Vector3d normal = delta / norm;
+  const auto point_jacobian = [&](pinocchio::FrameIndex frame,
+                                  const Eigen::Vector3d &point) {
+    Eigen::Matrix<double, 6, Eigen::Dynamic> jacobian(6, robot.nv());
+    jacobian.setZero();
+    pinocchio::getFrameJacobian(robot.model(), data, frame,
+                               pinocchio::LOCAL_WORLD_ALIGNED, jacobian);
+    Eigen::Matrix<double, 3, Eigen::Dynamic> linear = jacobian.topRows<3>();
+    const Eigen::Vector3d offset = point - data.oMf[frame].translation();
+    for (Eigen::Index col = 0; col < linear.cols(); ++col) {
+      linear.col(col) += jacobian.bottomRows<3>().col(col).cross(offset);
+    }
+    return linear;
+  };
+  const auto frame_a = geometry->geometryObjects[pair.first].parentFrame;
+  const auto frame_b = geometry->geometryObjects[pair.second].parentFrame;
+  if (frame_a >= robot.model().frames.size() ||
+      frame_b >= robot.model().frames.size()) {
+    return false;
+  }
+  const Eigen::RowVectorXd gradient =
+      (0.5 * sample_time * sample_time) * normal.transpose() *
+      (point_jacobian(frame_a, point_a) - point_jacobian(frame_b, point_b));
+  const double required = validation.failed_required_distance + reserve;
+  const double lower = required - value + gradient.dot(anchor_ddq);
+  if (!gradient.allFinite() || gradient.squaredNorm() <= 0.0 ||
+      !std::isfinite(required) || !std::isfinite(lower)) {
+    return false;
+  }
+  cut->coefficient_matrix = gradient;
+  cut->affine_bias = Eigen::VectorXd::Zero(1);
+  cut->lower_bounds = Eigen::VectorXd::Constant(1, lower);
+  cut->upper_bounds = Eigen::VectorXd::Zero(1);
+  cut->lower_bound_active = {true};
+  cut->upper_bound_active = {false};
+  return true;
+#else
+  (void)robot;
+  (void)validation;
+  (void)sample_q;
+  (void)anchor_ddq;
+  (void)sample_time;
+  (void)reserve;
+  (void)cut;
+  (void)diagnostics;
+  return false;
+#endif
+}
+
+// Include every family checked by the solver's common source-ID registry.
+std::string collision_refinement_source_id(
+    const AccelerationSolveOptions &options, const std::string &stem) {
+  std::unordered_set<std::string> ids;
+  const auto collect = [&ids](const auto &constraints) {
+    for (const auto &constraint : constraints) {
+      ids.insert(constraint.source_id);
+    }
+  };
+  collect(options.affine_constraints);
+  collect(options.frozen_next_velocity_constraints);
+  collect(options.task_acceleration_bounds);
+  collect(options.centroidal_momentum_rate_objectives);
+  collect(options.centroidal_momentum_rate_bounds);
+  collect(options.contact_acceleration_constraints);
+  collect(options.tight_point_constraints);
+  collect(options.tight_frame_pose_constraints);
+  collect(options.relative_pose_constraints);
+  collect(options.torso_pose_bound_constraints);
+  collect(options.com_support_polygon_constraints);
+  collect(options.capture_point_constraints);
+  collect(options.zmp_constraints);
+  std::string id = stem;
+  while (ids.count(id) != 0U) {
+    id += "_";
+  }
+  return id;
+}
+} // namespace
+
 AccelerationSolverResult AccelerationSolver::solve_with_velocity_collision(
     KinematicsSolver &collision_solver, const Eigen::VectorXd &q,
     const Eigen::VectorXd &dq, double dt,
@@ -67,6 +237,17 @@ AccelerationSolverResult AccelerationSolver::solve_with_velocity_collision(
         SolverStatus::kInvalidInput,
         "velocity collision lift validation_substeps must be in [1, 1024]",
         diagnostics));
+  }
+  if (lift_options.max_refinement_iterations < 0 ||
+      lift_options.max_refinement_iterations > 8 ||
+      !std::isfinite(lift_options.refinement_trust_radius) ||
+      lift_options.refinement_trust_radius <= 0.0 ||
+      !std::isfinite(lift_options.refinement_clearance_reserve) ||
+      lift_options.refinement_clearance_reserve < 0.0) {
+    return finish(velocity_collision_lift_failure(
+        SolverStatus::kInvalidInput,
+        "collision refinement requires iterations in [0, 8], positive finite "
+        "trust radius, and nonnegative finite clearance reserve", diagnostics));
   }
   if (collision_solver.robot().get() != robot_.get()) {
     return finish(velocity_collision_lift_failure(
@@ -157,73 +338,251 @@ AccelerationSolverResult AccelerationSolver::solve_with_velocity_collision(
         std::move(frozen));
   }
 
-  auto result = solve(q, dq, dt, lifted_options);
-  apply_velocity_collision_lift_diagnostics(&result, diagnostics);
-  if (result.status != SolverStatus::kSuccess) {
-    return finish(std::move(result));
-  }
-
-  std::vector<Eigen::VectorXd> validation_samples;
-  validation_samples.reserve(
-      static_cast<std::size_t>(lift_options.validation_substeps));
-  for (int step = 1; step <= lift_options.validation_substeps; ++step) {
-    const double sample_time =
-        dt * static_cast<double>(step) /
-        static_cast<double>(lift_options.validation_substeps);
-    try {
-      auto sample_q = robot_->integrate(
-          q, sample_time * dq +
-                 0.5 * sample_time * sample_time *
-                     result.joint_accelerations);
-      if (!sample_q.allFinite()) {
-        diagnostics.validation_samples =
-            static_cast<std::uint64_t>(step);
-        return finish(velocity_collision_lift_failure(
-            SolverStatus::kNumericalError,
-            "velocity collision lift generated a non-finite sample",
-            diagnostics));
-      }
-      validation_samples.push_back(std::move(sample_q));
-    } catch (const std::exception &error) {
-      diagnostics.validation_samples =
-          static_cast<std::uint64_t>(step);
-      return finish(velocity_collision_lift_failure(
-          SolverStatus::kNumericalError,
-          std::string("velocity collision lift sample integration failed: ") +
-              error.what(),
-          diagnostics));
+  // An opt-in retry is one transaction. A collision-rejected candidate must
+  // not advance elasticity before the next attempt at the same incoming state.
+  const bool transactional = lift_options.max_refinement_iterations > 0;
+  const bool saved_elastic_active = transactional ? elastic_was_active_ : false;
+  const Eigen::VectorXd saved_delta =
+      transactional ? elastic_band_delta_ : Eigen::VectorXd{};
+  const Eigen::VectorXd saved_nominal_lower =
+      transactional ? elastic_nominal_lower_ : Eigen::VectorXd{};
+  const Eigen::VectorXd saved_nominal_upper =
+      transactional ? elastic_nominal_upper_ : Eigen::VectorXd{};
+  const Eigen::VectorXd saved_capacity_lower =
+      transactional ? elastic_capacity_lower_ : Eigen::VectorXd{};
+  const Eigen::VectorXd saved_capacity_upper =
+      transactional ? elastic_capacity_upper_ : Eigen::VectorXd{};
+  const auto restore_elastic = [&]() {
+    if (transactional) {
+      elastic_was_active_ = saved_elastic_active;
+      elastic_band_delta_ = saved_delta;
+      elastic_nominal_lower_ = saved_nominal_lower;
+      elastic_nominal_upper_ = saved_nominal_upper;
+      elastic_capacity_lower_ = saved_capacity_lower;
+      elastic_capacity_upper_ = saved_capacity_upper;
     }
-  }
+  };
+  struct ElasticRollback {
+    const decltype(restore_elastic) &restore;
+    bool committed = false;
+    ~ElasticRollback() {
+      if (!committed) {
+        restore();
+      }
+    }
+  } elastic_rollback{restore_elastic};
+  // Only these per-call trust boxes may be removed. Caller rows and every
+  // sampled-distance cut remain immutable, including identically named rows.
+  std::vector<std::size_t> internal_trust_constraint_indices;
+  bool original_attempt_succeeded = false;
+  double accumulated_preprocessing_ms = 0.0;
+  double accumulated_backend_ms = 0.0;
+  double accumulated_postprocessing_ms = 0.0;
+  int accumulated_com_refinements = 0;
+  std::uint64_t accumulated_native_pair_evaluations = 0;
+  std::uint64_t accumulated_native_path_nodes = 0;
+  std::uint64_t accumulated_native_certified_intervals = 0;
+  const auto finish_attempts = [&](AccelerationSolverResult result) {
+    if (transactional) {
+      result.preprocessing_time_ms = accumulated_preprocessing_ms;
+      result.backend_computation_time_ms = accumulated_backend_ms;
+      result.postprocessing_time_ms = accumulated_postprocessing_ms;
+      result.nonlinear_refinement_iterations = accumulated_com_refinements;
+      result.native_collision_pair_evaluations =
+          accumulated_native_pair_evaluations;
+      result.native_collision_path_visited_nodes = accumulated_native_path_nodes;
+      result.native_collision_certified_intervals =
+          accumulated_native_certified_intervals;
+    }
+    if (transactional && result.status != SolverStatus::kSuccess) {
+      // Report the state actually retained, not the elastic state prepared or
+      // updated by a candidate which the collision wrapper rejected.
+      result.elastic_band_enabled = saved_elastic_active;
+      result.elastic_band_delta = saved_delta;
+      result.elastic_band_capacity_lower = saved_capacity_lower;
+      result.elastic_band_capacity_upper = saved_capacity_upper;
+      result.elastic_effective_position_lower_bounds =
+          saved_nominal_lower.size() == saved_delta.size() &&
+                  saved_capacity_lower.size() == saved_delta.size()
+              ? Eigen::VectorXd(saved_nominal_lower -
+                                saved_delta.cwiseMin(saved_capacity_lower))
+              : Eigen::VectorXd{};
+      result.elastic_effective_position_upper_bounds =
+          saved_nominal_upper.size() == saved_delta.size() &&
+                  saved_capacity_upper.size() == saved_delta.size()
+              ? Eigen::VectorXd(saved_nominal_upper +
+                                saved_delta.cwiseMin(saved_capacity_upper))
+              : Eigen::VectorXd{};
+    }
+    apply_velocity_collision_lift_diagnostics(&result, diagnostics);
+    return finish(std::move(result));
+  };
 
-  const auto validation =
-      collision_provider.validate_samples(q, validation_samples);
-  diagnostics.validation_samples = validation.samples_checked;
-  diagnostics.validation_allowed_pairs = validation.allowed_pair_count;
-  diagnostics.validation_pairs_checked = validation.pairs_checked;
-  diagnostics.validation_exact_queries =
-      validation.exact_distance_queries;
-  diagnostics.validation_initial_exact_queries =
-      validation.initial_exact_distance_queries;
-  diagnostics.validation_sample_exact_queries =
-      validation.sample_exact_distance_queries;
-  diagnostics.validation_conservative_checks =
-      validation.conservative_bound_checks;
-  diagnostics.validation_conservative_certified_pairs =
-      validation.conservative_bound_certified_pairs;
-  diagnostics.validation_kinematics_updates = validation.kinematics_updates;
-  diagnostics.validation_geometry_updates = validation.geometry_updates;
-  diagnostics.validation_initial_certificate_reused =
-      validation.initial_state_certificate_reused;
-  if (validation.status != SolverStatus::kSuccess ||
-      !validation.acceptable) {
-    auto failed =
-        clear_outputs(failure(validation.status, validation.message));
-    apply_velocity_collision_lift_diagnostics(&failed, diagnostics);
-    return finish(std::move(failed));
+  while (true) {
+    auto result = solve(q, dq, dt, lifted_options);
+    accumulated_preprocessing_ms += result.preprocessing_time_ms;
+    accumulated_backend_ms += result.backend_computation_time_ms;
+    accumulated_postprocessing_ms += result.postprocessing_time_ms;
+    accumulated_com_refinements += result.nonlinear_refinement_iterations;
+    accumulated_native_pair_evaluations += result.native_collision_pair_evaluations;
+    accumulated_native_path_nodes += result.native_collision_path_visited_nodes;
+    accumulated_native_certified_intervals +=
+        result.native_collision_certified_intervals;
+    if (result.status != SolverStatus::kSuccess) {
+      restore_elastic();
+      if (original_attempt_succeeded &&
+          (result.status == SolverStatus::kNumericalError ||
+           result.status == SolverStatus::kNoProgress ||
+           result.status == SolverStatus::kInfeasible) &&
+          !internal_trust_constraint_indices.empty() &&
+          diagnostics.refinement_iterations <
+              lift_options.max_refinement_iterations) {
+        // The initial solve satisfied the original assembled hard rows. A local
+        // trust box may instead exclude every candidate satisfying the added
+        // cut. Re-solve the unchanged objectives over the original physical
+        // domain, retaining ALL caller rows and collision cuts. Clearing the
+        // index ledger prevents another unrestricted retry until a new trust
+        // box has been added. This consumes the same bounded retry budget.
+        for (auto index = internal_trust_constraint_indices.rbegin();
+             index != internal_trust_constraint_indices.rend(); ++index) {
+          lifted_options.affine_constraints.erase(
+              lifted_options.affine_constraints.begin() +
+              static_cast<Eigen::Index>(*index));
+        }
+        internal_trust_constraint_indices.clear();
+        ++diagnostics.refinement_iterations;
+        continue;
+      }
+      if (diagnostics.refinement_iterations > 0) {
+        // Infeasibility of an added local model is not a certificate for the
+        // original nonlinear command.
+        result.status = SolverStatus::kNumericalError;
+        result.status_message = "bounded collision refinement solve failed: " +
+                                result.status_message;
+      }
+      return finish_attempts(std::move(result));
+    }
+
+    if (diagnostics.refinement_iterations == 0) {
+      original_attempt_succeeded = true;
+    }
+    std::vector<Eigen::VectorXd> validation_samples;
+    validation_samples.reserve(
+        static_cast<std::size_t>(lift_options.validation_substeps));
+    for (int step = 1; step <= lift_options.validation_substeps; ++step) {
+      const double sample_time =
+          dt * static_cast<double>(step) /
+          static_cast<double>(lift_options.validation_substeps);
+      try {
+        auto sample_q = robot_->integrate(
+            q, sample_time * dq +
+                   0.5 * sample_time * sample_time * result.joint_accelerations);
+        if (!sample_q.allFinite()) {
+          diagnostics.validation_samples += static_cast<std::uint64_t>(step);
+          restore_elastic();
+          return finish_attempts(clear_outputs(failure(
+              SolverStatus::kNumericalError,
+              "velocity collision lift generated a non-finite sample")));
+        }
+        validation_samples.push_back(std::move(sample_q));
+      } catch (const std::exception &error) {
+        diagnostics.validation_samples += static_cast<std::uint64_t>(step);
+        restore_elastic();
+        return finish_attempts(clear_outputs(failure(
+            SolverStatus::kNumericalError,
+            std::string("velocity collision lift sample integration failed: ") +
+                error.what())));
+      }
+    }
+
+    const auto validation =
+        collision_provider.validate_samples(q, validation_samples);
+    diagnostics.validation_samples += validation.samples_checked;
+    diagnostics.validation_allowed_pairs = validation.allowed_pair_count;
+    diagnostics.validation_pairs_checked += validation.pairs_checked;
+    diagnostics.validation_exact_queries += validation.exact_distance_queries;
+    diagnostics.validation_initial_exact_queries +=
+        validation.initial_exact_distance_queries;
+    diagnostics.validation_sample_exact_queries +=
+        validation.sample_exact_distance_queries;
+    diagnostics.validation_conservative_checks +=
+        validation.conservative_bound_checks;
+    diagnostics.validation_conservative_certified_pairs +=
+        validation.conservative_bound_certified_pairs;
+    diagnostics.validation_kinematics_updates += validation.kinematics_updates;
+    diagnostics.validation_geometry_updates += validation.geometry_updates;
+    diagnostics.validation_initial_certificate_reused =
+        diagnostics.validation_initial_certificate_reused ||
+        validation.initial_state_certificate_reused;
+    if (validation.status == SolverStatus::kSuccess && validation.acceptable) {
+      diagnostics.endpoint_validated = true;
+      elastic_rollback.committed = true;
+      return finish_attempts(std::move(result));
+    }
+    restore_elastic();
+    if (transactional) {
+      diagnostics.refinement_last_failed_sample_index =
+          validation.failed_sample_index;
+      diagnostics.refinement_last_failed_pair_key = validation.failed_pair_key;
+      diagnostics.refinement_last_failed_distance =
+          validation.failed_sample_distance;
+      diagnostics.refinement_last_required_distance =
+          validation.failed_required_distance;
+    }
+    const auto reject = [&]() {
+      return finish_attempts(
+          clear_outputs(failure(validation.status, validation.message)));
+    };
+    if (validation.status != SolverStatus::kCollisionViolated ||
+        diagnostics.refinement_iterations >=
+            lift_options.max_refinement_iterations ||
+        validation.failed_sample_index == 0 ||
+        validation.failed_sample_index > validation_samples.size()) {
+      return reject();
+    }
+
+    const double sample_time =
+        dt * static_cast<double>(validation.failed_sample_index) /
+        static_cast<double>(lift_options.validation_substeps);
+    AffineAccelerationConstraint cut;
+    try {
+      if (!make_sample_distance_cut(
+              *robot_, validation,
+              validation_samples[validation.failed_sample_index - 1],
+              result.joint_accelerations, sample_time,
+              lift_options.refinement_clearance_reserve, &cut, &diagnostics)) {
+        return reject();
+      }
+    } catch (const std::exception &) {
+      // Unsupported geometry or failed local differentiation never grants
+      // acceptance and never changes the existing rejection classification.
+      return reject();
+    }
+    const Eigen::VectorXd lower = result.joint_accelerations.array() -
+                                 lift_options.refinement_trust_radius;
+    const Eigen::VectorXd upper = result.joint_accelerations.array() +
+                                 lift_options.refinement_trust_radius;
+    if (!lower.allFinite() || !upper.allFinite()) {
+      return reject();
+    }
+    cut.source_id = collision_refinement_source_id(
+        lifted_options, "__collision_sample_refinement");
+    lifted_options.affine_constraints.push_back(std::move(cut));
+    AffineAccelerationConstraint trust;
+    trust.source_id = collision_refinement_source_id(
+        lifted_options, "__collision_sample_trust");
+    trust.coefficient_matrix =
+        Eigen::MatrixXd::Identity(robot_->nv(), robot_->nv());
+    trust.affine_bias = Eigen::VectorXd::Zero(robot_->nv());
+    trust.lower_bounds = lower;
+    trust.upper_bounds = upper;
+    // Cuts always remain hard. A failed local solve may remove ONLY
+    // tracked internal trust boxes, never a caller row or a physical bound.
+    internal_trust_constraint_indices.push_back(
+        lifted_options.affine_constraints.size());
+    lifted_options.affine_constraints.push_back(std::move(trust));
+    ++diagnostics.refinement_iterations;
   }
-  diagnostics.endpoint_validated = true;
-  apply_velocity_collision_lift_diagnostics(&result, diagnostics);
-  return finish(std::move(result));
 }
 
 } // namespace embodik

@@ -123,6 +123,7 @@ add_test(NAME test_generalized_constraint_set
 
 add_executable(test_acceleration_state_box
     test_acceleration_state_box.cpp
+    test_state_box_numerical_braking.cpp
 )
 
 target_link_libraries(test_acceleration_state_box

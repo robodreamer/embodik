@@ -12,9 +12,19 @@
 
 namespace embodik::detail {
 
+enum class ScalarGeometricViolationKind { kStateBound, kBrakingViability };
+
+struct ScalarGeometricViolation {
+  ScalarGeometricViolationKind kind = ScalarGeometricViolationKind::kStateBound;
+  int axis = -1;
+  bool upper = false;
+  double time = 0.0;
+};
+
 struct ScalarGeometricConstraintResult {
   SolverStatus status = SolverStatus::kSuccess;
   std::string message;
+  std::optional<ScalarGeometricViolation> violation = std::nullopt;
 
   bool satisfied() const { return status == SolverStatus::kSuccess; }
 };
@@ -112,6 +122,10 @@ int scalar_geometric_path_segment_count(
     const ScalarGeometricConstraintSpecification &specification,
     const ScalarGeometricPathValidationOptions &options,
     ScalarGeometricConstraintResult *failure_result);
+
+// Retain the old adaptive times and add missing fixed quarter points.
+std::vector<double> scalar_geometric_path_sample_times(int segment_count,
+                                                       double dt);
 
 ScalarGeometricConstraintResult validate_scalar_geometric_path(
     const ScalarGeometricConstraintSpecification &specification,

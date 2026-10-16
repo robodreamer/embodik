@@ -6,6 +6,8 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <fstream>
 #include <limits>
@@ -183,6 +185,70 @@ TEST(AccelerationGeometricConstraintPolicyTest,
       "six-dimensional test", "axes", mask, 6);
   ASSERT_TRUE(axis_result.satisfied()) << axis_result.message;
   EXPECT_EQ(axis_result.active_axes, std::vector<int>({0, 5}));
+}
+
+TEST(AccelerationScalarGeometricConstraintTest,
+     AdaptiveGridRetainsQuarterSamplesAndItsOriginalNodes) {
+  detail::ScalarGeometricConstraintSpecification specification;
+  specification.family_label = "sample schedule";
+  specification.source_id = "quarter witness";
+  specification.dimension = 1;
+  specification.active_axes = {0};
+  specification.state_lower_bounds = vector({-100.0});
+  specification.state_upper_bounds = vector({100.0});
+  specification.policy.rate_limits = vector({10.0});
+  specification.policy.acceleration_limits = vector({1.0});
+  specification.policy.lower_braking_accelerations = vector({1.0});
+  specification.policy.upper_braking_accelerations = vector({1.0});
+  detail::ScalarGeometricPathValidationOptions options;
+  options.minimum_segments = 18;
+  std::vector<double> seen;
+  const auto evaluate = [&](const detail::ScalarGeometricPathPoint &point,
+                            detail::ScalarGeometricCoordinateSample *sample) {
+    seen.push_back(point.time);
+    sample->value = vector({0.0});
+    sample->rate = vector({0.0});
+    sample->acceleration = vector({0.0});
+    return detail::ScalarGeometricConstraintResult{};
+  };
+  auto result = detail::validate_scalar_geometric_path(
+      specification, vector({0.0}), vector({0.0}), 1.0, options, evaluate);
+  ASSERT_TRUE(result.satisfied()) << result.message;
+  for (int i = 0; i <= 18; ++i)
+    EXPECT_NE(std::find(seen.begin(), seen.end(), i / 18.0), seen.end());
+  EXPECT_NE(std::find(seen.begin(), seen.end(), 0.25), seen.end());
+  EXPECT_NE(std::find(seen.begin(), seen.end(), 0.75), seen.end());
+  EXPECT_EQ(seen.size(), 21u);
+
+  // An abstract coordinate evaluator isolates sampling from robot dynamics.
+  // The narrow acceleration peak is below the bound at every 18-grid node.
+  result = detail::validate_scalar_geometric_path(
+      specification, vector({0.0}), vector({0.0}), 1.0, options,
+      [&](const detail::ScalarGeometricPathPoint &point,
+          detail::ScalarGeometricCoordinateSample *sample) {
+        evaluate(point, sample);
+        sample->acceleration(0) = 1.0 - 1e-6 +
+            2e-6 * std::exp(-std::pow((point.time - 0.25) / 0.006, 2));
+        return detail::ScalarGeometricConstraintResult{};
+      });
+  EXPECT_EQ(result.status, SolverStatus::kNumericalError);
+
+  // Keep the old multiply-then-divide arithmetic at existing nodes. The
+  // equivalent dt * (i / N) can perturb a nonlinear correction's Jacobian.
+  constexpr double interval = 0.0037;
+  seen.clear();
+  result = detail::validate_scalar_geometric_path(
+      specification, vector({0.0}), vector({0.0}), interval, options, evaluate);
+  ASSERT_TRUE(result.satisfied()) << result.message;
+  for (int i = 0; i <= 18; ++i)
+    EXPECT_NE(std::find(seen.begin(), seen.end(), interval * i / 18.0), seen.end());
+
+  options.maximum_segments = 18;
+  seen.clear();
+  result = detail::validate_scalar_geometric_path(
+      specification, vector({0.0}), vector({0.0}), 1.0, options, evaluate);
+  EXPECT_EQ(result.status, SolverStatus::kNumericalError);
+  EXPECT_TRUE(seen.empty());
 }
 
 TEST(AccelerationScalarGeometricConstraintTest,

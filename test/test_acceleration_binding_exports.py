@@ -101,6 +101,12 @@ def test_acceleration_option_records_round_trip_optionals_and_nested_values():
 
     options = eik.AccelerationSolveOptions()
     assert options.acceleration_limits_override is None
+    assert options.refine_partial_scale is False
+    options.refine_partial_scale = True
+    assert options.refine_partial_scale is True
+    assert options.prefer_direct_min_error_qp is False
+    options.prefer_direct_min_error_qp = True
+    assert options.prefer_direct_min_error_qp is True
     options.acceleration_limits_override = np.array([5.0, 6.0])
     options.generalized_acceleration_allocation = allocation
     options.effort_constraints = effort

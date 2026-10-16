@@ -115,7 +115,7 @@ TEST_F(AccelerationSolverTest, CapabilitiesExposeCurrentNativeScope) {
   const auto capabilities = AccelerationSolver::capabilities();
   EXPECT_TRUE(capabilities.supports_fixed_base_scalar_joints);
   EXPECT_FALSE(capabilities.supports_floating_base);
-  EXPECT_FALSE(capabilities.supports_scale_elastic);
+  EXPECT_TRUE(capabilities.supports_scale_elastic);
 #ifdef PINOCCHIO_WITH_HPP_FCL
   EXPECT_TRUE(capabilities.supports_collision_constraints);
   EXPECT_TRUE(capabilities.supports_analytic_sphere_collision_constraints);
@@ -372,9 +372,9 @@ TEST_F(AccelerationSolverTest, NoActiveTaskStillAppliesMandatoryBraking) {
   EXPECT_TRUE(contains_index(result.saturated_position_indices, 0));
 }
 
-TEST_F(AccelerationSolverTest, RejectsNonfiniteInputsAndScaleElasticFailClosed) {
+TEST_F(AccelerationSolverTest, RejectsNonfiniteInputs) {
   AccelerationSolver solver(robot_);
-  auto task = solver.add_joint_task("joint1_task", "joint1", 0.0);
+  solver.add_joint_task("joint1_task", "joint1", 0.0);
 
   auto nonfinite_q = vector({0.0, 0.0});
   nonfinite_q(0) = std::numeric_limits<double>::quiet_NaN();
@@ -382,12 +382,33 @@ TEST_F(AccelerationSolverTest, RejectsNonfiniteInputsAndScaleElasticFailClosed) 
                                 options(vector({10.0, 10.0})));
   EXPECT_EQ(nonfinite.status, SolverStatus::kNonFiniteInput);
   expect_no_motion_outputs(nonfinite);
+}
 
-  task->setSolveMode(TaskSolveMode::kScaleElastic);
-  auto elastic = solver.solve(vector({0.0, 0.0}), vector({0.0, 0.0}), 0.1,
-                              options(vector({10.0, 10.0})));
-  EXPECT_EQ(elastic.status, SolverStatus::kInvalidInput);
-  expect_no_motion_outputs(elastic);
+TEST_F(AccelerationSolverTest, ScaleElasticMatchesScaleInsideTheStateBox) {
+  AccelerationTaskReference reference;
+  reference.desired_acceleration = vector({3.0});
+  const auto q = vector({0.0, 0.0});
+  const auto dq = vector({0.0, 0.0});
+  const auto solve_options = options(vector({10.0, 10.0}));
+
+  AccelerationSolver scale_solver(robot_);
+  scale_solver.add_joint_task("joint1_task", "joint1", 0.0);
+  scale_solver.set_task_reference("joint1_task", reference);
+  const auto scale = scale_solver.solve(q, dq, 0.1, solve_options);
+
+  AccelerationSolver elastic_solver(robot_);
+  auto elastic_task = elastic_solver.add_joint_task("joint1_task", "joint1", 0.0);
+  elastic_task->setSolveMode(TaskSolveMode::kScaleElastic);
+  elastic_solver.set_task_reference("joint1_task", reference);
+  const auto elastic = elastic_solver.solve(q, dq, 0.1, solve_options);
+
+  ASSERT_EQ(scale.status, SolverStatus::kSuccess) << scale.status_message;
+  ASSERT_EQ(elastic.status, SolverStatus::kSuccess) << elastic.status_message;
+  EXPECT_NEAR(elastic.joint_accelerations(0), scale.joint_accelerations(0), kTolerance);
+  EXPECT_NEAR(elastic.joint_accelerations(1), scale.joint_accelerations(1), kTolerance);
+  EXPECT_NEAR(elastic.q_solution(0), scale.q_solution(0), kTolerance);
+  EXPECT_NEAR(elastic.elastic_band_capacity_lower.maxCoeff(), 0.0, kTolerance);
+  EXPECT_NEAR(elastic.elastic_band_capacity_upper.maxCoeff(), 0.0, kTolerance);
 }
 
 TEST_F(AccelerationSolverTest, InvalidDimensionsAndTimestepsFailClosed) {

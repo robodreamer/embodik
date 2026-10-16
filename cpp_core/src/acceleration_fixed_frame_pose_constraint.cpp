@@ -5,9 +5,13 @@
 #include "geometric_constraint_differential.hpp"
 #include "so3_log_differential.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <exception>
 #include <pinocchio/multibody/data.hpp>
+#include <pinocchio/algorithm/kinematics-derivatives.hpp>
+#include <pinocchio/algorithm/frames-derivatives.hpp>
+#include <pinocchio/algorithm/joint-configuration.hpp>
 #include <pinocchio/spatial/se3.hpp>
 #include <string>
 #include <utility>
@@ -25,7 +29,9 @@ FixedFramePoseConstraintResult failure(SolverStatus status,
 
 FixedFramePoseConstraintResult as_pose_result(
     const ScalarGeometricConstraintResult &result) {
-  return failure(result.status, result.message);
+  auto converted = failure(result.status, result.message);
+  converted.violation = result.violation;
+  return converted;
 }
 
 std::string identity(const FixedFramePoseConstraintRecord &constraint) {
@@ -441,6 +447,201 @@ FixedFramePoseConstraintResult validate_fixed_frame_pose_constraint_acceptance(
                        error.what());
   }
   return {};
+}
+
+FixedFramePoseConstraintResult linearize_fixed_frame_pose_violation(
+    const PreparedFixedFramePoseConstraint &prepared, const RobotModel &robot,
+    const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
+    const Eigen::VectorXd &acceleration, const ScalarGeometricViolation &violation,
+    AffineAccelerationConstraint *refinement) {
+  const int axis = violation.axis;
+  const double time = violation.time;
+  if (!refinement || axis < 0 || axis >= 6 || !(time > 0.0) ||
+      !std::isfinite(time) || q.size() != robot.nq() ||
+      dq.size() != robot.nv() || acceleration.size() != robot.nv() ||
+      !q.allFinite() || !dq.allFinite() || !acceleration.allFinite()) {
+    return failure(SolverStatus::kInvalidInput,
+                   "frame pose refinement inputs are invalid");
+  }
+  try {
+    const auto &model = robot.model();
+    const Eigen::VectorXd tangent = time * dq + 0.5 * time * time * acceleration;
+    const Eigen::VectorXd sample_q = robot.integrate(q, tangent);
+    const Eigen::VectorXd sample_dq = dq + time * acceleration;
+    pinocchio::Data scratch(model);
+    const Eigen::VectorXd zero = Eigen::VectorXd::Zero(robot.nv());
+    pinocchio::computeForwardKinematicsDerivatives(model, scratch, sample_q,
+                                                 sample_dq, zero);
+    Eigen::MatrixXd rate_q = Eigen::MatrixXd::Zero(6, robot.nv());
+    Eigen::MatrixXd rate_v = rate_q;
+    const auto frame_id = model.getFrameId(prepared.specification.frame_name);
+    pinocchio::getFrameVelocityDerivatives(
+        model, scratch, frame_id, pinocchio::LOCAL_WORLD_ALIGNED, rate_q, rate_v);
+    // Pinocchio's spatial derivative holds the expression origin fixed.
+    // The point's classical linear velocity also changes as that origin moves.
+    const Eigen::Vector3d angular_rate = rate_v.bottomRows<3>() * sample_dq;
+    for (Eigen::Index joint = 0; joint < robot.nv(); ++joint) {
+      rate_q.col(joint).head<3>() +=
+          angular_rate.cross(rate_v.col(joint).head<3>());
+    }
+    Eigen::MatrixXd integration = Eigen::MatrixXd::Zero(robot.nv(), robot.nv());
+    pinocchio::dIntegrate(model, q, tangent, integration, pinocchio::ARG1);
+    const Eigen::MatrixXd position_a = 0.5 * time * time * integration;
+    Eigen::RowVectorXd coordinate_gradient;
+    Eigen::RowVectorXd rate_gradient;
+    double coordinate;
+    double rate;
+    if (axis < 3) {
+      coordinate_gradient = rate_v.row(axis) * position_a;
+      rate_gradient = rate_q.row(axis) * position_a + time * rate_v.row(axis);
+      coordinate = scratch.oMf[frame_id].translation()(axis) -
+                   prepared.specification.reference_pose(axis, 3);
+      rate = rate_v.row(axis).dot(sample_dq);
+    } else {
+      const Eigen::Matrix3d body_rotation =
+          scratch.oMf[frame_id].rotation().transpose();
+      const Eigen::MatrixXd body_jacobian =
+          body_rotation * rate_v.bottomRows<3>();
+      const Eigen::Vector3d body_rate = body_jacobian * sample_dq;
+      Eigen::MatrixXd body_rate_q = body_rotation * rate_q.bottomRows<3>();
+      for (Eigen::Index joint = 0; joint < robot.nv(); ++joint) {
+        body_rate_q.col(joint) +=
+            body_rate.cross(body_jacobian.col(joint).head<3>());
+      }
+      const Eigen::Matrix3d error_rotation =
+          prepared.specification.reference_pose.topLeftCorner<3, 3>().transpose() *
+          scratch.oMf[frame_id].rotation();
+      const auto log = evaluate_so3_log_differential(
+          error_rotation, body_jacobian, Eigen::Vector3d::Zero(), sample_dq);
+      const Eigen::MatrixXd log_rate_q =
+          evaluate_so3_log_rate_configuration_gradient(
+              error_rotation, body_jacobian, body_rate, body_rate_q);
+      coordinate_gradient = log.jacobian.row(axis - 3) * position_a;
+      rate_gradient = log_rate_q.row(axis - 3) * position_a +
+                      time * log.jacobian.row(axis - 3);
+      coordinate = log.value(axis - 3);
+      rate = log.rate(axis - 3);
+    }
+    const double direction = violation.upper ? 1.0 : -1.0;
+    const double bound = violation.upper
+        ? prepared.specification.upper_bounds(axis)
+        : prepared.specification.lower_bounds(axis);
+    double residual = direction * (coordinate - bound);
+    Eigen::RowVectorXd gradient = direction * coordinate_gradient;
+    if (violation.kind == ScalarGeometricViolationKind::kBrakingViability) {
+      const auto &policy = prepared.specification.policy;
+      const double braking = violation.upper
+          ? policy.upper_braking_accelerations(axis)
+          : policy.lower_braking_accelerations(axis);
+      if (!(direction * rate > 0.0)) {
+        return failure(SolverStatus::kNumericalError,
+                       "frame pose refinement braking side is inconsistent");
+      }
+      residual = rate * rate + 2.0 * braking * residual;
+      gradient = 2.0 * rate * rate_gradient +
+                 2.0 * braking * direction * coordinate_gradient;
+    }
+    if (!std::isfinite(residual) || residual <= 0.0 || !gradient.allFinite() ||
+        !(gradient.norm() > 1e-14)) {
+      return failure(SolverStatus::kNumericalError,
+                     "frame pose refinement has no finite violated local model");
+    }
+    // A local model is not a nonlinear certificate. Retain every original row,
+    // bound the per-call correction, and require the complete acceptance pass.
+    const Eigen::Index rows = robot.nv() + 1;
+    refinement->coefficient_matrix = Eigen::MatrixXd::Zero(rows, robot.nv());
+    refinement->coefficient_matrix.row(0) = gradient;
+    refinement->coefficient_matrix.bottomRows(robot.nv()).setIdentity();
+    refinement->affine_bias = Eigen::VectorXd::Zero(rows);
+    refinement->affine_bias(0) = residual - gradient.dot(acceleration);
+    refinement->lower_bounds = Eigen::VectorXd::Zero(rows);
+    refinement->upper_bounds = Eigen::VectorXd::Zero(rows);
+    const double radius = std::max(0.01, 0.1 * std::max(1.0, acceleration.cwiseAbs().maxCoeff()));
+    refinement->lower_bounds.tail(robot.nv()) = acceleration.array() - radius;
+    refinement->upper_bounds.tail(robot.nv()) = acceleration.array() + radius;
+    refinement->lower_bound_active.assign(rows, true);
+    refinement->lower_bound_active[0] = false;
+    refinement->upper_bound_active.assign(rows, true);
+  } catch (const std::exception &error) {
+    return failure(SolverStatus::kNumericalError,
+                   std::string("frame pose refinement failed: ") + error.what());
+  }
+  return {};
+}
+
+FixedFramePoseConstraintResult linearize_fixed_frame_pose_violations(
+    const PreparedFixedFramePoseConstraint &prepared, const RobotModel &robot,
+    const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
+    const Eigen::VectorXd &acceleration, double dt,
+    const ScalarGeometricViolation &trigger,
+    AffineAccelerationConstraint *refinement) {
+  if (!(dt > 0.0) || !std::isfinite(dt)) {
+    return failure(SolverStatus::kInvalidInput,
+                   "frame pose batch refinement time is invalid");
+  }
+  auto original = linearize_fixed_frame_pose_violation(
+      prepared, robot, q, dq, acceleration, trigger, refinement);
+  if (!original.satisfied()) return original;
+  std::vector<AffineAccelerationConstraint> extra_rows;
+  try {
+    pinocchio::SE3 reference;
+    const auto valid_reference = pose_from_matrix(
+        prepared.specification.family_label, prepared.specification.source_id,
+        prepared.specification.reference_pose, &reference);
+    if (!valid_reference.satisfied()) return valid_reference;
+    // Path sampling can round an endpoint time one ulp above dt. Preserve its
+    // mandatory triggering cut and evaluate optional endpoint faces at dt.
+    std::vector<double> times{dt};
+    if (trigger.time < dt) times.insert(times.begin(), trigger.time);
+    pinocchio::Data scratch(robot.model());
+    for (double time : times) {
+      const auto sample = evaluate_pose_differential_at_state(
+          robot, scratch, prepared.specification.frame_name, reference,
+          robot.integrate(q, time * dq + 0.5 * time * time * acceleration),
+          dq + time * acceleration, prepared.rotation_active);
+      const auto coordinates = pose_coordinate_sample(sample, acceleration);
+      for (int axis : prepared.active_axes) {
+        auto specification = prepared.scalar.specification;
+        specification.active_axes = {axis};
+        const auto acceptance = validate_scalar_geometric_sample_acceptance(
+            specification, coordinates, time == dt);
+        if (!acceptance.violation) continue;
+        auto violation = *acceptance.violation;
+        violation.time = time;
+        if (violation.axis == trigger.axis && violation.kind == trigger.kind &&
+            violation.upper == trigger.upper &&
+            (time == trigger.time || (time == dt && trigger.time >= dt))) continue;
+        AffineAccelerationConstraint row;
+        const auto local = linearize_fixed_frame_pose_violation(
+            prepared, robot, q, dq, acceleration, violation, &row);
+        if (local.satisfied()) extra_rows.push_back(std::move(row));
+      }
+    }
+  } catch (const std::exception &) {
+    // Optional extra cuts do not replace the valid triggering model. The
+    // complete original acceptance pass still decides whether to emit motion.
+    return original;
+  }
+  if (extra_rows.empty()) return original;
+  const auto original_row = *refinement;
+  const Eigen::Index count = 1 + extra_rows.size();
+  const Eigen::Index rows = count + robot.nv();
+  refinement->coefficient_matrix = Eigen::MatrixXd::Zero(rows, robot.nv());
+  refinement->affine_bias = Eigen::VectorXd::Zero(rows);
+  refinement->lower_bounds = Eigen::VectorXd::Zero(rows);
+  refinement->upper_bounds = Eigen::VectorXd::Zero(rows);
+  refinement->lower_bound_active.assign(rows, true);
+  refinement->upper_bound_active.assign(rows, true);
+  for (Eigen::Index row = 0; row < count; ++row) {
+    const auto &model = row == 0 ? original_row : extra_rows[row - 1];
+    refinement->coefficient_matrix.row(row) = model.coefficient_matrix.row(0);
+    refinement->affine_bias(row) = model.affine_bias(0);
+    refinement->lower_bound_active[row] = false;
+  }
+  refinement->coefficient_matrix.bottomRows(robot.nv()).setIdentity();
+  refinement->lower_bounds.tail(robot.nv()) = original_row.lower_bounds.tail(robot.nv());
+  refinement->upper_bounds.tail(robot.nv()) = original_row.upper_bounds.tail(robot.nv());
+  return original;
 }
 
 } // namespace embodik::detail

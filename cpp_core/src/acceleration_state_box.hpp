@@ -32,6 +32,28 @@ ReachableRecoveryRateResult compute_reachable_recovery_rate(
     double maximum_recovery_rate, double acceleration_authority,
     double boundary_epsilon, double authority_fraction = 0.9);
 
+/** Snap only machine-roundoff excursions onto an acceleration interval face.
+ * Larger violations and invalid inputs remain unchanged for caller validation.
+ */
+double canonicalize_state_box_acceleration_roundoff(double acceleration,
+                                                   double lower,
+                                                   double upper);
+
+/** Polish a successful numerical solution into its original physical box.
+ * Already in-box vectors are unchanged. A proposed projection is committed
+ * only after original physical/normalized hard rows and all achieved objective
+ * images pass their caller-provided, unchanged numerical tolerances. Failure
+ * leaves the vector unchanged. This does not validate nonlinear geometry.
+ */
+bool polish_state_box_acceleration(
+    const Eigen::VectorXd &lower, const Eigen::VectorXd &upper,
+    const Eigen::MatrixXd &hard_matrix, const Eigen::VectorXd &hard_lower,
+    const Eigen::VectorXd &hard_upper,
+    const std::vector<Eigen::MatrixXd> &objective_matrices,
+    double box_tolerance, double normalized_hard_tolerance,
+    double objective_tolerance, Eigen::VectorXd *acceleration,
+    bool *changed = nullptr);
+
 struct StateBoxRowInput {
   double value = 0.0;
   double rate = 0.0;

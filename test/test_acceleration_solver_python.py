@@ -64,6 +64,7 @@ def _single_prismatic_sphere_pair_urdf() -> str:
 def _options_with_limits(limits: list[float] | np.ndarray) -> eik.AccelerationSolveOptions:
     options = eik.AccelerationSolveOptions()
     assert options.allow_state_box_task_fallback
+    assert not options.allow_best_effort_lower_tasks
     assert options.collect_task_diagnostics
     options.acceleration_limits_override = np.asarray(limits, dtype=float)
     options.apply_position_limits = False
@@ -85,6 +86,24 @@ def _collision_robot(tmp_path: pathlib.Path) -> eik.RobotModel:
     robot = eik.RobotModel(str(urdf), floating_base=False)
     robot.set_gravity(np.zeros(3))
     return robot
+
+
+@pytest.mark.parametrize("joint_index", [0, 1])
+def test_state_box_failure_identifies_joint_and_physical_state(tmp_path, joint_index):
+    robot = _two_joint_robot(tmp_path)
+    solver = eik.AccelerationSolver(robot)
+    q, dq = np.zeros(2), np.zeros(2)
+    q[joint_index], dq[joint_index] = -1.0, -0.1
+    options = _options_with_limits([1.0, 1.0])
+    options.apply_position_limits = True
+    result = solver.solve(q, dq, 0.01, options)
+    assert result.status == eik.SolverStatus.INFEASIBLE
+    assert "outward lower-bound rate at the boundary" in result.status_message
+    assert f"joint index {joint_index}" in result.status_message
+    assert "position=" in result.status_message and "velocity=" in result.status_message
+    assert "position bounds=[-1, 1]" in result.status_message
+    assert np.asarray(result.joint_accelerations).size == 0
+    assert np.asarray(result.joint_velocities_next).size == 0
 
 
 def test_capabilities_and_simple_fixed_base_solve(tmp_path):

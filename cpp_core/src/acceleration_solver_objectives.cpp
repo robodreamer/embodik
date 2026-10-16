@@ -137,12 +137,6 @@ void assemble_objectives(
   ordered_tasks.reserve(tasks.size());
   for (const auto &task : tasks) {
     if (task && task->isActive()) {
-      if (task->getSolveMode() == TaskSolveMode::kScaleElastic) {
-        assembly->status = SolverStatus::kInvalidInput;
-        assembly->message =
-            "AccelerationSolver does not support SCALE_ELASTIC tasks";
-        return;
-      }
       ordered_tasks.push_back(task);
     }
   }
@@ -231,11 +225,16 @@ void assemble_objectives(
     group_differentials.reserve(group.size());
     group_references.reserve(group.size());
 
-    const TaskSolveMode mode = group.front()->getSolveMode();
+    // SCALE_ELASTIC keeps the SCALE task direction. Its nominal-position band
+    // is applied separately and does not rename the backend mode.
+    const auto canonical_mode = [](TaskSolveMode mode) {
+      return mode == TaskSolveMode::kScaleElastic ? TaskSolveMode::kScale : mode;
+    };
+    const TaskSolveMode mode = canonical_mode(group.front()->getSolveMode());
     const bool allow_fallback = group.front()->getAllowMinErrorFallback();
     Eigen::Index cursor = 0;
     for (const auto &task : group) {
-      if (task->getSolveMode() != mode ||
+      if (canonical_mode(task->getSolveMode()) != mode ||
           task->getAllowMinErrorFallback() != allow_fallback) {
         assembly->status = SolverStatus::kInvalidInput;
         assembly->message =
@@ -420,11 +419,12 @@ append_centroidal_momentum_rate_objectives(
       return assembly;
     }
     if (objective.solve_mode != TaskSolveMode::kScale &&
+        objective.solve_mode != TaskSolveMode::kScaleElastic &&
         objective.solve_mode != TaskSolveMode::kMinError) {
       assembly.status = SolverStatus::kInvalidInput;
       assembly.message = "centroidal momentum-rate objective '" +
                          objective.source_id +
-                         "' only supports SCALE or MIN_ERROR";
+                         "' only supports SCALE, SCALE_ELASTIC, or MIN_ERROR";
       return assembly;
     }
 
@@ -449,7 +449,10 @@ append_centroidal_momentum_rate_objectives(
         Eigen::VectorXd::Zero(selected_axis_count(objective.axis_mask)));
     ObjectiveSolveConfig config;
     config.priority = objective.priority;
-    config.solve_mode = objective.solve_mode;
+    config.solve_mode =
+        objective.solve_mode == TaskSolveMode::kScaleElastic
+            ? TaskSolveMode::kScale
+            : objective.solve_mode;
     config.allow_min_error_fallback = objective.allow_min_error_fallback;
     objectives->configs.push_back(config);
     objectives->groups.emplace_back();

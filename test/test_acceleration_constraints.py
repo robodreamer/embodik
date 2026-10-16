@@ -214,7 +214,7 @@ class TestAccelerationConstraints:
         result = solver.solve_velocity(q, apply_limits=True)
 
         assert result.status == eik.SolverStatus.SUCCESS
-        assert np.max(np.abs(np.asarray(result.joint_velocities))) <= a_max * solver.dt * 1.02
+        assert np.max(np.abs(np.asarray(result.joint_velocities))) <= a_max * solver.dt + 1e-9
 
     def test_multistep_position_velocity_matches_applied_outer_step(self, panda_setup):
         """A multi-step result must report the velocity that produced q_solution."""
@@ -248,7 +248,10 @@ class TestAccelerationConstraints:
             atol=1e-9,
         )
 
-    def test_multistep_position_respects_outer_tick_acceleration_limit(self, panda_setup):
+    @pytest.mark.parametrize("multiple_targets", [False, True])
+    def test_multistep_position_respects_outer_tick_acceleration_limit(
+        self, panda_setup, multiple_targets
+    ):
         """Inner refinements must not multiply the configured outer-tick acceleration."""
         robot, solver = panda_setup
         task = solver.add_frame_task("ee", "panda_hand", eik.TaskType.FRAME_POSE)
@@ -275,11 +278,15 @@ class TestAccelerationConstraints:
 
         previous_applied_velocity = np.zeros(robot.nv)
         for _ in range(5):
-            result = solver.solve_position_step(q, [eik.TaskTarget("ee", target)], options)
+            result = (
+                solver.solve_position_step(q, [eik.TaskTarget("ee", target)], options)
+                if multiple_targets
+                else solver.solve_position_step(q, target, "ee", options)
+            )
             assert result.status == eik.SolverStatus.SUCCESS
             q_next = np.asarray(result.q_solution)
             applied_velocity = (q_next - q) / solver.dt
-            max_velocity_change = acceleration_limit * solver.dt * 1.02
+            max_velocity_change = acceleration_limit * solver.dt + 1e-9
             assert (
                 np.max(np.abs(applied_velocity - previous_applied_velocity)) <= max_velocity_change
             )
@@ -442,11 +449,58 @@ class TestAccelerationConstraints:
         assert step_result.status == eik.SolverStatus.SUCCESS
 
         applied_velocity = (np.asarray(step_result.q_solution) - q) / options.dt
+        # A finite-pose correction can improve the endpoint while changing the
+        # instantaneous least-squares command. Compare executed pose behavior
+        # against the original linear projection instead of requiring the old
+        # implementation's joint velocity exactly.
+        import pinocchio as pin
+
+        initial_pose = direct_robot.get_frame_pose("panda_hand")
+        desired_position = (
+            np.asarray(initial_pose.translation) + options.dt * projected_task_velocity[:3]
+        )
+        desired_rotation = pin.exp3(options.dt * projected_task_velocity[3:]) @ np.asarray(
+            initial_pose.rotation
+        )
+
+        def finite_error(candidate: np.ndarray) -> np.ndarray:
+            step_robot.update_configuration(candidate)
+            pose = step_robot.get_frame_pose("panda_hand")
+            return np.concatenate(
+                (
+                    desired_position - np.asarray(pose.translation),
+                    pin.log3(desired_rotation @ np.asarray(pose.rotation).T),
+                )
+            )
+
+        baseline_error = finite_error(q + options.dt * np.asarray(direct_result.joint_velocities))
+        refined_error = finite_error(np.asarray(step_result.q_solution))
+        if linear_commanded:
+            assert np.linalg.norm(refined_error[:3]) <= np.linalg.norm(baseline_error[:3]) + 1e-10
+            # These fixtures have measurable finite-step curvature: refinement
+            # must do useful work, rather than merely reproduce the baseline.
+            assert np.linalg.norm(refined_error) < np.linalg.norm(baseline_error) - 1e-6
+        else:
+            # In particular, an angular-only command must not acquire a new
+            # translation endpoint objective during predictive projection.
+            np.testing.assert_allclose(
+                applied_velocity,
+                np.asarray(direct_result.joint_velocities),
+                rtol=1e-6,
+                atol=1e-8,
+            )
+        if linear_commanded or angular_commanded:
+            assert np.linalg.norm(refined_error[3:]) <= np.linalg.norm(baseline_error[3:]) + 1e-10
+        assert np.max(np.abs(applied_velocity)) <= 100.0 * options.dt + 1e-8
+        assert np.all(np.abs(applied_velocity) <= step_robot.get_velocity_limits() + 1e-8)
+        lower, upper = step_robot.get_joint_limits()
+        assert np.all(np.asarray(step_result.q_solution) >= lower - 1e-9)
+        assert np.all(np.asarray(step_result.q_solution) <= upper + 1e-9)
         np.testing.assert_allclose(
+            step_solver.get_previous_joint_velocities(),
             applied_velocity,
-            np.asarray(direct_result.joint_velocities),
-            rtol=1e-6,
-            atol=1e-8,
+            rtol=1e-10,
+            atol=1e-10,
         )
 
     def test_multistep_position_selects_lower_merit_feasible_outer_candidate(self):
@@ -527,7 +581,7 @@ class TestAccelerationConstraints:
         assert nominal_result.status == eik.SolverStatus.SUCCESS
         nominal_velocity = (np.asarray(nominal_result.q_solution) - q) / options.dt
 
-        acceleration_step = 2.0 * options.dt * 1.01
+        acceleration_step = 2.0 * options.dt
         componentwise_velocity = np.clip(nominal_velocity, -acceleration_step, acceleration_step)
         componentwise_q = q + options.dt * componentwise_velocity
 

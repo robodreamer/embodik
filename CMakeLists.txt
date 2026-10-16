@@ -132,6 +132,7 @@ add_library(embodik_core SHARED
     cpp_core/src/acceleration_solver_objectives.cpp
     cpp_core/src/acceleration_solver_constraints.cpp
     cpp_core/src/acceleration_solver_state_effort.cpp
+    cpp_core/src/acceleration_solver_elastic.cpp
     cpp_core/src/kinematics_solver.cpp
     cpp_core/src/kinematics_solver_tasks.cpp
     cpp_core/src/kinematics_solver_auto_layout.cpp
