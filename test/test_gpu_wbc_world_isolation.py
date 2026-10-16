@@ -59,7 +59,7 @@ def _identity_targets(batch_size: int, frame_count: int, torch):
     return target
 
 
-def _solver(tmp_path: Path, batch_size: int) -> GpuWbcMultiFrameSolver:
+def _solver(tmp_path: Path, batch_size: int, **tracking_options) -> GpuWbcMultiFrameSolver:
     urdf = _write_chain(tmp_path / "chain.urdf")
     robot = eik.RobotModel(str(urdf), floating_base=False)
     frame = _tool_frame(robot)
@@ -74,6 +74,7 @@ def _solver(tmp_path: Path, batch_size: int) -> GpuWbcMultiFrameSolver:
         batch_size=batch_size,
         iterations=1,
         dt=0.01,
+        **tracking_options,
     )
 
 
@@ -186,3 +187,180 @@ def test_measure_device_batch_returns_solver_path_resource_fields(tmp_path: Path
     assert report.reserved_bytes >= report.allocated_bytes
     assert report.host_dispatch_ms >= 0.0
     assert report.synchronization_ms >= 0.0
+
+
+def test_public_constructor_applies_tracking_tolerances(tmp_path: Path) -> None:
+    _cuda()
+    solver = _solver(
+        tmp_path, batch_size=2, position_tolerance_m=0.005, orientation_tolerance_rad=0.01
+    )
+    assert solver._solver.config.position_tolerance_m == 0.005
+    assert solver._solver.config.orientation_tolerance_rad == 0.01
+
+
+def test_microscopic_pose_noise_does_not_move_an_idle_world(tmp_path: Path) -> None:
+    torch = _cuda()
+    solver = _solver(tmp_path, batch_size=2)
+    q = torch.zeros((2, solver.configuration_dim), dtype=torch.float32, device="cuda")
+    target = (
+        solver._solver._primary_pose(solver._solver.kinematics._evaluate_pose_trusted(q))[
+            ..., [0, 1, 2, 6, 3, 4, 5]
+        ]
+        .clone()
+        .contiguous()
+    )
+    # World zero has only floating-point-scale angular noise. The other
+    # world has a useful rotation request and must continue progressing.
+    target[0, 0, 6] = 1e-7
+    target[1, 0, 3] = float(np.cos(0.01))
+    target[1, 0, 6] = float(np.sin(0.01))
+    result = solver.solve_device_batch(q, target)
+    torch.testing.assert_close(result.q_solution[0], q[0], atol=0, rtol=0)
+    assert torch.linalg.vector_norm(result.q_solution[1] - q[1]).item() > 1e-7
+
+
+def test_noise_suppression_respects_a_stricter_tracking_tolerance(tmp_path: Path) -> None:
+    torch = _cuda()
+    solver = _solver(
+        tmp_path, batch_size=2, position_tolerance_m=1e-9, orientation_tolerance_rad=1e-9
+    )
+    q = torch.zeros((2, solver.configuration_dim), dtype=torch.float32, device="cuda")
+    pose = solver._solver._primary_pose(solver._solver.kinematics._evaluate_pose_trusted(q))
+    target = pose[..., [0, 1, 2, 6, 3, 4, 5]].clone().contiguous()
+    target[..., 6] = 1e-7
+    _, _, twist = solver._solver._task_state_eager(pose, target)
+    assert torch.linalg.vector_norm(twist, dim=-1).min().item() > 0
+
+
+def test_graph_capture_defers_automatic_gc(tmp_path: Path, monkeypatch) -> None:
+    import gc
+
+    torch = _cuda()
+    solver = _solver(tmp_path, batch_size=2)
+    core = solver._solver
+    original = core._solve_impl
+    policy = gc.isenabled()
+    captured_policy = []
+
+    def observed(*args, **kwargs):
+        if torch.cuda.is_current_stream_capturing():
+            captured_policy.append(gc.isenabled())
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(core, "_solve_impl", observed)
+    q = torch.zeros((2, solver.configuration_dim), dtype=torch.float32, device="cuda")
+    solver.solve_device_batch(q, _identity_targets(2, len(solver.frames), torch))
+    assert captured_policy and not any(captured_policy)
+    assert gc.isenabled() == policy
+
+
+def test_accepted_progress_is_distinct_from_terminal_convergence(tmp_path: Path) -> None:
+    torch = _cuda()
+    solver = _solver(tmp_path, batch_size=2)
+    q = torch.zeros((2, solver.configuration_dim), dtype=torch.float32, device="cuda")
+    target = (
+        solver._solver._primary_pose(solver._solver.kinematics._evaluate_pose_trusted(q))[
+            ..., [0, 1, 2, 6, 3, 4, 5]
+        ]
+        .clone()
+        .contiguous()
+    )
+    target[0, 0, 3] = float(np.cos(0.1))
+    target[0, 0, 6] = float(np.sin(0.1))
+    result = solver.solve_device_batch(q, target)
+    assert result.world_status.cpu().tolist() == [solver.WORLD_STATUS_SUCCESS] * 2
+    assert result.converged.cpu().tolist() == [False, True]
+
+
+def test_graph_results_borrow_buffers_while_cloned_snapshots_persist(tmp_path: Path) -> None:
+    torch = _cuda()
+    solver = _solver(tmp_path, batch_size=2)
+    q = torch.zeros((2, solver.configuration_dim), dtype=torch.float32, device="cuda")
+    target = (
+        solver._solver._primary_pose(solver._solver.kinematics._evaluate_pose_trusted(q))[
+            ..., [0, 1, 2, 6, 3, 4, 5]
+        ]
+        .clone()
+        .contiguous()
+    )
+    target[..., 3] = float(np.cos(0.1))
+    target[..., 6] = float(np.sin(0.1))
+    first = solver.solve_device_batch(q, target)
+    snapshot = first.q_solution.clone()
+    expected_snapshot = snapshot.clone()
+    target[..., 6] = -float(np.sin(0.1))
+    second = solver.solve_device_batch(first.q_solution, target)
+    assert first.q_solution.data_ptr() == second.q_solution.data_ptr()
+    assert not torch.equal(first.q_solution, snapshot)
+    torch.testing.assert_close(snapshot, expected_snapshot, atol=0, rtol=0)
+
+
+def test_inactive_world_has_no_primary_correction_request(tmp_path: Path, monkeypatch) -> None:
+    torch = _cuda()
+    solver = _solver(tmp_path, batch_size=2)
+    core = solver._solver
+    original = core._native_velocity
+    requests = []
+    matrices = []
+
+    def observed(twist, matrix, *args):
+        requests.append(twist.clone())
+        matrices.append(matrix.clone())
+        return original(twist, matrix, *args)
+
+    monkeypatch.setattr(core, "_native_velocity", observed)
+    q = torch.zeros((2, solver.configuration_dim), dtype=torch.float32, device="cuda")
+    target = (
+        core._primary_pose(core.kinematics._evaluate_pose_trusted(q))[..., [0, 1, 2, 6, 3, 4, 5]]
+        .clone()
+        .contiguous()
+    )
+    target[..., 3] = float(np.cos(0.1))
+    target[..., 6] = float(np.sin(0.1))
+    result = solver.solve_device_batch(
+        q, target, valid_mask=torch.tensor([True, False], device="cuda")
+    )
+    assert requests
+    torch.testing.assert_close(requests[-1][1], torch.zeros_like(requests[-1][1]), atol=0, rtol=0)
+    assert torch.linalg.vector_norm(requests[-1][0]).item() > 0
+    torch.testing.assert_close(result.q_solution[1], q[1], atol=0, rtol=0)
+    torch.testing.assert_close(matrices[-1][1], torch.zeros_like(matrices[-1][1]), atol=0, rtol=0)
+    assert matrices[-1][0].abs().max().item() > 0
+
+
+@pytest.mark.parametrize("feature", ["posture", "acceleration"])
+def test_zero_request_keeps_physical_factor_when_other_work_requires_it(
+    tmp_path: Path, monkeypatch, feature: str
+) -> None:
+    torch = _cuda()
+    options = (
+        {
+            "posture_target_configuration": (0.1, -0.1),
+            "posture_velocity_indices": (0, 1),
+            "posture_weights": (1.0, 1.0),
+        }
+        if feature == "posture"
+        else {"max_joint_acceleration_rad_s2": 0.1}
+    )
+    solver = _solver(tmp_path, batch_size=2, **options)
+    core = solver._solver
+    original_state = core._task_state
+    original_velocity = core._native_velocity
+    matrices = []
+
+    def zero_request(*args):
+        position, orientation, twist = original_state(*args)
+        return position, orientation, torch.zeros_like(twist)
+
+    def observed(twist, matrix, *args):
+        matrices.append(matrix.clone())
+        return original_velocity(twist, matrix, *args)
+
+    monkeypatch.setattr(core, "_task_state", zero_request)
+    monkeypatch.setattr(core, "_native_velocity", observed)
+    q = torch.zeros((2, solver.configuration_dim), dtype=torch.float32, device="cuda")
+    previous = torch.full_like(q, 0.5) if feature == "acceleration" else None
+    solver.solve_device_batch(
+        q, _identity_targets(2, len(solver.frames), torch), previous_velocity=previous
+    )
+    assert matrices[0].abs().max().item() > 0

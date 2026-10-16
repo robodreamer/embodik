@@ -24,6 +24,7 @@ except ImportError:
 
 from embodik.gpu.casadi_srinv import complete_consistent_redundant_velocity
 from embodik.gpu.casadi_srinv import srinv as _casadi_srinv
+from embodik.gpu.casadi_srinv import unreachable_inert_scale
 
 # Match the public KinematicsSolver SRINV defaults. Its 1e-6 constraint
 # tolerance is a separate parameter and must not be reused as this threshold.
@@ -219,11 +220,13 @@ def build_fi_pesns_velocity_solve(
         a = C @ delta_dq  # Scaled contribution
         b = C @ dq  # Unscaled (current)
         scale = get_feasible_task_scale(a, b, lower, upper, n_constraints)
+        scale = unreachable_inert_scale(scale, jacobian, dq + delta_dq, target, ca.norm_2(a))
 
-        # A consistent zero or repeated row is one task. Saturate every bound
-        # the full-scale step violates, then resolve the free joints. Every
-        # other task keeps this uniform scale.
-        completed, accepted = complete_consistent_redundant_velocity(
+        # A consistent zero, repeated, or linearly dependent row is one task.
+        # Saturate every bound the full-scale step violates, then resolve the
+        # free joints. A homogeneous pin set that cannot fit scale 1 keeps the
+        # largest feasible scale. Every other task keeps this uniform scale.
+        completed, accepted, achieved_scale = complete_consistent_redundant_velocity(
             jacobian,
             target,
             dq,
@@ -234,7 +237,7 @@ def build_fi_pesns_velocity_solve(
             projector=task_projector,
         )
         dq = accepted * completed + (1.0 - accepted) * (dq + scale * delta_dq)
-        task_scales[task_idx] = accepted + (1.0 - accepted) * scale
+        task_scales[task_idx] = accepted * achieved_scale + (1.0 - accepted) * scale
 
     # Fixed-iteration penalty loop. Only feasibility corrections evolve.
     for _ in range(k_max):

@@ -11,13 +11,29 @@ from __future__ import annotations
 
 import math
 import tempfile
+import threading
 import warnings
 import xml.etree.ElementTree as ET
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
 from ..contracts import RobotSolveSpec
 from .newton_model import _quat_xyzw_to_matrix, _skew, _unique_suffix_index
+
+_WARP_COM_STREAM_LOCK = threading.RLock()
+
+
+@contextmanager
+def _scoped_com_stream(wp: Any, stream: Any):
+    """Serialize Warp's shared device-stream save/restore, not GPU execution.
+
+    Separate evaluators own separate buffers, but ScopedStream changes the
+    device's Python default stream. Interleaved thread scopes can restore a
+    different thread's transient stream after its owner has released it.
+    """
+    with _WARP_COM_STREAM_LOCK, wp.ScopedStream(stream, sync_enter=False):
+        yield
 
 
 def _validate_spec(spec: RobotSolveSpec) -> list[tuple[str, int, int, int, int]]:
@@ -432,7 +448,7 @@ class NewtonCoMEvaluator:
             self._streams[pointer] = wp.Stream(self.model.device, cuda_stream=pointer)
         # Both libraries enqueue on the same stream. Warp's default implicit
         # wait on its previous stream is unnecessary and breaks parent capture.
-        with wp.ScopedStream(self._streams[pointer], sync_enter=False):
+        with _scoped_com_stream(wp, self._streams[pointer]):
             self.newton.eval_fk(self.model, self._qw, self._qd, self.state)
             self.newton.eval_jacobian(self.model, self.state, J=self._J, joint_S_s=self._S)
         rotation = _quat_xyzw_to_matrix(torch, self._body_q[..., 3:])
@@ -543,7 +559,7 @@ class NewtonCoMEvaluator:
         pointer = int(torch.cuda.current_stream(self.device).cuda_stream)
         if pointer not in self._streams:
             self._streams[pointer] = wp.Stream(self.model.device, cuda_stream=pointer)
-        with wp.ScopedStream(self._streams[pointer], sync_enter=False):
+        with _scoped_com_stream(wp, self._streams[pointer]):
             self.newton.eval_fk(
                 self.bias_model,
                 self.bias_state.joint_q,

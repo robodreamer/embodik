@@ -42,6 +42,32 @@ def _make_kernel(rows, columns, inverse_mode):
         status: wp.array(dtype=wp.int32),
     ):
         b = wp.tid()
+        # The exact zero matrix has a known zero generalized inverse. Idle
+        # worlds and unused bounded-completion factors reach this case often.
+        # Clear every reused output; still reject a non-finite supplied RHS.
+        exactly_zero = int(1)
+        # Undamped factors validate each input once instead of every Gram reuse.
+        invalid_matrix = int(0)
+        for r in range(rows):
+            for v in range(columns):
+                if j[b, r, v] != wp.float32(0.0):
+                    exactly_zero = 0
+                if inverse_mode == 1:
+                    if not wp.isfinite(j[b, r, v]):
+                        invalid_matrix = 1
+        if exactly_zero != 0 or invalid_matrix != 0:
+            invalid_rhs = invalid_matrix
+            if use_rhs != 0:
+                for r in range(rows):
+                    if not wp.isfinite(rhs[b, r]):
+                        invalid_rhs = 1
+            for v in range(columns):
+                solution[b, v] = wp.float32(0.0)
+                for r in range(rows):
+                    inverse[b, v, r] = wp.float32(0.0)
+                    undamped_inverse[b, v, r] = wp.float32(0.0)
+            status[b] = invalid_rhs
+            return
         a = mat()
         u = mat()
         bad = int(0)
@@ -53,10 +79,11 @@ def _make_kernel(rows, columns, inverse_mode):
                 for k in range(columns):
                     x = wp.float64(j[b, r, k])
                     y = wp.float64(j[b, c, k])
-                    if not wp.isfinite(x) or not wp.isfinite(y):
-                        bad = 1
-                        x = wp.float64(0.0)
-                        y = wp.float64(0.0)
+                    if inverse_mode != 1:
+                        if not wp.isfinite(x) or not wp.isfinite(y):
+                            bad = 1
+                            x = wp.float64(0.0)
+                            y = wp.float64(0.0)
                     value += x * y
                 a[r, c] = value
             scale = wp.max(scale, wp.abs(a[r, r]))
@@ -169,9 +196,15 @@ def _make_kernel(rows, columns, inverse_mode):
                 for k in range(rows):
                     basis = u[c, k] * u[r, k]
                     value += basis * weights[k]
-                    undamped_value += basis * undamped_weights[k]
+                    if inverse_mode != 1:
+                        undamped_value += basis * undamped_weights[k]
                 lu[r, c] = value
-                a[r, c] = undamped_value
+                # Undamped mode has identical weights and accumulation order.
+                # Share the value while retaining both reused output buffers.
+                if inverse_mode == 1:
+                    a[r, c] = value
+                else:
+                    a[r, c] = undamped_value
         for v in range(columns):
             answer = wp.float64(0.0)
             for r in range(rows):
@@ -180,11 +213,15 @@ def _make_kernel(rows, columns, inverse_mode):
                 for c in range(rows):
                     source = wp.float64(j[b, c, v])
                     value += source * lu[r, c]
-                    undamped_value += source * a[r, c]
+                    if inverse_mode != 1:
+                        undamped_value += source * a[r, c]
                 if not wp.isfinite(wp.float32(value)):
                     bad = 1
                 inverse[b, v, r] = wp.float32(value)
-                undamped_inverse[b, v, r] = wp.float32(undamped_value)
+                if inverse_mode == 1:
+                    undamped_inverse[b, v, r] = wp.float32(value)
+                else:
+                    undamped_inverse[b, v, r] = wp.float32(undamped_value)
                 if use_rhs != 0:
                     answer += value * wp.float64(rhs[b, r])
             if not wp.isfinite(wp.float32(answer)):

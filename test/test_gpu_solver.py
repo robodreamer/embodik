@@ -332,12 +332,21 @@ class TestGPUvsCPU:
         # GPU solve
         targets_flat, jacobians_flat = flatten_problem(goals, jacobians)
         gpu_result = solve_velocity_batched(
-            [targets_flat], [jacobians_flat], [C], [lower], [upper], use_gpu=True
+            [targets_flat],
+            [jacobians_flat],
+            [C],
+            [lower],
+            [upper],
+            use_gpu=True,
+            task_dims=[1, 1],
         )
 
         # Both should prioritize Task 0 (positive direction)
         assert cpu_result.solution[0] > 0
         assert gpu_result.velocities[0, 0] > 0
+        np.testing.assert_allclose(
+            gpu_result.velocities[0], cpu_result.solution, atol=VELOCITY_ATOL
+        )
 
 
 # =============================================================================
