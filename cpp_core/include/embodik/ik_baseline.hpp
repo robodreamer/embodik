@@ -1145,8 +1145,12 @@ inline bool RecoverFeasibleWeightedQuadratic(
 
 template <typename Decomposition>
 inline bool HasUsableSvdFactors(const Decomposition &decomposition) {
-  return decomposition.info() == Eigen::Success &&
-         decomposition.singularValues().allFinite() &&
+  // Eigen 3.3, used by the manylinux wheel image, has no SVD::info().
+#if EIGEN_WORLD_VERSION > 3 || \
+    (EIGEN_WORLD_VERSION == 3 && EIGEN_MAJOR_VERSION >= 4)
+  if (decomposition.info() != Eigen::Success) return false;
+#endif
+  return decomposition.singularValues().allFinite() &&
          (!decomposition.computeU() || decomposition.matrixU().allFinite()) &&
          (!decomposition.computeV() || decomposition.matrixV().allFinite());
 }
