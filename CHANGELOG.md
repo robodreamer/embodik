@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- SVD factor checks no longer call `info()` on Eigen 3.3. The manylinux wheel
+  image ships that version, which exposes singular values but not `SVD::info()`.
+
 ## [0.23.2] - 2026-10-16
 
 This release improves constrained velocity and acceleration IK robustness and
@@ -15,7 +20,7 @@ bounded: it does not guarantee escape from every stalled configuration, a
 collision-free swept path, or a fixed response-time deadline. Experimental
 corridor recovery and optional refinement routes require explicit opt-in.
 GPU acceleration support remains a subset of the CPU constraint API; see
-[GPU solver capabilities](docs/gpu_solvers.md) before selecting a backend.
+[GPU solver capabilities](https://robodreamer.github.io/embodik/gpu_solvers/) before selecting a backend.
 
 ### Added
 
@@ -80,7 +85,7 @@ GPU acceleration support remains a subset of the CPU constraint API; see
   list and assign it back to the option. In-place edits to a fetched record
   alone no longer update the option. This prevents references from dangling
   when the original list is replaced; see the
-  [update example](docs/acceleration_solver.md#updating-option-lists).
+  [update example](https://robodreamer.github.io/embodik/acceleration_solver/#updating-option-lists).
 
 - `AccelerationSolver` accepts `SCALE_ELASTIC` as SNS `SCALE` plus a
   nominal-position band inside the model limits. The band expands only for
