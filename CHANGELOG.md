@@ -25,9 +25,13 @@ GPU acceleration support remains a subset of the CPU constraint API; see
 - Acceleration collision lifting supports opt-in bounded sampled-distance
   corrections for fixed-base scalar revolute/prismatic models, retaining
   original limits and validation and exposing separate retry diagnostics.
+  `VelocityCollisionLiftOptions.max_refinement_iterations` stays `0`.
+  `refinement_trust_radius` and `refinement_clearance_reserve` bound each
+  local correction.
 
-- Acceleration solves can opt in to retaining a validated priority prefix when
-  numerical recovery cannot optimize optional lower MIN_ERROR tasks.
+- `AccelerationSolveOptions.allow_best_effort_lower_tasks` opts in to retaining
+  a validated priority prefix when numerical recovery cannot optimize optional
+  lower MIN_ERROR tasks. The default remains disabled.
 
 - Fixed-base GPU solvers expose opt-in partial SCALE refinement through
   `refine_partial_scale`, with advanced origin and seed-admission controls for
@@ -55,7 +59,12 @@ GPU acceleration support remains a subset of the CPU constraint API; see
 
 - Opt-in `PositionStepOptions.record_collision_candidates` records nominal
   collision checks and backoff configurations with effective recovery margins
-  and acceptance decisions. Recording is disabled by default.
+  and acceptance decisions. Records use `PositionStepCollisionCandidate`.
+  Recording is disabled by default.
+
+- `examples/harnesses/joint_limit_recovery_harness.py` reproduces CPU velocity
+  joint-limit redistribution on a generated two-slider robot. It is a
+  measurement harness, not an acceleration-solver example.
 - `KinematicsSolver.evaluate_collision_pair_distances(q)` returns a fresh
   distance and the configured minimum for every active collision pair. The
   query does not use the constraint-row budget or a cached closest pair, and
@@ -76,7 +85,9 @@ GPU acceleration support remains a subset of the CPU constraint API; see
 - `AccelerationSolver` accepts `SCALE_ELASTIC` as SNS `SCALE` plus a
   nominal-position band inside the model limits. The band expands only for
   that mode, and only up to `elastic_delta_max` and the physical joint
-  limits. Velocity, acceleration, collision, and other hard rows stay fixed.
+  limits. `reset_elastic_band()` clears the persistent band, and
+  `get_elastic_band_deltas()` reports it. Velocity, acceleration, collision,
+  and other hard rows stay fixed.
 
 ### Fixed
 
