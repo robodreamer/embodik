@@ -24,7 +24,9 @@ try:
 except ImportError:
     ca = None
 
+from embodik.gpu.casadi_srinv import complete_consistent_redundant_velocity
 from embodik.gpu.casadi_srinv import srinv as _casadi_srinv
+from embodik.gpu.casadi_srinv import unreachable_inert_scale
 
 # Match the public KinematicsSolver SRINV defaults.
 DEFAULT_EPSILON = 0.1
@@ -219,6 +221,9 @@ def build_pph_sns_velocity_solve(
         ddq = ca.SX.zeros(n_dof)
 
     task_scales = ca.SX.zeros(n_tasks)
+    # A completed redundant row is an absolute velocity. Later outer iterations
+    # must not add that task again.
+    task_accepted = [ca.SX.zeros(1) for _ in range(n_tasks)]
     mu = mu0
 
     # Fixed-iteration outer loop (fully unrolled)
@@ -254,11 +259,29 @@ def build_pph_sns_velocity_solve(
             a = C @ Delta_ddq  # Scaled contribution
             b = C @ ddq  # Current constraint value
             s_k = get_feasible_task_scale(a, b, lower, upper, n_constraints)
+            s_k = unreachable_inert_scale(s_k, J, ddq + Delta_ddq, target, ca.norm_2(a))
 
-            # Apply scaled delta with graceful scaling
-            Delta_ddq_scaled = Delta_ddq * s_k
-            ddq = ddq + Delta_ddq_scaled
-            task_scales[task_idx] = s_k
+            # Same consistent-row completion as FI-PeSNS. Full-rank tasks keep
+            # the uniform scale above. The first accepted scale stays latched.
+            completed, accepted, achieved_scale = complete_consistent_redundant_velocity(
+                J,
+                target,
+                ddq,
+                Delta_ddq,
+                C,
+                lower,
+                upper,
+                projector=P,
+            )
+            already_accepted = task_accepted[task_idx]
+            normal_update = ddq + s_k * Delta_ddq
+            completed_update = accepted * completed + (1.0 - accepted) * normal_update
+            ddq = already_accepted * ddq + (1.0 - already_accepted) * completed_update
+            reported_scale = accepted * achieved_scale + (1.0 - accepted) * s_k
+            task_scales[task_idx] = (
+                already_accepted * task_scales[task_idx] + (1.0 - already_accepted) * reported_scale
+            )
+            task_accepted[task_idx] = ca.fmax(already_accepted, accepted)
 
             # 2. Limited Rank-1 Projector Update (Top-M violators)
             # Compute current violations

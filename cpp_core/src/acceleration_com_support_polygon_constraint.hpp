@@ -17,6 +17,8 @@ namespace embodik::detail {
 struct ComSupportPolygonConstraintResult {
   SolverStatus status = SolverStatus::kSuccess;
   std::string message;
+  // Only true for a finite nonlinear path acceleration-limit violation.
+  bool path_acceleration_violation = false;
 
   bool satisfied() const { return status == SolverStatus::kSuccess; }
 };
@@ -59,6 +61,13 @@ prepare_com_support_polygon_constraint_at_state(
     const Eigen::VectorXd &joint_acceleration_lower,
     const Eigen::VectorXd &joint_acceleration_upper,
     const Eigen::VectorXd *witness_candidate = nullptr);
+
+ComSupportPolygonConstraintResult
+linearize_com_support_polygon_path_acceleration(
+    const PreparedComSupportPolygonConstraint &prepared,
+    const RobotModel &robot, const Eigen::VectorXd &q,
+    const Eigen::VectorXd &dq, const Eigen::VectorXd &candidate_acceleration,
+    double dt, AffineAccelerationConstraint *refinement);
 
 ComSupportPolygonConstraintResult
 validate_com_support_polygon_constraint_acceptance(

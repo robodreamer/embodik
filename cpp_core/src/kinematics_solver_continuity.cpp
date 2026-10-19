@@ -215,8 +215,11 @@ bool KinematicsSolver::update_position_step_target_signature(
       }
     }
     if (!matches) {
+      position_step_physical_recovery_active_ = false;
+      position_step_physical_recovery_anchor_blocks_.clear();
       reset_position_step_merit_window();
       position_step_stationary_anchor_blocks_.reset();
+      position_step_collision_best_merit_.reset();
       existing_target_geometry_changed = !target_geometry_matches;
     }
     if (!explicit_command_revision_enabled && world_target_geometry_matches &&
@@ -224,8 +227,11 @@ bool KinematicsSolver::update_position_step_target_signature(
       signature.reference_target_poses = previous.reference_target_poses;
     }
   } else {
+    position_step_physical_recovery_active_ = false;
+    position_step_physical_recovery_anchor_blocks_.clear();
     reset_position_step_merit_window();
     position_step_stationary_anchor_blocks_.reset();
+    position_step_collision_best_merit_.reset();
     position_step_collision_command_floor_distances_.clear();
   }
   last_position_step_target_signature_ = std::move(signature);
@@ -254,12 +260,15 @@ Eigen::Matrix4d KinematicsSolver::canonicalize_position_step_signature_pose(
 }
 
 void KinematicsSolver::reset_position_step_continuity_state() {
+  position_step_physical_recovery_active_ = false;
+  position_step_physical_recovery_anchor_blocks_.clear();
   last_position_step_target_signature_.reset();
   position_step_target_motion_blocks_.clear();
   position_step_target_motion_observed_ = false;
   position_step_collision_command_floor_distances_.clear();
   position_step_merit_priority_.reset();
   position_step_stationary_anchor_blocks_.reset();
+  position_step_collision_best_merit_.reset();
   reset_position_step_merit_window();
 }
 
@@ -271,8 +280,7 @@ void KinematicsSolver::reset_position_step_merit_window() {
   position_step_merit_window_direction_reversals_ = 0;
   position_step_merit_window_last_merits_.reset();
   position_step_merit_window_error_increases_ = 0;
-  position_step_stationary_guard_active_ = false;
-  position_step_stationary_guard_can_reopen_ = true;
+  position_step_continuity_state_ = PositionStepContinuityState::kMonitoring;
 }
 
 bool KinematicsSolver::should_hold_position_step_for_continuity(
@@ -293,6 +301,7 @@ bool KinematicsSolver::should_hold_position_step_for_continuity(
       *position_step_merit_priority_ != merit_priority) {
     reset_position_step_merit_window();
     position_step_stationary_anchor_blocks_.reset();
+    position_step_collision_best_merit_.reset();
     position_step_merit_priority_ = merit_priority;
   }
 
@@ -332,6 +341,23 @@ bool KinematicsSolver::should_hold_position_step_for_continuity(
     return false;
   }
 
+  // Publish a nominal candidate that completes the selected task. A satisfied
+  // endpoint is productive when the seed was unsatisfied; treating its zero
+  // normalized merit as a stationary hold would discard the completing step.
+  // Existing caller constraint checks remain authoritative. Already-satisfied
+  // seeds retain the stationary hold policy below.
+  const bool newly_satisfied =
+      initial_merit > kPositionStepSatisfiedMeritTolerance &&
+      final_merit <= kPositionStepSatisfiedMeritTolerance &&
+      std::all_of(final_target_block_merits.begin(),
+                  final_target_block_merits.end(), [](double merit) {
+                    return merit <= kPositionStepSatisfiedMeritTolerance;
+                  });
+  if (newly_satisfied) {
+    reset_position_step_merit_window();
+    return false;
+  }
+
   const bool collision_constraint_active =
       collision_constraint_.has_value() && collision_constraint_->enabled;
   const bool com_constraint_active =
@@ -344,6 +370,19 @@ bool KinematicsSolver::should_hold_position_step_for_continuity(
       get_linear_velocity_constraint_rows() > 0 ||
       !tight_frame_pose_constraints_.empty() ||
       !tight_point_constraints_.empty() || has_contact_frames();
+  const bool track_collision_best_merit =
+      collision_constraint_active && !acceleration_limits_enabled_ &&
+      !position_step_target_geometry_moved_ && !com_constraint_active &&
+      !relative_pose_constraint_active && !other_constraint_tradeoff_active &&
+      !has_active_velocity_centroidal_hard_constraints();
+  if (track_collision_best_merit) {
+    if (!position_step_collision_best_merit_.has_value()) {
+      position_step_collision_best_merit_ = initial_merit;
+    } else {
+      position_step_collision_best_merit_ =
+          std::min(*position_step_collision_best_merit_, initial_merit);
+    }
+  }
   const bool stationary_unconstrained_velocity_step =
       !acceleration_limits_enabled_ && position_step_target_motion_observed_ &&
       !position_step_target_geometry_moved_ && !collision_constraint_active &&
@@ -368,8 +407,7 @@ bool KinematicsSolver::should_hold_position_step_for_continuity(
           *dominant_anchor_block +
               kStationaryTargetMeritRegressionTolerance;
   if (stationary_target_regressed) {
-    position_step_stationary_guard_active_ = true;
-    position_step_stationary_guard_can_reopen_ = false;
+    position_step_continuity_state_ = PositionStepContinuityState::kHolding;
     position_step_merit_window_anchor_ = initial_merit;
     position_step_merit_window_motion_ = 0.0;
     position_step_merit_window_samples_ = 0;
@@ -411,12 +449,84 @@ bool KinematicsSolver::should_hold_position_step_for_continuity(
     }
   }
   position_step_merit_window_last_merits_ = final_target_merits;
+  // With no recovery/contact/acceleration tradeoff, holding is feasible. A
+  // minimum-error solve can reduce an aggregate residual by sacrificing the
+  // worst target. Do not spend the rest of a dwell window improving an easier
+  // task by moving the already worst commanded target farther away. Existing
+  // tolerance and command-motion checks permit numerical noise and moving
+  // targets; constrained recovery retains its windowed policy.
+  const bool minimum_error_candidate =
+      std::any_of(result.task_used_fallback.begin(),
+                  result.task_used_fallback.end(),
+                  [](bool used_fallback) { return used_fallback; }) ||
+      std::any_of(result.task_modes_effective.begin(),
+                  result.task_modes_effective.end(),
+                  [](TaskSolveMode mode) {
+                    return mode == TaskSolveMode::kMinError;
+                  });
+  const bool can_hold_stationary_without_constraint_tradeoff =
+      minimum_error_candidate &&
+      !position_step_target_geometry_moved_ &&
+      !acceleration_limits_enabled_ && !collision_constraint_active &&
+      !com_constraint_active && !relative_pose_constraint_active &&
+      !other_constraint_tradeoff_active;
+  if (can_hold_stationary_without_constraint_tradeoff &&
+      position_step_merit_window_error_increases_ >
+          kStationaryMaxDirectionReversals) {
+    position_step_continuity_state_ = PositionStepContinuityState::kHolding;
+    return true;
+  }
   position_step_merit_window_motion_ +=
       std::max(0.0, configuration_step_norm);
   ++position_step_merit_window_samples_;
 
-  if (position_step_stationary_guard_active_) {
-    if (!position_step_stationary_guard_can_reopen_) {
+  if (position_step_continuity_state_ !=
+      PositionStepContinuityState::kMonitoring) {
+    // A constrained solve can briefly oscillate while switching active rows.
+    // Do not make that history an irreversible hold when a fresh candidate
+    // now improves every unsatisfied task block without sacrificing the others.
+    // Candidate constraint/priority validation remains owned by the caller.
+    const bool constrained_candidate =
+        collision_constraint_active || com_constraint_active ||
+        relative_pose_constraint_active || other_constraint_tradeoff_active;
+    bool blockwise_progress = constrained_candidate &&
+        initial_merit > kPositionStepSatisfiedMeritTolerance &&
+        has_sufficient_position_step_merit_reduction(
+            initial_merit, final_merit, configuration_step_norm);
+    for (std::size_t index = 0;
+         blockwise_progress && index < initial_target_block_merits.size();
+         ++index) {
+      const double before = initial_target_block_merits[index];
+      const double after = final_target_block_merits[index];
+      const double tolerance = 64.0 * std::numeric_limits<double>::epsilon() *
+                               std::max({1.0, before, after});
+      // A satisfied block may acquire a small nonlinear residual while another
+      // block recovers. Keep it satisfied rather than requiring improvement of
+      // an already negligible residual down to machine precision.
+      blockwise_progress =
+          before <= kPositionStepSatisfiedMeritTolerance
+              ? after <= kPositionStepSatisfiedMeritTolerance + tolerance
+              : after <= before + tolerance && before - after > tolerance;
+    }
+    if (blockwise_progress) {
+      if (track_collision_best_merit &&
+          !has_sufficient_position_step_merit_reduction(
+              *position_step_collision_best_merit_, final_merit,
+              configuration_step_norm)) {
+        // Correcting a worse candidate back toward an earlier collision-bound
+        // optimum is useful, but must not reopen another non-improving window.
+        // A new command/policy resets this history; genuine new-best progress
+        // below still reopens ordinary control.
+        return false;
+      }
+      if (track_collision_best_merit) {
+        position_step_collision_best_merit_ = final_merit;
+      }
+      reset_position_step_merit_window();
+      return false;
+    }
+    if (position_step_continuity_state_ ==
+        PositionStepContinuityState::kHolding) {
       return true;
     }
     const bool hold_candidate = should_hold_non_improving_position_step(
@@ -489,10 +599,11 @@ bool KinematicsSolver::should_hold_position_step_for_continuity(
     return false;
   }
 
-  position_step_stationary_guard_active_ = true;
-  position_step_stationary_guard_can_reopen_ =
+  position_step_continuity_state_ =
       !caller_owns_command_identity && !target_is_satisfied &&
-      !window_was_oscillatory;
+              !window_was_oscillatory
+          ? PositionStepContinuityState::kReopenableHolding
+          : PositionStepContinuityState::kHolding;
   position_step_merit_window_anchor_ = initial_merit;
   position_step_merit_window_motion_ = 0.0;
   position_step_merit_window_samples_ = 0;

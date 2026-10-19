@@ -93,6 +93,34 @@ To solve 1,024 worlds while publishing only 512 robots to the browser, pass
 
 ## Model-derived API
 
+Native `warp_srinv` and `cusolver_srinv` bounded completion can release an
+unnecessary joint bound when a consistent combined task stalls at zero velocity.
+The recovery search runs in one graph-compatible Warp launch. It preserves the
+task ray and original velocity box, including boxes that require inward joint
+motion. Valid worlds with positive motion bypass the search. An invalid moving
+realization can be repaired only while preserving its achieved combined task
+velocity exactly; it is not silently rescaled to make it fit. If no checked
+repair is found, the original candidate remains subject to the surrounding
+solver's publication checks. Recovery does not replace collision, CoM,
+nonlinear acceptance or separately prioritized task handling. The recovery flag
+reports a repaired velocity, not convergence to the target.
+
+Fixed-base `GpuWbcMultiFrameSolver.from_robot()` callers can additionally set
+`refine_partial_scale=True` with `warp_srinv` or `cusolver_srinv` to seek a
+larger feasible primary task scale. The default is disabled. Refinement adds
+work and can change the joint trajectory; it does not optimize the complete
+nonlinear motion or replace later constraint checks. Unsupported backends
+reject this option.
+
+For a slightly off-ray float32 seed, refinement can restart its numerical search
+from exact zero velocity when the joint velocity box contains zero. It retains
+the existing final equality, box and scale-improvement checks. No intermediate
+zero command is published and the robot configuration is not reset. Boxes that
+require inward motion retain their existing path. Custom seed admission uses
+`refinement_ray_tolerance`; `refine_from_origin=True` explicitly requests origin
+initialization for admitted seeds. These two advanced options require partial
+refinement to be enabled.
+
 Build a solver with `from_robot()`. That factory selects `warp_srinv` and
 derives the joint layout from the loaded `RobotModel`. The class constructor
 is the legacy artifact path and is not the integration entry point.
@@ -135,7 +163,8 @@ target_cuda = torch.zeros(
 )
 target_cuda[..., 3] = 1.0  # identity quaternion, WXYZ
 result = solver.solve_device_batch(q_cuda, target_cuda)
-tracked = result.world_status == solver.WORLD_STATUS_SUCCESS
+accepted = result.world_status == solver.WORLD_STATUS_SUCCESS
+tracked = accepted & result.converged
 q_next_cuda = result.q_solution
 ```
 
@@ -194,8 +223,27 @@ Both adapters publish the same codes:
 
 Invalid and inactive rows keep the configuration the caller passed in. A held
 row keeps the seed after finite joint positions have been projected onto their
-limits. Read `world_status` when the application needs to know which worlds
-tracked the target. One bad row does not reject the batch.
+limits. `WORLD_STATUS_SUCCESS` means publication was accepted; it can describe
+an intermediate progress step whose target error is still large. To identify
+worlds that reached the configured tracking tolerances, also read
+`result.converged`, as shown above. One bad row does not reject the batch.
+
+### Result lifetime during graph replay
+
+With CUDA graph capture enabled, result tensors borrow reusable output buffers.
+The next call on the same solver overwrites them, including tensors held through
+an earlier result object. Consume them before the next solve, or use `.clone()`
+for a state snapshot, retained trajectory sample or before/after comparison:
+
+```python
+q_before = q_cuda.clone()
+result = solver.solve_device_batch(q_cuda, target_cuda)
+q_after = result.q_solution.clone()
+delta = q_after - q_before
+```
+
+Passing the latest `q_solution` directly into the next solve is supported;
+retaining that reference does not preserve the previous configuration.
 
 ## RL and simulator integration
 
@@ -283,7 +331,27 @@ capacity, and non-CUDA runtime attribution fail during construction or solve.
 Adding a new robot normally means supplying its URDF, frames, and policy—not
 editing a kernel with that robot's joint count.
 
+Native bounded-task completion uses a device-resident undamped Warp inverse
+for rank and reachability checks. These checks participate in the existing
+spectral-status publication veto and support CUDA graph replay with changed
+targets. The Torch reference helper remains available for algebraic comparisons;
+its general SVD path is not a guarantee of CUDA graph compatibility.
+
+Exactly zero native factor matrices return zero inverses/solutions without
+spectral work, clearing all reused outputs and retaining supplied RHS finiteness
+checks. Finite bounded-completion candidates that cannot be used feed zero
+factors to this path. Required candidates and non-finite matrices retain their
+normal factorization/status checks. No small nonzero matrix is treated as zero;
+rank, regularization and motion-acceptance thresholds are unchanged.
+
 ## Constraint and task coverage
+
+Newton CoM/centroidal evaluators use the caller's Torch CUDA stream. Each
+evaluator owns mutable buffers: serialize calls on one evaluator, or allocate
+separate evaluators for concurrent workers. CoM stream scopes serialize Warp's
+shared default-stream save/restore while enqueuing kernels; GPU work remains
+asynchronous. This protects independent CoM evaluators from interleaved scope
+restoration and does not make arbitrary shared solver objects thread-safe.
 
 Applications can inspect `GPU_WBC_CAPABILITIES` before exposing a control. A
 false capability must be disabled or rejected.

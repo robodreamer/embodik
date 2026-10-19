@@ -136,7 +136,7 @@ Default automation is intentionally targeted to reduce maintainer spend:
 ### CoM Support-Polygon Constraint
 
 - **Margin definition:** Use `char_size` (mean distance centroid → vertices), not `min_radius`.
-- **Three-layer velocity bound** (per half-plane, Spot Flex IK pattern):
+- **Three-layer velocity bound** (per half-plane):
   1. `com_vel_max` — always active
   2. `sqrt(2 * com_acc_max * slack)` — always active, smooth saturation
   3. `slack / dt` — only when slack < proximity_threshold
@@ -151,7 +151,7 @@ Default automation is intentionally targeted to reduce maintainer spend:
 ### Testing
 
 - Add unit tests in `test/` for new APIs (e.g. `test_com_constraint.py`).
-- Hardware seeds (limits + self-collision + stall): `docs/recovery_robustness.md`, `test/test_hardware_seed_recovery.py`.
+- Hardware seeds (limits + self-collision + stall): `docs/solver_robustness.md`, `test/test_hardware_seed_recovery.py`.
 - Use `solver.dt = 0.01` (attribute, not `set_dt()`).
 - `FrameTask`: use `set_target_pose(position, rotation)`, not `set_target_rotation` / `set_target_position`.
 
@@ -184,7 +184,6 @@ Default automation is intentionally targeted to reduce maintainer spend:
 ## External References
 
 - **ECTS (IROS 2016):** H. A. Park, "Dual-arm coordinated-motion task specification and performance evaluation," 2016 IEEE/RSJ IROS, Daejeon, pp. 516-522, doi:10.1109/IROS.2016.7759161.
-- **Spot Flex IK:** `flex-ik-new/flex_ik_v1/spot_flex_ik/` — CoM constraint pattern (`check_proximity_to_com_constraints`, `_compute_com_constraints`), `calculate_box_constraints` for margin/vel/accel bounds.
 
 ---
 

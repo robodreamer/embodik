@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(embodik VERSION 0.23.1)
+project(embodik VERSION 0.23.2)
 
 # Python is used to auto-discover Pinocchio (PyPI `pin`) CMake config during sdist builds.
 find_package(Python REQUIRED COMPONENTS Interpreter)
@@ -132,6 +132,7 @@ add_library(embodik_core SHARED
     cpp_core/src/acceleration_solver_objectives.cpp
     cpp_core/src/acceleration_solver_constraints.cpp
     cpp_core/src/acceleration_solver_state_effort.cpp
+    cpp_core/src/acceleration_solver_elastic.cpp
     cpp_core/src/kinematics_solver.cpp
     cpp_core/src/kinematics_solver_tasks.cpp
     cpp_core/src/kinematics_solver_auto_layout.cpp
@@ -141,6 +142,7 @@ add_library(embodik_core SHARED
     cpp_core/src/kinematics_solver_velocity.cpp
     cpp_core/src/kinematics_solver_position_step.cpp
     cpp_core/src/pose_metrics.cpp
+    cpp_core/src/cartesian_corridor_recovery.cpp
     cpp_core/src/sphere_broadphase.cpp
 )
 

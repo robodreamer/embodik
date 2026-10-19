@@ -12,6 +12,7 @@ from typing import Any
 
 from ..contracts import RobotSolveSpec
 from ._pose_math import _clamp_norm, _orientation_error
+from .capture_gc import suspend_capture_gc
 from .cusadi_sm120 import StrictCusadiFunction
 from .gpu_constraints import (
     CPU_MARGIN_THRESHOLD,
@@ -29,6 +30,7 @@ from .gpu_constraints import (
 from .gpu_priority import (
     PostureTaskRows,
     _configuration_indices_for_velocity_rows,
+    complete_consistent_redundant_velocity,
     ordered_priority_velocity,
 )
 from .newton_model import NewtonModelKinematics
@@ -100,6 +102,9 @@ class MultiFramePoseSolveConfig:
     torso_projection_noop_fast_path_enabled: bool = False
     contact_position_tolerance_m: float = 1e-4
     contact_orientation_tolerance_rad: float = 1e-3
+    refine_partial_scale: bool = False
+    refine_from_origin: bool = False
+    refinement_ray_tolerance: float = 1e-8
 
     def __post_init__(self) -> None:
         positive = (
@@ -151,6 +156,17 @@ class MultiFramePoseSolveConfig:
             )
         if self.velocity_solver == "torch_srinv" and self.standalone_cuda_graph_enabled:
             raise ValueError("torch_srinv does not support standalone CUDA Graph capture")
+        if not math.isfinite(self.refinement_ray_tolerance) or self.refinement_ray_tolerance <= 0:
+            raise ValueError("refinement ray tolerance must be finite and positive")
+        if self.refine_from_origin and not self.refine_partial_scale:
+            raise ValueError("origin refinement requires partial-scale refinement")
+        if self.refinement_ray_tolerance != 1e-8 and not self.refine_partial_scale:
+            raise ValueError("custom refinement ray tolerance requires partial-scale refinement")
+        if self.refine_partial_scale and self.velocity_solver not in {
+            "warp_srinv",
+            "cusolver_srinv",
+        }:
+            raise ValueError("partial-scale refinement requires warp_srinv or cusolver_srinv")
         if (
             self.cusolver_reuse_locked_primary_inverse_enabled
             and self.velocity_solver != "cusolver_srinv"
@@ -1542,6 +1558,34 @@ class DeviceResidentMultiFramePoseSolver:
         self._compiled_torso_rows = None
         self._compiled_finalization = None
         self._compiled_native_velocity = None
+        self._bounded_completion_inverse = None
+        self._bounded_completion_ok = None
+        self._bound_release = None
+        if self.config.velocity_solver in {"warp_srinv", "cusolver_srinv"}:
+            from .warp_bound_release import WarpBoundRelease
+            from .warp_directional_srinv import WarpDirectionalSRINV
+
+            self._bounded_completion_inverse = WarpDirectionalSRINV(
+                self.task_rows,
+                self.velocity_dim,
+                batch_capacity=self.batch_size,
+                inverse_mode="undamped_relative",
+                relative_rank_tolerance=1e-6,
+                device=str(self.device),
+            )
+            self._bound_release = WarpBoundRelease(
+                self.task_rows,
+                self.velocity_dim,
+                batch_capacity=self.batch_size,
+                device=str(self.device),
+                refine_partial_scale=self.config.refine_partial_scale,
+                refine_from_origin=self.config.refine_from_origin,
+                refinement_ray_tolerance=self.config.refinement_ray_tolerance,
+                repair_float32_roundoff=(
+                    self.config.refine_partial_scale
+                    and self.config.refinement_ray_tolerance == 1e-8
+                ),
+            )
         self._compiled_secondary_tasks = None
         self.collision = None
         self.collision_convex_envelope = None
@@ -1887,15 +1931,116 @@ class DeviceResidentMultiFramePoseSolver:
             velocity.index_copy_(1, self._unlocked_active_columns_tensor, solved_velocity)
         else:
             velocity = solved_velocity
-        lower = lower.to(self._fi_dtype)
-        upper = upper.to(self._fi_dtype)
-        needs_upper_scale = velocity > upper
-        needs_lower_scale = velocity < lower
-        scales = torch.ones_like(velocity)
-        scales = torch.where(needs_upper_scale, upper / torch.clamp(velocity, min=1e-30), scales)
-        scales = torch.where(needs_lower_scale, lower / torch.clamp(velocity, max=-1e-30), scales)
+        return self._finish_bounded_velocity(jacobian, twist, lower, upper, velocity)
+
+    def _finish_bounded_velocity(
+        self,
+        jacobian: Any,
+        twist: Any,
+        lower: Any,
+        upper: Any,
+        unscaled: Any,
+        *,
+        primary_factor: Any | None = None,
+    ):
+        """Scale into the velocity box, completing one consistent repeated task."""
+
+        torch = self.torch
+        lower = lower.to(dtype=unscaled.dtype)
+        upper = upper.to(dtype=unscaled.dtype)
+        scales = torch.ones_like(unscaled)
+        scales = torch.where(
+            unscaled > upper,
+            upper / torch.clamp(unscaled, min=1e-30),
+            scales,
+        )
+        scales = torch.where(
+            unscaled < lower,
+            lower / torch.clamp(unscaled, max=-1e-30),
+            scales,
+        )
         scale = torch.clamp(torch.amin(scales, dim=-1), min=0.0, max=1.0)
-        return (velocity * scale[:, None]).to(torch.float32)
+        scaled = unscaled * scale[:, None]
+        residual_tolerance = 1.0e-5 if unscaled.dtype == torch.float32 else 1.0e-8
+
+        def completion_inverse(matrix, tolerance):
+            result = self._bounded_completion_inverse.solve(matrix.to(torch.float32).contiguous())
+            # Factors are reused across calls; keep the status in the native
+            # solve's existing publication veto, including captured replay.
+            self._bounded_completion_ok &= (
+                self._bounded_completion_inverse.status[: self.batch_size] == 0
+            )
+            return result.to(matrix.dtype)
+
+        self._bounded_completion_ok = torch.ones(
+            self.batch_size, dtype=torch.bool, device=self.device
+        )
+        consistency_inverse = completion_inverse
+        if primary_factor is not None:
+
+            def consistency_inverse(matrix, tolerance):
+                cached = primary_factor.undamped_inverse[: self.batch_size]
+                reusable = (primary_factor.status[: self.batch_size] == 0) & torch.isfinite(
+                    cached
+                ).all(dim=(-2, -1))
+                # Failed/overflowed cached lanes retain the independent
+                # matrix-only factorization and its original status veto.
+                fresh = completion_inverse(
+                    torch.where(reusable[:, None, None], torch.zeros_like(matrix), matrix),
+                    tolerance,
+                )
+                return torch.where(reusable[:, None, None], cached.to(matrix.dtype), fresh)
+
+        completed = complete_consistent_redundant_velocity(
+            jacobian.to(dtype=unscaled.dtype),
+            twist.to(dtype=unscaled.dtype),
+            lower,
+            upper,
+            unscaled,
+            scaled,
+            residual_tolerance=residual_tolerance,
+            inverse_function=(
+                completion_inverse if self._bounded_completion_inverse is not None else None
+            ),
+            consistency_inverse_function=(
+                consistency_inverse if self._bounded_completion_inverse is not None else None
+            ),
+        )
+        if self._bound_release is not None:
+            completed = self._bound_release.solve(jacobian, twist, lower, upper, completed)
+        return completed.to(torch.float32)
+
+    def _matching_primary_completion_factor(self, jacobian: Any) -> Any | None:
+        """Use only the factor just computed from this unchanged full Jacobian."""
+        primary = self._warp_srinv
+        completion = self._bounded_completion_inverse
+        if primary is None or completion is None or self._locked_active_columns:
+            return None
+        if (
+            jacobian.dtype != self.torch.float32
+            or not jacobian.is_contiguous()
+            or tuple(jacobian.shape) != (self.batch_size, self.task_rows, self.velocity_dim)
+            or primary.inverse_mode != "directional"
+            or completion.inverse_mode != "undamped_relative"
+            or primary.relative_rank_tolerance != 1.0e-6
+            or completion.relative_rank_tolerance != 1.0e-6
+            or primary.max_sweeps != completion.max_sweeps
+            or primary.convergence != completion.convergence
+            or primary.device != jacobian.device
+            or completion.device != jacobian.device
+            or primary.undamped_inverse.dtype != self.torch.float32
+            or primary.undamped_inverse.device != jacobian.device
+            or tuple(primary.undamped_inverse.shape)
+            != (self.batch_size, self.velocity_dim, self.task_rows)
+            or any(
+                factor.rows != self.task_rows
+                or factor.columns != self.velocity_dim
+                or factor.batch_capacity != self.batch_size
+                for factor in (primary, completion)
+            )
+        ):
+            return None
+        return primary
 
     def _native_velocity(self, twist: Any, jacobian: Any, lower: Any, upper: Any):
         if getattr(self, "_cusolver_srinv", None) is not None:
@@ -1953,20 +2098,7 @@ class DeviceResidentMultiFramePoseSolver:
             else:
                 velocity = solved_velocity
                 self._cusolver_primary_inverse = outputs[2]
-            lower32, upper32 = lower.to(torch.float32), upper.to(torch.float32)
-            scales = torch.ones_like(velocity)
-            scales = torch.where(
-                velocity > upper32,
-                upper32 / torch.clamp(velocity, min=1e-30),
-                scales,
-            )
-            scales = torch.where(
-                velocity < lower32,
-                lower32 / torch.clamp(velocity, max=-1e-30),
-                scales,
-            )
-            scale = torch.clamp(torch.amin(scales, dim=-1), min=0.0, max=1.0)
-            return velocity * scale[:, None]
+            return self._finish_bounded_velocity(jacobian, twist, lower, upper, velocity)
         if self._warp_srinv is not None:
             torch = self.torch
             matrix = jacobian
@@ -1984,20 +2116,16 @@ class DeviceResidentMultiFramePoseSolver:
                 velocity.index_copy_(1, self._unlocked_active_columns_tensor, solved_velocity)
             else:
                 velocity = solved_velocity
-            lower32, upper32 = lower.to(torch.float32), upper.to(torch.float32)
-            scales = torch.ones_like(velocity)
-            scales = torch.where(
-                velocity > upper32,
-                upper32 / torch.clamp(velocity, min=1e-30),
-                scales,
+            # No intervening solve may overwrite this factor. Locked-column
+            # solves use a different matrix and retain independent completion.
+            return self._finish_bounded_velocity(
+                jacobian,
+                twist,
+                lower,
+                upper,
+                velocity,
+                primary_factor=self._matching_primary_completion_factor(jacobian),
             )
-            scales = torch.where(
-                velocity < lower32,
-                lower32 / torch.clamp(velocity, max=-1e-30),
-                scales,
-            )
-            scale = torch.clamp(torch.amin(scales, dim=-1), min=0.0, max=1.0)
-            return velocity * scale[:, None]
         if self._compiled_native_velocity is None:
             return self._native_velocity_eager(twist, jacobian, lower, upper)
         return self._compiled_native_velocity(twist, jacobian, lower, upper)
@@ -2199,7 +2327,10 @@ class DeviceResidentMultiFramePoseSolver:
                 # Newton's child graphs and the Warp kernels can be recorded
                 # directly by Torch. Warp 1.17 cannot reliably register this
                 # mixed Torch/Newton parent capture as an external capture.
-                with torch.cuda.graph(graph, capture_error_mode="thread_local"):
+                with (
+                    suspend_capture_gc(),
+                    torch.cuda.graph(graph, capture_error_mode="thread_local"),
+                ):
                     raw_graph_result = self._solve_impl(
                         static_q,
                         static_target,
@@ -2213,7 +2344,10 @@ class DeviceResidentMultiFramePoseSolver:
                         compact_publication=self.compact_publication(raw_graph_result),
                     )
             else:
-                with torch.cuda.graph(graph, capture_error_mode="thread_local"):
+                with (
+                    suspend_capture_gc(),
+                    torch.cuda.graph(graph, capture_error_mode="thread_local"),
+                ):
                     torch_stream = torch.cuda.current_stream(self.device)
                     warp_stream = wp.Stream(
                         wp.get_device(str(self.device)),
@@ -2333,6 +2467,7 @@ class DeviceResidentMultiFramePoseSolver:
         return self._compiled_errors(pose, target)
 
     def _task_state_eager(self, pose: Any, target: Any) -> tuple[Any, Any, Any]:
+        torch = self.torch
         position_vector, position, angular_vector, orientation = self._errors_eager(pose, target)
         linear = _clamp_norm(
             (position_vector * self._frame_position_gains[None, :, None]).reshape(-1, 3),
@@ -2344,9 +2479,31 @@ class DeviceResidentMultiFramePoseSolver:
         ).reshape(self.batch_size, self.frame_count, 3)
         chunks = []
         for frame_index, dimension in enumerate(self.frame_task_dimensions):
-            chunks.append(linear[:, frame_index])
+            # Do not amplify FP32 pose noise into gratuitous joint motion near
+            # a singularity. Keep the physical Jacobian and all hard/secondary
+            # rows; only suppress microscopic primary correction requests.
+            position_band = min(self.config.position_tolerance_m, 1e-6)
+            orientation_band = min(self.config.orientation_tolerance_rad, 1e-5)
+            if self.frame_contact_constraints[frame_index]:
+                position_band = min(position_band, self.config.contact_position_tolerance_m)
+                orientation_band = min(
+                    orientation_band, self.config.contact_orientation_tolerance_rad
+                )
+            chunks.append(
+                torch.where(
+                    (position[:, frame_index] <= position_band)[:, None],
+                    torch.zeros_like(linear[:, frame_index]),
+                    linear[:, frame_index],
+                )
+            )
             if dimension == 6:
-                chunks.append(angular[:, frame_index])
+                chunks.append(
+                    torch.where(
+                        (orientation[:, frame_index] <= orientation_band)[:, None],
+                        torch.zeros_like(angular[:, frame_index]),
+                        angular[:, frame_index],
+                    )
+                )
         twist = self.torch.cat(chunks, dim=-1)
         return position, orientation, twist
 
@@ -3967,6 +4124,10 @@ class DeviceResidentMultiFramePoseSolver:
             spectral_solve_ok &= contact_spectral_ok
             jacobian = self._select_task_jacobian(jacobian)
             position, orientation, twist = self._task_state(pose, target)
+            # Inactive/invalid worlds cannot publish commands. Do not spend
+            # bounded ray-completion work on their original task requests.
+            # Keep the physical Jacobian and error diagnostics unchanged.
+            twist = torch.where(participate[:, None], twist, torch.zeros_like(twist))
             if initial_position is None:
                 initial_position = position
                 initial_orientation = orientation
@@ -4010,17 +4171,43 @@ class DeviceResidentMultiFramePoseSolver:
             )
             effective_dt = self.config.dt * adaptive_scale
             lower, upper = self._bounds(q, q_start, previous, effective_dt)
+            primary_jacobian = jacobian
+            if (
+                not self.secondary_task_enabled
+                and not self.torso_constraint_enabled
+                and not self.com_constraint_enabled
+                and not self.centroidal_enabled
+                and not self.config.collision_enabled
+                and not any(self.frame_contact_constraints)
+            ):
+                # With only the primary tasks and a box containing zero,
+                # an exactly zero request has the known zero solution. Feed
+                # a zero matrix to the fixed-shape factors for those worlds
+                # instead of computing an unused inverse. Preserve the real
+                # Jacobian for all later diagnostics and constraint paths.
+                idle = (twist == 0).all(-1)
+                idle &= ((lower <= 0) & (upper >= 0)).all(-1)
+                idle &= torch.isfinite(jacobian).all(dim=(1, 2))
+                primary_jacobian = torch.where(
+                    (~participate | idle)[:, None, None],
+                    torch.zeros_like(jacobian),
+                    jacobian,
+                )
             if self.fi is None:
-                velocity = self._native_velocity(twist, jacobian, lower, upper)
+                velocity = self._native_velocity(twist, primary_jacobian, lower, upper)
                 if self._warp_srinv is not None:
                     spectral_solve_ok &= self._warp_srinv.status[: self.batch_size] == 0
                 if self._cusolver_primary_status is not None:
                     spectral_solve_ok &= self._cusolver_primary_status == 0
+                if self._bounded_completion_ok is not None:
+                    spectral_solve_ok &= self._bounded_completion_ok
             else:
                 kernel_time_ms += 1000.0 * self.fi._evaluate_trusted(
                     (
                         twist.to(self._fi_dtype).contiguous(),
-                        jacobian.to(self._fi_dtype).reshape(self.batch_size, -1).contiguous(),
+                        primary_jacobian.to(self._fi_dtype)
+                        .reshape(self.batch_size, -1)
+                        .contiguous(),
                         self._constraints,
                         lower.to(self._fi_dtype).contiguous(),
                         upper.to(self._fi_dtype).contiguous(),

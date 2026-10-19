@@ -7,6 +7,426 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.23.2] - 2026-10-16
+
+This release improves constrained velocity and acceleration IK robustness and
+reduces repeated numerical and collision work. Recovery remains local and
+bounded: it does not guarantee escape from every stalled configuration, a
+collision-free swept path, or a fixed response-time deadline. Experimental
+corridor recovery and optional refinement routes require explicit opt-in.
+GPU acceleration support remains a subset of the CPU constraint API; see
+[GPU solver capabilities](docs/gpu_solvers.md) before selecting a backend.
+
+### Added
+
+- `AccelerationSolveOptions.refine_partial_scale` exposes opt-in bounded
+  refinement of feasible directional acceleration commands.
+
+- Acceleration collision lifting supports opt-in bounded sampled-distance
+  corrections for fixed-base scalar revolute/prismatic models, retaining
+  original limits and validation and exposing separate retry diagnostics.
+  `VelocityCollisionLiftOptions.max_refinement_iterations` stays `0`.
+  `refinement_trust_radius` and `refinement_clearance_reserve` bound each
+  local correction.
+
+- `AccelerationSolveOptions.allow_best_effort_lower_tasks` opts in to retaining
+  a validated priority prefix when numerical recovery cannot optimize optional
+  lower MIN_ERROR tasks. The default remains disabled.
+
+- Fixed-base GPU solvers expose opt-in partial SCALE refinement through
+  `refine_partial_scale`, with advanced origin and seed-admission controls for
+  the native Warp and cuSOLVER backends.
+
+- Experimental `CartesianCorridorRecovery` generates hypothetical free-hand
+  endpoints and validates bounded native velocity rollouts before activation.
+  Executed steps retain explicit pose, joint, collision and support checks;
+  acceleration/contact recovery and swept collision certification are unsupported.
+  Optional measured-state revalidation, pose-zone reentry and remembered gain
+  backoff order remain disabled by default.
+
+- `SolverRuntimeConfig.refine_partial_scale` exposes opt-in CPU refinement of
+  feasible partial directional SCALE solutions. The default remains disabled.
+
+- Constrained weighted velocity IK accepts an optional validated feasible seed
+  for primal optimization when a preceding solve already provides one.
+
+- Native acceleration options expose default-off `prefer_direct_min_error_qp`
+  to prefer a feasible-primal quadratic route for all-MIN_ERROR hierarchies,
+  preserving hard bounds, earlier task images and fallback authorization.
+
+- Opt-in position-step velocity candidate records expose each native velocity,
+  integration interval, and nominal manifold motion before acceptance guards.
+
+- Opt-in `PositionStepOptions.record_collision_candidates` records nominal
+  collision checks and backoff configurations with effective recovery margins
+  and acceptance decisions. Records use `PositionStepCollisionCandidate`.
+  Recording is disabled by default.
+
+- `examples/harnesses/joint_limit_recovery_harness.py` reproduces CPU velocity
+  joint-limit redistribution on a generated two-slider robot. It is a
+  measurement harness, not an acceleration-solver example.
+- `KinematicsSolver.evaluate_collision_pair_distances(q)` returns a fresh
+  distance and the configured minimum for every active collision pair. The
+  query does not use the constraint-row budget or a cached closest pair, and
+  it leaves the robot state unchanged.
+
+### Changed
+
+- **Native rebuild:** solver option and result layouts changed. Rebuild native
+  consumers, the core library, and Python bindings together for this release.
+
+- **Python migration:** acceleration-option constraint and objective lists now
+  return owned record snapshots. To change a stored record, edit the returned
+  list and assign it back to the option. In-place edits to a fetched record
+  alone no longer update the option. This prevents references from dangling
+  when the original list is replaced; see the
+  [update example](docs/acceleration_solver.md#updating-option-lists).
+
+- `AccelerationSolver` accepts `SCALE_ELASTIC` as SNS `SCALE` plus a
+  nominal-position band inside the model limits. The band expands only for
+  that mode, and only up to `elastic_delta_max` and the physical joint
+  limits. `reset_elastic_band()` clears the persistent band, and
+  `get_elastic_band_deltas()` reports it. Velocity, acceleration, collision,
+  and other hard rows stay fixed.
+
+### Fixed
+
+- Acceleration nominal-position elasticity ignores `MIN_ERROR` scale sentinels
+  in registered-task and centroidal diagnostics. A fully achieved elastic task
+  no longer expands unsaturated joint bands merely because another objective
+  uses minimum-error optimization.
+
+- Acceleration collision linearizations refresh the current pair catalog,
+  avoiding stale candidate subsets in explicit-state and stopping rollouts.
+- Objective fallback reuses hard-feasibility witnesses only after validating
+  them against the current original constraints. Collision sample validation
+  skips stronger bounds when enclosing spheres already certify clearance.
+
+- Nonlinear geometric endpoint state and braking checks use the same entry
+  tolerance as the next state-box construction, allowing existing refinement
+  to repair small violations before a successful command is returned.
+
+- Hard-constraint feasibility search recognizes a fully pinned active set
+  without following spurious numerical directions, while retaining multiplier
+  release, residual checks, and existing infeasibility certificates.
+
+- Geometric path validation retains quarter-interval checks when the adaptive
+  grid changes, and CoM refinement uses the same sample locations. Existing
+  sample times retain their original arithmetic to avoid roundoff changes in
+  nonlinear corrections.
+
+- Python acceleration-option constraint and objective lists return owned record
+  snapshots, preventing dangling references, corrupted data and crashes when
+  saving, replacing and restoring lists.
+
+- Generalized numerical recovery can preserve a feasible mixed SCALE/MIN_ERROR
+  prefix while repairing a trailing MIN_ERROR task, without changing earlier
+  achieved images, directional scales, hard limits, or fallback authorization.
+
+- Unresolved hard-feasibility searches can retry objective-null trial-bound
+  release; promoted witnesses must pass every original row at its existing
+  tolerance. Previously feasible and proven-infeasible results are retained.
+
+- Position stepping can refine finite primary MIN_ERROR pose endpoints while
+  preserving the original requested pose and integration limits.
+
+- Tight-frame acceleration recovery handles SO(3) state and braking violations
+  and groups violated scalar faces into bounded corrective solves, retaining
+  task policies and full nonlinear acceptance.
+
+- Generalized affine SCALE recovery retries unusable Phase-I ray seeds at a
+  tighter precision, avoiding lost directional motion while preserving valid
+  seed searches, hard bounds and task checks.
+  An independently revalidated auxiliary-scale projection can avoid that retry
+  without changing the physical command or acceptance tolerances.
+
+- Authorized best-effort recovery retains validated finite commands even when
+  a rank-deficient task reports infinite conditioning. Unoptimized lower tasks
+  remain flagged; original hard rows and higher task images stay protected.
+  Quadratic recovery also reports attempted iterations when a search fails.
+
+- Enabled partial-SCALE refinement gets its own bounded attempt even when an
+  earlier zero-scale recovery already ran for the same objective.
+
+- Recovery of a MIN_ERROR suffix after a SCALE prefix can reuse a certified
+  feasible quadratic solution immediately when roundoff in weak task-null
+  directions prevents convergence, retaining hard bounds and protected task
+  images. Other minimum-error recovery paths retain their stopping rules.
+
+- Bounded acceleration collision recovery can retry outside an exhausted
+  internal trust box while retaining caller constraints and physical limits.
+
+- CoM position and velocity getters share a consistent cache regardless of
+  access order, including tiny nonzero velocities.
+
+- Successful unallocated acceleration solves can correct small state-box
+  residuals after rechecking hard constraints and achieved task images at the
+  existing numerical tolerances.
+
+- Nonlinear CoM acceleration corrections account for configuration and velocity
+  changes along the commanded path when constructing local refinement rows.
+
+- Roundoff-sized position-boundary failures can recover with a physically
+  capped braking command when its endpoint and next state remain valid.
+- An almost-zero task error no longer suppresses an already authorized
+  minimum-error recovery retry after a hard-bound rejection.
+- Minimum-error recovery can release a negative-dual trial bound before
+  rejecting an ill-conditioned working set; success retains its existing
+  stationarity and hard-bound checks.
+- Converging nonlinear CoM curvature corrections have a bounded eight-retry
+  budget, avoiding premature rejection after four corrections.
+- Numerical retries retain an already authorized minimum-error fallback after
+  an internal hard-bound rejection, without demoting strict SCALE objectives.
+- Collision row caches refresh when joint acceleration limits are enabled,
+  disabled, or changed.
+
+- Directional CPU recovery can initialize a feasible affine task ray when
+  zero acceleration does not satisfy the moving-state task equation.
+- Phase I no longer initializes strictly interior inequalities as active
+  equalities with their initial slack attached.
+
+- Invalid singular-vector output from the fast SVD triggers a Jacobi SVD retry
+  with the same rank threshold and damping policy.
+- Numerical recovery of a trailing `MIN_ERROR` objective retains feasible
+  higher-priority `SCALE` task images and all original hard constraints.
+- CoM acceleration violations caused by changing command-path geometry can
+  trigger bounded corrective solves, followed by full acceptance validation.
+  `AccelerationSolverResult.nonlinear_refinement_iterations` reports retries.
+
+- Hard-constrained minimum-error numerical recovery now considers moving
+  lower-priority objectives when the primary objective is a satisfied hold.
+  Recovery preserves the achieved higher-priority task images.
+
+- `AccelerationSolver` canonicalizes machine-roundoff excursions onto the
+  original physical acceleration bounds before coupled validation and state
+  integration. Joint state-box failures identify the joint and physical state.
+
+- Acceleration-limited position stepping reconciles roundoff at a scalar
+  braking face using its existing floating-point comparison allowance.
+  Genuine conflicts still fail without advancing velocity history.
+
+- Acceleration-limited position solves account for true scalar joint limits
+  before integration, including when elastic task policies are enabled.
+  Rejected priority candidates cannot commit an acceleration-infeasible zero
+  hold as accepted velocity history.
+
+- Coupled outer CoM projections use tighter numerical accuracy, snap scalar
+  joint bounds, and recheck coupled rows before accepting or restoring a command.
+
+- Failed explicit CPU `MIN_ERROR` hierarchies can release incompatible trial
+  bounds through feasible active-set recovery while preserving earlier task
+  images and the original hard constraints.
+
+- Acceleration-limited position steps preserve CoM velocity rows during outer
+  realization and validate emitted commands using the outer control interval.
+
+- Opt-in GPU refinement can recover a rounded float32 seed from a feasible
+  zero origin while retaining final equality, box and improvement checks.
+
+- A stationary `NO_PROGRESS` preferred-lock attempt now permits the normal
+  position solve, even when it lies inside the coarse lock-error tolerance.
+  Settled successful holds and moving candidates retain the existing policy.
+
+- With joint acceleration limits enabled, position-step objectives containing
+  only frame tasks retain the physical full-pose Jacobian near scalar joint
+  limits, so lower-priority motion preserves the actual primary task image.
+  Configured joint bounds continue to constrain allowed motion.
+
+- Acceleration-limited position commands and braking rollouts honor configured
+  per-pair collision floors instead of reimposing nominal clearance after the
+  task solve. Per-pair validation and the independent penetration guard remain.
+
+- Joint acceleration constraints and position-step braking predictions use the
+  configured maximum without the former one-percent expansion. Direct velocity
+  and outer position commands share the exact step with collision stopping
+  certificates; existing hard-safety precedence is preserved.
+
+- Legacy velocity IK reports `INFEASIBLE` for an exactly zero hard constraint
+  row whose interval excludes zero beyond the existing bound tolerance, instead
+  of exhausting iterations. Nonzero rows and permitted softening are unchanged.
+
+- Position-step continuity no longer discards a validated step that brings
+  previously unsatisfied tasks into tolerance at a stationary monitoring
+  boundary. Already-satisfied holds and hard-constraint checks are preserved,
+  with regression coverage for both position-step overloads.
+
+- Direct legacy linear/velocity primary SCALE results no longer report success
+  for structurally inconsistent task rays. Explicit primary MIN_ERROR fallback
+  remains eligible; position-step projection, lower-priority preferences and
+  supported regularization are preserved.
+
+- Opt-in position-step seed corridors bound scalar joint displacement across
+  adaptive and multiple inner iterations using the outer command interval and
+  effective velocity caps. Corridor bounds enter the velocity hierarchy without
+  component clipping; failed strict primary vectors retain earlier accepted motion.
+
+- GPU undamped inverse mode shares identical accumulations for its two output
+  buffers and checks matrix finiteness once per factor. Rank, convergence,
+  overflow and output-clearing checks are retained.
+
+- Position-step collision escapes and joint-limit desaturation preserve the
+  matching velocity solve's physical hard rows, locked coordinates and
+  endpoint safety checks. Permitted per-pair overlap no longer triggers an
+  escape by itself. A held escape rejected for worsening protected tasks
+  reports `NO_PROGRESS` without counting it as accepted recovery motion.
+
+- Elastic full-pose position steps prefer a checked true-limit SCALE ray when
+  integration clipping would change the requested Cartesian direction.
+  Original hard rows and lower-task modes remain enforced.
+
+- Bounded-ray retries re-solve the hierarchy with smaller primary requests
+  when nonlinear integration worsens pose error. Accepted candidates retain
+  their checked lower-task motion and diagnostics through subsequent repair.
+
+- GPU bound-release refinement reuses fixed equality QR rows within each
+  active-set phase, retaining rank, finite-input, task-ray and bound checks.
+
+- GPU bounded task completion reuses the immediately preceding primary
+  undamped factor when its matrix and numerical settings match. Failed or
+  non-finite cached factors retain independent factorization and status checks.
+
+- GPU bounded task completion skips an unused blocker-factor inverse after
+  accepting the preceding violator solution, retaining bound and non-finite
+  input checks.
+
+- Coupled collision recovery removes every mandatory separating direction
+  from a task once it requires tangent projection,
+  preventing an infeasible task ray without enabling minimum-error fallback.
+
+- Zero and near-zero CPU `MIN_ERROR` targets retain hard-row feasibility when
+  bounds require nonzero motion, instead of taking the stationary shortcut.
+
+- Satisfied zero CPU task objectives preserve their achieved values against
+  lower-priority motion. Zero targets with residuals from earlier tasks are
+  solved inside the remaining nullspace instead of silently skipped.
+
+- Unconfigured velocity frame tasks and stationary manipulability gradients
+  leave secondary motion available. Explicit zero velocity references still
+  preserve their achieved values; physical Jacobian queries are unchanged.
+
+- Stationary collision recovery retains its hold state while correcting back
+  toward an earlier best pose, preventing repeated unproductive reopen cycles.
+
+- The Spot command helper balances small arm reaches, larger base-assisted
+  reaches and conditioning recovery at its default locomotion sensitivity.
+  Separate forward, lateral and yaw restoration gains retain arm participation
+  in lateral and yaw commands after physics settling while preserving forward
+  base assistance.
+  Changing sensitivity affects x/y/yaw assistance while retaining height and
+  roll/pitch restoration.
+
+- Native GPU inverses avoid spectral work for exactly zero matrices and finite
+  unused bounded-completion factors while retaining replay output clearing and
+  non-finite input/status checks.
+
+- Independent Newton CoM/centroidal evaluators preserve Warp stream restoration
+  under concurrent worker calls, avoiding an obsolete default stream after
+  interleaved scopes. Each evaluator still requires exclusive buffer ownership.
+
+- Generalized affine SCALE results recover the realized intermediate scale
+  when active hard rows eliminate the remaining task direction, retaining
+  original hard bounds and exact task-ray validation.
+
+- Legacy native SCALE results no longer report positive-scale success when an
+  unactuated primary task row has a nonzero target. Explicitly authorized
+  primary `MIN_ERROR` fallback remains available.
+
+- Task-layout diagnostics reflect active frame tasks rather than an automatic
+  policy state. Raw pose tasks and fixed-layout groups no longer trigger
+  ineffective split retries when no automatic group can switch.
+
+- Explicit Cartesian orientation tasks preserve their physical Jacobians near
+  joint limits, retaining legal inward rotations and split-pose recovery while
+  joint velocity constraints enforce the permitted motion.
+
+- Elastic position steps can repair a joint realization before integration
+  clipping removes achieved primary motion, while retaining the primary image,
+  existing constraints and endpoint safety checks.
+
+- GPU bound release can compensate mandatory inward joint motion while
+  retaining the homogeneous primary task. It also retains feasible task-null
+  motion when the task ray collapses to zero scale, and can recover a positive
+  task ray when no feasible zero-task starting velocity exists.
+  Invalid moving realizations can also be repaired while preserving their
+  achieved primary velocity; valid moving realizations bypass the search.
+
+- Native hard-bound validation no longer depends on summed task scales,
+  including mixed `SCALE`/`MIN_ERROR` results. Bound recovery can preserve
+  achieved primary motion before selecting weighted fallback. Stationary
+  commands can recover compensating task-null motion, explicitly enabled
+  `MIN_ERROR` retries remain available, and proven contradictory hard intervals
+  report infeasibility.
+
+- Native task scaling preserves productive motion when task-independent joints
+  require a nonzero velocity to satisfy a scalar box. A verified feasible
+  starting velocity prevents those bounds from collapsing the task scale.
+
+- Constrained continuity holds can reopen for productive coupled motion while
+  already satisfied task blocks remain within the existing satisfaction tolerance.
+
+- Position integration no longer adds inset-restoration motion to an exactly
+  zero locked or globally excluded joint command at a valid limit.
+
+- Cartesian position tasks retain legal inward motion near joint limits,
+  independently of Cartesian axis signs, in velocity and position-step solves.
+  Physical position Jacobians preserve task/nullspace combinations during
+  singularity recovery, while velocity constraints enforce permitted directions.
+
+- Held fixed-base `SCALE` pose steps can recover with bounded physical-task
+  retries and radius refinement, preserving sampled constraints and bounded
+  pose errors through layout retries and resetting recovery when commands change.
+
+- Stationary minimum-error position steps reject worsening of the worst target
+  promptly when no hard-constraint tradeoff requires motion, and resume when
+  targets change. Scaled-step productivity retains its existing dwell policy.
+
+- Position-step collision rejection respects effective per-pair recovery floors
+  and overrides instead of imposing global nominal clearance again. The
+  independent penetration guard remains active. Iterative position IK also
+  checks the candidate distance before rejecting motion from a safe seed.
+- Constrained stationary position-step holds can reopen when a validated
+  candidate makes sufficient progress on every unsatisfied task-error block
+  without worsening another block in the current priority group. Earlier
+  oscillation no longer permanently vetoes fresh recovery progress.
+- A zero-scale CPU velocity task can recover by releasing an unnecessary
+  saturated constraint. Recovery preserves the task ray, achieved prior task
+  values and original hard intervals, and requires a feasible zero-scale
+  witness. Native `warp_srinv` and `cusolver_srinv` combined tasks use a
+  graph-compatible bound-release kernel for zero velocity in boxes containing
+  zero. Existing positive-scale behavior is retained.
+- Native GPU bounded-completion rank checks use reusable native inverse
+  buffers during graph capture. Singleton matrices use an exact tensor
+  inverse, avoiding a host-synchronizing Torch SVD in that case. Spectral
+  failures continue to veto publication.
+- A consistent explicit zero row, repeated row, or linear combination of
+  earlier rows is no longer a rank failure. The same saturation applies to a
+  consistent full-rank row whose uniform scale is zero, so a reachable task
+  still finishes past the default 20-iteration cap. The ESNS loop saturates
+  every bound violated by the full-scale step when that set still reaches the
+  target. When it does not, only the joints that force scale 0 are saturated.
+  When that full-scale velocity exceeds a free bound and the pinned joints are
+  at the origin, the reported scale is the largest value that stays inside the
+  box. A positive uniform scale is left unchanged. A structurally singular
+  Jacobian or an inconsistent extra row keeps the original row-count stop. An
+  all-zero Jacobian reports scale 0 for a nonzero target. Inconsistent targets
+  still scale, and hard bounds stay in force.
+- The GPU native velocity solve, FI-PeSNS, and PPH-SNS use that same completion
+  for one consistent task, including a full-rank row blocked at scale 0, a
+  pinned zero-width bound, and the same partial scale. A step that does not
+  move a nonzero target reports scale 0. Other GPU tasks keep uniform bound
+  scaling.
+- Tall task matrices no longer combine the full left singular vectors with the
+  shorter per-singular-value damping diagonal. That size mismatch could
+  produce non-finite state in release builds.
+- Velocity clamping keeps sparse position-limit rows and coupled velocity rows
+  in their own layout. Position bounds no longer clamp those extra rows as if
+  they were joint velocities.
+- `FrameTask.get_jacobian()` refreshes the cached task error when the cache is
+  stale, so reading the Jacobian first still sees the updated task.
+- Priority acceptance no longer adds numerical slack on top of an already
+  exceeded baseline, so a protected merit cannot ratchet upward across control
+  ticks. Every nonzero position step is checked against that budget.
+
 ## [0.23.1] - 2026-09-25
 
 ### Fixed

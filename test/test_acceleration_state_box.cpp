@@ -2,7 +2,9 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <limits>
 
 namespace embodik::detail {
@@ -23,6 +25,112 @@ StateBoxRowInput fixture(double sign = 1.0) {
   input.lower_braking_acceleration = 1.0;
   input.upper_braking_acceleration = 1.0;
   return input;
+}
+
+TEST(AccelerationStateBoxTest, CanonicalizesOnlyRoundoffOutsideEitherFace) {
+  const double epsilon = std::numeric_limits<double>::epsilon();
+  EXPECT_DOUBLE_EQ(
+      canonicalize_state_box_acceleration_roundoff(-epsilon * epsilon,
+                                                  0.0, 15.0),
+      0.0);
+  EXPECT_DOUBLE_EQ(
+      canonicalize_state_box_acceleration_roundoff(epsilon * epsilon,
+                                                  -15.0, 0.0),
+      0.0);
+  EXPECT_DOUBLE_EQ(canonicalize_state_box_acceleration_roundoff(
+                       std::nextafter(2.0, 0.0), 2.0, 4.0),
+                   2.0);
+  EXPECT_DOUBLE_EQ(canonicalize_state_box_acceleration_roundoff(
+                       std::nextafter(-2.0, 0.0), -4.0, -2.0),
+                   -2.0);
+  EXPECT_DOUBLE_EQ(
+      canonicalize_state_box_acceleration_roundoff(1.0, 0.0, 2.0), 1.0);
+}
+
+TEST(AccelerationStateBoxTest, DoesNotRepairLargerStateBoxViolations) {
+  EXPECT_DOUBLE_EQ(
+      canonicalize_state_box_acceleration_roundoff(-1e-9, 0.0, 15.0),
+      -1e-9);
+  EXPECT_DOUBLE_EQ(
+      canonicalize_state_box_acceleration_roundoff(1e-9, -15.0, 0.0),
+      1e-9);
+}
+
+TEST(AccelerationStateBoxTest, OppositeFaceDoesNotInflateRoundoffAllowance) {
+  const double infinity = std::numeric_limits<double>::infinity();
+  for (double opposite_face : {1e300, infinity}) {
+    EXPECT_DOUBLE_EQ(canonicalize_state_box_acceleration_roundoff(
+                         -1e-9, 0.0, opposite_face),
+                     -1e-9);
+    EXPECT_DOUBLE_EQ(canonicalize_state_box_acceleration_roundoff(
+                         1e-9, -opposite_face, 0.0),
+                     1e-9);
+    EXPECT_DOUBLE_EQ(canonicalize_state_box_acceleration_roundoff(
+                         -std::numeric_limits<double>::epsilon(), 0.0,
+                         opposite_face),
+                     0.0);
+  }
+}
+
+TEST(AccelerationStateBoxTest, InvalidCanonicalizationInputsRemainUnchanged) {
+  const double infinity = std::numeric_limits<double>::infinity();
+  const double nan = std::numeric_limits<double>::quiet_NaN();
+  EXPECT_DOUBLE_EQ(
+      canonicalize_state_box_acceleration_roundoff(-1.0, 2.0, 1.0), -1.0);
+  EXPECT_DOUBLE_EQ(
+      canonicalize_state_box_acceleration_roundoff(-1.0, nan, 1.0), -1.0);
+  EXPECT_DOUBLE_EQ(
+      canonicalize_state_box_acceleration_roundoff(-1.0, 0.0, nan), -1.0);
+  EXPECT_EQ(canonicalize_state_box_acceleration_roundoff(infinity, 0.0, 1.0),
+            infinity);
+  EXPECT_TRUE(std::isnan(
+      canonicalize_state_box_acceleration_roundoff(nan, 0.0, 1.0)));
+}
+
+TEST(AccelerationStateBoxTest,
+     BoundaryRoundoffCanBrakeWithoutChangingTheSuppliedState) {
+  constexpr double dt = 0.01;
+  const double epsilon = std::numeric_limits<double>::epsilon();
+  for (double sign : {-1.0, 1.0}) {
+    StateBoxRowInput input;
+    input.value = 0.0;
+    input.rate = sign * epsilon * epsilon * dt;
+    input.state_bounds = sign < 0.0 ? active(0.0, 1.0)
+                                    : active(-1.0, 0.0);
+    input.acceleration_bounds = active(-15.0, 15.0);
+    input.lower_braking_acceleration = 15.0;
+    input.upper_braking_acceleration = 15.0;
+    const auto braking = shape_state_box_row(input, dt);
+    ASSERT_EQ(braking.status, SolverStatus::kSuccess) << braking.message;
+    const double expected_acceleration = -sign * std::min(
+        15.0, std::abs(input.rate) / (dt * std::sqrt(64.0 * epsilon)));
+    EXPECT_DOUBLE_EQ(braking.lower_acceleration, expected_acceleration);
+    EXPECT_DOUBLE_EQ(braking.upper_acceleration, expected_acceleration);
+    EXPECT_GE(braking.lower_acceleration, input.acceleration_bounds.lower);
+    EXPECT_LE(braking.upper_acceleration, input.acceleration_bounds.upper);
+    EXPECT_DOUBLE_EQ(input.value, 0.0);
+    EXPECT_DOUBLE_EQ(input.rate, sign * epsilon * epsilon * dt);
+    auto predicted = input;
+    predicted.value = input.value +
+                      (dt * input.rate +
+                       0.5 * dt * dt * braking.lower_acceleration);
+    predicted.rate = input.rate + dt * braking.lower_acceleration;
+    EXPECT_GE(predicted.value, input.state_bounds.lower);
+    EXPECT_LE(predicted.value, input.state_bounds.upper);
+    EXPECT_LE(sign * predicted.rate, 0.0);
+    const auto next_box = shape_state_box_row(predicted, dt);
+    ASSERT_EQ(next_box.status, SolverStatus::kSuccess) << next_box.message;
+    EXPECT_LE(std::max(next_box.lower_acceleration,
+                       input.acceleration_bounds.lower),
+              std::min(next_box.upper_acceleration,
+                       input.acceleration_bounds.upper));
+    const double lower = sign < 0.0 ? 0.0 : -15.0;
+    const double upper = sign < 0.0 ? 15.0 : 0.0;
+    const double repaired = canonicalize_state_box_acceleration_roundoff(
+        sign * epsilon * epsilon, lower, upper);
+    input.rate = dt * repaired;
+    EXPECT_EQ(shape_state_box_row(input, dt).status, SolverStatus::kSuccess);
+  }
 }
 
 TEST(AccelerationStateBoxTest, CompatibleBoxIsSignSymmetric) {
@@ -178,6 +286,240 @@ TEST(AccelerationStateBoxTest,
       infeasible_result.physical_constraint.coefficient_matrix.size() == 0);
   EXPECT_TRUE(infeasible_result.state_rows.empty());
   EXPECT_TRUE(infeasible_result.shaped_rows.empty());
+}
+
+struct AccelerationPolishProblem {
+  Eigen::VectorXd lower = Eigen::VectorXd::Zero(2);
+  Eigen::VectorXd upper = Eigen::VectorXd::Ones(2);
+  Eigen::MatrixXd hard = Eigen::MatrixXd::Identity(2, 2);
+  Eigen::VectorXd hard_lower = lower;
+  Eigen::VectorXd hard_upper = upper;
+  std::vector<Eigen::MatrixXd> objectives{Eigen::MatrixXd::Identity(2, 2)};
+  Eigen::VectorXd value = (Eigen::Vector2d() << -1e-13, 0.25).finished();
+  bool changed = true;
+
+  bool apply() {
+    return polish_state_box_acceleration(
+        lower, upper, hard, hard_lower, hard_upper, objectives,
+        1e-8, 1e-10, 1e-8, &value, &changed);
+  }
+};
+
+TEST(AccelerationStateBoxPolish, InBoxSolutionIsBitwiseUnchanged) {
+  AccelerationPolishProblem problem;
+  problem.value(0) = -0.0;
+  const Eigen::VectorXd original = problem.value;
+  ASSERT_TRUE(problem.apply());
+  EXPECT_FALSE(problem.changed);
+  EXPECT_EQ(std::memcmp(problem.value.data(), original.data(),
+                        sizeof(double) * original.size()), 0);
+}
+
+TEST(AccelerationStateBoxPolish, PreservesUnboundedAxesAndOneSidedHardRows) {
+  const double infinity = std::numeric_limits<double>::infinity();
+  AccelerationPolishProblem problem;
+  problem.upper(0) = infinity;
+  problem.lower(1) = -infinity;
+  problem.upper(1) = infinity;
+  problem.hard = Eigen::MatrixXd::Zero(1, 2);
+  problem.hard(0, 0) = 1.0;
+  problem.hard_lower = Eigen::VectorXd::Zero(1);
+  problem.hard_upper = Eigen::VectorXd::Constant(1, infinity);
+  ASSERT_TRUE(problem.apply());
+  EXPECT_TRUE(problem.changed);
+  EXPECT_DOUBLE_EQ(problem.value(0), 0.0);
+  EXPECT_DOUBLE_EQ(problem.value(1), 0.25);
+  problem.lower.setConstant(-infinity);
+  problem.upper.setConstant(infinity);
+  problem.value(0) = -0.0;
+  const Eigen::VectorXd original = problem.value;
+  ASSERT_TRUE(problem.apply());
+  EXPECT_FALSE(problem.changed);
+  EXPECT_EQ(std::memcmp(problem.value.data(), original.data(),
+                        sizeof(double) * original.size()), 0);
+}
+
+TEST(AccelerationStateBoxPolish, RepairsResidualBeforeNearZeroIntegration) {
+  constexpr double dt = 0.01;
+  for (double sign : {-1.0, 1.0}) {
+    StateBoxRowInput input;
+    input.value = -sign * 1e-20;
+    input.rate = -sign * 3e-17;
+    input.state_bounds = sign < 0.0 ? active(0.0, 1.0) : active(-1.0, 0.0);
+    input.rate_bounds = active(-1.0, 1.0);
+    input.acceleration_bounds = active(-15.0, 15.0);
+    input.lower_braking_acceleration = 15.0;
+    input.upper_braking_acceleration = 15.0;
+    const auto box = shape_state_box_row(input, dt);
+    ASSERT_EQ(box.status, SolverStatus::kSuccess) << box.message;
+    const double raw = sign * 1e-13;
+    const double old = canonicalize_state_box_acceleration_roundoff(
+        raw, box.lower_acceleration, box.upper_acceleration);
+    EXPECT_DOUBLE_EQ(old, raw);
+    const double old_next = input.value +
+        (dt * input.rate + 0.5 * dt * dt * old);
+    EXPECT_TRUE(sign < 0.0 ? old_next < input.state_bounds.lower
+                           : old_next > input.state_bounds.upper);
+    Eigen::VectorXd value = Eigen::VectorXd::Constant(1, raw);
+    const Eigen::VectorXd lower =
+        Eigen::VectorXd::Constant(1, box.lower_acceleration);
+    const Eigen::VectorXd upper =
+        Eigen::VectorXd::Constant(1, box.upper_acceleration);
+    const Eigen::MatrixXd identity = Eigen::MatrixXd::Identity(1, 1);
+    bool changed = false;
+    ASSERT_TRUE(polish_state_box_acceleration(
+        lower, upper, identity, lower, upper, {identity},
+        1e-8, 1e-10, 1e-8, &value, &changed));
+    ASSERT_TRUE(changed);
+    EXPECT_DOUBLE_EQ(value(0), sign < 0.0 ? box.lower_acceleration
+                                         : box.upper_acceleration);
+    auto next = input;
+    next.value = input.value +
+        (dt * input.rate + 0.5 * dt * dt * value(0));
+    next.rate = input.rate + dt * value(0);
+    EXPECT_GE(next.value, input.state_bounds.lower);
+    EXPECT_LE(next.value, input.state_bounds.upper);
+    EXPECT_EQ(shape_state_box_row(next, dt).status, SolverStatus::kSuccess);
+  }
+}
+
+TEST(AccelerationStateBoxPolish, PreservesEachAchievedHierarchyImage) {
+  AccelerationPolishProblem problem;
+  problem.objectives = {Eigen::MatrixXd::Zero(1, 2),
+                        Eigen::MatrixXd::Zero(1, 2)};
+  problem.objectives[0](0, 1) = 1.0;
+  problem.objectives[1](0, 0) = 1.0;
+  const Eigen::VectorXd original = problem.value;
+  ASSERT_TRUE(problem.apply());
+  EXPECT_TRUE(problem.changed);
+  EXPECT_DOUBLE_EQ(problem.value(0), 0.0);
+  for (const auto &matrix : problem.objectives) {
+    EXPECT_LE((matrix * problem.value - matrix * original).norm(), 1e-8);
+  }
+}
+
+TEST(AccelerationStateBoxPolish, RejectsPhysicalCoupledRowDamage) {
+  AccelerationPolishProblem problem;
+  problem.hard = Eigen::MatrixXd::Zero(1, 2);
+  problem.hard(0, 0) = 1e8;
+  problem.hard_lower = Eigen::VectorXd::Constant(1, -1e-5);
+  problem.hard_upper = problem.hard_lower;
+  const Eigen::VectorXd original = problem.value;
+  EXPECT_FALSE(problem.apply());
+  EXPECT_FALSE(problem.changed);
+  EXPECT_TRUE(problem.value == original);
+}
+
+TEST(AccelerationStateBoxPolish, RetainsNormalizedCertificateUnderRowRescaling) {
+  for (double scale : {1e-9, 1.0}) {
+    AccelerationPolishProblem problem;
+    problem.value(0) = -5e-9;
+    problem.hard = Eigen::MatrixXd::Zero(1, 2);
+    problem.hard(0, 0) = scale;
+    problem.hard_lower = Eigen::VectorXd::Constant(1, -5e-9 * scale);
+    problem.hard_upper = problem.hard_lower;
+    const Eigen::VectorXd original = problem.value;
+    EXPECT_FALSE(problem.apply());
+    EXPECT_FALSE(problem.changed);
+    EXPECT_TRUE(problem.value == original);
+  }
+}
+
+TEST(AccelerationStateBoxPolish, RejectsCompletedImageDamage) {
+  AccelerationPolishProblem problem;
+  problem.objectives = {Eigen::MatrixXd::Zero(1, 2)};
+  problem.objectives[0](0, 0) = 1e8;
+  const Eigen::VectorXd original = problem.value;
+  EXPECT_FALSE(problem.apply());
+  EXPECT_FALSE(problem.changed);
+  EXPECT_TRUE(problem.value == original);
+}
+
+TEST(AccelerationStateBoxPolish, CertifiesSubArithmeticResidualAgainstRawImage) {
+  AccelerationPolishProblem problem;
+  problem.value(0) = -1e-15;
+  problem.objectives = {Eigen::MatrixXd::Zero(1, 2)};
+  problem.objectives[0](0, 0) = 1e8;
+  const Eigen::VectorXd original = problem.value;
+  // Arithmetic-only preprocessing would erase this otherwise visible change.
+  EXPECT_DOUBLE_EQ(canonicalize_state_box_acceleration_roundoff(
+                       original(0), problem.lower(0), problem.upper(0)),
+                   0.0);
+  EXPECT_FALSE(problem.apply());
+  EXPECT_FALSE(problem.changed);
+  EXPECT_TRUE(problem.value == original);
+}
+
+TEST(AccelerationStateBoxPolish, CertifiesComposedAxisCorrectionsTogether) {
+  AccelerationPolishProblem problem;
+  problem.value << -1e-15, -1e-13;
+  problem.objectives = {Eigen::MatrixXd::Zero(1, 2)};
+  problem.objectives[0] << 7e6, 7e4;
+  const Eigen::VectorXd original = problem.value;
+
+  // Each individual image change is below tolerance, but their combined
+  // correction is 1.4e-8 and must be checked against the raw backend image.
+  AccelerationPolishProblem preprocessed = problem;
+  preprocessed.value(0) = canonicalize_state_box_acceleration_roundoff(
+      original(0), problem.lower(0), problem.upper(0));
+  ASSERT_TRUE(preprocessed.apply());
+  EXPECT_TRUE(preprocessed.changed);
+  EXPECT_GT((problem.objectives[0] * preprocessed.value -
+             problem.objectives[0] * original).norm(),
+            1e-8);
+
+  EXPECT_FALSE(problem.apply());
+  EXPECT_FALSE(problem.changed);
+  EXPECT_TRUE(problem.value == original);
+}
+
+TEST(AccelerationStateBoxPolish, HandlesEmptyAndConstantHardRowSets) {
+  AccelerationPolishProblem problem;
+  problem.hard = Eigen::MatrixXd::Zero(0, 2);
+  problem.hard_lower.resize(0);
+  problem.hard_upper.resize(0);
+  ASSERT_TRUE(problem.apply());
+  EXPECT_TRUE(problem.changed);
+  problem.value(0) = -1e-13;
+  problem.hard = Eigen::MatrixXd::Zero(1, 2);
+  problem.hard_lower = Eigen::VectorXd::Zero(1);
+  problem.hard_upper = Eigen::VectorXd::Zero(1);
+  ASSERT_TRUE(problem.apply());
+  problem.value(0) = -1e-13;
+  problem.hard_lower(0) = 1e-8;
+  problem.hard_upper(0) = 2e-8;
+  EXPECT_FALSE(problem.apply());
+  EXPECT_DOUBLE_EQ(problem.value(0), -1e-13);
+}
+
+TEST(AccelerationStateBoxPolish, RejectsLargeResidualAndInvalidInputs) {
+  for (int variant = 0; variant < 9; ++variant) {
+    AccelerationPolishProblem problem;
+    if (variant == 0) problem.value(0) = -1e-7;
+    if (variant == 1) problem.upper.resize(1);
+    if (variant == 2) problem.hard.resize(2, 3);
+    if (variant == 3) problem.hard_lower(0) = std::numeric_limits<double>::infinity();
+    if (variant == 4) problem.hard(0, 0) = std::numeric_limits<double>::quiet_NaN();
+    if (variant == 5) problem.objectives = {Eigen::MatrixXd::Zero(1, 3)};
+    if (variant == 6) problem.lower(0) = std::numeric_limits<double>::quiet_NaN();
+    if (variant == 7) problem.hard_upper(0) = std::numeric_limits<double>::quiet_NaN();
+    if (variant == 8) problem.value(0) = std::numeric_limits<double>::quiet_NaN();
+    const Eigen::VectorXd original = problem.value;
+    EXPECT_FALSE(problem.apply());
+    EXPECT_FALSE(problem.changed);
+    EXPECT_EQ(std::memcmp(problem.value.data(), original.data(),
+                          sizeof(double) * original.size()), 0);
+  }
+}
+
+TEST(AccelerationStateBoxPolish, DoesNotRelaxUncertifiedMeasuredState) {
+  auto input = fixture();
+  input.value = -1e-20;
+  input.rate = -1e-16;
+  input.state_bounds = active(0.0, 1.0);
+  EXPECT_EQ(shape_state_box_row(input, 0.01).status, SolverStatus::kInfeasible);
+  EXPECT_DOUBLE_EQ(input.value, -1e-20);
+  EXPECT_DOUBLE_EQ(input.rate, -1e-16);
 }
 
 } // namespace

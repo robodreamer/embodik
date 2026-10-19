@@ -12,6 +12,7 @@ from typing import List, Tuple
 
 import numpy as np
 import pytest
+from support_scale_cases import ScaleCase, cases_for, scale_cases
 
 # Test tolerances
 VELOCITY_ATOL = (
@@ -770,6 +771,345 @@ def test_fi_pesns_multi_task():
     assert scales.shape == (2,)
     assert np.all(np.isfinite(vel))
     assert np.all((scales >= 0) & (scales <= 1))
+
+
+def _catalog_case(name: str) -> ScaleCase:
+    return next(case for case in scale_cases() if case.name == name)
+
+
+def _cpu_scale_solution(
+    matrix: np.ndarray, target: np.ndarray, lower: np.ndarray, upper: np.ndarray
+):
+    import embodik as eik
+
+    result = eik.computeMultiObjectiveVelocitySolutionEigen(
+        [target],
+        [np.asfortranarray(matrix)],
+        np.eye(matrix.shape[1]),
+        lower,
+        upper,
+    )
+    return result.status, float(result.task_scales[0]), np.asarray(result.solution).ravel()
+
+
+_FI_SOLVERS: dict[tuple[int, int], object] = {}
+_PPH_SOLVERS: dict[tuple[int, int], object] = {}
+
+
+def _uniform_scaled_step(case: ScaleCase) -> tuple[np.ndarray, np.ndarray]:
+    """Min-norm step and the single scale that keeps it inside the box."""
+
+    step = np.linalg.pinv(case.matrix) @ case.target
+    limit = np.ones_like(step)
+    positive = step > 1e-6
+    negative = step < -1e-6
+    limit[positive] = np.clip(case.upper[positive] / step[positive], 0.0, 1.0)
+    limit[negative] = np.clip(case.lower[negative] / step[negative], 0.0, 1.0)
+    return step, step * float(limit.min())
+
+
+def _assert_case_velocity(
+    case: ScaleCase, scale: float, velocity: np.ndarray, *, scale_atol: float, velocity_atol: float
+) -> None:
+    assert scale == pytest.approx(case.scale, abs=scale_atol)
+    np.testing.assert_allclose(velocity, case.velocity, atol=velocity_atol)
+    np.testing.assert_allclose(case.matrix @ velocity, case.scale * case.target, atol=velocity_atol)
+    assert np.all(velocity >= case.lower - velocity_atol)
+    assert np.all(velocity <= case.upper + velocity_atol)
+
+
+@pytest.mark.parametrize("case", cases_for("fi"), ids=lambda case: case.name)
+def test_fi_scale_case_matches_the_contract(case: ScaleCase) -> None:
+    """FI-PeSNS matches the named scale and velocity, and the CPU solver."""
+
+    try:
+        import embodik as eik
+        from embodik.gpu.casadi_fi_pesns import build_fi_pesns_single_task
+    except ImportError as error:
+        pytest.skip(f"EmbodiK or CasADi not available: {error}")
+
+    status, cpu_scale, cpu_velocity = _cpu_scale_solution(
+        case.matrix, case.target, case.lower, case.upper
+    )
+    assert status == eik.SolverStatus.SUCCESS
+    _assert_case_velocity(
+        case, cpu_scale, cpu_velocity, scale_atol=case.scale_atol, velocity_atol=case.velocity_atol
+    )
+    key = (case.matrix.shape[1], case.matrix.shape[0])
+    function = _FI_SOLVERS.get(key)
+    if function is None:
+        function = build_fi_pesns_single_task(
+            n_dof=key[0],
+            task_dim=key[1],
+            n_constraints=key[0],
+            k_max=2,
+        )
+        _FI_SOLVERS[key] = function
+    velocity, scales = function(
+        case.target, case.matrix.flatten(), np.eye(key[0]), case.lower, case.upper
+    )
+    _assert_case_velocity(
+        case,
+        float(np.asarray(scales).ravel()[0]),
+        np.asarray(velocity).ravel(),
+        scale_atol=1e-4,
+        velocity_atol=max(case.velocity_atol, 1e-4),
+    )
+    np.testing.assert_allclose(
+        np.asarray(velocity).ravel(), cpu_velocity, atol=max(case.velocity_atol, 1e-4)
+    )
+
+
+@pytest.mark.parametrize("case", cases_for("pph"), ids=lambda case: case.name)
+def test_pph_scale_case_latches_the_contract(case: ScaleCase) -> None:
+    """PPH-SNS latches the same named scale instead of a later uniform scale."""
+
+    try:
+        from embodik.gpu.casadi_pph_sns import build_pph_sns_single_task
+    except ImportError as error:
+        pytest.skip(f"CasADi not available: {error}")
+
+    key = (case.matrix.shape[1], case.matrix.shape[0])
+    function = _PPH_SOLVERS.get(key)
+    if function is None:
+        function = build_pph_sns_single_task(
+            n_dof=key[0], task_dim=key[1], n_constraints=key[0], k_max=3, m_max=1
+        )
+        _PPH_SOLVERS[key] = function
+    velocity, scales = function(
+        case.target, case.matrix.flatten(), np.eye(key[0]), case.lower, case.upper
+    )
+    _assert_case_velocity(
+        case,
+        float(np.asarray(scales).ravel()[0]),
+        np.asarray(velocity).ravel(),
+        scale_atol=1e-4,
+        velocity_atol=max(case.velocity_atol, 1e-4),
+    )
+
+
+def _torch_case_params():
+    for case in cases_for("torch"):
+        yield pytest.param(case, "float64", id=f"{case.name}-float64")
+        if case.float32:
+            yield pytest.param(case, "float32", id=f"{case.name}-float32")
+
+
+@pytest.mark.parametrize("case,dtype_name", list(_torch_case_params()))
+def test_torch_scale_case_matches_the_contract(case: ScaleCase, dtype_name: str) -> None:
+    """Native completion of the min-norm step matches the named velocity."""
+
+    torch = pytest.importorskip("torch")
+    from embodik.gpu.wbc._runtime.gpu_priority import complete_consistent_redundant_velocity
+
+    unscaled, scaled = _uniform_scaled_step(case)
+    dtype = getattr(torch, dtype_name)
+    completed = complete_consistent_redundant_velocity(
+        torch.tensor(case.matrix, dtype=dtype),
+        torch.tensor(case.target, dtype=dtype),
+        torch.tensor(case.lower, dtype=dtype),
+        torch.tensor(case.upper, dtype=dtype),
+        torch.tensor(unscaled, dtype=dtype),
+        torch.tensor(scaled, dtype=dtype),
+    )
+    atol = case.velocity_atol if dtype_name == "float64" else max(case.velocity_atol, 1e-4)
+    np.testing.assert_allclose(completed.detach().cpu().numpy(), case.velocity, atol=atol)
+
+
+def test_fi_known_damping_and_rank_gaps_stay_put() -> None:
+    """Pin the three places where FI must not be forced onto the CPU velocity."""
+
+    try:
+        from embodik.gpu.casadi_fi_pesns import build_fi_pesns_single_task
+    except ImportError as error:
+        pytest.skip(f"CasADi not available: {error}")
+
+    by_name = {case.name: case for case in scale_cases()}
+
+    def solve(case: ScaleCase):
+        function = build_fi_pesns_single_task(
+            n_dof=case.matrix.shape[1],
+            task_dim=case.matrix.shape[0],
+            n_constraints=case.matrix.shape[1],
+            k_max=2,
+        )
+        velocity, scales = function(
+            case.target,
+            case.matrix.flatten(),
+            np.eye(case.matrix.shape[1]),
+            case.lower,
+            case.upper,
+        )
+        return float(np.asarray(scales).ravel()[0]), np.asarray(velocity).ravel()
+
+    loose = by_name["linear_combination_loose"]
+    loose_scale, loose_velocity = solve(loose)
+    assert loose_scale == pytest.approx(1.0, abs=1e-5)
+    gap = np.linalg.norm(loose_velocity - loose.velocity)
+    assert 1e-4 < gap < 1e-2
+    np.testing.assert_allclose(loose.matrix @ loose_velocity, loose.target, atol=2e-3)
+
+    skew = by_name["skew_two_degrees_loose"]
+    skew_scale, skew_velocity = solve(skew)
+    assert skew_scale == pytest.approx(1.0, abs=1e-5)
+    assert skew_velocity[0] == pytest.approx(1.0, abs=1e-2)
+    assert 1e-3 < abs(skew_velocity[1]) < 0.05
+
+    within = by_name["target_within_rank_tolerance"]
+    within_scale, within_velocity = solve(within)
+    assert within_scale == pytest.approx(0.0, abs=1e-6)
+    np.testing.assert_allclose(within_velocity, 0.0, atol=1e-6)
+
+
+def test_fi_loose_consistent_zero_row_keeps_damped_srinv() -> None:
+    """No bound violation, so the completion must not replace the damped step."""
+    try:
+        import embodik as eik
+        from embodik.gpu.casadi_fi_pesns import build_fi_pesns_single_task
+    except ImportError as error:
+        pytest.skip(f"EmbodiK or CasADi not available: {error}")
+
+    zero_row = _catalog_case("redundant_zero_n4")
+    matrix, target = zero_row.matrix, zero_row.target
+    lower = np.full(4, -10.0)
+    upper = np.full(4, 10.0)
+    status, cpu_scale, cpu_velocity = _cpu_scale_solution(matrix, target, lower, upper)
+    assert status == eik.SolverStatus.SUCCESS
+    assert cpu_scale == pytest.approx(1.0)
+
+    function = build_fi_pesns_single_task(
+        n_dof=4,
+        task_dim=2,
+        n_constraints=4,
+        tol=1e-6,
+        damping=0.1,
+        k_max=2,
+    )
+    velocity, scales = function(target, matrix.flatten(), np.eye(4), lower, upper)
+    assert float(np.asarray(scales).ravel()[0]) == pytest.approx(1.0)
+    np.testing.assert_allclose(np.asarray(velocity).ravel(), cpu_velocity, atol=1e-5)
+
+
+def test_casadi_completion_keeps_locked_joint_fixed() -> None:
+    try:
+        import casadi as ca
+
+        from embodik.gpu.casadi_srinv import complete_consistent_redundant_velocity
+    except ImportError as error:
+        pytest.skip(f"CasADi not available: {error}")
+
+    matrix = np.array([[1.0, 1.0, 1.0, 1.0], [0.0, 0.0, 0.0, 0.0]])
+    target = np.array([1.0, 0.0])
+    lower = np.zeros(4)
+    upper = np.array([0.0, 2.0, 2.0, 2.0])
+    current = np.zeros(4)
+    step = np.array([0.0, 0.5, 0.5, 0.5])
+    jacobian = ca.SX.sym("J", 2, 4)
+    goal = ca.SX.sym("target", 2)
+    current_symbol = ca.SX.sym("current", 4)
+    step_symbol = ca.SX.sym("step", 4)
+    coefficients = ca.SX.sym("C", 4, 4)
+    lower_symbol = ca.SX.sym("lower", 4)
+    upper_symbol = ca.SX.sym("upper", 4)
+    velocity, accepted, _achieved_scale = complete_consistent_redundant_velocity(
+        jacobian,
+        goal,
+        current_symbol,
+        step_symbol,
+        coefficients,
+        lower_symbol,
+        upper_symbol,
+    )
+    function = ca.Function(
+        "locked_completion",
+        [
+            jacobian,
+            goal,
+            current_symbol,
+            step_symbol,
+            coefficients,
+            lower_symbol,
+            upper_symbol,
+        ],
+        [velocity, accepted],
+    )
+    completed, flag = function(matrix, target, current, step, np.eye(4), lower, upper)
+    assert float(np.asarray(flag).reshape(-1)[0]) == pytest.approx(1.0)
+    np.testing.assert_allclose(
+        np.asarray(completed).ravel(),
+        np.array([0.0, 1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0]),
+        atol=1e-8,
+    )
+
+
+def test_fi_zero_jacobian_does_not_report_a_full_scale() -> None:
+    try:
+        from embodik.gpu.casadi_fi_pesns import build_fi_pesns_single_task
+    except ImportError as error:
+        pytest.skip(f"CasADi not available: {error}")
+
+    matrix = np.zeros((2, 4))
+    target = np.array([0.0, 1.0])
+    lower = np.full(4, -1.0)
+    upper = np.full(4, 1.0)
+    function = build_fi_pesns_single_task(
+        n_dof=4, task_dim=2, n_constraints=4, k_max=1, mu0=0.0, eta=0.0
+    )
+    velocity, scales = function(target, matrix.flatten(), np.eye(4), lower, upper)
+    assert float(np.asarray(scales).ravel()[0]) == pytest.approx(0.0, abs=1e-8)
+    np.testing.assert_allclose(np.asarray(velocity).ravel(), 0.0, atol=1e-8)
+
+
+def test_torch_completion_keeps_locked_joint_fixed() -> None:
+    torch = pytest.importorskip("torch")
+    from embodik.gpu.wbc._runtime.gpu_priority import complete_consistent_redundant_velocity
+
+    matrix = np.array([[1.0, 1.0, 1.0, 1.0], [0.0, 0.0, 0.0, 0.0]])
+    target = np.array([1.0, 0.0])
+    lower = np.zeros(4)
+    upper = np.array([0.0, 2.0, 2.0, 2.0])
+    dtype = torch.float64
+    completed = complete_consistent_redundant_velocity(
+        torch.tensor(matrix, dtype=dtype),
+        torch.tensor(target, dtype=dtype),
+        torch.tensor(lower, dtype=dtype),
+        torch.tensor(upper, dtype=dtype),
+        torch.tensor([0.0, 0.5, 0.5, 0.5], dtype=dtype),
+        torch.zeros(4, dtype=dtype),
+    )
+    np.testing.assert_allclose(
+        completed.detach().cpu().numpy(),
+        np.array([0.0, 1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0]),
+        atol=1e-8,
+    )
+
+
+def test_torch_completion_compiles_fullgraph() -> None:
+    torch = pytest.importorskip("torch")
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required to compile the native velocity graph")
+    from embodik.gpu.wbc._runtime.gpu_priority import complete_consistent_redundant_velocity
+
+    compiled = torch.compile(
+        complete_consistent_redundant_velocity,
+        fullgraph=True,
+        dynamic=False,
+        options={"triton.cudagraphs": False},
+    )
+    zero_row = _catalog_case("redundant_zero_n4")
+    dtype = torch.float32
+    device = "cuda"
+    completed = compiled(
+        torch.tensor(zero_row.matrix, dtype=dtype, device=device),
+        torch.tensor(zero_row.target, dtype=dtype, device=device),
+        torch.tensor(zero_row.lower, dtype=dtype, device=device),
+        torch.tensor(zero_row.upper, dtype=dtype, device=device),
+        torch.full((4,), 0.25, dtype=dtype, device=device),
+        torch.zeros(4, dtype=dtype, device=device),
+    )
+    np.testing.assert_allclose(
+        completed.detach().cpu().numpy(), zero_row.velocity.astype(np.float32), atol=1e-5
+    )
 
 
 if __name__ == "__main__":

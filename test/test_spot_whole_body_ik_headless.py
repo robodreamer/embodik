@@ -1272,6 +1272,20 @@ def test_spot_whole_body_ik_condition_protection_biases_stretched_arm_toward_ref
     assert protected.position_error <= arm_first.position_error + 1e-4
 
 
+def test_spot_locomotion_sensitivity_preserves_height_and_rpy_gains() -> None:
+    ik = OptionalSpotWholeBodyIK.__new__(OptionalSpotWholeBodyIK)
+    gains = []
+    for sensitivity in (0.25, 1.0, 4.0):
+        ik.locomotion_sensitivity = sensitivity
+        gains.append(ik._locomanip_base_gains())
+    axes = [0, 1, 5]
+    assert np.all(gains[0][axes] > gains[1][axes])
+    assert np.all(gains[1][axes] > gains[2][axes])
+    np.testing.assert_allclose(gains[1][axes], [0.2, 0.75, 0.5])
+    for gain in gains:
+        np.testing.assert_allclose(gain[[2, 3, 4]], [4.0, 5.0, 5.0])
+
+
 def test_spot_whole_body_ik_small_forward_target_uses_arm_after_pose_nudge() -> None:
     ik = OptionalSpotWholeBodyIK(_resolve_spot_ik_urdf(), dt=0.01)
     observation = _policy_observation()

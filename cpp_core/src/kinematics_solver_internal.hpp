@@ -39,6 +39,19 @@
 namespace embodik {
 
 namespace {
+// Acceleration limits are physical maxima. Keep constraints and all stopping
+// predictions on the same exact velocity step; tolerances belong in comparisons.
+inline double acceleration_velocity_step(double acceleration, double dt) {
+  return acceleration * dt;
+}
+
+inline double acceleration_velocity_comparison_tolerance(
+    double previous_velocity, double applied_velocity, double velocity_step) {
+  return 64.0 * std::numeric_limits<double>::epsilon() *
+         std::max({1.0, std::abs(previous_velocity), std::abs(applied_velocity),
+                   std::abs(velocity_step)});
+}
+
 constexpr double kCollisionTolerance = 1e-4;
 constexpr double kCollisionUpperDistance = 1e1;
 constexpr double kDistanceEpsilon = 1e-9;
@@ -287,6 +300,47 @@ static bool all_frame_task_blocks_commanded(
   return position_gain > 0.0 && orientation_gain > 0.0 &&
          error.head<3>().squaredNorm() > kCollisionEscapeNormEps &&
          error.tail<3>().squaredNorm() > kCollisionEscapeNormEps;
+}
+
+// Experimental recovery uses explicit units and keeps satisfied blocks inside
+// their tolerances. A satisfied pose has zero continuity merit.
+static double normalized_pose_merit(double position, double orientation,
+                                    const SolverRuntimeConfig &cfg) {
+  if (position <= cfg.normalized_pose_position_tolerance &&
+      orientation <= cfg.normalized_pose_orientation_tolerance) return 0.0;
+  return std::hypot(position / cfg.normalized_pose_position_tolerance,
+                    orientation / cfg.normalized_pose_orientation_tolerance);
+}
+
+static bool normalized_pose_progress(const std::vector<double> &before,
+                                     const std::vector<double> &after,
+                                     const SolverRuntimeConfig &cfg) {
+  if (before.empty() || before.size() != after.size() || before.size() % 2 != 0)
+    return false;
+  for (size_t i = 0; i < before.size(); i += 2) {
+    const double p = before[i], r = before[i + 1];
+    const double np = after[i], nr = after[i + 1];
+    if (!std::isfinite(p) || !std::isfinite(r) || !std::isfinite(np) || !std::isfinite(nr))
+      return false;
+    const double epsilon = 64 * std::numeric_limits<double>::epsilon();
+    if ((p <= cfg.normalized_pose_position_tolerance && np > cfg.normalized_pose_position_tolerance * (1 + epsilon)) ||
+        (r <= cfg.normalized_pose_orientation_tolerance && nr > cfg.normalized_pose_orientation_tolerance * (1 + epsilon))) return false;
+    const double old_merit = normalized_pose_merit(p, r, cfg);
+    const double new_merit = normalized_pose_merit(np, nr, cfg);
+    if (old_merit > 0 && !(new_merit < old_merit - epsilon * std::max(1.0, old_merit)))
+      return false;
+  }
+  return true;
+}
+
+static std::vector<double> normalized_continuity_blocks(const std::vector<double> &blocks,
+                                                         const SolverRuntimeConfig &cfg) {
+  std::vector<double> result;
+  for (size_t i = 0; i + 1 < blocks.size(); i += 2) {
+    result.push_back(normalized_pose_merit(blocks[i], blocks[i + 1], cfg));
+    result.push_back(0.0);
+  }
+  return result;
 }
 
 static double commanded_frame_merit(
@@ -561,6 +615,23 @@ static bool collision_recovery_margins_acceptable(
   return true;
 }
 
+static double position_step_collision_global_threshold(
+    const std::vector<double> &reference_margins,
+    const std::vector<double> &candidate_margins, double nominal_distance) {
+  const auto has_finite_margin = [](const std::vector<double> &margins) {
+    return std::any_of(margins.begin(), margins.end(),
+                       [](double margin) { return std::isfinite(margin); });
+  };
+  // Per-pair margins already enforce configured overrides and structural
+  // floors. Applying nominal clearance again silently replaces those policies.
+  // Keep an independent material-penetration guard and the legacy fallback
+  // when no per-pair floor information is available.
+  return has_finite_margin(reference_margins) ||
+                 has_finite_margin(candidate_margins)
+             ? kCollisionPenetrationDistanceThreshold
+             : nominal_distance;
+}
+
 static bool collision_recovery_margins_are_safe(
     const std::vector<double> &margins, double safe_threshold) {
   bool found = false;
@@ -809,6 +880,7 @@ static bool project_objectives_into_constraint_tangent_space(
     Eigen::MatrixXd tangent_projector = Eigen::MatrixXd::Identity(
         original_jacobian.cols(), original_jacobian.cols());
     bool projection_required = false;
+    int independent_recovery_normals = 0;
     for (int row = 0; row < constraint_jacobian.rows(); ++row) {
       const Eigen::RowVectorXd constraint_row = constraint_jacobian.row(row);
       if (constraint_row.squaredNorm() <= 1e-12) {
@@ -816,9 +888,15 @@ static bool project_objectives_into_constraint_tangent_space(
       }
       const double desired_separation = constraint_row.dot(desired_velocity);
       if (desired_separation >=
-          constraint_lower_bounds(row) - feasibility_tolerance) {
+              constraint_lower_bounds(row) - feasibility_tolerance &&
+          constraint_lower_bounds(row) <= feasibility_tolerance) {
         continue;
       }
+
+      // Once projection is needed, every positive lower bound owns mandatory
+      // affine recovery motion. Leaving one such normal in the scalable task
+      // can make all scales infeasible when the other recovery rows are
+      // saturated, even if the original full-scale task satisfied that row.
 
       const Eigen::RowVectorXd remaining_normal =
           constraint_row * tangent_projector;
@@ -830,6 +908,9 @@ static bool project_objectives_into_constraint_tangent_space(
           remaining_normal.transpose() * remaining_normal /
           remaining_norm_squared;
       projection_required = true;
+      if (constraint_lower_bounds(row) > feasibility_tolerance) {
+        ++independent_recovery_normals;
+      }
     }
 
     if (!projection_required) {
@@ -885,6 +966,13 @@ static bool project_objectives_into_constraint_tangent_space(
     }
     projection_applied = true;
     if (rank == 0) {
+      // Only coupled mandatory recovery needs a zero tangent objective. Keep
+      // the original ray for a single normal or approach-permitting bounds,
+      // preserving target-directed braking and the existing fallback policy.
+      if (independent_recovery_normals > 1) {
+        task_jacobians[task_idx].setZero();
+        task_goals[task_idx].setZero();
+      }
       continue;
     }
     const Eigen::MatrixXd row_basis = svd.matrixU().leftCols(rank).transpose();
@@ -1554,6 +1642,12 @@ static bool preferred_lock_candidate_acceptable(
       candidate.q_solution.size() == 0 || !candidate.q_solution.allFinite()) {
     return false;
   }
+  // A stationary stalled attempt must not suppress the normal free solve
+  // merely because it is inside the coarse preference error tolerances.
+  if (candidate.status == SolverStatus::kNoProgress &&
+      step_norm <= kPositionStepMeritMotionThreshold) {
+    return false;
+  }
   if (!preferred_lock_error_component_acceptable(
           entry_errors.max_position_error, candidate_errors.max_position_error,
           options.preferred_lock_tracking_tolerance,
@@ -1612,9 +1706,10 @@ static void clamp_joint_velocity_solution_in_place(
 static void tighten_bounds_with_reference_corridor(
     Eigen::VectorXd &c_lower, Eigen::VectorXd &c_upper,
     const Eigen::VectorXd &q_reference, const Eigen::VectorXd &q_current,
-    const Eigen::VectorXd &vel_limits, double dt,
+    const Eigen::VectorXd &vel_limits, double corridor_dt, double integration_dt,
     const std::vector<int> &velocity_to_config_index, int nv) {
-  if (dt <= 0.0 || c_lower.size() < nv || c_upper.size() < nv ||
+  if (corridor_dt <= 0.0 || integration_dt <= 0.0 ||
+      c_lower.size() < nv || c_upper.size() < nv ||
       q_reference.size() == 0 || q_current.size() == 0 ||
       vel_limits.size() < nv) {
     return;
@@ -1633,18 +1728,16 @@ static void tighten_bounds_with_reference_corridor(
     if (q_idx >= q_reference.size() || q_idx >= q_current.size()) {
       continue;
     }
-    const double max_delta = std::max(0.0, vel_limits[i] * dt);
+    if (!std::isfinite(vel_limits[i])) continue;
+    const double max_delta = std::max(0.0, vel_limits[i] * corridor_dt);
     const double corridor_lower_q = q_reference[q_idx] - max_delta;
     const double corridor_upper_q = q_reference[q_idx] + max_delta;
-    const double corridor_lower_v = (corridor_lower_q - q_current[q_idx]) / dt;
-    const double corridor_upper_v = (corridor_upper_q - q_current[q_idx]) / dt;
+    const double corridor_lower_v =
+        (corridor_lower_q - q_current[q_idx]) / integration_dt;
+    const double corridor_upper_v =
+        (corridor_upper_q - q_current[q_idx]) / integration_dt;
     c_lower[i] = std::max(c_lower[i], corridor_lower_v);
     c_upper[i] = std::min(c_upper[i], corridor_upper_v);
-    if (c_lower[i] > c_upper[i]) {
-      const double mid = 0.5 * (c_lower[i] + c_upper[i]);
-      c_lower[i] = mid;
-      c_upper[i] = mid;
-    }
   }
 }
 
@@ -1652,7 +1745,8 @@ static void clamp_joint_velocity_to_position_limits_for_integration(
     Eigen::Ref<Eigen::VectorXd> dq, const Eigen::VectorXd &q_current,
     const Eigen::VectorXd &q_min, const Eigen::VectorXd &q_max,
     const std::vector<int> &velocity_to_config_index, double integration_dt,
-    int nv) {
+    int nv, const std::vector<int> &locked_indices,
+    const std::vector<std::shared_ptr<Task>> &tasks) {
   if (integration_dt <= 0.0 || dq.size() < nv || q_current.size() == 0) {
     return;
   }
@@ -1672,10 +1766,42 @@ static void clamp_joint_velocity_to_position_limits_for_integration(
       continue;
     }
 
-    const double lower_velocity =
+    // Do not inject inset-restoration motion into a locked coordinate at a
+    // valid boundary. Unlocked joints retain the existing inset policy.
+    if (dq[vi] == 0.0 && q_current[qi] >= q_min[qi] &&
+        q_current[qi] <= q_max[qi]) {
+      bool any_active_task = false;
+      bool excluded_by_all_tasks = true;
+      for (const auto &task : tasks) {
+        if (!task->isActive()) {
+          continue;
+        }
+        any_active_task = true;
+        const auto &excluded = task->get_excluded_joint_indices();
+        if (std::find(excluded.begin(), excluded.end(), vi) == excluded.end()) {
+          excluded_by_all_tasks = false;
+          break;
+        }
+      }
+      if (std::find(locked_indices.begin(), locked_indices.end(), vi) !=
+              locked_indices.end() ||
+          (any_active_task && excluded_by_all_tasks)) {
+        continue;
+      }
+    }
+
+    double lower_velocity =
         (q_min[qi] + margin_limit - q_current[qi]) / integration_dt;
-    const double upper_velocity =
+    double upper_velocity =
         (q_max[qi] - margin_limit - q_current[qi]) / integration_dt;
+    // A valid boundary configuration must admit a stationary command. Forcing
+    // an inset restoration changes coordinated task motion, including hard
+    // zero-velocity rows, and does not vanish when a candidate is backtracked.
+    // Retain the inset cap without reversing or increasing an inward command.
+    if (q_current[qi] >= q_min[qi] && q_current[qi] <= q_max[qi]) {
+      lower_velocity = std::min(0.0, lower_velocity);
+      upper_velocity = std::max(0.0, upper_velocity);
+    }
     if (lower_velocity <= upper_velocity) {
       dq[vi] = std::clamp(dq[vi], lower_velocity, upper_velocity);
     } else {

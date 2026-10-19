@@ -8,6 +8,9 @@
 
 ## Result Diagnostics
 
+For per-iteration native velocity and integration records, see
+[position-step diagnostics](../position_step_diagnostics.md).
+
 Solver result objects include `condition_number`, the worst Jacobian condition
 number observed by the singularity-robust inverse during that solve. Values near
 `1.0` indicate well-conditioned task Jacobians; larger values mean the solve is
@@ -81,6 +84,40 @@ limits enabled, an exact sampled-data stopping envelope brakes outward motion
 before the margin so entry remains continuous. The policy is off by default and
 requires position limits to be enabled.
 
+With joint acceleration limits enabled, position-step objectives containing
+only frame tasks retain their physical Jacobians near joint limits. The
+configured bounds constrain joint motion; they do not remove individual
+Jacobian entries and change the primary motion that lower priorities preserve.
+
+## Preferred joint locks
+
+`PositionStepOptions.preferred_locked_joint_indices` tries a locked candidate
+before the normal position solve. Its tracking tolerances let a productive
+candidate retain the preference while approaching the target.
+
+A stationary `NO_PROGRESS` candidate falls through to the normal solve even
+inside those coarse tolerances. Successful settled holds remain preferred.
+The fallback starts from the original configuration and solver state; mandatory
+joint locks and physical constraints still apply.
+
+## Joint acceleration limits
+
+`set_acceleration_limits()` configures per-joint maxima; enabling acceleration
+limits constrains velocity changes to `a_max * dt`, without a percentage allowance.
+For position steps this applies to the published outer command, rather than each
+speculative inner refinement. Braking predictions use the same exact step.
+Call `set_previous_joint_velocities()` when an outer controller changes the
+velocity actually applied. Enabling acceleration limits initializes this
+reference to zero. Zero acceleration preserves the incoming velocity unless a
+hard safety constraint takes precedence.
+
+Hard position-limit viability retains precedence when externally synchronized
+state/history makes the acceleration corridor incompatible with safe motion.
+Brake comparisons allow bounded integration roundoff, without widening the
+physical constraint box. If configuration precision cannot resolve the motion,
+the continuity path holds instead of certifying a braking step.
+These kinematic command bounds do not certify hardware timing or stopping.
+
 ## Adaptive dt, elastic band, stall handler
 
 - **Adaptive dt** — `PositionStepOptions.adaptive_dt` scales integration step with position error;
@@ -108,6 +145,12 @@ minimum retained clearance and the recovery target. A pair below the floor
 recovers toward it; a pair already above the floor may move down toward it
 instead of being pinned at its first observed clearance. The target is capped by
 the pair's active collision margin, including per-pair overrides.
+
+Acceleration-limited position commands use these same per-pair targets for
+the final command and braking rollout checks. Nominal clearance is not applied
+again after a valid per-pair floor check. The independent penetration guard
+remains active; when per-pair margins are unavailable, the nominal clearance
+check remains the fallback.
 
 The floor is **off by default**. Getter/setter pairs:
 `get_non_worsening_collision_floor_enabled()` and

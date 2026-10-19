@@ -272,6 +272,43 @@ TEST_F(VelocityCollisionLinearizationTest, RejectsInvalidRowDt) {
 }
 
 TEST_F(VelocityCollisionLinearizationTest,
+       ExplicitLinearizationFindsNewlyActivePairAfterCachedSubsetScan) {
+  auto warm_robot = make_robot(multi_urdf_path_);
+  auto fresh_robot = make_robot(multi_urdf_path_);
+  auto warm = make_solver(warm_robot, 0.01, 0.005);
+  auto fresh = make_solver(fresh_robot, 0.01, 0.005);
+  for (auto *solver : {&warm, &fresh}) {
+    solver->set_proximity_gated_collision_activation_enabled(true);
+    solver->set_collision_constraint_activation_multiplier(10.0);
+    solver->enable_collision_pair_cache(true, 100, 0.005, 128);
+    solver->enable_sphere_broadphase(false);
+  }
+  const auto initial = detail::VelocityConstraintTestObserver::
+      linearize_collision_velocity_constraint(warm, 0.01);
+  ASSERT_TRUE(initial.has_value());
+  ASSERT_EQ(initial->coefficient_matrix.rows(), 1);
+
+  // The left obstacle was active at q=0. After this movement the right one
+  // enters the activation shell while the left leaves it. Explicit-state
+  // linearizations must inspect the current catalog, not only the old pair.
+  const Eigen::VectorXd q = Eigen::VectorXd::Constant(1, 0.04);
+  warm_robot->update_configuration(q);
+  fresh_robot->update_configuration(q);
+  const auto after = detail::VelocityConstraintTestObserver::
+      linearize_collision_velocity_constraint(warm, 0.01);
+  const auto reference = detail::VelocityConstraintTestObserver::
+      linearize_collision_velocity_constraint(fresh, 0.01);
+  ASSERT_TRUE(reference.has_value());
+  ASSERT_TRUE(after.has_value());
+  EXPECT_TRUE(after->coefficient_matrix.isApprox(reference->coefficient_matrix,
+                                                 kTolerance));
+  EXPECT_TRUE(after->lower_bounds.isApprox(reference->lower_bounds, kTolerance));
+  EXPECT_TRUE(after->upper_bounds.isApprox(reference->upper_bounds, kTolerance));
+  EXPECT_EQ(after->object_a, reference->object_a);
+  EXPECT_EQ(after->object_b, reference->object_b);
+}
+
+TEST_F(VelocityCollisionLinearizationTest,
        NoArgCollisionConstraintPreservesLegacyDtClamp) {
   auto robot = make_robot(urdf_path_);
   ASSERT_TRUE(robot->has_collision_geometry());

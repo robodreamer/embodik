@@ -182,6 +182,12 @@ can exit penetration without treating interpenetration as a valid rest pose. A p
 above the floor but below `min_distance` may move toward the floor instead of being pinned to its
 initial clearance, preserving safe tangential and whole-body motion.
 
+The persistent floor does not increase merely because a pair moves above nominal
+clearance. Position and position-step rejection check the effective per-pair floor, including
+pair overrides and command-local anchors, rather than applying the global nominal
+distance a second time. An independent penetration guard remains active. With the
+structural policy disabled, configured nominal pair clearances remain enforced.
+
 See [KinematicsSolver — Collision recovery floor](api/kinematics_solver.md#collision-recovery-floor).
 
 ### Tangential sliding at an active boundary
@@ -234,6 +240,42 @@ pixi run python scripts/diagnose_collision_pair_membership.py torso_link right_b
 pixi run python scripts/prove_sweep_collision_metric.py
 pixi run python scripts/validate_wbc_segments.py
 ```
+
+## Fresh per-pair endpoint evaluation
+
+`solver.evaluate_collision_pair_distances(q)` evaluates every currently allowed
+and active collision geometry pair at a finite, full-size configuration. It
+returns read-only `CollisionPairDistance` records with `geometry_a`,
+`geometry_b`, `distance`, `minimum_distance`, and `persistent_floor_m`. Each minimum is the currently
+active pair override or configured global margin. Pending overrides and recovery
+floors are not activated by this diagnostic query.
+
+`persistent_floor_m` reports the initialized persistent recovery floor, capped
+by the active pair minimum. It is `None` while that policy is disabled or the
+pair has not been seeded by solving. Queries neither seed nor ratchet floors.
+This value does not include command-local anchors or certify a candidate or
+swept trajectory; retain those checks separately. A persistent structural floor
+can permit clearance loss above that floor, so a per-step no-clearance-loss
+test measures a different policy.
+
+```python
+records = solver.evaluate_collision_pair_distances(q_command)
+if records is not None:
+    for pair in records:
+        print(pair.geometry_a, pair.geometry_b, pair.distance, pair.minimum_distance)
+```
+
+The query preserves robot configuration, velocity, collision policy and shared
+geometry results. It uses local geometry data for fresh distances. Missing
+geometry, a disabled collision policy, or no active allowed pairs returns
+`None`; invalid configurations or nonfinite distances raise an error. It does
+not limit evaluation to the constraint row budget or a cached closest pair.
+
+When checking a command modified after solving, compare complete previous and
+candidate pair snapshots. Require each pair's configured margin; for a pair
+already inside its margin, require nonworsening clearance relative to that
+pair's previous distance. A single minimum distance and the largest override
+margin cannot establish this per-pair condition.
 
 ## API reference
 

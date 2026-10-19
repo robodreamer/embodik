@@ -10,7 +10,7 @@ the model-provided joint spans.
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import NamedTuple
 
 import torch
@@ -254,6 +254,17 @@ def undamped_generalized_inverse(
         raise ValueError("matrix must use a floating dtype")
     if not math.isfinite(relative_rank_tolerance) or relative_rank_tolerance < 0.0:
         raise ValueError("relative_rank_tolerance must be finite and nonnegative")
+    if matrix.shape[-2] == 1 or matrix.shape[-1] == 1:
+        # A rank-one row/column has this exact pseudoinverse without an SVD.
+        # Tensor arithmetic here also avoids host-side checks during capture.
+        squared_norm = matrix.square().sum(dim=(-2, -1), keepdim=True)
+        retained = (squared_norm > 0) & (relative_rank_tolerance < 1.0)
+        denominator = torch.where(retained, squared_norm, torch.ones_like(squared_norm))
+        return torch.where(
+            retained,
+            matrix.transpose(-2, -1) / denominator,
+            torch.zeros_like(matrix.transpose(-2, -1)),
+        )
     left, singular_values, right_transpose = torch.linalg.svd(matrix, full_matrices=False)
     maximum = singular_values.amax(dim=-1, keepdim=True)
     cutoff = relative_rank_tolerance * maximum
@@ -265,6 +276,195 @@ def undamped_generalized_inverse(
     return (right_transpose.transpose(-2, -1) * inverse_spectrum.unsqueeze(-2)) @ (
         left.transpose(-2, -1)
     )
+
+
+def _consistent_task_rank(
+    jacobian: torch.Tensor,
+    target: torch.Tensor,
+    rank_tolerance: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return task rank and whether the target lies in the Jacobian row space."""
+
+    singular_values = torch.linalg.svdvals(jacobian)
+    largest = singular_values.amax(dim=-1, keepdim=True)
+    task_rank = (singular_values > rank_tolerance * largest).sum(dim=-1)
+    augmented = torch.cat((jacobian, target.unsqueeze(-1)), dim=-1)
+    augmented_values = torch.linalg.svdvals(augmented)
+    augmented_largest = augmented_values.amax(dim=-1, keepdim=True)
+    augmented_rank = (augmented_values > rank_tolerance * augmented_largest).sum(dim=-1)
+    return task_rank, augmented_rank == task_rank
+
+
+def _explicit_consistent_task(
+    jacobian: torch.Tensor,
+    target: torch.Tensor,
+    rank_tolerance: float,
+    inverse_function: Callable[[torch.Tensor, float], torch.Tensor] | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Return the explicit-row mask, task rank, and target consistency."""
+
+    if jacobian.ndim < 2 or jacobian.shape[-2] != target.shape[-1]:
+        raise ValueError("target width must match jacobian rows")
+    rows = jacobian.shape[-2]
+    if inverse_function is not None:
+        inverse = inverse_function(jacobian, rank_tolerance)
+        projector = inverse @ jacobian
+        task_rank = projector.diagonal(dim1=-2, dim2=-1).sum(-1).round().to(torch.int64)
+        residual = target - (jacobian @ (inverse @ target.unsqueeze(-1))).squeeze(-1)
+        consistent = torch.linalg.vector_norm(residual, dim=-1) <= (
+            rank_tolerance * torch.linalg.vector_norm(target, dim=-1).clamp_min(1.0)
+        )
+        return (task_rank < rows) & consistent, task_rank, consistent
+    row_norm = torch.linalg.vector_norm(jacobian, dim=-1)
+    jacobian_scale = torch.linalg.vector_norm(jacobian, dim=(-2, -1)).clamp_min(1.0)
+    zero_row = row_norm <= rank_tolerance * jacobian_scale.unsqueeze(-1)
+    row_tolerance = rank_tolerance * jacobian_scale
+    if rows == 0:
+        redundant = zero_row
+    else:
+        flags = [zero_row[..., 0]]
+        for row in range(1, rows):
+            earlier = jacobian[..., :row, :]
+            design = earlier.transpose(-1, -2)
+            rhs = jacobian[..., row, :].unsqueeze(-1)
+            coefficients = undamped_generalized_inverse(design, rank_tolerance) @ rhs
+            reconstructed = (design @ coefficients).squeeze(-1)
+            residual = torch.linalg.vector_norm(reconstructed - jacobian[..., row, :], dim=-1)
+            in_span = residual <= row_tolerance
+            flags.append(zero_row[..., row] | in_span)
+        redundant = torch.stack(flags, dim=-1)
+    task_rank, consistent = _consistent_task_rank(jacobian, target, rank_tolerance)
+    redundant_count = redundant.sum(dim=-1)
+    explicit = (redundant_count > 0) & (task_rank + redundant_count == rows) & consistent
+    return explicit, task_rank, consistent
+
+
+def complete_consistent_redundant_velocity(
+    jacobian: torch.Tensor,
+    target: torch.Tensor,
+    lower: torch.Tensor,
+    upper: torch.Tensor,
+    unscaled: torch.Tensor,
+    scaled: torch.Tensor,
+    *,
+    rank_tolerance: float = 1.0e-6,
+    bound_tolerance: float = 1.0e-6,
+    residual_tolerance: float = 1.0e-6,
+    inverse_function: Callable[[torch.Tensor, float], torch.Tensor] | None = None,
+    consistency_inverse_function: Callable[[torch.Tensor, float], torch.Tensor] | None = None,
+) -> torch.Tensor:
+    """Saturate bounds that block one consistent task and resolve the free joints.
+
+    A consistent zero row, repeated row, linear combination, or full-rank row
+    whose uniform scale is zero is completed. A positive uniform scale, a
+    structural singularity, and an inconsistent row keep ``scaled``. Pinned
+    joints hold the violated bound. When the full-scale free-joint solution
+    leaves the box and the pins are at the origin, the largest scale inside
+    the box is kept. Joints that still allow a positive scale are pinned only
+    when that set realizes the target; otherwise only the scale-zero joints are
+    pinned.
+
+    The internal consistency callback may reuse the unchanged primary factor;
+    the two reduced candidate solves always use ``inverse_function``.
+    """
+
+    explicit, task_rank, consistent = _explicit_consistent_task(
+        jacobian,
+        target,
+        rank_tolerance,
+        (
+            consistency_inverse_function
+            if consistency_inverse_function is not None
+            else inverse_function
+        ),
+    )
+    inverse = undamped_generalized_inverse if inverse_function is None else inverse_function
+    violated = (unscaled < lower - bound_tolerance) | (unscaled > upper + bound_tolerance)
+    # A zero-width bound is already saturated. Leaving it free lets the
+    # re-solve move a locked joint.
+    fixed = upper - lower <= bound_tolerance
+    positive_step = unscaled > bound_tolerance
+    negative_step = unscaled < -bound_tolerance
+    ones = torch.ones_like(unscaled)
+    upper_limit = torch.where(positive_step, upper / unscaled.clamp(min=bound_tolerance), ones)
+    lower_limit = torch.where(negative_step, lower / unscaled.clamp(max=-bound_tolerance), ones)
+    component_scale = torch.where(
+        positive_step, upper_limit, torch.where(negative_step, lower_limit, ones)
+    )
+    component_scale = component_scale.clamp(min=0.0, max=1.0)
+    uniform_scale = component_scale.amin(dim=-1)
+    scale_blocked = uniform_scale <= bound_tolerance
+    applies = explicit | (consistent & scale_blocked & (task_rank > 0))
+    applies_blocked = consistent & scale_blocked & (task_rank > 0)
+    blocker = component_scale <= bound_tolerance
+
+    def _resolve(pinned: torch.Tensor, active: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        particular = torch.where(
+            pinned,
+            torch.clamp(unscaled, min=lower, max=upper),
+            torch.zeros_like(unscaled),
+        )
+        free = (~pinned).to(jacobian.dtype)
+        reduced = jacobian * free.unsqueeze(-2)
+        # The candidate is used only by an active task with at least one pin.
+        # Keep invalid matrices visible to the factor backend's status checks.
+        # Finite unused factors have a known irrelevant zero inverse instead.
+        unused = ~(active & pinned.any(dim=-1))
+        unused &= torch.isfinite(reduced).all(dim=(-2, -1))
+        factor_matrix = torch.where(unused[..., None, None], torch.zeros_like(reduced), reduced)
+        task_residual = target - (jacobian @ particular.unsqueeze(-1)).squeeze(-1)
+        correction = (inverse(factor_matrix, rank_tolerance) @ task_residual.unsqueeze(-1)).squeeze(
+            -1
+        ) * free
+        candidate = particular + correction
+        achieved = jacobian @ candidate.unsqueeze(-1)
+        residual_norm = torch.linalg.vector_norm(achieved.squeeze(-1) - target, dim=-1)
+        target_scale = torch.linalg.vector_norm(target, dim=-1).clamp_min(1.0)
+        within_bounds = (
+            (candidate >= lower - bound_tolerance) & (candidate <= upper + bound_tolerance)
+        ).all(dim=-1)
+        reachable = residual_norm <= residual_tolerance * target_scale
+        finite = torch.isfinite(candidate).all(dim=-1)
+        base = active & pinned.any(dim=-1) & reachable & finite
+        full_use = base & within_bounds
+        pin_task = (jacobian @ particular.unsqueeze(-1)).squeeze(-1)
+        homogeneous = torch.linalg.vector_norm(particular, dim=-1) <= bound_tolerance
+        homogeneous = homogeneous & (
+            torch.linalg.vector_norm(pin_task, dim=-1) <= residual_tolerance * target_scale
+        )
+        positive = candidate > bound_tolerance
+        negative = candidate < -bound_tolerance
+        upper_ratio = torch.where(positive, upper / candidate.clamp(min=bound_tolerance), ones)
+        lower_ratio = torch.where(negative, lower / candidate.clamp(max=-bound_tolerance), ones)
+        partial_scale = torch.minimum(upper_ratio.amin(dim=-1), lower_ratio.amin(dim=-1))
+        partial_scale = partial_scale.clamp(min=0.0, max=1.0)
+        scaled_candidate = candidate * partial_scale.unsqueeze(-1)
+        partial_within = (
+            (scaled_candidate >= lower - bound_tolerance)
+            & (scaled_candidate <= upper + bound_tolerance)
+        ).all(dim=-1)
+        partial_use = (
+            base & ~within_bounds & homogeneous & partial_within & (partial_scale > bound_tolerance)
+        )
+        velocity = torch.where(
+            full_use.unsqueeze(-1),
+            candidate,
+            torch.where(partial_use.unsqueeze(-1), scaled_candidate, torch.zeros_like(candidate)),
+        )
+        return velocity, full_use | partial_use
+
+    violator_velocity, violator_accepted = _resolve(
+        (violated | fixed) & applies.unsqueeze(-1), applies
+    )
+    blocked_velocity, blocked_accepted = _resolve(
+        (blocker | fixed) & applies_blocked.unsqueeze(-1),
+        # An accepted violator candidate already owns this lane. Preserve
+        # non-finite factor vetoes while zeroing its unused finite inverse.
+        applies_blocked & ~violator_accepted,
+    )
+    use_blocked = (~violator_accepted) & blocked_accepted
+    completed = torch.where(violator_accepted.unsqueeze(-1), violator_velocity, scaled)
+    return torch.where(use_blocked.unsqueeze(-1), blocked_velocity, completed)
 
 
 def undamped_nullspace_projector(

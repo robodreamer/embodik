@@ -354,6 +354,14 @@ bool accepted_frozen_constraints_are_satisfied(const std::vector<FrozenNextVeloc
 bool accepted_lock_constraints_are_satisfied(const AccelerationSolveOptions &options, const Eigen::VectorXd &dq, double dt, const Eigen::VectorXd &ddq);
 
 struct VelocityCollisionLiftDiagnostics {
+  int refinement_iterations = 0;
+  std::uint64_t refinement_exact_queries = 0;
+  std::uint64_t refinement_kinematics_updates = 0;
+  std::uint64_t refinement_geometry_updates = 0;
+  std::uint64_t refinement_last_failed_sample_index = 0;
+  std::string refinement_last_failed_pair_key;
+  double refinement_last_failed_distance = std::numeric_limits<double>::quiet_NaN();
+  double refinement_last_required_distance = std::numeric_limits<double>::quiet_NaN();
   bool applied = false;
   bool endpoint_validated = false;
   std::uint64_t validation_samples = 0;

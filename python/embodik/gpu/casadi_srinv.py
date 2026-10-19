@@ -156,3 +156,296 @@ def srinv(
     inverse_denominators = squared_singular_values + global_regularization + per_value_damping
     inverse_spectrum = ca.diag(1.0 / inverse_denominators)
     return rotated_columns @ inverse_spectrum @ left_singular_vectors.T
+
+
+def undamped_jacobi_pinv(
+    matrix: "ca.SX",
+    rank_tolerance: float = 1e-6,
+) -> "ca.SX":
+    """Moore-Penrose inverse that drops singular values below the ESNS cutoff.
+
+    A consistent zero row makes ``det(J J.T)`` zero. The extended SRINV then
+    regularizes every direction. This inverse keeps the independent directions
+    undamped and is used only for that redundant-row completion.
+    """
+    if ca is None:
+        raise RuntimeError("CasADi is required")
+    gram = matrix @ matrix.T
+    rotated_columns, left_singular_vectors, squared_singular_values = _one_sided_jacobi_svd(
+        matrix, gram
+    )
+    singular_values = ca.sqrt(ca.fmax(squared_singular_values, 0.0))
+    largest = singular_values[0]
+    for index in range(1, singular_values.numel()):
+        largest = ca.fmax(largest, singular_values[index])
+    coefficients = []
+    for index in range(singular_values.numel()):
+        retained = singular_values[index] > rank_tolerance * largest
+        safe_squared = ca.fmax(squared_singular_values[index], 1e-30)
+        coefficients.append(ca.if_else(retained, 1.0 / safe_squared, 0.0))
+    return rotated_columns @ ca.diag(ca.vertcat(*coefficients)) @ left_singular_vectors.T
+
+
+def _jacobi_singular_values(matrix: "ca.SX") -> "ca.SX":
+    gram = matrix @ matrix.T
+    _, _, squared_singular_values = _one_sided_jacobi_svd(matrix, gram)
+    return ca.sqrt(ca.fmax(squared_singular_values, 0.0))
+
+
+def _numerical_rank(singular_values: "ca.SX", rank_tolerance: float) -> "ca.SX":
+    largest = singular_values[0]
+    for index in range(1, singular_values.numel()):
+        largest = ca.fmax(largest, singular_values[index])
+    rank = ca.SX.zeros(1)
+    for index in range(singular_values.numel()):
+        rank = rank + ca.if_else(
+            singular_values[index] > rank_tolerance * largest,
+            1.0,
+            0.0,
+        )
+    return rank
+
+
+def unreachable_inert_scale(
+    scale: "ca.SX",
+    jacobian: "ca.SX",
+    proposed: "ca.SX",
+    target: "ca.SX",
+    contribution: "ca.SX",
+    *,
+    epsilon: float = 1e-6,
+    precision: float = 1e-10,
+) -> "ca.SX":
+    """Keep a zero constraint step only when that step meets the task.
+
+    A zero Jacobian has a zero pseudoinverse step inside every finite box, so
+    the uniform scale would otherwise stay 1 for a target it cannot produce.
+    """
+    if ca is None:
+        raise RuntimeError("CasADi is required")
+    residual = ca.norm_2(jacobian @ proposed - target)
+    target_scale = ca.fmax(1.0, ca.norm_2(target))
+    unreachable = (contribution < epsilon) * (residual > precision * target_scale)
+    return ca.if_else(unreachable, 0.0, scale)
+
+
+def _explicit_redundant_rows(
+    jacobian: "ca.SX",
+    rank_tolerance: float,
+) -> list["ca.SX"]:
+    """Mark a zero row or a row in the span of the rows above it."""
+    rows = jacobian.size1()
+    row_tolerance = rank_tolerance * ca.fmax(1.0, ca.norm_fro(jacobian))
+    redundant = []
+    for row in range(rows):
+        row_vector = jacobian[row, :]
+        is_zero = ca.norm_2(row_vector) <= row_tolerance
+        if row == 0:
+            redundant.append(is_zero)
+            continue
+        earlier = jacobian[:row, :]
+        reconstructed = (row_vector @ undamped_jacobi_pinv(earlier, rank_tolerance)) @ earlier
+        in_span = ca.norm_2(row_vector - reconstructed) <= row_tolerance
+        redundant.append(ca.fmax(is_zero, in_span))
+    return redundant
+
+
+def _constraint_scale(
+    step: "ca.SX",
+    origin: "ca.SX",
+    lower: "ca.SX",
+    upper: "ca.SX",
+    eps_small: float = 1e-10,
+    eps_large: float = 1e10,
+) -> "ca.SX":
+    """Largest scale in ``[0, 1]`` for one linear inequality."""
+    margin_low = lower - origin
+    margin_high = upper - origin
+    positive = step > eps_small
+    negative = step < -eps_small
+    safe_positive = ca.if_else(positive, step, 1.0)
+    safe_negative = ca.if_else(negative, step, -1.0)
+    upper_ratio = ca.if_else(positive, margin_high / safe_positive, 1.0)
+    lower_ratio = ca.if_else(negative, margin_low / safe_negative, 1.0)
+    ratio = ca.if_else(step > 0.0, upper_ratio, lower_ratio)
+    ratio = ca.fmax(0.0, ca.fmin(1.0, ratio))
+    valid = (ca.fabs(step) > eps_small) * (ca.fabs(step) < eps_large)
+    return ca.if_else(valid, ratio, 1.0)
+
+
+def _largest_origin_scale(
+    values: "ca.SX",
+    lower: "ca.SX",
+    upper: "ca.SX",
+    tolerance: float,
+) -> "ca.SX":
+    """Largest ``s`` in ``[0, 1]`` such that ``s * values`` stays in the box."""
+    scale = ca.SX.ones(1)
+    for index in range(values.numel()):
+        component = values[index]
+        positive = component > tolerance
+        negative = component < -tolerance
+        safe_positive = ca.if_else(positive, component, 1.0)
+        safe_negative = ca.if_else(negative, component, -1.0)
+        upper_ratio = ca.if_else(positive, upper[index] / safe_positive, 1.0)
+        lower_ratio = ca.if_else(negative, lower[index] / safe_negative, 1.0)
+        scale = ca.fmin(scale, ca.fmax(0.0, ca.fmin(upper_ratio, lower_ratio)))
+    return ca.fmax(0.0, ca.fmin(1.0, scale))
+
+
+def complete_consistent_redundant_velocity(
+    jacobian: "ca.SX",
+    target: "ca.SX",
+    current: "ca.SX",
+    full_scale_step: "ca.SX",
+    coefficients: "ca.SX",
+    lower: "ca.SX",
+    upper: "ca.SX",
+    *,
+    rank_tolerance: float = 1e-6,
+    bound_tolerance: float = 1e-6,
+    residual_tolerance: float = 1e-8,
+    projector: "ca.SX | None" = None,
+) -> tuple["ca.SX", "ca.SX", "ca.SX"]:
+    """Saturate bounds that block one consistent task and resolve the free joints.
+
+    Returns the completed velocity, an acceptance flag, and the scale that
+    velocity realizes. A consistent zero row, repeated row, linear combination,
+    or full-rank row whose uniform scale is zero is completed. A positive
+    uniform scale, a structural singularity, and an inconsistent row keep that
+    uniform scale. When the full-scale free-joint solution leaves the box and
+    the pinned rows are at the origin, the largest feasible scale is kept.
+    ``projector`` is the nullspace of higher-priority tasks.
+    """
+    if ca is None:
+        raise RuntimeError("CasADi is required")
+
+    rows = jacobian.size1()
+    redundant = _explicit_redundant_rows(jacobian, rank_tolerance)
+    redundant_count = ca.sum1(ca.vertcat(*redundant))
+    task_rank = _numerical_rank(_jacobi_singular_values(jacobian), rank_tolerance)
+    augmented = ca.horzcat(jacobian, target)
+    augmented_rank = _numerical_rank(_jacobi_singular_values(augmented), rank_tolerance)
+    consistent = ca.fabs(augmented_rank - task_rank) < 0.5
+    explicit_consistent = (
+        (redundant_count > 0.5) * (ca.fabs(task_rank + redundant_count - rows) < 0.5) * consistent
+    )
+
+    full_velocity = current + full_scale_step
+    constraint_value = coefficients @ full_velocity
+    degrees_of_freedom = jacobian.size2()
+    if projector is None:
+        projector = ca.SX.eye(degrees_of_freedom)
+    current_constraint = coefficients @ current
+    step_on_constraints = coefficients @ full_scale_step
+    uniform_scale = ca.SX.ones(1)
+    violated_flags = []
+    scale_blocked_flags = []
+    fixed_flags = []
+    bound_values = []
+    for index in range(coefficients.size1()):
+        value = constraint_value[index]
+        violated = ca.if_else(
+            (value < lower[index] - bound_tolerance) + (value > upper[index] + bound_tolerance),
+            1.0,
+            0.0,
+        )
+        # A zero-width bound is already saturated. Leaving it free lets the
+        # re-solve move a locked joint.
+        fixed = ca.if_else(upper[index] - lower[index] <= bound_tolerance, 1.0, 0.0)
+        row_scale = _constraint_scale(
+            step_on_constraints[index],
+            current_constraint[index],
+            lower[index],
+            upper[index],
+        )
+        uniform_scale = ca.fmin(uniform_scale, row_scale)
+        violated_flags.append(violated)
+        scale_blocked_flags.append(ca.if_else(row_scale <= bound_tolerance, 1.0, 0.0))
+        fixed_flags.append(fixed)
+        bound_values.append(ca.fmin(upper[index], ca.fmax(lower[index], value)))
+    # A positive uniform scale is already the CPU result. Completion is for a
+    # scale of zero, plus the explicit dependent-row case.
+    scale_blocked = uniform_scale <= bound_tolerance
+    eligible = ca.fmax(
+        explicit_consistent,
+        consistent * scale_blocked * (task_rank > 0.5),
+    )
+
+    def _resolve(active_flags: list["ca.SX"]) -> tuple["ca.SX", "ca.SX", "ca.SX"]:
+        mask = ca.vertcat(*active_flags)
+        constraint_delta = ca.vertcat(
+            *[
+                active_flags[index] * (bound_values[index] - current_constraint[index])
+                for index in range(coefficients.size1())
+            ]
+        )
+        masked_constraints = ca.diag(mask) @ coefficients @ projector
+        constraint_inverse = undamped_jacobi_pinv(masked_constraints, rank_tolerance)
+        particular = constraint_inverse @ constraint_delta
+        nullspace = ca.SX.eye(degrees_of_freedom) - constraint_inverse @ masked_constraints
+        reduced = jacobian @ projector @ nullspace
+        task_residual = target - jacobian @ current - jacobian @ projector @ particular
+        correction = nullspace @ (undamped_jacobi_pinv(reduced, rank_tolerance) @ task_residual)
+        candidate = current + projector @ (particular + correction)
+        achieved = coefficients @ candidate
+        within_bounds = ca.SX.ones(1)
+        for index in range(coefficients.size1()):
+            within_bounds = within_bounds * ca.if_else(
+                (achieved[index] >= lower[index] - bound_tolerance)
+                * (achieved[index] <= upper[index] + bound_tolerance),
+                1.0,
+                0.0,
+            )
+        residual_norm = ca.norm_2(jacobian @ candidate - target)
+        target_scale = ca.fmax(1.0, ca.norm_2(target))
+        reachable = residual_norm <= residual_tolerance * target_scale
+        has_pins = ca.sum1(mask) > 0.5
+        full_accept = eligible * reachable * within_bounds * has_pins
+        # Nonzero pin bounds are affine. Scale only the homogeneous ray from
+        # the origin, where every pinned constraint value is already zero.
+        partial_scale = _largest_origin_scale(achieved, lower, upper, bound_tolerance)
+        scaled_achieved = partial_scale * achieved
+        partial_within = ca.SX.ones(1)
+        for index in range(coefficients.size1()):
+            value = scaled_achieved[index]
+            partial_within = partial_within * ca.if_else(
+                (value >= lower[index] - bound_tolerance)
+                * (value <= upper[index] + bound_tolerance),
+                1.0,
+                0.0,
+            )
+        pin_task = ca.norm_2(jacobian @ projector @ particular)
+        homogeneous = (ca.norm_2(current) <= bound_tolerance) * (
+            pin_task <= residual_tolerance * target_scale
+        )
+        partial_accept = (
+            eligible
+            * reachable
+            * (1.0 - within_bounds)
+            * has_pins
+            * homogeneous
+            * partial_within
+            * (partial_scale > bound_tolerance)
+        )
+        accepted = ca.fmax(full_accept, partial_accept)
+        achieved_scale = full_accept + partial_accept * partial_scale
+        velocity = full_accept * candidate + partial_accept * partial_scale * candidate
+        return velocity, accepted, achieved_scale
+
+    violator_velocity, violator_accepted, violator_scale = _resolve(
+        [ca.fmax(violated_flags[index], fixed_flags[index]) for index in range(len(fixed_flags))]
+    )
+    # Violators of the full step can over-pin a joint that still allows a
+    # positive scale. A second pass keeps only the joints that force scale 0.
+    blocked_velocity, blocked_accepted, blocked_scale = _resolve(
+        [
+            ca.fmax(scale_blocked_flags[index], fixed_flags[index])
+            for index in range(len(fixed_flags))
+        ]
+    )
+    use_blocked = (1.0 - violator_accepted) * blocked_accepted
+    accepted = ca.fmax(violator_accepted, blocked_accepted)
+    achieved_scale = violator_accepted * violator_scale + use_blocked * blocked_scale
+    velocity = violator_accepted * violator_velocity + use_blocked * blocked_velocity
+    return velocity, accepted, achieved_scale

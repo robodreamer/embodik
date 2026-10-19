@@ -536,7 +536,9 @@ Eigen::Vector3d RobotModel::get_com_position() const {
   }
 
   if (!com_updated_) {
-    pinocchio::centerOfMass(model_, data_, current_q_, false);
+    // Position and velocity getters share this cache flag. Populate both so
+    // calling the position getter first cannot leave a stale CoM velocity.
+    pinocchio::centerOfMass(model_, data_, current_q_, current_v_, false);
     com_updated_ = true;
   }
 
@@ -549,7 +551,7 @@ Eigen::Vector3d RobotModel::get_com_velocity() const {
         "Kinematics not updated. Call update_configuration() first.");
   }
 
-  if (current_v_.isZero()) {
+  if (current_v_.isZero(0.0)) {
     return Eigen::Vector3d::Zero();
   }
 

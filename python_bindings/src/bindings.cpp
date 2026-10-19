@@ -16,6 +16,7 @@
 
 #include <nanobind/eigen/dense.h>
 #include <nanobind/nanobind.h>
+#include <nanobind/stl/optional.h>
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/vector.h>
 
@@ -37,6 +38,7 @@ void bind_tasks(nb::module_ &m);
 void bind_kinematics_solver(nb::module_ &m);
 void bind_pose_metrics(nb::module_ &m);
 void bind_acceleration_solver(nb::module_ &m);
+void bind_cartesian_corridor_recovery(nb::module_ &m);
 
 NB_MODULE(_embodik_impl, m) {
   m.doc() = "embodiK: High-performance inverse kinematics with Pinocchio";
@@ -419,6 +421,10 @@ NB_MODULE(_embodik_impl, m) {
               "Multiplier on the angular pose error (default 1.0)")
       .def_rw("max_steps", &eik::PositionStepOptions::max_steps,
               "Number of velocity-IK iterations per call (default 1)")
+      .def_rw("record_collision_candidates", &eik::PositionStepOptions::record_collision_candidates,
+              "Record nominal collision checks and backoffs in the result; disabled by default")
+      .def_rw("record_velocity_candidates", &eik::PositionStepOptions::record_velocity_candidates,
+              "Record native velocities and nominal integration per step before guards; disabled by default")
       .def_rw("dt", &eik::PositionStepOptions::dt,
               "Integration timestep per step; <=0 uses solver.dt (default -1)")
       .def_rw("current_joint_velocity",
@@ -474,8 +480,10 @@ NB_MODULE(_embodik_impl, m) {
               "active. Uses proven defaults (delta_max=0.05). Default False.")
       .def_rw("limit_change_from_seed",
               &eik::PositionStepOptions::limit_change_from_seed,
-              "When True, tighten each inner step so q stays within "
-              "current_q(at entry) ± velocity_limit*dt")
+              "Bound scalar joint displacement for the whole call by "
+              "effective_velocity_cap * outer dt, including adaptive integration. "
+              "Multiple/adaptive iterations do not certify arbitrary outer "
+              "hard-linear rows or acceleration/contact histories.")
       .def_rw("no_progress_max_steps",
               &eik::PositionStepOptions::no_progress_max_steps,
               "Consecutive low-progress inner steps before returning "
@@ -646,6 +654,8 @@ NB_MODULE(_embodik_impl, m) {
       "Bundled runtime defaults for interactive solver loops.")
       .def(nb::init<>())
       .def_rw("damping", &eik::SolverRuntimeConfig::damping)
+      .def_rw("refine_partial_scale", &eik::SolverRuntimeConfig::refine_partial_scale,
+              "Opt in to improving feasible partial SCALE rates without relaxing bounds or earlier tasks.")
       .def_rw("position_step_max_steps",
               &eik::SolverRuntimeConfig::position_step_max_steps)
       .def_rw("adaptive_dt", &eik::SolverRuntimeConfig::adaptive_dt)
@@ -686,6 +696,16 @@ NB_MODULE(_embodik_impl, m) {
       .def_rw("advisor_scale_max", &eik::SolverRuntimeConfig::advisor_scale_max)
       .def_rw("advisor_scale_epoch_s",
               &eik::SolverRuntimeConfig::advisor_scale_epoch_s)
+
+      .def_rw("normalized_pose_recovery_enabled",
+              &eik::SolverRuntimeConfig::normalized_pose_recovery_enabled,
+              "Enable experimental normalized pose recovery (default off)")
+      .def_rw("normalized_pose_recovery_reference",
+              &eik::SolverRuntimeConfig::normalized_pose_recovery_reference)
+      .def_rw("normalized_pose_position_tolerance",
+              &eik::SolverRuntimeConfig::normalized_pose_position_tolerance)
+      .def_rw("normalized_pose_orientation_tolerance",
+              &eik::SolverRuntimeConfig::normalized_pose_orientation_tolerance)
       .def_rw("enable_auto_task_layout",
               &eik::SolverRuntimeConfig::enable_auto_task_layout,
               "Enable opt-in stateful PoseTaskGroup merged/split layout "
@@ -697,9 +717,30 @@ NB_MODULE(_embodik_impl, m) {
       .def_rw("auto_layout_cooldown_ticks",
               &eik::SolverRuntimeConfig::auto_layout_cooldown_ticks);
 
+  nb::class_<eik::PositionStepVelocityCandidate>(m, "PositionStepVelocityCandidate")
+      .def_ro("step_index", &eik::PositionStepVelocityCandidate::step_index)
+      .def_ro("integration_dt", &eik::PositionStepVelocityCandidate::integration_dt)
+      .def_ro("reference_q", &eik::PositionStepVelocityCandidate::reference_q)
+      .def_ro("solver_velocity", &eik::PositionStepVelocityCandidate::solver_velocity)
+      .def_ro("integrated_velocity", &eik::PositionStepVelocityCandidate::integrated_velocity)
+      .def_ro("candidate_q", &eik::PositionStepVelocityCandidate::candidate_q)
+      .def_ro("task_scales", &eik::PositionStepVelocityCandidate::task_scales);
+
+  nb::class_<eik::PositionStepCollisionCandidate>(m, "PositionStepCollisionCandidate")
+      .def_ro("stage", &eik::PositionStepCollisionCandidate::stage)
+      .def_ro("reference_q", &eik::PositionStepCollisionCandidate::reference_q)
+      .def_ro("candidate_q", &eik::PositionStepCollisionCandidate::candidate_q)
+      .def_ro("reference_margins", &eik::PositionStepCollisionCandidate::reference_margins)
+      .def_ro("candidate_margins", &eik::PositionStepCollisionCandidate::candidate_margins)
+      .def_ro("reference_min_distance", &eik::PositionStepCollisionCandidate::reference_min_distance)
+      .def_ro("candidate_min_distance", &eik::PositionStepCollisionCandidate::candidate_min_distance)
+      .def_ro("global_distance_threshold", &eik::PositionStepCollisionCandidate::global_distance_threshold)
+      .def_ro("floor_acceptable", &eik::PositionStepCollisionCandidate::floor_acceptable);
   nb::class_<eik::PositionIKResult, eik::VelocitySolverResult>(
       m, "PositionIKResult", "Result from position-level IK solving")
       .def_ro("q_solution", &eik::PositionIKResult::q_solution)
+      .def_ro("collision_candidates", &eik::PositionIKResult::collision_candidates)
+      .def_ro("velocity_candidates", &eik::PositionIKResult::velocity_candidates)
       .def_prop_ro(
           "achieved_pose",
           [](const eik::PositionIKResult &r) { return r.achieved_pose; })
@@ -779,7 +820,7 @@ NB_MODULE(_embodik_impl, m) {
          const Eigen::VectorXd &upper_limits, double solver_tolerance,
          double solver_tight_tolerance, unsigned int max_iters,
          double norm_threshold, unsigned int max_zero_scale_iters,
-         double sr_tolerance, double sr_damping) {
+         double sr_tolerance, double sr_damping, bool refine_partial_scale) {
         eik::VelocitySolverConfig p;
         p.epsilon = solver_tolerance;
         p.precision_threshold = solver_tight_tolerance;
@@ -788,6 +829,7 @@ NB_MODULE(_embodik_impl, m) {
         p.stall_detection_count = max_zero_scale_iters;
         p.regularization_config.epsilon = sr_tolerance;
         p.regularization_config.regularization_factor = sr_damping;
+        p.refine_partial_scale = refine_partial_scale;
         return eik::computeMultiObjectiveVelocitySolutionEigen(
             goals, jacobians, C, lower_limits, upper_limits, p);
       },
@@ -795,7 +837,7 @@ NB_MODULE(_embodik_impl, m) {
       "solver_tolerance"_a = 1e-6, "solver_tight_tolerance"_a = 1e-10,
       "max_iters"_a = 20, "norm_threshold"_a = 1e10,
       "max_zero_scale_iters"_a = 2, "sr_tolerance"_a = 1e-6,
-      "sr_damping"_a = 1e-1,
+      "sr_damping"_a = 1e-1, "refine_partial_scale"_a = false,
       R"pbdoc(
           Full multi-task velocity IK using Eigen types. Preferred API.
           )pbdoc");
@@ -810,7 +852,8 @@ NB_MODULE(_embodik_impl, m) {
          double solver_tolerance, double solver_tight_tolerance,
          unsigned int max_iters, double norm_threshold,
          unsigned int max_zero_scale_iters, double sr_tolerance,
-         double sr_damping) {
+         double sr_damping,
+         const std::optional<Eigen::VectorXd> &initial_solution) {
         eik::VelocitySolverConfig p;
         p.epsilon = solver_tolerance;
         p.precision_threshold = solver_tight_tolerance;
@@ -821,7 +864,7 @@ NB_MODULE(_embodik_impl, m) {
         p.regularization_config.regularization_factor = sr_damping;
         return eik::computeConstrainedWeightedVelocitySolutionEigen(
             goals, jacobians, C, lower_limits, upper_limits, objective_weights,
-            p);
+            p, {}, initial_solution ? &*initial_solution : nullptr);
       },
       "goals"_a, "jacobians"_a, "C"_a, "lower_limits"_a, "upper_limits"_a,
       "objective_weights"_a = std::vector<double>{},
@@ -829,10 +872,13 @@ NB_MODULE(_embodik_impl, m) {
       "max_iters"_a = 20, "norm_threshold"_a = 1e10,
       "max_zero_scale_iters"_a = 2, "sr_tolerance"_a = 1e-6,
       "sr_damping"_a = 1e-1,
+      "initial_solution"_a = nb::none(),
       R"pbdoc(
           Constrained weighted velocity IK. Stacks all objectives with
           sqrt(weight) row scaling and solves one hard-constrained MIN_ERROR
           objective against C/lower/upper.
+          Optional initial_solution must be finite and satisfy the current
+          hard constraints. It seeds primal optimization, not the result.
           )pbdoc");
 
   // Module metadata
@@ -853,4 +899,5 @@ NB_MODULE(_embodik_impl, m) {
 
   // Bind acceleration-level solver
   bind_acceleration_solver(m);
+  bind_cartesian_corridor_recovery(m);
 }

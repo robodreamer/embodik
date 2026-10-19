@@ -314,11 +314,23 @@ struct AccelerationSolveOptions {
   std::optional<Eigen::VectorXd> acceleration_limits_override;
   bool apply_velocity_limits = true;
   bool apply_position_limits = true;
+  // Optional nominal envelope, contained in immutable model position limits.
+  std::optional<Eigen::VectorXd> nominal_position_lower_bounds;
+  std::optional<Eigen::VectorXd> nominal_position_upper_bounds;
+  double elastic_delta_max = 0.05;
+  double elastic_expand_rate = 0.01;
+  double elastic_decay_rate = 0.2;
+  bool elastic_expand_only_saturated = true;
   // A compatible position/velocity/acceleration box can require braking, so
   // zero acceleration may be infeasible even when the task requests strict
   // scaling. Keep the established safety-first behavior by default, but make
   // the MIN_ERROR fallback explicit and caller-controllable.
   bool allow_state_box_task_fallback = true;
+  // Opt in to retaining a validated higher-priority command when numerical
+  // recovery cannot optimize a trailing MIN_ERROR task. Hard constraints and
+  // achieved higher-priority images remain protected; lower-task optimality
+  // is not certified. Physical and nonlinear acceptance checks still apply.
+  bool allow_best_effort_lower_tasks = false;
   // Rich per-task acceleration records require retaining physical
   // differentials through postprocessing. Disable for latency-sensitive loops
   // that consume only status, scales, errors, and executable state outputs.
@@ -347,6 +359,14 @@ struct AccelerationSolveOptions {
   std::vector<int> zero_acceleration_joint_indices;
   std::vector<int> zero_next_velocity_joint_indices;
   std::vector<int> fixed_current_position_joint_indices;
+  // Opt in to a bounded refinement of feasible partial SCALE commands.
+  // Higher-priority images and original hard bounds remain protected; an
+  // improved primary scale can change lower-priority objective errors.
+  bool refine_partial_scale = false;
+  // Prefer a feasible-primal quadratic solve for an explicit all-MIN_ERROR
+  // hierarchy. Original scaling attempts and physical acceptance remain;
+  // unsuccessful direct attempts return to the established search.
+  bool prefer_direct_min_error_qp = false;
 };
 
 /**
@@ -359,6 +379,12 @@ struct AccelerationSolveOptions {
  */
 struct VelocityCollisionLiftOptions {
   int validation_substeps = 1;
+  /// Opt-in local sampled-distance corrections; zero preserves compatibility.
+  int max_refinement_iterations = 0;
+  /// Absolute per-coordinate acceleration trust radius (joint units / s^2).
+  double refinement_trust_radius = 0.5;
+  /// Additional distance required by local models, never an acceptance tolerance.
+  double refinement_clearance_reserve = 1e-6;
 };
 
 enum class CollisionConstraintOutsidePolicy {
@@ -487,12 +513,20 @@ struct AccelerationSolverResult : public SolverResult {
   double backend_computation_time_ms = 0.0;
   /// C++ time after the backend returned, including acceptance diagnostics.
   double postprocessing_time_ms = 0.0;
+  /// Number of bounded nonlinear CoM/translation corrective solves (zero normally).
+  int nonlinear_refinement_iterations = 0;
   Eigen::VectorXd joint_accelerations;
   Eigen::VectorXd joint_velocities_next;
   Eigen::VectorXd q_solution;
 
   /// True once the compatible acceleration box participated in the solve,
   /// including backend attempts that return no executable motion.
+  bool elastic_band_enabled = false;
+  Eigen::VectorXd elastic_band_delta;
+  Eigen::VectorXd elastic_band_capacity_lower;
+  Eigen::VectorXd elastic_band_capacity_upper;
+  Eigen::VectorXd elastic_effective_position_lower_bounds;
+  Eigen::VectorXd elastic_effective_position_upper_bounds;
   bool acceleration_limits_applied = false;
   /// True when the explicit state-box policy enabled MIN_ERROR fallback.
   bool state_box_task_fallback_applied = false;
@@ -511,6 +545,17 @@ struct AccelerationSolverResult : public SolverResult {
   std::vector<ZmpAccelerationDiagnostics> zmp_diagnostics;
   bool velocity_collision_lift_applied = false;
   bool collision_endpoint_validated = false;
+  /// Extra full solves after a sampled collision rejection; separate from CoM.
+  int collision_refinement_iterations = 0;
+  std::uint64_t collision_refinement_exact_queries = 0;
+  std::uint64_t collision_refinement_kinematics_updates = 0;
+  std::uint64_t collision_refinement_geometry_updates = 0;
+  std::uint64_t collision_refinement_last_failed_sample_index = 0;
+  std::string collision_refinement_last_failed_pair_key;
+  double collision_refinement_last_failed_distance =
+      std::numeric_limits<double>::quiet_NaN();
+  double collision_refinement_last_required_distance =
+      std::numeric_limits<double>::quiet_NaN();
   bool collision_step_certified = false;
   std::uint64_t collision_validation_samples = 0;
   std::uint64_t collision_validation_allowed_pairs = 0;
@@ -537,7 +582,8 @@ struct AccelerationSolverResult : public SolverResult {
 struct AccelerationSolverCapabilities {
   bool supports_fixed_base_scalar_joints = true;
   bool supports_floating_base = false;
-  bool supports_scale_elastic = false;
+  // SCALE_ELASTIC uses SCALE task scaling plus a nominal-position band.
+  bool supports_scale_elastic = true;
 #ifdef PINOCCHIO_WITH_HPP_FCL
   // True when at least one native collision family is available. Inspect the
   // precise capability below and configuration contract for its scope.
@@ -606,6 +652,9 @@ public:
   std::shared_ptr<Task> get_task(const std::string &name) const;
   void remove_task(const std::string &name);
   void clear_tasks();
+  /// Clear only nominal-position elasticity, without changing physical state.
+  void reset_elastic_band();
+  Eigen::VectorXd get_elastic_band_deltas() const;
 
   /**
    * @brief Configure native continuously certified analytic collision.
@@ -654,7 +703,24 @@ public:
           VelocityCollisionLiftOptions{});
 
 private:
+  AccelerationSolverResult solve_impl(
+      const Eigen::VectorXd &q, const Eigen::VectorXd &dq, double dt,
+      const AccelerationSolveOptions &options, int refinement_budget);
   void ensure_unique_task_name(const std::string &name) const;
+  SolverStatus
+  prepare_elastic_bounds(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
+                         const Eigen::VectorXd &acceleration_limits,
+                         const AccelerationSolveOptions &options,
+                         AccelerationSolveOptions *effective_options,
+                         bool *active, std::string *message);
+  void update_elastic_band(const AccelerationSolverResult &result,
+                           const AccelerationSolveOptions &options);
+  bool elastic_was_active_ = false;
+  Eigen::VectorXd elastic_band_delta_;
+  Eigen::VectorXd elastic_nominal_lower_;
+  Eigen::VectorXd elastic_nominal_upper_;
+  Eigen::VectorXd elastic_capacity_lower_;
+  Eigen::VectorXd elastic_capacity_upper_;
 
   std::shared_ptr<RobotModel> robot_;
   std::vector<std::shared_ptr<Task>> tasks_;

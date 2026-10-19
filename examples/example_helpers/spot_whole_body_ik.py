@@ -87,6 +87,9 @@ _LOCO_TORSO_POSE_HALF_RANGE = np.array(
 _ARM_TORSO_POSE_AXIS_MASK = np.array([0.0, 0.0, 1.0, 1.0, 1.0, 0.0], dtype=float)
 _LOCO_NULLSPACE_BASE_GAINS = np.array([1e-4, 1e-4, 4.0, 5.0, 5.0, 1e-4], dtype=float)
 _LOCO_ARM_BIASED_BASE_GAINS = np.array([10.0, 10.0, 4.0, 5.0, 5.0, 10.0], dtype=float)
+# Lateral and yaw restoration need stronger gains to retain arm participation
+# in a settled simulation pose, while forward reaches need earlier base assist.
+_LOCO_BALANCED_BASE_GAINS = np.array([0.2, 0.75, 4.0, 5.0, 5.0, 0.5], dtype=float)
 _LOCO_NULLSPACE_ARM_GAINS = np.array([3.0, 0.2, 0.2, 1.0, 0.2, 3.0], dtype=float)
 _LOCO_NULLSPACE_GAIN = 1.0
 _LOCO_CONDITION_HANDOFF_ENTER = 150.0
@@ -986,11 +989,18 @@ class OptionalSpotWholeBodyIK:
 
     def _locomanip_base_gains(self) -> np.ndarray:
         sensitivity = float(np.clip(self._locomotion_sensitivity, 0.25, 4.0))
-        blend = (np.log(sensitivity) - np.log(0.25)) / (np.log(4.0) - np.log(0.25))
-        blend = float(np.clip(blend, 0.0, 1.0))
         locked = np.maximum(_LOCO_ARM_BIASED_BASE_GAINS, 1e-9)
+        balanced = _LOCO_BALANCED_BASE_GAINS
         free = np.maximum(_LOCO_NULLSPACE_BASE_GAINS, 1e-9)
-        return np.exp((1.0 - blend) * np.log(locked) + blend * np.log(free))
+        if sensitivity <= 1.0:
+            blend = float((np.log(sensitivity) - np.log(0.25)) / np.log(4.0))
+            start, end = locked, balanced
+        else:
+            blend = float(np.log(sensitivity) / np.log(4.0))
+            start, end = balanced, free
+        # Balance small arm reaches, larger base assist and conditioning
+        # handoffs; all three behaviors are tested at the default 1.0.
+        return np.exp((1.0 - blend) * np.log(start) + blend * np.log(end))
 
     def _set_locomanip_posture_bias(self, *, condition_protect: bool = False) -> None:
         if self._posture_task is None or self._ik_opts is None:

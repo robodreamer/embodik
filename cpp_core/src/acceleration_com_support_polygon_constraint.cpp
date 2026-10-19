@@ -8,6 +8,7 @@
 #include <cmath>
 #include <exception>
 #include <limits>
+#include <stdexcept>
 #include <utility>
 
 namespace embodik::detail {
@@ -387,9 +388,12 @@ ComSupportPolygonConstraintResult validate_sample(
             comparison_tolerance(
                 acceleration(row),
                 prepared.specification.policy.acceleration_limit)) {
-      return failure(SolverStatus::kNumericalError,
-                     "nonlinear CoM support-polygon path violated edge " +
-                         std::to_string(row) + " acceleration bound");
+      auto result = failure(
+          SolverStatus::kNumericalError,
+          "nonlinear CoM support-polygon path violated edge " +
+              std::to_string(row) + " acceleration bound");
+      result.path_acceleration_violation = true;
+      return result;
     }
     if (endpoint && recovery) {
       const double target = prepared.recovery_rate_targets(row);
@@ -425,6 +429,33 @@ ComSupportPolygonConstraintResult validate_sample(
     }
   }
   return {};
+}
+
+ScalarGeometricConstraintSpecification com_path_specification(
+    const PreparedComSupportPolygonConstraint &prepared) {
+  ScalarGeometricConstraintSpecification specification;
+  specification.family_label = kFamilyLabel;
+  specification.source_id = prepared.specification.source_id;
+  specification.dimension =
+      prepared.state_box.physical_constraint.coefficient_matrix.rows();
+  specification.state_lower_bounds =
+      Eigen::VectorXd::Constant(specification.dimension, -1e9);
+  specification.state_upper_bounds =
+      Eigen::VectorXd::Constant(specification.dimension, 1e9);
+  specification.active_axes.reserve(
+      static_cast<std::size_t>(specification.dimension));
+  for (Eigen::Index row = 0; row < specification.dimension; ++row) {
+    specification.active_axes.push_back(static_cast<int>(row));
+  }
+  specification.policy.rate_limits = Eigen::VectorXd::Constant(
+      specification.dimension, prepared.specification.policy.rate_limit);
+  specification.policy.acceleration_limits = Eigen::VectorXd::Constant(
+      specification.dimension, prepared.specification.policy.acceleration_limit);
+  specification.policy.lower_braking_accelerations = Eigen::VectorXd::Constant(
+      specification.dimension, prepared.specification.policy.braking_acceleration);
+  specification.policy.upper_braking_accelerations =
+      specification.policy.lower_braking_accelerations;
+  return specification;
 }
 
 } // namespace
@@ -560,6 +591,161 @@ prepare_com_support_polygon_constraint_at_state(
 }
 
 ComSupportPolygonConstraintResult
+linearize_com_support_polygon_path_acceleration(
+    const PreparedComSupportPolygonConstraint &prepared,
+    const RobotModel &robot, const Eigen::VectorXd &q,
+    const Eigen::VectorXd &dq, const Eigen::VectorXd &candidate_acceleration,
+    double dt, AffineAccelerationConstraint *refinement) {
+  if (refinement == nullptr) {
+    return failure(SolverStatus::kInvalidInput,
+                   "CoM path refinement output is missing");
+  }
+  const auto specification = com_path_specification(prepared);
+  ScalarGeometricConstraintResult segment_failure;
+  const int segments = scalar_geometric_path_segment_count(
+      dq, candidate_acceleration, dt, specification,
+      ScalarGeometricPathValidationOptions{}, &segment_failure);
+  if (!segment_failure.satisfied()) {
+    return failure(segment_failure.status, segment_failure.message);
+  }
+  const auto times = scalar_geometric_path_sample_times(segments, dt);
+  const int sample_segments = static_cast<int>(times.size()) - 1;
+  if (sample_segments > ScalarGeometricPathValidationOptions{}.maximum_segments) {
+    return failure(SolverStatus::kNumericalError,
+                   "CoM path refinement exceeded validation sample budget");
+  }
+  const Eigen::Index edges = specification.dimension;
+  Eigen::VectorXd worst = Eigen::VectorXd::Zero(edges);
+  Eigen::MatrixXd matrices = Eigen::MatrixXd::Zero(edges, robot.nv());
+  Eigen::VectorXd biases = Eigen::VectorXd::Zero(edges);
+  Eigen::VectorXi worst_segment = Eigen::VectorXi::Constant(edges, -1);
+  Eigen::VectorXd worst_values = Eigen::VectorXd::Zero(edges);
+  pinocchio::Data scratch(robot.model());
+  try {
+    for (int segment = 0; segment <= sample_segments; ++segment) {
+      const double time = times[segment];
+      const Eigen::VectorXd sample_q = robot.integrate(
+          q, time * dq + 0.5 * time * time * candidate_acceleration);
+      const Eigen::VectorXd sample_dq = dq + time * candidate_acceleration;
+      const auto differential = evaluate_com_in_frame_differential_at_state(
+          robot, scratch, prepared.specification.definition.frame_name,
+          sample_q, sample_dq);
+      const auto valid = validate_com_differential(
+          differential, sample_dq, robot.nv(), "CoM path refinement");
+      if (!valid.satisfied()) {
+        return valid;
+      }
+      const auto projected = project_com_differential(prepared.geometry,
+                                                      differential);
+      const Eigen::VectorXd acceleration =
+          projected.acceleration_matrix * candidate_acceleration +
+          projected.affine_bias;
+      if (!acceleration.allFinite()) {
+        return failure(SolverStatus::kNumericalError,
+                       "CoM path refinement acceleration was non-finite");
+      }
+      for (Eigen::Index edge = 0; edge < edges; ++edge) {
+        const double excess = std::abs(acceleration(edge)) -
+                              prepared.specification.policy.acceleration_limit;
+        if (excess > comparison_tolerance(
+                         acceleration(edge),
+                         prepared.specification.policy.acceleration_limit) &&
+            excess > worst(edge)) {
+          worst(edge) = excess;
+          worst_segment(edge) = segment;
+          worst_values(edge) = acceleration(edge);
+        }
+      }
+    }
+    // Differentiate the complete constant-acceleration path map at each
+    // selected time. Opposite/duplicate polygon edges share the same probes.
+    for (int segment = 0; segment <= sample_segments; ++segment) {
+      if (!(worst_segment.array() == segment).any()) {
+        continue;
+      }
+      const double time = times[segment];
+      const auto evaluate_acceleration = [&](const Eigen::VectorXd &acceleration) {
+        const Eigen::VectorXd sample_q = robot.integrate(
+            q, time * dq + 0.5 * time * time * acceleration);
+        const Eigen::VectorXd sample_dq = dq + time * acceleration;
+        const auto differential = evaluate_com_in_frame_differential_at_state(
+            robot, scratch, prepared.specification.definition.frame_name,
+            sample_q, sample_dq);
+        const auto valid = validate_com_differential(
+            differential, sample_dq, robot.nv(), "CoM path refinement derivative");
+        if (!valid.satisfied()) {
+          throw std::runtime_error(valid.message);
+        }
+        const auto projected = project_com_differential(prepared.geometry,
+                                                        differential);
+        const Eigen::VectorXd value =
+            projected.acceleration_matrix * acceleration + projected.affine_bias;
+        if (!value.allFinite()) {
+          throw std::runtime_error("CoM path derivative sample was non-finite");
+        }
+        return value;
+      };
+      Eigen::MatrixXd gradient(edges, robot.nv());
+      for (Eigen::Index joint = 0; joint < robot.nv(); ++joint) {
+        const double step = std::cbrt(std::numeric_limits<double>::epsilon()) *
+                            std::max(1.0, std::abs(candidate_acceleration(joint)));
+        Eigen::VectorXd plus = candidate_acceleration;
+        Eigen::VectorXd minus = candidate_acceleration;
+        plus(joint) += step;
+        minus(joint) -= step;
+        const double separation = plus(joint) - minus(joint);
+        if (!(separation > 0.0) || !std::isfinite(separation)) {
+          throw std::runtime_error("CoM path derivative perturbation is invalid");
+        }
+        // Perturbed states are differentiation probes, never commands. Both
+        // q(t) and dq(t), including the affine acceleration bias, are refreshed.
+        const Eigen::VectorXd plus_value = evaluate_acceleration(plus);
+        const Eigen::VectorXd minus_value = evaluate_acceleration(minus);
+        gradient.col(joint) = (plus_value - minus_value) / separation;
+      }
+      if (!gradient.allFinite()) {
+        throw std::runtime_error("CoM path derivative was non-finite");
+      }
+      for (Eigen::Index edge = 0; edge < edges; ++edge) {
+        if (worst_segment(edge) != segment) {
+          continue;
+        }
+        matrices.row(edge) = gradient.row(edge);
+        // Anchor the local affine row at the exact evaluated candidate value.
+        biases(edge) =
+            worst_values(edge) - gradient.row(edge).dot(candidate_acceleration);
+        if (!std::isfinite(biases(edge))) {
+          throw std::runtime_error("CoM path derivative bias was non-finite");
+        }
+      }
+    }
+  } catch (const std::exception &error) {
+    return failure(SolverStatus::kNumericalError,
+                   std::string("CoM path refinement failed: ") + error.what());
+  }
+  const Eigen::Index count = (worst.array() > 0.0).count();
+  if (count == 0) {
+    return failure(SolverStatus::kNumericalError,
+                   "CoM path refinement found no violated acceleration row");
+  }
+  // Sampled path linearizations are local models, not feasibility certificates.
+  // Every corrected solution must pass the unchanged full nonlinear validator.
+  refinement->coefficient_matrix.resize(count, robot.nv());
+  refinement->affine_bias.resize(count);
+  refinement->lower_bounds = Eigen::VectorXd::Constant(
+      count, -prepared.specification.policy.acceleration_limit);
+  refinement->upper_bounds = -refinement->lower_bounds;
+  Eigen::Index row = 0;
+  for (Eigen::Index edge = 0; edge < edges; ++edge) {
+    if (worst(edge) > 0.0) {
+      refinement->coefficient_matrix.row(row) = matrices.row(edge);
+      refinement->affine_bias(row++) = biases(edge);
+    }
+  }
+  return {};
+}
+
+ComSupportPolygonConstraintResult
 validate_com_support_polygon_constraint_acceptance(
     const PreparedComSupportPolygonConstraint &prepared,
     const RobotModel &robot, const Eigen::VectorXd &q,
@@ -573,35 +759,8 @@ validate_com_support_polygon_constraint_acceptance(
   }
 
   pinocchio::Data scratch(robot.model());
-  ScalarGeometricConstraintSpecification path_spec;
-  path_spec.family_label = kFamilyLabel;
-  path_spec.source_id = prepared.specification.source_id;
-  path_spec.dimension = prepared.state_box.physical_constraint
-                            .coefficient_matrix.rows();
-  path_spec.state_lower_bounds =
-      Eigen::VectorXd::Constant(path_spec.dimension, -1e9);
-  path_spec.state_upper_bounds =
-      Eigen::VectorXd::Constant(path_spec.dimension, 1e9);
-  path_spec.active_axes.reserve(static_cast<std::size_t>(path_spec.dimension));
-  for (Eigen::Index row = 0; row < path_spec.dimension; ++row) {
-    path_spec.active_axes.push_back(static_cast<int>(row));
-  }
-  path_spec.policy.rate_limits =
-      Eigen::VectorXd::Constant(path_spec.dimension,
-                                prepared.specification.policy.rate_limit);
-  path_spec.policy.acceleration_limits =
-      Eigen::VectorXd::Constant(
-          path_spec.dimension,
-          prepared.specification.policy.acceleration_limit);
-  path_spec.policy.lower_braking_accelerations =
-      Eigen::VectorXd::Constant(
-          path_spec.dimension,
-          prepared.specification.policy.braking_acceleration);
-  path_spec.policy.upper_braking_accelerations =
-      Eigen::VectorXd::Constant(
-          path_spec.dimension,
-          prepared.specification.policy.braking_acceleration);
-
+  const auto path_spec = com_path_specification(prepared);
+  bool path_acceleration_violation = false;
   const ScalarGeometricPathValidationOptions path_options;
   const auto path = validate_scalar_geometric_path(
       path_spec, dq, accepted_acceleration, dt, path_options,
@@ -624,6 +783,7 @@ validate_com_support_polygon_constraint_acceptance(
               prepared, differential, accepted_acceleration,
               dt,
               path_point.segment_index == path_point.segment_count);
+          path_acceleration_violation = sample.path_acceleration_violation;
           return ScalarGeometricConstraintResult{sample.status,
                                                  sample.message};
         } catch (const std::exception &error) {
@@ -634,7 +794,9 @@ validate_com_support_polygon_constraint_acceptance(
         }
       });
   if (!path.satisfied()) {
-    return failure(path.status, path.message);
+    auto result = failure(path.status, path.message);
+    result.path_acceleration_violation = path_acceleration_violation;
+    return result;
   }
 
   Eigen::VectorXd q_next;

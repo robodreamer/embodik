@@ -29,6 +29,13 @@ void bind_kinematics_solver(nb::module_ &m) {
           const Eigen::VectorXd &, const std::vector<TaskTarget> &,
           const PositionStepOptions &)>(&KinematicsSolver::solve_position_step);
 
+  nb::class_<CollisionPairDistance>(m, "CollisionPairDistance")
+      .def_ro("geometry_a", &CollisionPairDistance::geometry_a)
+      .def_ro("geometry_b", &CollisionPairDistance::geometry_b)
+      .def_ro("distance", &CollisionPairDistance::distance)
+      .def_ro("minimum_distance", &CollisionPairDistance::minimum_distance)
+      .def_ro("persistent_floor_m", &CollisionPairDistance::persistent_floor_m);
+
   nb::class_<KinematicsSolver::CollisionDebugInfo>(m, "CollisionDebugInfo")
       .def_prop_ro("object_a",
                    [](const KinematicsSolver::CollisionDebugInfo &self) {
@@ -224,6 +231,10 @@ void bind_kinematics_solver(nb::module_ &m) {
       .def("enable_acceleration_limits",
            &KinematicsSolver::enable_acceleration_limits, nb::arg("enable"),
            "Enable or disable inter-tick acceleration limit constraints")
+
+      .def("get_acceleration_limits_enabled",
+           &KinematicsSolver::get_acceleration_limits_enabled,
+           "Return whether inter-tick acceleration limits are enabled")
 
       .def("set_acceleration_limits",
            &KinematicsSolver::set_acceleration_limits, nb::arg("limits"),
@@ -567,9 +578,9 @@ void bind_kinematics_solver(nb::module_ &m) {
            &KinematicsSolver::get_collision_recovery_scale)
       .def("set_non_worsening_collision_floor_enabled",
            &KinematicsSolver::set_non_worsening_collision_floor_enabled, nb::arg("enable"),
-           "Enable the per-pair non-worsening (ratcheting) collision recovery floor.  "
-           "When enabled, links that rest closer than min_distance are maintained "
-           "at their achievable distance instead of triggering an infeasible recovery.  "
+           "Enable the per-pair structural collision recovery floor.  "
+           "Pairs first seen below nominal clearance recover toward the configured "
+           "structural floor; that persistent floor does not ratchet upward as clearance improves.  "
            "Off by default on a new solver; the bimanual teleop app opts in.")
       .def("get_non_worsening_collision_floor_enabled",
            &KinematicsSolver::get_non_worsening_collision_floor_enabled)
@@ -864,6 +875,12 @@ void bind_kinematics_solver(nb::module_ &m) {
            "Return post-step pair checks certified by cached rigid-body "
            "motion bounds in the latest outer position step.")
 
+      .def("evaluate_collision_pair_distances",
+           &KinematicsSolver::evaluate_collision_pair_distances, nb::arg("q"),
+           "Fresh exact distances and configured clearances for every allowed "
+           "active pair. Requires finite full nq and preserves robot state. "
+           "Returns None without enabled policy, geometry, or active pairs; "
+           "nonfinite distance results raise. Independent of row budgets.")
       .def("evaluate_min_collision_distance",
            &KinematicsSolver::evaluate_min_collision_distance,
            nb::arg("current_q") = Eigen::VectorXd(),

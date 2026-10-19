@@ -107,6 +107,131 @@ SolverResult solve_canonical(
 }
 
 TEST(HierarchicalLinearSolverTest,
+     RevalidatedPhaseOneWitnessPreservesMixedPriorityFallback) {
+  const Eigen::MatrixXd constraints = Eigen::Matrix2d::Identity();
+  const Eigen::VectorXd lower = vector({0.1, -0.5});
+  const Eigen::VectorXd upper = vector({0.8, 0.4});
+  const auto config = exact_config();
+  Eigen::VectorXd witness;
+  ASSERT_EQ(detail::FindHardConstraintFeasibleWitness(
+                constraints, lower, upper, config, &witness),
+            detail::HardConstraintFeasibilityStatus::kFeasible);
+  ObjectiveSolveConfig primary;
+  primary.solve_mode = TaskSolveMode::kScale;
+  ObjectiveSolveConfig secondary;
+  secondary.solve_mode = TaskSolveMode::kScale;
+  secondary.allow_min_error_fallback = true;
+  const auto run = [&](const Eigen::VectorXd *hint, bool direct) {
+    detail::HierarchicalLinearSolverExecutionOptions execution;
+    execution.initial_hard_constraint_witness = hint;
+    execution.prefer_direct_min_error_qp = direct;
+    return solveHierarchicalLinearSystemEigen(
+        {vector({0.3}), vector({0.2, 0.4})},
+        {vector({0.0}), vector({0.0, 0.0})},
+        {matrix({{1.0, 0.0}}), matrix({{0.0, 1.0}, {0.0, 0.0}})},
+        constraints, lower, upper, config, {primary, secondary}, nullptr,
+        execution);
+  };
+  for (bool direct : {false, true}) {
+    const auto original = run(nullptr, direct);
+    const auto reused = run(&witness, direct);
+    ASSERT_EQ(original.status, SolverStatus::kSuccess)
+        << original.status_message;
+    expect_results_equal_except_timing(reused, original);
+    ASSERT_EQ(reused.task_used_fallback.size(), 2u);
+    EXPECT_FALSE(reused.task_used_fallback[0]);
+    EXPECT_TRUE(reused.task_used_fallback[1]);
+    EXPECT_NEAR(solution_vector(reused)(0), 0.3, kTolerance);
+  }
+}
+
+TEST(HierarchicalLinearSolverTest,
+     InvalidPhaseOneWitnessHintsRunOrdinaryFeasibilitySearch) {
+  const auto run = [&](const Eigen::VectorXd *hint, bool infeasible) {
+    detail::HierarchicalLinearSolverExecutionOptions execution;
+    execution.initial_hard_constraint_witness = hint;
+    execution.prefer_direct_min_error_qp = true;
+    ObjectiveSolveConfig objective;
+    objective.solve_mode = TaskSolveMode::kMinError;
+    return solveHierarchicalLinearSystemEigen(
+        {vector({0.4})}, {vector({0.0})}, {matrix({{1.0}})},
+        matrix({{1.0}, {1.0}}), vector({0.2, infeasible ? 0.9 : 0.2}),
+        vector({0.8, 1.2}), exact_config(), {objective}, nullptr, execution);
+  };
+  const std::vector<Eigen::VectorXd> hints{
+      vector({}), vector({0.4, 0.4}), vector({-0.4}),
+      vector({std::numeric_limits<double>::quiet_NaN()}),
+      vector({std::numeric_limits<double>::infinity()})};
+  for (bool infeasible : {false, true}) {
+    const auto original = run(nullptr, infeasible);
+    EXPECT_EQ(original.status, infeasible ? SolverStatus::kInfeasible
+                                         : SolverStatus::kSuccess);
+    for (const auto &hint : hints) {
+      expect_results_equal_except_timing(run(&hint, infeasible), original);
+    }
+  }
+}
+
+TEST(HierarchicalLinearSolverTest,
+     PhaseOneWitnessDoesNotOverrideLegacyVelocityPolicy) {
+  const Eigen::VectorXd witness = vector({0.7});
+  detail::HierarchicalLinearSolverExecutionOptions execution;
+  execution.policy = detail::HierarchicalLinearSolverPolicy::kLegacyVelocity;
+  const auto run = [&]() {
+    return solveHierarchicalLinearSystemEigen(
+        {vector({0.4})}, {vector({0.0})}, {matrix({{1.0}})},
+        matrix({{1.0}}), vector({-1.0}), vector({1.0}), exact_config(),
+        {}, nullptr, execution);
+  };
+  const auto original = run();
+  execution.initial_hard_constraint_witness = &witness;
+  expect_results_equal_except_timing(run(), original);
+}
+
+TEST(HierarchicalLinearSolverTest,
+     ExplicitFallbackRetriesUnrealizablePositiveTaskRay) {
+  ObjectiveSolveConfig objective;
+  objective.solve_mode = TaskSolveMode::kScale;
+  objective.allow_min_error_fallback = false;
+  const auto strict = solve_canonical(
+      {vector({0.2, 0.4})}, {vector({0.0, 0.0})},
+      {matrix({{1.0}, {0.0}})}, matrix({{1.0}}), vector({-1.0}),
+      vector({1.0}), {objective});
+  EXPECT_EQ(strict.status, SolverStatus::kNoProgress);
+  objective.allow_min_error_fallback = true;
+  const auto fallback = solve_canonical(
+      {vector({0.2, 0.4})}, {vector({0.0, 0.0})},
+      {matrix({{1.0}, {0.0}})}, matrix({{1.0}}), vector({-1.0}),
+      vector({1.0}), {objective});
+  ASSERT_EQ(fallback.status, SolverStatus::kSuccess) << fallback.status_message;
+  ASSERT_EQ(fallback.task_scales.size(), 1u);
+  EXPECT_EQ(fallback.task_scales[0], -1.0);
+  EXPECT_EQ(fallback.task_modes_effective[0], TaskSolveMode::kMinError);
+  EXPECT_TRUE(fallback.task_used_fallback[0]);
+  EXPECT_NEAR(fallback.solution[0], 0.2, 1e-8);
+}
+
+TEST(HierarchicalLinearSolverTest,
+     LowerFailedEqualityDoesNotConvertValidPrimaryToMinError) {
+  ObjectiveSolveConfig primary;
+  primary.solve_mode = TaskSolveMode::kScale;
+  primary.allow_min_error_fallback = true;
+  ObjectiveSolveConfig secondary;
+  secondary.solve_mode = TaskSolveMode::kScale;
+  secondary.allow_min_error_fallback = false;
+  const auto result = solve_canonical(
+      {vector({0.2}), vector({0.7, 0.3})},
+      {vector({0.0}), vector({0.0, 0.0})},
+      {matrix({{1.0}}), matrix({{1.0}, {0.0}})}, matrix({{1.0}}),
+      vector({-1.0}), vector({1.0}), {primary, secondary});
+  EXPECT_EQ(result.status, SolverStatus::kNoProgress);
+  ASSERT_EQ(result.task_scales.size(), 2u);
+  EXPECT_EQ(result.task_modes_effective[0], TaskSolveMode::kScale);
+  EXPECT_FALSE(result.task_used_fallback[0]);
+  EXPECT_NEAR(result.solution[0], 0.2, 1e-8);
+}
+
+TEST(HierarchicalLinearSolverTest,
      LegacyVelocityWrapperMatchesCanonicalZeroBiasResult) {
   const std::vector<Eigen::VectorXd> targets{vector({0.4}), vector({-0.2})};
   const std::vector<Eigen::VectorXd> zero_biases{vector({0.0}),
@@ -509,7 +634,7 @@ TEST(HierarchicalLinearSolverTest,
 }
 
 TEST(HierarchicalLinearSolverTest,
-     LegacyVelocityWrapperDoesNotUseGeneralizedPhaseOnePolicy) {
+     BothPoliciesCertifyAnImpossibleHardInterval) {
   const Eigen::MatrixXd impossible_row = matrix({{0.0}});
   const Eigen::VectorXd lower = vector({1.0});
   const Eigen::VectorXd upper = vector({2.0});
@@ -522,7 +647,97 @@ TEST(HierarchicalLinearSolverTest,
       config);
 
   EXPECT_EQ(generalized.status, SolverStatus::kInfeasible);
-  EXPECT_NE(legacy.status, SolverStatus::kInfeasible);
+  EXPECT_EQ(legacy.status, SolverStatus::kInfeasible);
+}
+
+TEST(HierarchicalLinearSolverTest,
+     LegacyExactZeroHardRowsReportCompleteInfeasibilityDiagnostics) {
+  const auto config = exact_config();
+  for (const double sign : {-1.0, 1.0}) {
+    SCOPED_TRACE(sign);
+    const Eigen::MatrixXd constraints = matrix({{1.0}, {-0.0}});
+    const auto result = computeMultiObjectiveVelocitySolutionEigen(
+        {vector({0.0})}, {matrix({{1.0}})}, constraints,
+        vector({-1.0, sign > 0.0 ? 1.0 : -2.0}),
+        vector({1.0, sign > 0.0 ? 2.0 : -1.0}), config);
+    EXPECT_EQ(result.status, SolverStatus::kInfeasible)
+        << result.status_message;
+    ASSERT_EQ(result.solution.size(), 1U);
+    EXPECT_DOUBLE_EQ(result.solution.front(), 0.0);
+    ASSERT_EQ(result.task_scales.size(), 1U);
+    EXPECT_DOUBLE_EQ(result.task_scales.front(), 0.0);
+    ASSERT_EQ(result.task_errors.size(), 1U);
+    EXPECT_DOUBLE_EQ(result.task_errors.front(), 0.0);
+    EXPECT_EQ(result.task_modes_effective,
+              std::vector<TaskSolveMode>{TaskSolveMode::kScale});
+    EXPECT_EQ(result.task_used_fallback, std::vector<bool>{false});
+  }
+}
+
+TEST(HierarchicalLinearSolverTest,
+     LegacyZeroHardRowsRetainExistingBoundTolerance) {
+  const auto config = exact_config();
+  for (const auto &[lower, upper] :
+       std::vector<std::pair<double, double>>{
+           {-1.0, 1.0}, {0.0, 0.0}, {config.epsilon, 1.0},
+           {-1.0, -config.epsilon}}) {
+    const auto result = computeMultiObjectiveVelocitySolutionEigen(
+        {vector({1.0})}, {matrix({{1.0}})}, matrix({{0.0}}),
+        vector({lower}), vector({upper}), config);
+    EXPECT_EQ(result.status, SolverStatus::kSuccess) << result.status_message;
+    ASSERT_EQ(result.solution.size(), 1U);
+    EXPECT_DOUBLE_EQ(result.solution.front(), 1.0);
+  }
+  for (const bool positive : {false, true}) {
+    const double outside = std::nextafter(
+        config.epsilon, std::numeric_limits<double>::infinity());
+    const auto result = computeMultiObjectiveVelocitySolutionEigen(
+        {vector({0.0})}, {matrix({{1.0}})}, matrix({{0.0}}),
+        vector({positive ? outside : -1.0}),
+        vector({positive ? 1.0 : -outside}), config);
+    EXPECT_EQ(result.status, SolverStatus::kInfeasible)
+        << result.status_message;
+  }
+}
+
+TEST(HierarchicalLinearSolverTest,
+     LegacyNonzeroRowsRemainFeasibleUnderExtremePositiveRescaling) {
+  for (const double magnitude :
+       {1.0, 1e-12, 1e-100, 1e-200, 1e-300,
+        std::numeric_limits<double>::denorm_min()}) {
+    for (const double sign : {-1.0, 1.0}) {
+      const double coefficient = sign * magnitude;
+      SCOPED_TRACE(coefficient);
+      auto config = exact_config();
+      config.epsilon = magnitude * 1e-4;
+      const auto result = computeMultiObjectiveVelocitySolutionEigen(
+          {vector({1.0})}, {matrix({{1.0}})}, matrix({{coefficient}}),
+          vector({std::min(coefficient, 2.0 * coefficient)}),
+          vector({std::max(coefficient, 2.0 * coefficient)}), config);
+      EXPECT_EQ(result.status, SolverStatus::kSuccess)
+          << result.status_message;
+      ASSERT_EQ(result.solution.size(), 1U);
+      EXPECT_DOUBLE_EQ(result.solution.front(), 1.0);
+      EXPECT_DOUBLE_EQ(result.task_scales.front(), 1.0);
+    }
+  }
+}
+
+TEST(HierarchicalLinearSolverTest,
+     LegacyZeroRowsWithPermittedSofteningAreNotCertifiedImmutable) {
+  const auto config = exact_config();
+  const Eigen::VectorXd softening = vector({4.0});
+  const auto softened = computeMultiObjectiveVelocitySolutionEigen(
+      {vector({0.0})}, {matrix({{1.0}})}, matrix({{0.0}}), vector({1.0}),
+      vector({2.0}), config, {}, &softening);
+  EXPECT_NE(softened.status, SolverStatus::kInfeasible)
+      << softened.status_message;
+  const Eigen::VectorXd hard = vector({1.0});
+  const auto immutable = computeMultiObjectiveVelocitySolutionEigen(
+      {vector({0.0})}, {matrix({{1.0}})}, matrix({{0.0}}), vector({1.0}),
+      vector({2.0}), config, {}, &hard);
+  EXPECT_EQ(immutable.status, SolverStatus::kInfeasible)
+      << immutable.status_message;
 }
 
 TEST(HierarchicalLinearSolverTest,
@@ -890,6 +1105,72 @@ TEST(HierarchicalLinearSolverTest,
   EXPECT_TRUE(solution_vector(transformed).isApprox(solution_vector(baseline),
                                                      kTolerance));
   expect_double_vectors_near(transformed.task_scales, baseline.task_scales);
+}
+
+TEST(HierarchicalLinearSolverTest,
+     ActiveHardRowsRecoverIntermediateAffineScaleWithoutFallback) {
+  const auto jacobian = matrix({{1.0, 0.0, 0.0}});
+  const auto goal = vector({10.0});
+  const auto bias = vector({1.0});
+  const auto constraints = matrix({{1.0, 0.0, 0.0}, {0.0, 1.0, 0.0},
+                                   {0.0, 0.0, 1.0}, {1.0, 0.0, 0.0},
+                                   {0.0, 0.0, 0.1}, {1.0, 1.0, 0.0}});
+  const auto lower = vector({-101.0, 1.2, -102.0, -0.6, -0.5, -10.1});
+  const auto upper = vector({99.0, 1.2, 98.0, -0.6, -0.5, 0.6});
+  ObjectiveSolveConfig objective;
+  objective.allow_min_error_fallback = false;
+  for (bool reverse_rows : {false, true}) {
+    for (double row_scale : {0.01, 1.0, 100.0}) {
+      Eigen::MatrixXd transformed = row_scale * constraints;
+      Eigen::VectorXd transformed_lower = row_scale * lower;
+      Eigen::VectorXd transformed_upper = row_scale * upper;
+      if (reverse_rows) {
+        transformed = transformed.colwise().reverse().eval();
+        transformed_lower = transformed_lower.reverse().eval();
+        transformed_upper = transformed_upper.reverse().eval();
+      }
+      const auto result = solve_canonical(
+          {goal}, {bias}, {jacobian}, transformed, transformed_lower,
+          transformed_upper, {objective});
+      ASSERT_EQ(result.status, SolverStatus::kSuccess) << result.status_message;
+      const auto velocity = solution_vector(result);
+      EXPECT_TRUE(velocity.isApprox(vector({-0.6, 1.2, -5.0}), kTolerance));
+      ASSERT_EQ(result.task_scales.size(), 1U);
+      EXPECT_NEAR(result.task_scales[0], 0.04, kTolerance);
+      EXPECT_EQ(result.task_modes_effective[0], TaskSolveMode::kScale);
+      EXPECT_FALSE(result.task_used_fallback[0]);
+      EXPECT_TRUE((jacobian * velocity + bias)
+                      .isApprox(result.task_scales[0] * goal, kTolerance));
+      EXPECT_LE(detail::ComputeMaxLinearConstraintViolation(
+                    constraints, lower, upper, velocity), kTolerance);
+    }
+  }
+}
+
+TEST(HierarchicalLinearSolverTest,
+     AffineScaleRecoveryCannotHideAnUnsupportedTaskComponent) {
+  ObjectiveSolveConfig objective;
+  objective.allow_min_error_fallback = false;
+  const auto result = solve_canonical(
+      {vector({10.0, 0.0})}, {vector({1.0, 0.2})},
+      {matrix({{1.0}, {0.0}})}, matrix({{1.0}, {1.0}}),
+      vector({-100.0, -0.6}), vector({100.0, -0.6}), {objective});
+  EXPECT_NE(result.status, SolverStatus::kSuccess);
+  EXPECT_FALSE(result.task_used_fallback[0]);
+}
+
+TEST(HierarchicalLinearSolverTest,
+     AffineScaleRecoveryCannotPublishNegativeOrAboveUnitScale) {
+  ObjectiveSolveConfig objective;
+  objective.allow_min_error_fallback = false;
+  for (double fixed_velocity : {-2.0, 20.0}) {
+    const auto result = solve_canonical(
+        {vector({10.0})}, {vector({1.0})}, {matrix({{1.0}})},
+        matrix({{1.0}, {1.0}}), vector({-100.0, fixed_velocity}),
+        vector({100.0, fixed_velocity}), {objective});
+    EXPECT_NE(result.status, SolverStatus::kSuccess);
+    EXPECT_FALSE(result.task_used_fallback[0]);
+  }
 }
 
 } // namespace

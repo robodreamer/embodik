@@ -470,6 +470,8 @@ class GpuWbcMultiFrameSolver:
         dt: float = 0.1,
         position_gain: float = 8.0,
         orientation_gain: float = 4.0,
+        position_tolerance_m: float = 0.008,
+        orientation_tolerance_rad: float = 0.03,
         max_linear_speed: float = 2.0,
         max_angular_speed: float = 2.0,
         max_joint_acceleration_rad_s2: float | None = None,
@@ -536,6 +538,9 @@ class GpuWbcMultiFrameSolver:
         secondary_frame_orientation_gains: tuple[float, ...] = (),
         secondary_frame_weights: tuple[float, ...] = (),
         locked_velocity_indices: tuple[int, ...] = (),
+        refine_partial_scale: bool = False,
+        refine_from_origin: bool = False,
+        refinement_ray_tolerance: float = 1e-8,
     ) -> None:
         try:
             import torch
@@ -730,6 +735,8 @@ class GpuWbcMultiFrameSolver:
                 dt=dt,
                 position_gain=position_gain,
                 orientation_gain=orientation_gain,
+                position_tolerance_m=position_tolerance_m,
+                orientation_tolerance_rad=orientation_tolerance_rad,
                 max_linear_speed=max_linear_speed,
                 max_angular_speed=max_angular_speed,
                 allow_nonconverged_progress_steps=True,
@@ -744,6 +751,9 @@ class GpuWbcMultiFrameSolver:
                 cusolver_reuse_locked_primary_inverse_enabled=(
                     cusolver_reuse_locked_primary_inverse_enabled
                 ),
+                refine_partial_scale=refine_partial_scale,
+                refine_from_origin=refine_from_origin,
+                refinement_ray_tolerance=refinement_ray_tolerance,
                 adaptive_dt=adaptive_dt,
                 adaptive_dt_max_scale=adaptive_dt_max_scale,
                 adaptive_dt_reference_distance=adaptive_dt_reference_distance,
@@ -930,7 +940,10 @@ class GpuWbcMultiFrameSolver:
         quaternion. Both must be float32 CUDA tensors. Finite joint positions
         outside their limits are projected onto those limits before the solve.
         Read ``result.world_status`` for each world. ``result.status`` is not a
-        per-world code.
+        per-world code. ``WORLD_STATUS_SUCCESS`` includes accepted progress
+        steps; also check ``result.converged`` for terminal tracking accuracy.
+        With CUDA graph capture enabled, output tensors are reused by the next
+        solve; clone tensors that must remain valid across calls.
         """
 
         return GpuWbcFloatingMultiFrameSolver.solve_device_batch(
@@ -1003,6 +1016,8 @@ class GpuWbcFloatingMultiFrameSolver:
         dt: float = 0.01,
         position_gain: float = 60.0,
         orientation_gain: float = 60.0,
+        position_tolerance_m: float = 0.008,
+        orientation_tolerance_rad: float = 0.03,
         max_linear_speed: float = 1.8,
         max_angular_speed: float = 2.5,
         adaptive_dt: bool = False,
@@ -1162,6 +1177,8 @@ class GpuWbcFloatingMultiFrameSolver:
                 adaptive_dt_reference_distance=adaptive_dt_reference_distance,
                 position_gain=position_gain,
                 orientation_gain=orientation_gain,
+                position_tolerance_m=position_tolerance_m,
+                orientation_tolerance_rad=orientation_tolerance_rad,
                 max_linear_speed=max_linear_speed,
                 max_angular_speed=max_angular_speed,
                 max_joint_acceleration_rad_s2=max_joint_acceleration_rad_s2,
@@ -1661,7 +1678,10 @@ class GpuWbcFloatingMultiFrameSolver:
 
         ``result.world_status`` is an int8 tensor of shape ``[batch_size]``.
         ``result.status`` only reports that the batch finished and still needs
-        that per-world read.
+        that per-world read. ``WORLD_STATUS_SUCCESS`` includes accepted progress
+        steps; also check ``result.converged`` for terminal tracking accuracy.
+        With CUDA graph capture enabled, output tensors are reused by the next
+        solve; clone tensors that must remain valid across calls.
         """
 
         history = self._previous_velocity if previous_velocity is None else previous_velocity

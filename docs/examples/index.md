@@ -65,6 +65,7 @@ the application to `AccelerationSolver`.
 | `gpu_collision_batch.py` | Not applicable | Benchmarks collision-distance queries, not an IK solver loop. |
 | `harnesses/ai_worker_weighted_fallback_harness.py` | Not applicable | Measures the velocity solver's weighted-fallback policy, which the acceleration API does not import. |
 | `harnesses/g1_four_gizmo_ik_benchmark.py` | Unsupported | Exercises the same floating-base G1 runtime as example 07. |
+| `harnesses/joint_limit_recovery_harness.py` | Not applicable | Measures CPU velocity joint-limit redistribution, which the acceleration API does not import. |
 | `10_parallel_trajectory_tracking.py` | Not applicable | Exercises the model-derived parallel velocity WBC pipeline. |
 | `parallel_trajectory_tracking.py` | Not applicable | Compatibility launcher for the numbered parallel WBC example. |
 | `robot_model_example.py` | Not applicable | Walks through model, FK, Jacobian, and CoM APIs without an IK loop. |

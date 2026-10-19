@@ -7,12 +7,25 @@ AccelerationSolverResult
 AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
                           double dt,
                           const AccelerationSolveOptions &options) {
+  // Sampled curvature corrections may need more than four contractions to
+  // satisfy the unchanged nonlinear tolerance. Successful candidates still
+  // return immediately; keep a finite budget for nonconvergent local models.
+  return solve_impl(q, dq, dt, options, 8);
+}
+
+AccelerationSolverResult AccelerationSolver::solve_impl(
+    const Eigen::VectorXd &q, const Eigen::VectorXd &dq, double dt,
+    const AccelerationSolveOptions &options, int refinement_budget) {
   const auto start = std::chrono::steady_clock::now();
   auto backend_start = start;
   auto backend_end = start;
   bool backend_completed = false;
-  const auto finish = [&start, &backend_start, &backend_end,
-                       &backend_completed](AccelerationSolverResult result) {
+  bool elastic_prepared = false;
+  bool elastic_active = false;
+  AccelerationSolveOptions effective_options = options;
+  const auto finish = [this, &start, &backend_start, &backend_end,
+                       &backend_completed, &elastic_prepared, &elastic_active,
+                       &effective_options](AccelerationSolverResult result) {
     const auto end = std::chrono::steady_clock::now();
     result.computation_time_ms =
         std::chrono::duration<double, std::milli>(end - start).count();
@@ -22,6 +35,21 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
               .count();
       result.postprocessing_time_ms =
           std::chrono::duration<double, std::milli>(end - backend_end).count();
+    }
+    if (elastic_prepared) {
+      result.elastic_band_enabled = elastic_active;
+      result.elastic_band_delta = elastic_band_delta_;
+      result.elastic_band_capacity_lower = elastic_capacity_lower_;
+      result.elastic_band_capacity_upper = elastic_capacity_upper_;
+      result.elastic_effective_position_lower_bounds =
+          effective_options.nominal_position_lower_bounds.value_or(
+              Eigen::VectorXd{});
+      result.elastic_effective_position_upper_bounds =
+          effective_options.nominal_position_upper_bounds.value_or(
+              Eigen::VectorXd{});
+      if (elastic_active) {
+        update_elastic_band(result, effective_options);
+      }
     }
     return result;
   };
@@ -61,8 +89,16 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
         std::string("acceleration kinematics update failed: ") + error.what()));
   }
 
-  const auto state_box =
-      build_joint_state_box(*robot_, q, dq, dt, accel_limits, options);
+  std::string elastic_message;
+  const SolverStatus elastic_status =
+      prepare_elastic_bounds(q, dq, accel_limits, options, &effective_options,
+                             &elastic_active, &elastic_message);
+  if (elastic_status != SolverStatus::kSuccess) {
+    return finish(failure(elastic_status, elastic_message));
+  }
+  elastic_prepared = true;
+  const auto state_box = build_joint_state_box(*robot_, q, dq, dt, accel_limits,
+                                               effective_options);
   if (state_box.status != SolverStatus::kSuccess) {
     return finish(failure(state_box.status, state_box.message));
   }
@@ -549,13 +585,16 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
   // normalized and Phase I would duplicate that feasibility proof.
   const bool prevalidated_state_box_only =
       !allocation.has_value() && state_box_only;
+  auto backend_config = acceleration_backend_config();
+  backend_config.refine_partial_scale = options.refine_partial_scale;
   backend_start = std::chrono::steady_clock::now();
   auto backend = detail::SolveGeneralizedHierarchicalLinearSystemEigen(
       *backend_targets, *backend_biases, *backend_matrices,
       *backend_constraint_matrix, *backend_lower_bounds, *backend_upper_bounds,
-      acceleration_backend_config(), objectives.configs, nullptr,
+      backend_config, objectives.configs, nullptr,
       kConstraintTolerance, prevalidated_state_box_only,
-      prevalidated_state_box_only);
+      prevalidated_state_box_only, options.allow_best_effort_lower_tasks,
+      options.prefer_direct_min_error_qp);
   backend_end = std::chrono::steady_clock::now();
   backend_completed = true;
 
@@ -596,13 +635,6 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
       return finish(fail_after_backend(physical.status, physical.message));
     }
     result.joint_accelerations = physical.vector;
-    assign_solution_from_vector(&result, result.joint_accelerations);
-    if (!populate_allocation_diagnostics(&result, *allocation,
-                                         result.joint_accelerations)) {
-      return finish(fail_after_backend(
-          SolverStatus::kNumericalError,
-          "acceleration allocation diagnostics are not finite"));
-    }
   } else {
     result.joint_accelerations = std::move(backend_solution);
   }
@@ -611,6 +643,50 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
     return finish(fail_after_backend(
         SolverStatus::kNumericalError,
         "backend returned an invalid acceleration vector"));
+  }
+  // Certify every unallocated correction against the original raw backend
+  // vector, including arithmetic-sized box residuals. Canonicalizing first
+  // would hide the achieved-image change from this certificate.
+  if (!allocation.has_value()) {
+    const Eigen::MatrixXd &physical_matrix =
+        state_box_only ? state_box_matrix : constraints->coefficient_matrix();
+    const Eigen::VectorXd &physical_lower =
+        state_box_only ? state_box.lower : constraints->lower_bounds();
+    const Eigen::VectorXd &physical_upper =
+        state_box_only ? state_box.upper : constraints->upper_bounds();
+    bool polished = false;
+    if (!detail::polish_state_box_acceleration(
+            state_box.lower, state_box.upper, physical_matrix, physical_lower,
+            physical_upper, objectives.matrices, kConstraintTolerance,
+            backend_config.epsilon, kConstraintTolerance,
+            &result.joint_accelerations, &polished)) {
+      return finish(fail_after_backend(
+          SolverStatus::kNumericalError,
+          "physical acceleration box polishing could not preserve hard "
+          "constraints and task images"));
+    }
+    if (polished) {
+      if (!result.status_message.empty()) {
+        result.status_message += "; ";
+      }
+      result.status_message += "physical acceleration box numerically polished";
+    }
+  } else {
+    // Allocation retains its existing arithmetic-only postprocessing.
+    for (Eigen::Index index = 0; index < robot_->nv(); ++index) {
+      result.joint_accelerations(index) =
+          detail::canonicalize_state_box_acceleration_roundoff(
+              result.joint_accelerations(index), state_box.lower(index),
+              state_box.upper(index));
+    }
+  }
+  assign_solution_from_vector(&result, result.joint_accelerations);
+  if (allocation.has_value() &&
+      !populate_allocation_diagnostics(&result, *allocation,
+                                      result.joint_accelerations)) {
+    return finish(fail_after_backend(
+        SolverStatus::kNumericalError,
+        "acceleration allocation diagnostics are not finite"));
   }
   if ((result.joint_accelerations.array() <
        state_box.lower.array() - kConstraintTolerance)
@@ -795,7 +871,7 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
       native_collision_compiled.has_value()) {
     predicted_state_box = build_joint_state_box(
         *robot_, result.q_solution, result.joint_velocities_next, dt,
-        accel_limits, options);
+        accel_limits, effective_options);
     if (predicted_state_box->status != SolverStatus::kSuccess) {
       return finish(fail_after_backend(
           predicted_state_box->status,
@@ -804,6 +880,37 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
               predicted_state_box->message));
     }
   }
+  auto retry_nonlinear_refinement = [&](AffineAccelerationConstraint refinement,
+                                        const std::string &source_prefix,
+                                        const std::string &label) {
+    auto refined_options = options;
+    refinement.source_id = source_prefix;
+    while (constraint_source_ids.count(refinement.source_id) != 0U) {
+      refinement.source_id += "_";
+    }
+    refined_options.affine_constraints.push_back(std::move(refinement));
+    const auto retry_start = std::chrono::steady_clock::now();
+    auto refined = solve_impl(q, dq, dt, refined_options, refinement_budget - 1);
+    // Only the deepest finish() updates elasticity, once for the final result.
+    // Re-preparation at unchanged q/dq and nominal bounds is idempotent.
+    ++refined.nonlinear_refinement_iterations;
+    refined.computation_time_ms =
+        std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - start).count();
+    refined.preprocessing_time_ms +=
+        std::chrono::duration<double, std::milli>(backend_start - start).count();
+    refined.backend_computation_time_ms += result.backend_computation_time_ms;
+    refined.postprocessing_time_ms +=
+        std::chrono::duration<double, std::milli>(retry_start - backend_end).count();
+    refined.native_collision_pair_evaluations += result.native_collision_pair_evaluations;
+    if (refined.status != SolverStatus::kSuccess) {
+      // A failed local model is not a proof about the original nonlinear set.
+      refined.status = SolverStatus::kNumericalError;
+      refined.status_message = "bounded nonlinear " + label + " refinement failed: " +
+                               refined.status_message;
+    }
+    return refined;
+  };
   if (has_predicted_geometric_acceptance) {
     for (const auto &prepared :
          tight_point_constraints.prepared_constraints) {
@@ -823,6 +930,18 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
               prepared, *robot_, q, dq, result.joint_accelerations, dt,
               predicted_state_box->lower, predicted_state_box->upper);
       if (!acceptance.satisfied()) {
+        if (acceptance.violation &&
+            acceptance.violation->time > 0.0 && refinement_budget > 0) {
+          AffineAccelerationConstraint refinement;
+          const auto linearized =
+              detail::linearize_fixed_frame_pose_violations(
+                  prepared, *robot_, q, dq, result.joint_accelerations,
+                  dt, *acceptance.violation, &refinement);
+          if (linearized.satisfied()) {
+            return retry_nonlinear_refinement(
+                std::move(refinement), "__frame_pose_refinement", "frame pose");
+          }
+        }
         return finish(clear_outputs(
             failure(acceptance.status, acceptance.message)));
       }
@@ -856,6 +975,22 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
               prepared, *robot_, q, dq, result.joint_accelerations, dt,
               predicted_state_box->lower, predicted_state_box->upper);
       if (!acceptance.satisfied()) {
+        if (acceptance.path_acceleration_violation && refinement_budget > 0) {
+          AffineAccelerationConstraint refinement;
+          const auto linearized =
+              detail::linearize_com_support_polygon_path_acceleration(
+                  prepared, *robot_, q, dq, result.joint_accelerations, dt,
+                  &refinement);
+          if (!linearized.satisfied()) {
+            return finish(clear_outputs(failure(
+                SolverStatus::kNumericalError, linearized.message)));
+          }
+          // Keep original objectives, policies, and all physical rows. These
+          // extra sample rows are per-call local models; they never authorize
+          // acceptance without repeating every original nonlinear check.
+          return retry_nonlinear_refinement(
+              std::move(refinement), "__com_path_refinement", "CoM");
+        }
         return finish(clear_outputs(
             failure(acceptance.status, acceptance.message)));
       }

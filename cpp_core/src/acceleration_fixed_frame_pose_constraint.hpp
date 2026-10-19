@@ -28,6 +28,7 @@ struct FixedFramePoseConstraintRecord {
 struct FixedFramePoseConstraintResult {
   SolverStatus status = SolverStatus::kSuccess;
   std::string message;
+  std::optional<ScalarGeometricViolation> violation = std::nullopt;
 
   bool satisfied() const { return status == SolverStatus::kSuccess; }
 };
@@ -61,5 +62,22 @@ FixedFramePoseConstraintResult validate_fixed_frame_pose_constraint_acceptance(
     const Eigen::VectorXd &accepted_acceleration, double dt,
     const Eigen::VectorXd &predicted_joint_acceleration_lower,
     const Eigen::VectorXd &predicted_joint_acceleration_upper);
+
+// Local pose model only. Every returned candidate still requires the
+// complete original nonlinear acceptance checks, including rotation/support.
+FixedFramePoseConstraintResult linearize_fixed_frame_pose_violation(
+    const PreparedFixedFramePoseConstraint &prepared, const RobotModel &robot,
+    const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
+    const Eigen::VectorXd &acceleration, const ScalarGeometricViolation &violation,
+    AffineAccelerationConstraint *refinement);
+
+// Gather violated scalar faces at the triggering sample and endpoint into one
+// local solve. All nonlinear acceptance and the original trust box still apply.
+FixedFramePoseConstraintResult linearize_fixed_frame_pose_violations(
+    const PreparedFixedFramePoseConstraint &prepared, const RobotModel &robot,
+    const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
+    const Eigen::VectorXd &acceleration, double dt,
+    const ScalarGeometricViolation &trigger,
+    AffineAccelerationConstraint *refinement);
 
 } // namespace embodik::detail

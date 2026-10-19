@@ -6,5 +6,7 @@ import sys
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
-if str(_REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(_REPO_ROOT))
+_TEST_DIR = Path(__file__).resolve().parent
+for _path in (_REPO_ROOT, _TEST_DIR):
+    if str(_path) not in sys.path:
+        sys.path.insert(0, str(_path))

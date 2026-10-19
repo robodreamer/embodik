@@ -115,4 +115,37 @@ So3LogCoordinateDifferential evaluate_so3_log_differential(
   return result;
 }
 
+Eigen::MatrixXd evaluate_so3_log_rate_configuration_gradient(
+    const Eigen::Matrix3d &error_rotation,
+    const Eigen::MatrixXd &right_angular_jacobian,
+    const Eigen::Vector3d &right_angular_rate,
+    const Eigen::MatrixXd &right_angular_rate_configuration_gradient) {
+  if (right_angular_jacobian.rows() != 3 ||
+      right_angular_rate_configuration_gradient.rows() != 3 ||
+      right_angular_rate_configuration_gradient.cols() !=
+          right_angular_jacobian.cols() ||
+      !right_angular_jacobian.allFinite() ||
+      !right_angular_rate_configuration_gradient.allFinite()) {
+    throw std::invalid_argument("SO(3) rate-gradient dimensions or values are invalid");
+  }
+  const auto log = evaluate_so3_log_differential(
+      error_rotation, Eigen::Matrix3d::Identity(), Eigen::Vector3d::Zero(),
+      right_angular_rate);
+  const auto coefficients = so3_log_coefficients(log.angle);
+  Eigen::MatrixXd gradient =
+      log.jacobian * right_angular_rate_configuration_gradient;
+  for (Eigen::Index column = 0; column < gradient.cols(); ++column) {
+    const Eigen::Vector3d delta =
+        log.jacobian * right_angular_jacobian.col(column);
+    gradient.col(column) +=
+        0.5 * delta.cross(right_angular_rate) +
+        coefficients.quadratic *
+            (delta.cross(log.value.cross(right_angular_rate)) +
+             log.value.cross(delta.cross(right_angular_rate))) +
+        coefficients.radial_derivative * log.value.dot(delta) *
+            log.value.cross(log.value.cross(right_angular_rate));
+  }
+  return gradient;
+}
+
 } // namespace embodik::detail

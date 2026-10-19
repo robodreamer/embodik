@@ -282,3 +282,61 @@ def test_full_model_subset_centroidal_solver_captures_and_publishes(tmp_path: Pa
     assert bool(torch.isfinite(second.q_solution).all())
     assert bool(second.capture_point_constraint_feasible.all())
     assert bool(second.velocity_zmp_constraint_feasible.all())
+
+
+def test_independent_centroidal_evaluators_restore_stream_under_thread_overlap(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+
+    torch = _cuda_modules()
+    import newton
+    import warp as wp
+
+    urdf = _write_serial_chain(tmp_path / "threaded_chain.urdf", 2)
+    robot = eik.RobotModel(str(urdf), floating_base=False)
+    spec = _spec(robot, "threaded_chain")
+    evaluators = [
+        NewtonCoMEvaluator(1, urdf, tmp_path / f"thread_cache_{index}", spec) for index in range(2)
+    ]
+    streams = [torch.cuda.Stream() for _ in evaluators]
+    inputs = [
+        torch.tensor([[0.12, -0.17]], dtype=torch.float32, device="cuda"),
+        torch.tensor([[-0.21, 0.09]], dtype=torch.float32, device="cuda"),
+    ]
+    torch.cuda.synchronize()
+    original_stream = wp.get_stream("cuda:0").cuda_stream
+    original_fk = newton.eval_fk
+
+    def delayed_fk(*args, **kwargs):
+        expected = int(torch.cuda.current_stream().cuda_stream)
+        assert wp.get_stream("cuda:0").cuda_stream == expected
+        # Release the GIL inside the scope, making competing stream scopes
+        # overlap deterministically unless the enqueue critical section locks.
+        time.sleep(0.001)
+        assert wp.get_stream("cuda:0").cuda_stream == expected
+        return original_fk(*args, **kwargs)
+
+    monkeypatch.setattr(newton, "eval_fk", delayed_fk)
+
+    def evaluate(index):
+        with torch.cuda.stream(streams[index]):
+            for _ in range(10):
+                position, jacobian, momentum = evaluators[index].evaluate_centroidal(inputs[index])
+                bias = evaluators[index].evaluate_centroidal_bias(
+                    inputs[index], torch.zeros_like(inputs[index])
+                )
+            outputs = [value.clone() for value in (position, jacobian, momentum, bias)]
+        streams[index].synchronize()
+        return outputs
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(evaluate, index) for index in range(2)]
+        results = [future.result(timeout=30) for future in futures]
+    assert wp.get_stream("cuda:0").cuda_stream == original_stream
+    for index, values in enumerate(results):
+        q = inputs[index].cpu().numpy()
+        expected = _cpu_reference(robot, q, np.zeros_like(q))
+        for actual, reference in zip(values, expected, strict=True):
+            np.testing.assert_allclose(actual.cpu().numpy(), reference, rtol=5e-5, atol=6e-6)

@@ -1,11 +1,15 @@
 #include "acceleration_braking_witness.hpp"
 #include "acceleration_com_support_polygon_constraint.hpp"
+#include "acceleration_scalar_geometric_constraint.hpp"
 #include "geometric_constraint_differential.hpp"
 #include "support_polygon_geometry.hpp"
 
 #include <embodik/acceleration_solver.hpp>
 
 #include <Eigen/Dense>
+#include <algorithm>
+#include <cmath>
+#include <functional>
 #include <cstdio>
 #include <fstream>
 #include <gtest/gtest.h>
@@ -527,6 +531,292 @@ TEST_F(AccelerationSolverComSupportPolygonTest,
   const auto duplicate = solver.solve(q_, dq_, 0.01, options);
   EXPECT_EQ(duplicate.status, SolverStatus::kInvalidInput);
   expect_no_motion_outputs(duplicate);
+}
+
+// Independent physical formulas below intentionally do not use the production
+// CoM differential. Only the path sampling policy is shared.
+detail::PreparedComSupportPolygonConstraint derivative_fixture(int nv) {
+  detail::PreparedComSupportPolygonConstraint prepared;
+  prepared.specification = polygon_constraint(
+      "path_derivative", square(Eigen::Vector2d::Zero(), 3.0), 10.0, 0.01);
+  prepared.specification.definition.frame_name = "world";
+  const auto geometry = detail::prepare_support_polygon_geometry(
+      prepared.specification.definition, "derivative test", "path_derivative");
+  EXPECT_TRUE(geometry.satisfied()) << geometry.message;
+  prepared.geometry = geometry.geometry;
+  prepared.state_box.physical_constraint.coefficient_matrix =
+      Eigen::MatrixXd::Zero(prepared.geometry.halfspace_normals.rows(), nv);
+  return prepared;
+}
+
+using PhysicalAcceleration =
+    std::function<Eigen::Vector2d(double, const Eigen::VectorXd &)>;
+
+std::vector<double> derivative_worst_times(
+    const detail::PreparedComSupportPolygonConstraint &prepared,
+    const Eigen::VectorXd &dq, const Eigen::VectorXd &a, double dt,
+    const PhysicalAcceleration &physical) {
+  const detail::ScalarGeometricPathValidationOptions policy;
+  const int segments = std::max(policy.minimum_segments, static_cast<int>(std::ceil(
+      dt * dq.cwiseAbs().cwiseMax((dq + dt * a).cwiseAbs()).maxCoeff() /
+      policy.maximum_joint_tangent_step)));
+  std::vector<double> times;
+  for (Eigen::Index edge = 0; edge < prepared.geometry.halfspace_normals.rows(); ++edge) {
+    double worst = 0.0, time = -1.0;
+    for (double t : detail::scalar_geometric_path_sample_times(segments, dt)) {
+      const double excess = std::abs(prepared.geometry.halfspace_normals.row(edge).dot(
+          physical(t, a))) - prepared.specification.policy.acceleration_limit;
+      if (excess > 1e-8 && excess > worst) {
+        worst = excess;
+        time = t;
+      }
+    }
+    // All fixture edges violate; output rows therefore retain normal order.
+    EXPECT_GE(time, 0.0);
+    times.push_back(time);
+  }
+  return times;
+}
+
+TEST(ComPathDerivativeTest, PendulumAnalyticDerivativeAndAnchorForBothSigns) {
+  ScopedUrdf urdf("embodik_com_path_derivative_pendulum.urdf", R"(
+<robot name="pendulum"><link name="base"/>
+<link name="body"><inertial><origin xyz="0 1 0"/><mass value="1"/>
+<inertia ixx=".1" ixy="0" ixz="0" iyy=".1" iyz="0" izz=".1"/>
+</inertial></link><joint name="pivot" type="revolute"><parent link="base"/>
+<child link="body"/><axis xyz="0 0 1"/>
+<limit lower="-3" upper="3" velocity="10" effort="100"/></joint></robot>)");
+  RobotModel robot(urdf.path(), false);
+  const auto prepared = derivative_fixture(1);
+  constexpr double q = -0.518, dq = 0.333, dt = 0.283;
+  for (double acceleration : {-2.0, 2.0}) {
+    SCOPED_TRACE(acceleration);
+    const Eigen::VectorXd candidate = vector({acceleration});
+    const PhysicalAcceleration physical = [=](double t, const Eigen::VectorXd &a) {
+      const double angle = q + t * dq + 0.5 * t * t * a(0);
+      const double rate = dq + t * a(0);
+      return Eigen::Vector2d(-std::cos(angle) * a(0) + std::sin(angle) * rate * rate,
+                            -std::sin(angle) * a(0) - std::cos(angle) * rate * rate);
+    };
+    const auto times = derivative_worst_times(
+        prepared, vector({dq}), candidate, dt, physical);
+    ASSERT_TRUE(std::any_of(times.begin(), times.end(), [](double t) { return t > 0.0; }));
+    AffineAccelerationConstraint row;
+    const auto result = detail::linearize_com_support_polygon_path_acceleration(
+        prepared, robot, vector({q}), vector({dq}), candidate, dt, &row);
+    ASSERT_TRUE(result.satisfied()) << result.message;
+    ASSERT_EQ(row.coefficient_matrix.rows(), static_cast<Eigen::Index>(times.size()));
+    for (Eigen::Index edge = 0; edge < row.coefficient_matrix.rows(); ++edge) {
+      const double t = times[edge], a = acceleration;
+      const double angle = q + t * dq + 0.5 * t * t * a;
+      const double rate = dq + t * a;
+      const Eigen::Vector2d derivative(
+          -std::cos(angle) + 0.5 * t * t * std::sin(angle) * a +
+              0.5 * t * t * std::cos(angle) * rate * rate + 2 * t * std::sin(angle) * rate,
+          -std::sin(angle) - 0.5 * t * t * std::cos(angle) * a +
+              0.5 * t * t * std::sin(angle) * rate * rate - 2 * t * std::cos(angle) * rate);
+      const auto normal = prepared.geometry.halfspace_normals.row(edge);
+      EXPECT_NEAR(row.coefficient_matrix(edge, 0), normal.dot(derivative), 2e-8);
+      EXPECT_NEAR(row.coefficient_matrix.row(edge).dot(candidate) + row.affine_bias(edge),
+                  normal.dot(physical(t, candidate)), 1e-12);
+    }
+  }
+}
+
+TEST(ComPathDerivativeTest, RotatedRootFrameProjectsTheCompleteWorldGradient) {
+  ScopedUrdf urdf("embodik_com_rotated_root_derivative.urdf", R"(
+<robot name="rotated"><link name="base"/><link name="support"/>
+<joint name="fixed_support" type="fixed"><parent link="base"/><child link="support"/>
+<origin xyz=".1 -.2 .3" rpy=".2 -.1 .3"/></joint>
+<link name="body"><inertial><origin xyz="0 0 1"/><mass value="1"/>
+<inertia ixx=".1" ixy="0" ixz="0" iyy=".1" iyz="0" izz=".1"/></inertial></link>
+<joint name="pivot" type="revolute"><parent link="base"/><child link="body"/>
+<axis xyz="0 1 0"/><limit lower="-3" upper="3" velocity="10" effort="100"/>
+</joint></robot>)");
+  RobotModel robot(urdf.path(), false);
+  auto prepared = derivative_fixture(1);
+  prepared.specification.definition.frame_name = "support";
+  const Eigen::Matrix3d rotation =
+      (Eigen::AngleAxisd(.3, Eigen::Vector3d::UnitZ()) *
+       Eigen::AngleAxisd(-.1, Eigen::Vector3d::UnitY()) *
+       Eigen::AngleAxisd(.2, Eigen::Vector3d::UnitX())).toRotationMatrix();
+  constexpr double q = .3, dq = .4, dt = .15;
+  for (double a : {-3., 3.}) {
+    const Eigen::VectorXd candidate = vector({a});
+    const PhysicalAcceleration physical = [=](double t, const Eigen::VectorXd &command) {
+      const double x = q + t * dq + .5 * t * t * command(0), v = dq + t * command(0);
+      const Eigen::Vector3d world(command(0) * std::cos(x) - v * v * std::sin(x), 0.,
+                                  -command(0) * std::sin(x) - v * v * std::cos(x));
+      return Eigen::Vector2d((rotation.transpose() * world).head<2>());
+    };
+    const auto times = derivative_worst_times(
+        prepared, vector({dq}), candidate, dt, physical);
+    ASSERT_EQ(times.size(), 4U);
+    AffineAccelerationConstraint row;
+    const auto result = detail::linearize_com_support_polygon_path_acceleration(
+        prepared, robot, vector({q}), vector({dq}), candidate, dt, &row);
+    ASSERT_TRUE(result.satisfied()) << result.message;
+    ASSERT_EQ(row.coefficient_matrix.rows(), static_cast<Eigen::Index>(times.size()));
+    for (Eigen::Index edge = 0; edge < row.coefficient_matrix.rows(); ++edge) {
+      const double t = times[edge], x = q + t * dq + .5 * t * t * a, v = dq + t * a;
+      const Eigen::Vector3d world(
+          std::cos(x) - .5 * t * t * a * std::sin(x) -
+              2 * t * v * std::sin(x) - .5 * t * t * v * v * std::cos(x),
+          0., -std::sin(x) - .5 * t * t * a * std::cos(x) -
+                  2 * t * v * std::cos(x) + .5 * t * t * v * v * std::sin(x));
+      const Eigen::Vector2d derivative = (rotation.transpose() * world).head<2>();
+      const auto normal = prepared.geometry.halfspace_normals.row(edge);
+      EXPECT_NEAR(row.coefficient_matrix(edge, 0), normal.dot(derivative), 2e-8);
+      EXPECT_NEAR(row.coefficient_matrix.row(edge).dot(candidate) + row.affine_bias(edge),
+                  normal.dot(physical(t, candidate)), 1e-12);
+    }
+  }
+}
+
+TEST_F(AccelerationSolverComSupportPolygonTest,
+       CoupledPathDerivativeMatchesIndependentDirectionalDifferences) {
+  const auto prepared = derivative_fixture(2);
+  const Eigen::VectorXd q = vector({-0.3, 0.7}), dq = vector({0.4, -0.2});
+  const Eigen::VectorXd acceleration = vector({2.0, -1.3});
+  constexpr double dt = 0.23;
+  const PhysicalAcceleration physical = [&](double t, const Eigen::VectorXd &a) {
+    const Eigen::VectorXd angles = q + t * dq + 0.5 * t * t * a;
+    const Eigen::VectorXd rates = dq + t * a;
+    const auto rotating = [](double angle, double rate, double accel) {
+      return Eigen::Vector2d(-std::cos(angle) * rate * rate - std::sin(angle) * accel,
+                            -std::sin(angle) * rate * rate + std::cos(angle) * accel);
+    };
+    // Fixture CoM = (2/3)e(q1) + (1/6)e(q1+q2).
+    return Eigen::Vector2d((2.0 / 3.0) * rotating(angles(0), rates(0), a(0)) +
+        (1.0 / 6.0) * rotating(angles.sum(), rates.sum(), a.sum()));
+  };
+  const auto times = derivative_worst_times(prepared, dq, acceleration, dt, physical);
+  ASSERT_TRUE(std::any_of(times.begin(), times.end(), [](double t) { return t > 0.0; }));
+  AffineAccelerationConstraint row;
+  const auto result = detail::linearize_com_support_polygon_path_acceleration(
+      prepared, *robot_, q, dq, acceleration, dt, &row);
+  ASSERT_TRUE(result.satisfied()) << result.message;
+  ASSERT_EQ(row.coefficient_matrix.rows(), static_cast<Eigen::Index>(times.size()));
+  for (const Eigen::Vector2d direction : {Eigen::Vector2d(0.6, 0.8),
+                                         Eigen::Vector2d(-0.8, 0.6)}) {
+    for (double h : {1e-4, 5e-5}) {
+      for (Eigen::Index edge = 0; edge < row.coefficient_matrix.rows(); ++edge) {
+        const auto normal = prepared.geometry.halfspace_normals.row(edge);
+        const Eigen::Vector2d difference =
+            (physical(times[edge], acceleration + h * direction) -
+             physical(times[edge], acceleration - h * direction)) / (2 * h);
+        EXPECT_NEAR(row.coefficient_matrix.row(edge).dot(direction), normal.dot(difference), 2e-8);
+        EXPECT_NEAR(row.coefficient_matrix.row(edge).dot(acceleration) + row.affine_bias(edge),
+                    normal.dot(physical(times[edge], acceleration)), 1e-12);
+      }
+    }
+  }
+}
+
+TEST_F(AccelerationSolverComSupportPolygonTest,
+       PathRefinementPreservesModelStateOnSuccessAndEvaluationFailure) {
+  // Materialize acceleration-level CoM data before taking any snapshot.
+  // A position-only CoM getter can mark com_updated_ without populating vcom;
+  // reading the bias later would then change the snapshotted velocity even
+  // without refinement. Cache readiness is outside this isolation contract.
+  (void)robot_->get_com_jacobian_bias();
+  const Eigen::VectorXd cached_q = robot_->get_current_configuration();
+  const Eigen::VectorXd cached_dq = robot_->get_current_velocity();
+  const Eigen::Matrix4d pose = robot_->get_frame_pose("tip").toHomogeneousMatrix();
+  const Eigen::MatrixXd frame_jacobian = robot_->get_frame_jacobian("tip");
+  const Eigen::Vector3d com = robot_->get_com_position();
+  const Eigen::Vector3d com_velocity = robot_->get_com_velocity();
+  const Eigen::MatrixXd com_jacobian = robot_->get_com_jacobian();
+  const Eigen::Vector3d com_bias = robot_->get_com_jacobian_bias();
+  const auto expect_unchanged = [&] {
+    EXPECT_TRUE(robot_->get_current_configuration().isApprox(cached_q, 0.0));
+    EXPECT_TRUE(robot_->get_current_velocity().isApprox(cached_dq, 0.0));
+    EXPECT_TRUE(robot_->get_frame_pose("tip").toHomogeneousMatrix().isApprox(pose, 0.0));
+    EXPECT_TRUE(robot_->get_frame_jacobian("tip").isApprox(frame_jacobian, 0.0));
+    EXPECT_TRUE(robot_->get_com_position().isApprox(com, 0.0));
+    EXPECT_TRUE(robot_->get_com_velocity().isApprox(com_velocity, 0.0));
+    EXPECT_TRUE(robot_->get_com_jacobian().isApprox(com_jacobian, 0.0));
+    EXPECT_TRUE(robot_->get_com_jacobian_bias().isApprox(com_bias, 0.0));
+  };
+  // Control: the same getter sequence must be stable without any refinement.
+  expect_unchanged();
+  auto prepared = derivative_fixture(2);
+  const Eigen::VectorXd q = vector({-0.3, 0.7}), dq = vector({0.4, -0.2});
+  const Eigen::VectorXd acceleration = vector({2.0, -1.3});
+  AffineAccelerationConstraint first, repeated;
+  const auto success = detail::linearize_com_support_polygon_path_acceleration(
+      prepared, *robot_, q, dq, acceleration, 0.23, &first);
+  ASSERT_TRUE(success.satisfied()) << success.message;
+  expect_unchanged();
+  // Frame lookup fails after scratch CoM evaluation has already run.
+  prepared.specification.definition.frame_name = "missing_support_frame";
+  const auto failed = detail::linearize_com_support_polygon_path_acceleration(
+      prepared, *robot_, q, dq, acceleration, 0.23, &repeated);
+  EXPECT_EQ(failed.status, SolverStatus::kNumericalError) << failed.message;
+  expect_unchanged();
+  prepared.specification.definition.frame_name = "world";
+  const auto again = detail::linearize_com_support_polygon_path_acceleration(
+      prepared, *robot_, q, dq, acceleration, 0.23, &repeated);
+  ASSERT_TRUE(again.satisfied()) << again.message;
+  EXPECT_TRUE(first.coefficient_matrix.isApprox(repeated.coefficient_matrix, 0.0));
+  EXPECT_TRUE(first.affine_bias.isApprox(repeated.affine_bias, 0.0));
+  expect_unchanged();
+}
+
+TEST(ComPathSamplingTest, AnalyticPendulumQuarterPeakCannotBeAccepted) {
+  ScopedUrdf urdf("embodik_com_quarter_peak.urdf", R"(
+<robot name="quarter_peak">
+  <link name="base"/>
+  <link name="pendulum"><inertial><origin xyz="0 0 1"/>
+    <mass value="1"/><inertia ixx=".1" ixy="0" ixz="0" iyy=".1" iyz="0" izz=".1"/>
+  </inertial></link>
+  <joint name="joint" type="revolute"><parent link="base"/><child link="pendulum"/>
+    <origin xyz="0 0 2"/><axis xyz="0 1 0"/>
+    <limit lower="-3.14" upper="3.14" velocity="20" effort="100"/>
+  </joint>
+</robot>)");
+  auto robot = std::make_shared<RobotModel>(urdf.path(), false);
+  constexpr double dt = 0.01, acceleration = 10.0, peak_rate = 3.6;
+  constexpr double peak_time = 0.25 * dt;
+  const double initial_rate = peak_rate - acceleration * peak_time;
+  // x = sin(q). Its acceleration peaks where
+  // x''' = -3*a*v*sin(q) - v^3*cos(q) = 0.
+  const double peak_q = -std::atan(peak_rate * peak_rate / (3 * acceleration));
+  const double initial_q = peak_q - peak_time * initial_rate -
+                           0.5 * peak_time * peak_time * acceleration;
+  const auto physical_acceleration = [&](double t) {
+    const double q = initial_q + t * initial_rate + 0.5 * t * t * acceleration;
+    const double v = initial_rate + t * acceleration;
+    return acceleration * std::cos(q) - v * v * std::sin(q);
+  };
+  const int segments = std::max(16, static_cast<int>(std::ceil(
+      dt * std::max(initial_rate, initial_rate + dt * acceleration) / 0.002)));
+  ASSERT_EQ(segments, 19);
+  double grid_maximum = 0;
+  for (int i = 0; i <= segments; ++i)
+    grid_maximum = std::max(grid_maximum,
+                           std::abs(physical_acceleration(dt * i / segments)));
+  const double peak = physical_acceleration(peak_time);
+  ASSERT_GT(peak - grid_maximum, 1e-6);
+  const double limit = 0.5 * (grid_maximum + peak);
+  AccelerationSolveOptions options;
+  options.acceleration_limits_override = vector({100.0});
+  auto constraint = polygon_constraint("quarter", square(Eigen::Vector2d::Zero(), 5.0),
+                                       20.0, limit);
+  constraint.definition.margin = 0.0;
+  options.com_support_polygon_constraints = {constraint};
+  AffineAccelerationConstraint lock;
+  lock.source_id = "analytic-acceleration-lock";
+  lock.coefficient_matrix = Eigen::MatrixXd::Identity(1, 1);
+  lock.affine_bias = vector({0.0});
+  lock.lower_bounds = lock.upper_bounds = vector({acceleration});
+  options.affine_constraints = {lock};
+  AccelerationSolver solver(robot);
+  const auto result = solver.solve(vector({initial_q}), vector({initial_rate}), dt, options);
+  EXPECT_EQ(result.status, SolverStatus::kNumericalError) << result.status_message;
+  EXPECT_NE(result.status_message.find("CoM"), std::string::npos);
+  EXPECT_EQ(result.q_solution.size(), 0);
+  EXPECT_EQ(result.joint_accelerations.size(), 0);
 }
 
 } // namespace

@@ -1,5 +1,8 @@
 #include "acceleration_solver_internal.hpp"
 
+#include <iomanip>
+#include <sstream>
+
 namespace embodik {
 namespace acceleration_solver_internal {
 
@@ -204,8 +207,10 @@ StateBoxAssembly build_joint_state_box(const RobotModel &robot,
   Eigen::VectorXd upper_positions;
   if (options.apply_position_limits) {
     const auto joint_limits = robot.get_joint_limits();
-    lower_positions = joint_limits.first;
-    upper_positions = joint_limits.second;
+    lower_positions =
+        options.nominal_position_lower_bounds.value_or(joint_limits.first);
+    upper_positions =
+        options.nominal_position_upper_bounds.value_or(joint_limits.second);
     if (lower_positions.size() != q.size() || upper_positions.size() != q.size() ||
         !lower_positions.allFinite() || !upper_positions.allFinite() ||
         (lower_positions.array() > upper_positions.array()).any()) {
@@ -236,7 +241,16 @@ StateBoxAssembly build_joint_state_box(const RobotModel &robot,
     const auto shaped = detail::shape_state_box_row(row, dt);
     if (shaped.status != SolverStatus::kSuccess) {
       assembly.status = shaped.status;
-      assembly.message = shaped.message;
+      std::ostringstream context;
+      context << shaped.message << " (joint index " << index
+              << std::setprecision(17) << ", position=" << row.value
+              << ", velocity=" << row.rate;
+      if (options.apply_position_limits) {
+        context << ", position bounds=[" << row.state_bounds.lower << ", "
+                << row.state_bounds.upper << "]";
+      }
+      context << ")";
+      assembly.message = context.str();
       return assembly;
     }
     assembly.lower(index) = shaped.lower_acceleration;

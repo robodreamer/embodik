@@ -1,4 +1,5 @@
 #include "embodik/sphere_broadphase.hpp"
+#include "sphere_pair_distance_lower_bound.hpp"
 #include <coal/BVH/BVH_model.h>
 #include <coal/shape/geometric_shapes.h>
 #include <algorithm>
@@ -113,10 +114,9 @@ double SphereBroadphase::compute_pair_lower_bound(
     const Eigen::Vector3d &translation_b, const Eigen::Matrix3d &rotation_b) const {
   const auto &sa = spheres_[geom_idx_a];
   const auto &sb = spheres_[geom_idx_b];
-  const Eigen::Vector3d center_a = translation_a + rotation_a * sa.center;
-  const Eigen::Vector3d center_b = translation_b + rotation_b * sb.center;
   const double sphere_lower_bound =
-      (center_a - center_b).norm() - sa.radius - sb.radius;
+      detail::sphere_pair_distance_lower_bound(
+          sa, sb, translation_a, rotation_a, translation_b, rotation_b);
 
   const Eigen::Vector3d box_center_a =
       translation_a + rotation_a * sa.box_center;

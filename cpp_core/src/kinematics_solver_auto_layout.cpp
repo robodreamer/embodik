@@ -61,6 +61,15 @@ VelocitySolverResult KinematicsSolver::retry_auto_task_layout_as_split_if_needed
     const std::vector<PositionStepPriorityConstraintSpec>
         &priority_constraints,
     bool apply_position_step_acceleration_limits) {
+  const bool has_auto_group = std::any_of(
+      pose_task_groups_.begin(), pose_task_groups_.end(),
+      [](const auto &entry) {
+        return entry.second && entry.second->auto_switch();
+      });
+  // A policy-state change cannot alter raw frame tasks or fixed-layout groups.
+  if (!has_auto_group) {
+    return result;
+  }
   const bool merged_succeeded = result.status == SolverStatus::kSuccess;
   const bool merged_binds =
       auto_layout_binding_score_ >
@@ -86,6 +95,10 @@ VelocitySolverResult KinematicsSolver::retry_auto_task_layout_as_split_if_needed
   pending_reuse_current_kinematics_ = true;
   pending_position_step_acceleration_limits_ =
       apply_position_step_acceleration_limits;
+  PositionStepHardConstraints merged_hard_constraints;
+  if (position_step_hard_constraints_ != nullptr) {
+    merged_hard_constraints = std::move(*position_step_hard_constraints_);
+  }
   VelocitySolverResult retry = solve_velocity(q, true);
   const char *reason =
       merged_succeeded ? "binding merged solve" : "non-success merged solve";
@@ -97,6 +110,9 @@ VelocitySolverResult KinematicsSolver::retry_auto_task_layout_as_split_if_needed
                            reason + ": " + retry.status_message;
   }
   if (merged_succeeded && retry.status != SolverStatus::kSuccess) {
+    if (position_step_hard_constraints_ != nullptr) {
+      *position_step_hard_constraints_ = std::move(merged_hard_constraints);
+    }
     if (result.status_message.empty()) {
       result.status_message =
           std::string("auto task layout kept successful merged solve after "
