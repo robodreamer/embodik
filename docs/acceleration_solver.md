@@ -119,7 +119,9 @@ Default band parameters are `elastic_delta_max=0.05`,
 `elastic_expand_only_saturated=True`. Delta and expansion use each scalar
 joint's coordinate units. Expansion and multiplicative decay apply per solve.
 A boundary seed receives a small initial band. Low task scales expand eligible
-bands, and unconstrained bands decay. Occupied position and outward braking
+bands, and unconstrained bands decay. Only finite uniform scales in `[0, 1]`
+contribute to the low-scale test; `MIN_ERROR` diagnostics use a `-1` sentinel,
+which does not indicate a stalled scale. Occupied position and outward braking
 reserve are retained up to the configured capacity. States that need a larger
 reserve fail closed. Nominal changes reset the band. `reset_elastic_band()`
 clears it without replacing caller `q` or `dq`. `get_elastic_band_deltas()`

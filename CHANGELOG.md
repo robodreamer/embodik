@@ -80,6 +80,11 @@ GPU acceleration support remains a subset of the CPU constraint API; see
 
 ### Fixed
 
+- Acceleration nominal-position elasticity ignores `MIN_ERROR` scale sentinels
+  in registered-task and centroidal diagnostics. A fully achieved elastic task
+  no longer expands unsaturated joint bands merely because another objective
+  uses minimum-error optimization.
+
 - Acceleration collision linearizations refresh the current pair catalog,
   avoiding stale candidate subsets in explicit-state and stopping rollouts.
 - Objective fallback reuses hard-feasibility witnesses only after validating

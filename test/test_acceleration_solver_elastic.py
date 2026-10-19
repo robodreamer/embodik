@@ -201,3 +201,92 @@ def test_model_hard_limit_updates_recap_existing_nominal_band(tmp_path):
     rejected = solver.solve(np.zeros(1), np.zeros(1), DT, options)
     assert rejected.status == embodik.SolverStatus.INVALID_INPUT
     assert rejected.q_solution.size == 0
+
+
+@pytest.mark.parametrize("posture_reference", [0.2, 0.0])
+@pytest.mark.parametrize("collect_diagnostics", [False, True])
+def test_min_error_posture_does_not_expand_a_fully_achieved_elastic_band(
+    tmp_path, posture_reference, collect_diagnostics
+):
+    second_joint = """<link name="tip2"/><joint name="joint2" type="prismatic">
+<parent link="tip"/><child link="tip2"/><axis xyz="0 1 0"/>
+<limit lower="-1" upper="1" velocity="2" effort="10"/></joint></robot>"""
+    path = tmp_path / "mixed_elastic.urdf"
+    path.write_text(URDF.replace("</robot>", second_joint))
+    robot = embodik.RobotModel(str(path), floating_base=False)
+    solver = embodik.AccelerationSolver(robot)
+    primary = solver.add_joint_task("primary", "joint", 0.0)
+    primary.solve_mode = embodik.TaskSolveMode.SCALE_ELASTIC
+    primary.allow_min_error_fallback = False
+    reference = embodik.AccelerationTaskReference()
+    reference.proportional_gain = reference.derivative_gain = 0.0
+    reference.desired_acceleration = np.array([0.2])
+    solver.set_task_reference("primary", reference)
+    posture = solver.add_posture_task("posture")
+    posture.priority = 1
+    posture.solve_mode = embodik.TaskSolveMode.MIN_ERROR
+    reference = embodik.AccelerationTaskReference()
+    reference.proportional_gain = reference.derivative_gain = 0.0
+    reference.desired_acceleration = np.array([posture_reference, 0.0])
+    solver.set_task_reference("posture", reference)
+    options = embodik.AccelerationSolveOptions()
+    options.acceleration_limits_override = np.full(2, 10.0)
+    options.nominal_position_lower_bounds = np.full(2, -NOMINAL_LIMIT)
+    options.nominal_position_upper_bounds = np.full(2, NOMINAL_LIMIT)
+    options.allow_state_box_task_fallback = False
+    options.collect_task_diagnostics = collect_diagnostics
+    assert options.elastic_expand_only_saturated
+
+    # Reuse the same interior state to isolate adaptation from occupied space
+    # and braking reserve. Check both the used band and post-solve state.
+    for _ in range(3):
+        result = solver.solve(np.zeros(2), np.zeros(2), DT, options)
+        assert result.status == embodik.SolverStatus.SUCCESS, result.status_message
+        np.testing.assert_allclose(result.task_scales, [1.0, -1.0], atol=TOLERANCE)
+        np.testing.assert_allclose(
+            result.task_errors, [0.0, abs(0.2 - posture_reference)], atol=TOLERANCE
+        )
+        assert not result.saturated_position_indices
+        np.testing.assert_allclose(result.joint_accelerations, [0.2, 0.0], atol=TOLERANCE)
+        np.testing.assert_array_equal(result.elastic_band_delta, np.zeros(2))
+        np.testing.assert_array_equal(solver.get_elastic_band_deltas(), np.zeros(2))
+        np.testing.assert_array_equal(
+            result.elastic_effective_position_lower_bounds, np.full(2, -NOMINAL_LIMIT)
+        )
+        np.testing.assert_array_equal(
+            result.elastic_effective_position_upper_bounds, np.full(2, NOMINAL_LIMIT)
+        )
+
+
+@pytest.mark.parametrize(
+    "requested_mode", [embodik.TaskSolveMode.SCALE_ELASTIC, embodik.TaskSolveMode.MIN_ERROR]
+)
+def test_only_min_error_diagnostics_do_not_invent_an_elastic_stall(tmp_path, requested_mode):
+    path = tmp_path / "unreachable_direction.urdf"
+    path.write_text(URDF)
+    robot = embodik.RobotModel(str(path), floating_base=False)
+    solver = embodik.AccelerationSolver(robot)
+    task = solver.add_frame_task("goal", "tip", embodik.TaskType.FRAME_POSITION)
+    task.solve_mode = requested_mode
+    task.allow_min_error_fallback = True
+    task.set_position_mask(np.array([False, True, False]))
+    reference = embodik.AccelerationTaskReference()
+    reference.proportional_gain = reference.derivative_gain = 0.0
+    reference.desired_acceleration = np.array([0.0, 1.0, 0.0])
+    solver.set_task_reference("goal", reference)
+    options = embodik.AccelerationSolveOptions()
+    options.acceleration_limits_override = np.array([10.0])
+    options.allow_state_box_task_fallback = False
+    _narrow_nominal(options)
+    elastic_requested = requested_mode == embodik.TaskSolveMode.SCALE_ELASTIC
+
+    for _ in range(3):
+        result = solver.solve(np.zeros(1), np.zeros(1), DT, options)
+        assert result.status == embodik.SolverStatus.SUCCESS, result.status_message
+        assert result.elastic_band_enabled == elastic_requested
+        assert result.task_scales == [-1.0]
+        assert result.task_modes_effective == [embodik.TaskSolveMode.MIN_ERROR]
+        assert result.task_used_fallback == [elastic_requested]
+        np.testing.assert_array_equal(result.joint_accelerations, np.zeros(1))
+        np.testing.assert_array_equal(result.elastic_band_delta, np.zeros(1))
+        np.testing.assert_array_equal(solver.get_elastic_band_deltas(), np.zeros(1))

@@ -145,15 +145,22 @@ void AccelerationSolver::update_elastic_band(
     return;
   }
   double scale = 1.0;
+  const auto include_uniform_scale = [&scale](double task_scale) {
+    // MIN_ERROR reports -1 rather than a uniform scale. Such diagnostics must
+    // not manufacture a stall or bypass saturated-only band adaptation.
+    if (std::isfinite(task_scale) && task_scale >= 0.0 && task_scale <= 1.0) {
+      scale = std::min(scale, task_scale);
+    }
+  };
   bool task_error =
       std::any_of(result.task_errors.begin(), result.task_errors.end(),
                   [](double error) { return error > kElasticTaskError; });
   for (double task_scale : result.task_scales) {
-    scale = std::min(scale, task_scale);
+    include_uniform_scale(task_scale);
   }
   for (const CentroidalMomentumRateDiagnostics &diagnostic :
        result.centroidal_momentum_rate_diagnostics) {
-    scale = std::min(scale, diagnostic.scale);
+    include_uniform_scale(diagnostic.scale);
     task_error = task_error || diagnostic.residual.norm() > kElasticTaskError;
   }
   if (result.task_scales.empty() &&
