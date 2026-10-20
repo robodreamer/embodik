@@ -1231,6 +1231,13 @@ A smaller budget cannot make an infeasible direction achievable; a hold remains
 possible. These are local position-step protections, not global path planning,
 contact guarantees or an API for the separate `AccelerationSolver`.
 
+When a finite candidate violates protected task merit and hard constraints
+require re-solving, each rejected retry reduces the interval or terminal
+fraction by at least half. A near-one fraction computed for one proposal does
+not guarantee that re-solving will produce a valid nonlinear endpoint. The
+bounded eight-retry limit and all final acceptance checks remain in force;
+failure to find an acceptable candidate can still produce a hold.
+
 ### Explicit original collision-floor anchors
 
 For velocity-only position stepping, callers may retain the original clearance

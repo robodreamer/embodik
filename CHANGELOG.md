@@ -23,6 +23,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Constrained position-step merit retries now reduce the interval or terminal
+  fraction by at least half after rejection. Near-one backtracking fractions no
+  longer consume every retry on essentially the same rejected nonlinear step;
+  the retry cap and final constraint checks are unchanged.
+
 - SVD factor checks no longer call `info()` on Eigen 3.3. The manylinux wheel
   image ships that version, which exposes singular values but not `SVD::info()`.
 

@@ -14,6 +14,13 @@ namespace {
 // physical velocity/acceleration faces or coupled CoM rows.
 constexpr double kOuterComProjectionEpsilon = 1e-10;
 
+// Re-solving changes the candidate: a fraction found for the previous proposal
+// need not remove the next proposal's nonlinear merit violation. Ensure every
+// rejected retry makes substantial progress through the bounded search.
+double priority_retry_contraction(double accepted_fraction) {
+  return accepted_fraction > 0.0 ? std::min(0.5, accepted_fraction) : 0.5;
+}
+
 struct ScopedPositionStepInterval {
   double &slot;
   double previous;
@@ -5554,7 +5561,7 @@ PositionIKResult KinematicsSolver::solve_position_step_impl(
         }
       }
       double retry_dt =
-          step_dt_eff * (priority_scale > 0.0 ? priority_scale : 0.5);
+          step_dt_eff * priority_retry_contraction(priority_scale);
       for (int retry_index = 0;
            !direct_priority_backtrack_is_safe &&
            !accepted_priority_retry &&
@@ -5601,7 +5608,7 @@ PositionIKResult KinematicsSolver::solve_position_step_impl(
           accepted_priority_retry = true;
           break;
         }
-        retry_dt *= retry_scale > 0.0 ? retry_scale : 0.5;
+        retry_dt *= priority_retry_contraction(retry_scale);
       }
       if (!accepted_priority_retry) {
         q = q_pre_step;
@@ -6459,7 +6466,7 @@ PositionIKResult KinematicsSolver::solve_position_step_impl(
       }
     }
     double retry_fraction =
-        final_priority_scale > 0.0 ? final_priority_scale : 0.5;
+        priority_retry_contraction(final_priority_scale);
     for (int retry_index = 0;
          !direct_priority_backtrack_is_safe &&
          !accepted_final_priority_retry &&
@@ -6522,8 +6529,7 @@ PositionIKResult KinematicsSolver::solve_position_step_impl(
         accepted_final_priority_retry = true;
         break;
       }
-      retry_fraction *=
-          retry_priority_scale > 0.0 ? retry_priority_scale : 0.5;
+      retry_fraction *= priority_retry_contraction(retry_priority_scale);
     }
     if (!accepted_final_priority_retry) {
       q = current_q;
