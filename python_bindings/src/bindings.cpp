@@ -498,6 +498,8 @@ NB_MODULE(_embodik_impl, m) {
               "Number of velocity-IK iterations per call (default 1)")
       .def_rw("record_collision_candidates", &eik::PositionStepOptions::record_collision_candidates,
               "Record nominal collision checks and backoffs in the result; disabled by default")
+      .def_rw("per_target_priority_budgets", &eik::PositionStepOptions::per_target_priority_budgets,
+              "Protect each explicit per-target merit budget; default false keeps aggregate behavior")
       .def_rw("record_velocity_candidates", &eik::PositionStepOptions::record_velocity_candidates,
               "Record native velocities and nominal integration per step before guards; disabled by default")
       .def_rw("dt", &eik::PositionStepOptions::dt,

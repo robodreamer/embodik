@@ -974,9 +974,7 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
 
   std::optional<ConstraintBlock> position_step_priority_constraint_result =
       std::nullopt;
-  if (apply_limits && acceleration_limits_enabled_ &&
-      acceleration_limits_.size() == robot_->nv() &&
-      !pending_position_step_priority_constraints_.empty()) {
+  if (apply_limits && !pending_position_step_priority_constraints_.empty()) {
     struct PriorityViabilityRow {
       Eigen::RowVectorXd jacobian;
       double lower_bound;
@@ -986,7 +984,8 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
 
     const auto append_priority_block =
         [&](const Eigen::VectorXd &error, const Eigen::MatrixXd &jacobian,
-            int offset, double tolerance, double step_dt) {
+            int offset, double tolerance, double step_dt,
+            bool physical_velocity_budget) {
           if (!std::isfinite(tolerance) || tolerance <= 0.0 ||
               !std::isfinite(step_dt) || step_dt <= 0.0 ||
               offset < 0 || offset + 3 > error.size() ||
@@ -1014,6 +1013,17 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
             return;
           }
 
+          if (physical_velocity_budget &&
+              (!acceleration_limits_enabled_ ||
+               acceleration_limits_.size() != robot_->nv())) {
+            // A tangent of the individual norm budget, using physical columns.
+            // Over-budget seeds may recover without first demanding an
+            // instantaneous return to the tolerance. Final integration is
+            // independently checked against this task's original target.
+            const double slack = std::max(tolerance, error_norm) - error_norm;
+            rows.push_back({std::move(row), -slack / step_dt});
+            return;
+          }
           double acceleration_support = 0.0;
           for (int velocity_index = 0; velocity_index < row.size();
                ++velocity_index) {
@@ -1031,8 +1041,9 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
             return;
           }
 
-          const double viable_tolerance =
-              std::max(0.0, tolerance - constraint_tolerance_);
+          const double viable_tolerance = physical_velocity_budget
+              ? std::max(tolerance, error_norm)
+              : std::max(0.0, tolerance - constraint_tolerance_);
           const double slack = viable_tolerance - error_norm;
           double lower_bound = 0.0;
           if (slack > 0.0) {
@@ -1049,16 +1060,20 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
         continue;
       }
       const Eigen::VectorXd error = spec.task->getError();
-      const Eigen::MatrixXd jacobian = spec.task->getJacobian();
+      Eigen::MatrixXd jacobian = spec.task->getJacobian();
+      if (spec.physical_velocity_budget) {
+        if (const auto *frame = dynamic_cast<const FrameTask *>(spec.task.get()))
+          jacobian = frame->buildPhysicalJacobian();
+      }
       if (jacobian.cols() != robot_->nv() || error.size() != jacobian.rows()) {
         continue;
       }
       const TaskType task_type = spec.task->getType();
       if (error.size() >= 6) {
         append_priority_block(error, jacobian, 0, spec.position_tolerance,
-                              spec.step_dt);
+                              spec.step_dt, spec.physical_velocity_budget);
         append_priority_block(error, jacobian, 3, spec.orientation_tolerance,
-                              spec.step_dt);
+                              spec.step_dt, spec.physical_velocity_budget);
       } else if (error.size() >= 3) {
         const bool orientation_only =
             task_type == TaskType::FRAME_ORIENTATION;
@@ -1066,7 +1081,7 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
             error, jacobian, 0,
             orientation_only ? spec.orientation_tolerance
                              : spec.position_tolerance,
-            spec.step_dt);
+            spec.step_dt, spec.physical_velocity_budget);
       }
     }
 

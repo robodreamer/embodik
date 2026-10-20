@@ -1876,6 +1876,7 @@ private:
     double position_tolerance = -1.0;
     double orientation_tolerance = -1.0;
     double step_dt = 0.0;
+    bool physical_velocity_budget = false;
   };
 
   struct TightFramePoseConstraintConfig {

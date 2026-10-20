@@ -384,6 +384,7 @@ static void append_position_step_option_signature(
       signature.end(),
       {options.position_gain,
        options.orientation_gain,
+       options.per_target_priority_budgets ? 1.0 : 0.0,
        static_cast<double>(options.max_steps),
        options.dt,
        options.max_linear_speed,

@@ -4999,6 +4999,18 @@ PositionIKResult KinematicsSolver::solve_position_step_impl(
       protected_target_priorities.push_back(rt.task->getPriority());
     }
   }
+  if (options.per_target_priority_budgets) {
+    for (std::size_t index = 0; index < resolved.size(); ++index) {
+      const auto &target = targets[index];
+      if (resolved[index].task->isActive() &&
+          ((std::isfinite(target.priority_position_tolerance) &&
+            target.priority_position_tolerance > 0.0 && target.position_gain > 0.0) ||
+           (std::isfinite(target.priority_orientation_tolerance) &&
+            target.priority_orientation_tolerance > 0.0 && target.orientation_gain > 0.0))) {
+        protected_target_priorities.push_back(resolved[index].task->getPriority());
+      }
+    }
+  }
   std::sort(protected_target_priorities.begin(),
             protected_target_priorities.end());
   protected_target_priorities.erase(
@@ -5008,8 +5020,9 @@ PositionIKResult KinematicsSolver::solve_position_step_impl(
 
   const auto build_priority_constraint_specs = [&](double step_dt_eff) {
     std::vector<PositionStepPriorityConstraintSpec> specs;
-    if (!acceleration_limits_enabled_ ||
-        acceleration_limits_.size() != robot_->nv()) {
+    if (!options.per_target_priority_budgets &&
+        (!acceleration_limits_enabled_ ||
+         acceleration_limits_.size() != robot_->nv())) {
       return specs;
     }
     specs.reserve(resolved.size());
@@ -5024,10 +5037,12 @@ PositionIKResult KinematicsSolver::solve_position_step_impl(
       const auto &target = targets[index];
       const bool protect_position =
           std::isfinite(target.priority_position_tolerance) &&
-          target.priority_position_tolerance > 0.0;
+          target.priority_position_tolerance > 0.0 &&
+          (!options.per_target_priority_budgets || target.position_gain > 0.0);
       const bool protect_orientation =
           std::isfinite(target.priority_orientation_tolerance) &&
-          target.priority_orientation_tolerance > 0.0;
+          target.priority_orientation_tolerance > 0.0 &&
+          (!options.per_target_priority_budgets || target.orientation_gain > 0.0);
       if (!protect_position && !protect_orientation) {
         continue;
       }
@@ -5037,7 +5052,7 @@ PositionIKResult KinematicsSolver::solve_position_step_impl(
                        protect_orientation
                            ? target.priority_orientation_tolerance
                            : -1.0,
-                       step_dt_eff});
+                       step_dt_eff, options.per_target_priority_budgets});
     }
     return specs;
   };
@@ -5095,6 +5110,11 @@ PositionIKResult KinematicsSolver::solve_position_step_impl(
                       ? configured_tolerance
                       : kPositionStepSatisfiedMeritTolerance;
               if (!std::isfinite(baseline) || !std::isfinite(candidate)) {
+                return false;
+              }
+              if (options.per_target_priority_budgets && has_configured_tolerance &&
+                  candidate > std::max(baseline, protected_tolerance +
+                                                    kPriorityMeritNumericalTolerance)) {
                 return false;
               }
               acceptable_total += std::max(baseline, protected_tolerance);

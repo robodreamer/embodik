@@ -487,6 +487,9 @@ struct PositionStepOptions {
   /// Capture the native velocity and nominal integrated configuration per step.
   /// These records precede candidate acceptance/backoff guards.
   bool record_velocity_candidates = false;
+  /// Enforce each explicitly configured TaskTarget merit budget separately.
+  /// Default false retains the same-priority aggregate merit contract.
+  bool per_target_priority_budgets = false;
   double dt = -1.0;              // Integration timestep per step (≤0 → solver.dt)
   /// Optional caller-owned current generalized velocity (size nv). Required
   /// when a velocity-ZMP constraint is active so solve_position_step can form

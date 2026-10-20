@@ -1206,6 +1206,31 @@ the accepted backtracking fraction. The trace also records the final returned
 configuration, status and hold flag. Geometry snapshots and continuous swept
 collision validation remain separate from linear backend replay.
 
+### Individual target merit budgets
+
+Same-priority targets retain aggregate position/orientation merit protection by
+default. For independent hand budgets in a multi-target CPU position step:
+
+```python
+options.per_target_priority_budgets = True
+right_target.priority_orientation_tolerance = 0.002  # radians
+left_target.priority_orientation_tolerance = 0.01
+result = solver.solve_position_step(q, [right_target, left_target], options)
+```
+
+Each explicitly configured positive position/orientation tolerance is protected
+independently, including targets without a lower-priority task. The solver adds
+local physical velocity rows and checks finite integrated candidates against
+each original target. An initially exceeded budget permits recovery without
+further worsening; it does not demand an instantaneous error correction.
+Numerical slack is attached to the configured budget rather than accumulated
+on successive calls. Masks and zero gains retain their commanded-block meaning.
+
+Budgets and the policy flag may change between calls without resetting targets.
+A smaller budget cannot make an infeasible direction achievable; a hold remains
+possible. These are local position-step protections, not global path planning,
+contact guarantees or an API for the separate `AccelerationSolver`.
+
 ## Batch and parallel workloads
 
 Real-time control uses **one solver per loop**. Offline reachability and morphology sweeps scale
