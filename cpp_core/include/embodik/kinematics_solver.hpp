@@ -1444,6 +1444,14 @@ private:
     Eigen::VectorXd upper;
   };
   PositionStepHardConstraints *position_step_hard_constraints_ = nullptr;
+  bool problem_tracing_enabled_ = false;
+  SolverProblemTrace last_problem_trace_;
+  PositionIKResult solve_position_step_impl(
+      const Eigen::VectorXd &current_q, const Eigen::Matrix4d &target_pose,
+      const std::string &frame_task_name, const PositionStepOptions &options);
+  PositionIKResult solve_position_step_impl(
+      const Eigen::VectorXd &current_q, const std::vector<TaskTarget> &targets,
+      const PositionStepOptions &options);
   /// Immutable outer-command corridor, independent of movable diagnostic captures.
   /// Scalar configuration coordinates use the existing nv-to-nq mapping.
   struct PositionStepSeedCorridor {
@@ -2160,6 +2168,13 @@ private:
 
 public:
   // ========== Position IK Methods ==========
+
+  /// Opt-in diagnostic snapshots; disabling also releases retained traces.
+  void enable_problem_tracing(bool enabled = true) {
+    problem_tracing_enabled_ = enabled;
+    last_problem_trace_ = {};
+  }
+  SolverProblemTrace get_last_problem_trace() const { return last_problem_trace_; }
 
   /**
    * @brief Basic position IK solver

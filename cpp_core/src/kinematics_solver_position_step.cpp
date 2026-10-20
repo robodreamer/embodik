@@ -3043,6 +3043,37 @@ PositionIKResult KinematicsSolver::solve_position(
 
 PositionIKResult KinematicsSolver::solve_position_step(
     const Eigen::VectorXd &current_q, const Eigen::Matrix4d &target_pose,
+    const std::string &frame_task_name, const PositionStepOptions &options) {
+  if (problem_tracing_enabled_ && position_step_call_depth_ == 0)
+    last_problem_trace_ = {};
+  PositionIKResult result = solve_position_step_impl(
+      current_q, target_pose, frame_task_name, options);
+  if (problem_tracing_enabled_) {
+    last_problem_trace_.position_result_q = result.q_solution;
+    last_problem_trace_.position_status = result.status;
+    last_problem_trace_.position_status_message = result.status_message;
+    last_problem_trace_.position_hold_active = result.position_step_hold_active;
+  }
+  return result;
+}
+
+PositionIKResult KinematicsSolver::solve_position_step(
+    const Eigen::VectorXd &current_q, const std::vector<TaskTarget> &targets,
+    const PositionStepOptions &options) {
+  if (problem_tracing_enabled_ && position_step_call_depth_ == 0)
+    last_problem_trace_ = {};
+  PositionIKResult result = solve_position_step_impl(current_q, targets, options);
+  if (problem_tracing_enabled_) {
+    last_problem_trace_.position_result_q = result.q_solution;
+    last_problem_trace_.position_status = result.status;
+    last_problem_trace_.position_status_message = result.status_message;
+    last_problem_trace_.position_hold_active = result.position_step_hold_active;
+  }
+  return result;
+}
+
+PositionIKResult KinematicsSolver::solve_position_step_impl(
+    const Eigen::VectorXd &current_q, const Eigen::Matrix4d &target_pose,
     const std::string &frame_task_name,
     const PositionStepOptions &options) {
 
@@ -4548,7 +4579,7 @@ PositionIKResult KinematicsSolver::solve_position_step(
   return result;
 }
 
-PositionIKResult KinematicsSolver::solve_position_step(
+PositionIKResult KinematicsSolver::solve_position_step_impl(
     const Eigen::VectorXd &current_q, const std::vector<TaskTarget> &targets,
     const PositionStepOptions &options) {
 
@@ -5103,8 +5134,25 @@ PositionIKResult KinematicsSolver::solve_position_step(
         }
         const auto baseline_merits = target_block_merits_at(q_before);
         const auto candidate_merits = target_block_merits_at(q_after);
+        const auto record_candidate = [&](double fraction) {
+          if (!problem_tracing_enabled_) return;
+          PriorityCandidateTrace trace;
+          trace.before_q = q_before;
+          trace.proposed_q = q_after;
+          trace.accepted_fraction = fraction;
+          for (std::size_t index = 0; index < resolved.size(); ++index) {
+            trace.task_names.push_back(targets[index].task_name);
+            trace.task_priorities.push_back(resolved[index].task->getPriority());
+            trace.baseline_block_merits.emplace_back(
+                baseline_merits[index][0], baseline_merits[index][1]);
+            trace.proposed_block_merits.emplace_back(
+                candidate_merits[index][0], candidate_merits[index][1]);
+          }
+          last_problem_trace_.priority_candidates.push_back(std::move(trace));
+        };
         if (priority_candidate_acceptable(baseline_merits,
                                           candidate_merits)) {
+          record_candidate(1.0);
           robot_->update_configuration(q_after);
           return 1.0;
         }
@@ -5126,6 +5174,7 @@ PositionIKResult KinematicsSolver::solve_position_step(
             rejected_fraction = fraction;
           }
         }
+        record_candidate(accepted_fraction);
         robot_->update_configuration(q_after);
         return accepted_fraction;
       };

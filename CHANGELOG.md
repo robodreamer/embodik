@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Opt-in CPU velocity/position-step problem snapshots and nominal hierarchical
+  backend replay, including objective policies, variable mapping and per-target
+  priority-candidate merits. Recording is disabled by default.
+
 ### Fixed
 
 - SVD factor checks no longer call `info()` on Eigen 3.3. The manylinux wheel

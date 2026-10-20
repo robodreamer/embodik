@@ -85,8 +85,83 @@ NB_MODULE(_embodik_impl, m) {
       .def_rw("iteration_limit", &eik::BasicSolverConfig::iteration_limit)
       .def_rw("regularization", &eik::BasicSolverConfig::regularization);
 
-  // (Intentionally do not bind VelocitySolverConfig/RegularizedInverseConfig
-  // yet to avoid import-time issues.)
+  nb::class_<eik::RegularizedInverseConfig>(m, "RegularizedInverseConfig")
+      .def(nb::init<>())
+      .def_rw("epsilon", &eik::RegularizedInverseConfig::epsilon)
+      .def_rw("regularization_factor", &eik::RegularizedInverseConfig::regularization_factor);
+
+  nb::class_<eik::VelocitySolverConfig>(m, "VelocitySolverConfig")
+      .def(nb::init<>())
+      .def_rw("epsilon", &eik::VelocitySolverConfig::epsilon)
+      .def_rw("precision_threshold", &eik::VelocitySolverConfig::precision_threshold)
+      .def_rw("iteration_limit", &eik::VelocitySolverConfig::iteration_limit)
+      .def_rw("magnitude_limit", &eik::VelocitySolverConfig::magnitude_limit)
+      .def_rw("stall_detection_count", &eik::VelocitySolverConfig::stall_detection_count)
+      .def_rw("regularization_config", &eik::VelocitySolverConfig::regularization_config)
+      .def_rw("refine_partial_scale", &eik::VelocitySolverConfig::refine_partial_scale);
+
+  nb::class_<eik::ObjectiveSolveConfig>(m, "ObjectiveSolveConfig")
+      .def(nb::init<>())
+      .def_rw("priority", &eik::ObjectiveSolveConfig::priority)
+      .def_rw("solve_mode", &eik::ObjectiveSolveConfig::solve_mode)
+      .def_rw("allow_min_error_fallback", &eik::ObjectiveSolveConfig::allow_min_error_fallback)
+      .def_rw("use_goal_directed_limit_clamp", &eik::ObjectiveSolveConfig::use_goal_directed_limit_clamp);
+
+  nb::class_<eik::VelocityProblemTrace>(m, "VelocityProblemTrace")
+      .def(nb::init<>())
+      .def_rw("seed_q", &eik::VelocityProblemTrace::seed_q)
+      .def_rw("validation_dt", &eik::VelocityProblemTrace::validation_dt)
+      .def_rw("constraint_matrix", &eik::VelocityProblemTrace::constraint_matrix)
+      .def_rw("lower_bounds", &eik::VelocityProblemTrace::lower_bounds)
+      .def_rw("upper_bounds", &eik::VelocityProblemTrace::upper_bounds)
+      .def_rw("maximum_softening_factors", &eik::VelocityProblemTrace::maximum_softening_factors)
+      .def_rw("objective_goals", &eik::VelocityProblemTrace::objective_goals)
+      .def_rw("objective_jacobians", &eik::VelocityProblemTrace::objective_jacobians)
+      .def_rw("objective_configs", &eik::VelocityProblemTrace::objective_configs)
+      .def_rw("solver_config", &eik::VelocityProblemTrace::solver_config)
+      .def_rw("backend_column_scale", &eik::VelocityProblemTrace::backend_column_scale)
+      .def_rw("stationary_primary", &eik::VelocityProblemTrace::stationary_primary)
+      .def_rw("validate_primary_range", &eik::VelocityProblemTrace::validate_primary_range)
+      .def_rw("active_task_names", &eik::VelocityProblemTrace::active_task_names)
+      .def_rw("active_task_priorities", &eik::VelocityProblemTrace::active_task_priorities)
+      .def_rw("backend_solution", &eik::VelocityProblemTrace::backend_solution)
+      .def_rw("backend_status", &eik::VelocityProblemTrace::backend_status)
+      .def_rw("backend_status_message", &eik::VelocityProblemTrace::backend_status_message)
+      .def_rw("returned_velocity", &eik::VelocityProblemTrace::returned_velocity)
+      .def_rw("returned_status", &eik::VelocityProblemTrace::returned_status)
+      .def_rw("returned_status_message", &eik::VelocityProblemTrace::returned_status_message);
+
+  nb::class_<eik::PriorityCandidateTrace>(m, "PriorityCandidateTrace")
+      .def(nb::init<>())
+      .def_rw("before_q", &eik::PriorityCandidateTrace::before_q)
+      .def_rw("proposed_q", &eik::PriorityCandidateTrace::proposed_q)
+      .def_rw("baseline_block_merits", &eik::PriorityCandidateTrace::baseline_block_merits)
+      .def_rw("proposed_block_merits", &eik::PriorityCandidateTrace::proposed_block_merits)
+      .def_rw("task_names", &eik::PriorityCandidateTrace::task_names)
+      .def_rw("task_priorities", &eik::PriorityCandidateTrace::task_priorities)
+      .def_rw("accepted_fraction", &eik::PriorityCandidateTrace::accepted_fraction);
+
+  nb::class_<eik::SolverProblemTrace>(m, "SolverProblemTrace")
+      .def(nb::init<>())
+      .def_rw("velocity_problems", &eik::SolverProblemTrace::velocity_problems)
+      .def_rw("priority_candidates", &eik::SolverProblemTrace::priority_candidates)
+      .def_rw("position_result_q", &eik::SolverProblemTrace::position_result_q)
+      .def_rw("position_status", &eik::SolverProblemTrace::position_status)
+      .def_rw("position_status_message", &eik::SolverProblemTrace::position_status_message)
+      .def_rw("position_hold_active", &eik::SolverProblemTrace::position_hold_active);
+
+  m.def("replay_velocity_problem", [](const eik::VelocityProblemTrace &trace) {
+    return eik::solveHierarchicalLinearSystemEigen(
+        trace.objective_goals, {}, trace.objective_jacobians,
+        trace.constraint_matrix, trace.lower_bounds, trace.upper_bounds,
+        trace.solver_config, trace.objective_configs,
+        trace.maximum_softening_factors.size() ? &trace.maximum_softening_factors : nullptr,
+        eik::detail::HierarchicalLinearSolverExecutionOptions{
+            eik::detail::HierarchicalLinearSolverPolicy::kLegacyVelocity,
+            0.0, false, &trace.stationary_primary, trace.validate_primary_range});
+  }, nb::arg("trace"),
+     "Replay the nominal hierarchical backend only, in recorded backend coordinates; "
+     "adapter recovery, contact projection and integration are not replayed.");
 
   nb::class_<eik::JointConfiguration>(m, "JointConfiguration",
                                       "Joint positions container")

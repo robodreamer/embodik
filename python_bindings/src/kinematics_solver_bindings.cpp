@@ -168,6 +168,11 @@ void bind_kinematics_solver(nb::module_ &m) {
            &KinematicsSolver::clear_all_target_velocities,
            "Clear direct target velocities on all registered tasks.")
 
+      .def("enable_problem_tracing", &KinematicsSolver::enable_problem_tracing,
+           nb::arg("enabled") = true,
+           "Enable diagnostic snapshots of nominal backend calls and priority checks; off by default")
+      .def("get_last_problem_trace", &KinematicsSolver::get_last_problem_trace,
+           "Return an owned snapshot for the latest velocity or position-step request")
       .def("get_task", &KinematicsSolver::get_task, nb::arg("name"),
            "Get a task by name")
 

@@ -1169,6 +1169,43 @@ or proof that an unreachable command can be tracked.
 
 Use these in Viser panels and regression tests instead of guessing from motion alone.
 
+### Opt-in hierarchical problem snapshots
+
+For CPU velocity and position-step diagnosis, enable recording explicitly:
+
+```python
+solver.enable_problem_tracing(True)
+result = solver.solve_position_step(q, targets, options)
+trace = solver.get_last_problem_trace()
+for problem in trace.velocity_problems:
+    replay = embodik.replay_velocity_problem(problem)
+    # replay.solution is in backend coordinates. Convert to physical velocity:
+    dq = problem.backend_column_scale * replay.solution
+solver.enable_problem_tracing(False)
+```
+
+Recording is off by default. Each public request replaces the previous trace;
+position-step requests retain their nominal backend calls, including retries.
+The getter returns an owned snapshot. Disabling recording releases the retained
+trace. Recording copies matrices and configurations and is intended for
+diagnosis, not latency measurements with recording disabled.
+
+Each velocity problem contains the actual hierarchical goals, Jacobians,
+bounds, softening factors, objective policies, numerical configuration and
+backend variable mapping. `replay_velocity_problem()` runs that nominal
+hierarchical backend, preserving its policy and ordering. It does not replay
+later adapter recovery, contact projection, integration or collision acceptance.
+`backend_solution`/`backend_status` and `returned_velocity`/`returned_status`
+describe these different stages; a backend success is not a physical acceptance
+certificate. Constraint residuals must be interpreted in the recorded backend
+coordinates.
+
+For multi-target position stepping, `priority_candidates` records proposed
+configurations, per-task position/orientation merits, task names/priorities and
+the accepted backtracking fraction. The trace also records the final returned
+configuration, status and hold flag. Geometry snapshots and continuous swept
+collision validation remain separate from linear backend replay.
+
 ## Batch and parallel workloads
 
 Real-time control uses **one solver per loop**. Offline reachability and morphology sweeps scale

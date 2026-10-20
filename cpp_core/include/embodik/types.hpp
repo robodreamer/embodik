@@ -190,6 +190,53 @@ struct ObjectiveSolveConfig {
   bool use_goal_directed_limit_clamp = false;
 };
 
+/// Optional snapshot of one nominal hierarchical backend call. Matrices are in
+/// backend coordinates; physical velocity = backend_column_scale * solution.
+/// Later adapter recovery, contact projection and integration are not replayed.
+struct VelocityProblemTrace {
+  Eigen::VectorXd seed_q;
+  double validation_dt = 0.0;
+  Eigen::MatrixXd constraint_matrix;
+  Eigen::VectorXd lower_bounds;
+  Eigen::VectorXd upper_bounds;
+  Eigen::VectorXd maximum_softening_factors;
+  std::vector<Eigen::VectorXd> objective_goals;
+  std::vector<Eigen::MatrixXd> objective_jacobians;
+  std::vector<ObjectiveSolveConfig> objective_configs;
+  VelocitySolverConfig solver_config;
+  Eigen::VectorXd backend_column_scale;
+  Eigen::MatrixXd stationary_primary;
+  bool validate_primary_range = true;
+  std::vector<std::string> active_task_names;
+  std::vector<int> active_task_priorities;
+  Eigen::VectorXd backend_solution;
+  SolverStatus backend_status = SolverStatus::kInvalidInput;
+  std::string backend_status_message;
+  Eigen::VectorXd returned_velocity;
+  SolverStatus returned_status = SolverStatus::kInvalidInput;
+  std::string returned_status_message;
+};
+
+struct PriorityCandidateTrace {
+  Eigen::VectorXd before_q;
+  Eigen::VectorXd proposed_q;
+  std::vector<Eigen::Vector2d> baseline_block_merits;
+  std::vector<Eigen::Vector2d> proposed_block_merits;
+  std::vector<std::string> task_names;
+  std::vector<int> task_priorities;
+  double accepted_fraction = 0.0;
+};
+
+/// Snapshot of the most recent public position-step or velocity request.
+struct SolverProblemTrace {
+  std::vector<VelocityProblemTrace> velocity_problems;
+  std::vector<PriorityCandidateTrace> priority_candidates;
+  Eigen::VectorXd position_result_q;
+  SolverStatus position_status = SolverStatus::kInvalidInput;
+  std::string position_status_message;
+  bool position_hold_active = false;
+};
+
 /**
  * @brief Exact collision-geometry names that identify one unordered pair.
  *

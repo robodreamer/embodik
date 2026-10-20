@@ -261,6 +261,8 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
         get_collision_min_distance() > 0.0 ? get_collision_min_distance() : 0.0;
     enable_stall_handler(nominal);
   }
+  if (problem_tracing_enabled_ && position_step_call_depth_ == 0)
+    last_problem_trace_ = {};
   const bool timing = timing_breakdown_enabled_;
   auto get_elapsed_ms = [](auto start) {
     return std::chrono::duration_cast<std::chrono::microseconds>(
@@ -2292,6 +2294,37 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
       detail::HierarchicalLinearSolverExecutionOptions{
           detail::HierarchicalLinearSolverPolicy::kLegacyVelocity, 0.0, false,
           &protected_stationary_primary, position_step_call_depth_ == 0});
+  std::optional<std::size_t> problem_trace_index;
+  if (problem_tracing_enabled_) {
+    VelocityProblemTrace trace;
+    trace.seed_q = q_eval;
+    trace.validation_dt = pending_step_validation_dt_.value_or(dt_);
+    trace.constraint_matrix = *solve_C;
+    trace.lower_bounds = c_lower;
+    trace.upper_bounds = c_upper;
+    trace.maximum_softening_factors = has_soft_rows
+        ? max_softening_factors : Eigen::VectorXd();
+    trace.objective_goals = goals;
+    trace.objective_jacobians = *solve_jacobians;
+    trace.objective_configs = objective_configs;
+    trace.solver_config = config;
+    trace.backend_column_scale = metric_active
+        ? joint_metric_col_scale_ : Eigen::VectorXd::Ones(robot_->nv());
+    trace.stationary_primary = protected_stationary_primary;
+    trace.validate_primary_range = position_step_call_depth_ == 0;
+    for (const auto &task : tasks_) {
+      if (task && task->isActive()) {
+        trace.active_task_names.push_back(task->getName());
+        trace.active_task_priorities.push_back(task->getPriority());
+      }
+    }
+    trace.backend_solution = Eigen::Map<const Eigen::VectorXd>(
+        backend_result.solution.data(), backend_result.solution.size());
+    trace.backend_status = backend_result.status;
+    trace.backend_status_message = backend_result.status_message;
+    problem_trace_index = last_problem_trace_.velocity_problems.size();
+    last_problem_trace_.velocity_problems.push_back(std::move(trace));
+  }
   if (metric_active &&
       static_cast<int>(backend_result.solution.size()) == robot_->nv()) {
     for (int j = 0; j < robot_->nv(); ++j)
@@ -3511,6 +3544,12 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
   stall_handler_update(result);
   elastic_band_update(result);
   update_auto_task_layout_feedback(result);
+  if (problem_trace_index) {
+    auto &trace = last_problem_trace_.velocity_problems[*problem_trace_index];
+    trace.returned_velocity = result.joint_velocities;
+    trace.returned_status = result.status;
+    trace.returned_status_message = result.status_message;
+  }
 
   return result;
 }
