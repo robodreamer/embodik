@@ -291,6 +291,14 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
     }
   } clear_pending_locks{this};
   (void)clear_pending_locks;
+  if (has_collision_trajectory_floor_anchor() &&
+      (acceleration_limits_enabled_ || !collision_trajectory_catalog_matches())) {
+    result.status = SolverStatus::kInvalidInput;
+    result.status_message = "trajectory anchor requires a matching collision catalog and velocity-only execution";
+    result.joint_velocities = Eigen::VectorXd::Zero(robot_->nv());
+    result.solution.assign(robot_->nv(), 0.0);
+    return result;
+  }
   // Timing fields default to 0.0; only populate when timing is enabled.
   const Eigen::VectorXd q_eval =
       (current_q.size() > 0) ? current_q : robot_->get_current_configuration();

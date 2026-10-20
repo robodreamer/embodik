@@ -711,6 +711,22 @@ public:
    */
   double get_collision_min_distance() const;
 
+  /** Anchor each configured pair to min(distance(q), configured minimum).
+   * Floors persist across targets and commands until explicitly cleared or
+   * replaced. Position-step publication checks every anchored pair freshly.
+   * This opt-in policy suppresses implicit collision-margin relaxation.
+   * Acceleration-limited execution requires a separate stopping contract and
+   * is rejected while an anchor is active. */
+  void set_collision_trajectory_floor_anchor(const Eigen::VectorXd &q,
+                                             double tolerance = 1e-9);
+  void clear_collision_trajectory_floor_anchor();
+  bool has_collision_trajectory_floor_anchor() const {
+    return !collision_trajectory_floors_.empty();
+  }
+  double get_collision_trajectory_floor_tolerance() const {
+    return collision_trajectory_floor_tolerance_;
+  }
+
   /**
    * @brief Disable collision avoidance constraints.
    *
@@ -1446,6 +1462,7 @@ private:
   PositionStepHardConstraints *position_step_hard_constraints_ = nullptr;
   bool problem_tracing_enabled_ = false;
   SolverProblemTrace last_problem_trace_;
+  void record_position_step_trace(const PositionIKResult &result);
   PositionIKResult solve_position_step_impl(
       const Eigen::VectorXd &current_q, const Eigen::Matrix4d &target_pose,
       const std::string &frame_task_name, const PositionStepOptions &options);
@@ -1932,6 +1949,14 @@ private:
   bool non_worsening_collision_floor_enabled_ = false;  // opt-in (changes recovery semantics)
   double collision_structural_floor_ = 0.005;  // 5 mm penetration-prevention floor
   std::unordered_map<std::string, double> collision_pair_distance_floor_;
+  std::unordered_map<std::string, double> collision_trajectory_floors_;
+  double collision_trajectory_floor_tolerance_ = 1e-9;
+  double trajectory_recovery_target(const std::string &pair_key,
+                                    double legacy_target) const;
+  bool collision_trajectory_catalog_matches() const;
+  bool collision_trajectory_state_acceptable(const Eigen::VectorXd &q);
+  bool check_collision_trajectory_step(const Eigen::VectorXd &seed,
+                                       PositionIKResult &result);
   // Frozen (locked/excluded) velocity DOFs used when the lazy-reuse cache was
   // built; lazy reuse is invalidated when the current frozen set differs, since
   // it changes which collision pairs are controllable / selectable.

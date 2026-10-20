@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Explicit original collision-floor anchors for velocity-only CPU position
+  steps, with named-pair retention across commands, bounded candidate checks
+  and final fresh all-pair validation. Legacy recovery remains the default.
+
 - Opt-in individual position/orientation merit budgets for CPU multi-target
   position steps, with physical velocity rows and finite-candidate validation.
   The default same-priority aggregate policy is preserved.

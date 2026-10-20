@@ -137,6 +137,103 @@ void KinematicsSolver::configure_collision_constraint(
 #endif
 }
 
+void KinematicsSolver::set_collision_trajectory_floor_anchor(
+    const Eigen::VectorXd &q, double tolerance) {
+  if (!std::isfinite(tolerance) || tolerance < 0.0)
+    throw std::invalid_argument("trajectory floor tolerance must be finite and nonnegative");
+  if (acceleration_limits_enabled_)
+    throw std::invalid_argument("trajectory floors do not support acceleration-limited execution");
+  const auto records = evaluate_collision_pair_distances(q);
+  if (!records || records->empty())
+    throw std::invalid_argument("trajectory floors require a configured collision catalog");
+  std::unordered_map<std::string, double> floors;
+  for (const auto &record : *records) {
+    const auto key = canonical_pair_key(record.geometry_a, record.geometry_b);
+    if (!floors.emplace(key, std::min(record.distance, record.minimum_distance)).second)
+      throw std::invalid_argument("trajectory floor catalog has duplicate geometry identities");
+  }
+  collision_trajectory_floors_ = std::move(floors);
+  collision_trajectory_floor_tolerance_ = tolerance;
+  position_step_collision_command_floor_distances_.clear();
+  post_step_collision_distance_cache_.clear();
+  ++collision_validation_policy_revision_;
+  invalidate_collision_validation_state_certificates();
+}
+
+void KinematicsSolver::clear_collision_trajectory_floor_anchor() {
+  collision_trajectory_floors_.clear();
+  position_step_collision_command_floor_distances_.clear();
+  post_step_collision_distance_cache_.clear();
+  ++collision_validation_policy_revision_;
+  invalidate_collision_validation_state_certificates();
+}
+
+double KinematicsSolver::trajectory_recovery_target(
+    const std::string &pair_key, double legacy_target) const {
+  if (collision_trajectory_floors_.empty()) return legacy_target;
+  const auto floor = collision_trajectory_floors_.find(pair_key);
+  if (floor == collision_trajectory_floors_.end())
+    throw std::logic_error("collision catalog changed; replace or clear the trajectory anchor");
+  return floor->second - collision_trajectory_floor_tolerance_;
+}
+
+bool KinematicsSolver::collision_trajectory_catalog_matches() const {
+  if (collision_trajectory_floors_.empty()) return true;
+  if (!collision_constraint_ || !collision_constraint_->enabled) return false;
+  const auto pairs = get_active_collision_pairs();
+  if (pairs.size() != collision_trajectory_floors_.size()) return false;
+  return std::all_of(pairs.begin(), pairs.end(), [this](const auto &pair) {
+    return collision_trajectory_floors_.count(canonical_pair_key(pair.first, pair.second)) != 0;
+  });
+}
+
+bool KinematicsSolver::collision_trajectory_state_acceptable(const Eigen::VectorXd &q) {
+  const auto records = evaluate_collision_pair_distances(q);
+  if (!records || records->size() != collision_trajectory_floors_.size()) return false;
+  for (const auto &record : *records) {
+    const auto floor = collision_trajectory_floors_.find(
+        canonical_pair_key(record.geometry_a, record.geometry_b));
+    if (floor == collision_trajectory_floors_.end() ||
+        record.distance < floor->second - collision_trajectory_floor_tolerance_)
+      return false;
+  }
+  return true;
+}
+
+bool KinematicsSolver::check_collision_trajectory_step(
+    const Eigen::VectorXd &seed, PositionIKResult &result) {
+  if (collision_trajectory_floors_.empty()) return true;
+  std::string message;
+  SolverStatus status = SolverStatus::kInvalidInput;
+  if (seed.size() != robot_->nq() || !seed.allFinite())
+    message = "trajectory floor requires a finite seed with size nq";
+  else if (acceleration_limits_enabled_)
+    message = "trajectory floor does not certify acceleration-limited stopping";
+  else if (!collision_trajectory_catalog_matches())
+    message = "collision catalog changed; replace or clear the trajectory floor anchor";
+  else if (!collision_trajectory_state_acceptable(seed)) {
+    status = SolverStatus::kCollisionViolated;
+    message = "measured seed violates the original trajectory floor";
+  } else if (result.q_solution.size() == robot_->nq() && result.q_solution.allFinite() &&
+             ((result.q_solution.array() == seed.array()).all() ||
+              collision_trajectory_state_acceptable(result.q_solution))) {
+    return true;
+  } else {
+    status = SolverStatus::kCollisionViolated;
+    message = "integrated candidate violates the original trajectory floor";
+  }
+  result.status = status;
+  result.status_message = message;
+  result.q_solution = seed;
+  result.solution.assign(robot_->nv(), 0.0);
+  result.joint_velocities = Eigen::VectorXd::Zero(robot_->nv());
+  result.position_step_hold_active = false;
+  result.position_error = result.orientation_error = std::numeric_limits<double>::infinity();
+  previous_dq_ = Eigen::VectorXd::Zero(robot_->nv());
+  if (seed.size() == robot_->nq() && seed.allFinite()) robot_->update_kinematics(seed);
+  return false;
+}
+
 std::optional<KinematicsSolver::CollisionDebugInfo>
 KinematicsSolver::evaluate_collision_debug(const Eigen::VectorXd &current_q) {
 #ifdef PINOCCHIO_WITH_HPP_FCL
@@ -286,6 +383,9 @@ KinematicsSolver::evaluate_collision_pair_distances(const Eigen::VectorXd &q) {
       if (floor != collision_pair_distance_floor_.end())
         persistent_floor = std::min(floor->second, minimum_distance);
     }
+    const auto anchor = collision_trajectory_floors_.find(
+        canonical_pair_key(geometry_a, geometry_b));
+    if (anchor != collision_trajectory_floors_.end()) persistent_floor = anchor->second;
     records.push_back({geometry_a, geometry_b, distance, minimum_distance, persistent_floor});
   }
   if (records.empty()) {
@@ -588,6 +688,7 @@ KinematicsSolver::evaluate_post_step_collision_recovery_margins(
                 kCollisionTolerance);
       }
 
+      recovery_target = trajectory_recovery_target(pair_key, recovery_target);
       const double required_safe_distance =
           std::max(
               {collision_constraint_->min_distance,
@@ -763,6 +864,7 @@ KinematicsSolver::evaluate_post_step_collision_recovery_margins(
               kCollisionTolerance);
     }
 
+    recovery_target = trajectory_recovery_target(pair_key, recovery_target);
     margins[pair_index] = signed_distance - recovery_target;
   }
 
@@ -1385,6 +1487,7 @@ KinematicsSolver::resolve_collision_recovery_distances(
                  position_step_collision_command_floor_distances_[pair_index] -
                      kCollisionTolerance);
   }
+  distances.recovery_target = trajectory_recovery_target(pair_key, distances.recovery_target);
   return distances;
 #else
   (void)pair_index;
@@ -1968,7 +2071,8 @@ KinematicsSolver::compute_collision_constraint(double row_dt,
         std::isfinite(
             position_step_collision_command_floor_distances_[pair_idx]);
     if ((!proximity_gating_active && distance < recovery_target) ||
-        ((non_worsening_collision_floor_enabled_ || command_floor_active) &&
+        ((non_worsening_collision_floor_enabled_ || command_floor_active ||
+          !collision_trajectory_floors_.empty()) &&
          distance <= recovery_target + recovery_selection_margin)) {
       mandatory_pair_indices.insert(pair_idx);
     }
@@ -2205,6 +2309,16 @@ KinematicsSolver::compute_collision_constraint(double row_dt,
     const double repulsion_deadband  = collision_repulsion_deadband_;
     const double recovery_scale      = collision_recovery_scale_;
     const double max_sep_speed_nonpen = collision_max_sep_speed_nonpen_;
+    if (!collision_trajectory_floors_.empty()) {
+      // Keep acceptance tolerance for integration/query roundoff rather than
+      // spending it in the constructed row. A row exactly on floor-tolerance
+      // otherwise chatters across the rejection boundary by a single ulp.
+      const double construction_target =
+          recovery_target + collision_trajectory_floor_tolerance_;
+      return {(construction_target - signed_distance) / constraint_dt,
+              (config.upper_distance - config.tolerance + signed_distance) /
+                  constraint_dt};
+    }
     double lower_bound = 0.0;
     if (signed_distance >= (recovery_target + repulsion_deadband)) {
       lower_bound =
@@ -2682,7 +2796,8 @@ KinematicsSolver::validate_collision_samples(
     effective_floors[cursor] = recovery.recovery_target;
   }
 
-  constexpr double kSampleNonWorseningTolerance = 1e-8;
+  const double kSampleNonWorseningTolerance =
+      collision_trajectory_floors_.empty() ? 1e-8 : 0.0;
   if (geometry_trackable && !result.initial_state_certificate_reused) {
     CollisionStateSafetyCertificate certificate;
     certificate.q = q_from;

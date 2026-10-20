@@ -1231,6 +1231,40 @@ A smaller budget cannot make an infeasible direction achievable; a hold remains
 possible. These are local position-step protections, not global path planning,
 contact guarantees or an API for the separate `AccelerationSolver`.
 
+### Explicit original collision-floor anchors
+
+For velocity-only position stepping, callers may retain the original clearance
+of every configured geometry pair:
+
+```python
+solver.set_collision_trajectory_floor_anchor(q_initial, tolerance=1e-9)
+# Change targets and call solve_position_step() normally.
+# Explicitly end or replace the original-floor contract when appropriate:
+solver.clear_collision_trajectory_floor_anchor()
+```
+
+For each named pair the fixed floor is `min(distance(q_initial), minimum_distance)`.
+It persists across calls and target changes. The configured tolerance is applied
+once to this fixed floor; it is not accumulated per command. The anchor overrides
+ordinary nominal/structural recovery targets, disables implicit stall-handler
+margin relaxation, and remains fixed if nominal margins change. Clear or replace
+the anchor explicitly to select a new contract. Pair-distance queries expose the
+anchored floor in `persistent_floor_m` while it is active.
+
+Near-floor pairs remain mandatory constraint rows even beyond the nominal row
+budget. Existing bounded backoffs and final fresh all-pair queries check actual
+integrated states. Sample validation uses the anchored floor without adding its
+legacy numerical allowance. A changed pair catalog returns `INVALID_INPUT` until
+the anchor is cleared or replaced. An outside-floor measured seed or rejected
+final candidate returns `COLLISION_VIOLATED`, retaining the input configuration;
+this failure is not a certified executable stop or a tracking success.
+
+This is opt-in. It does not certify a continuous swept path, prevent all holds,
+or guarantee that an endpoint is reachable. Acceleration-limited execution is
+explicitly rejected while an anchor is active: its physical stopping contract
+requires separate qualification. The separate `AccelerationSolver` and GPU
+solvers do not acquire this capability through the CPU API.
+
 ## Batch and parallel workloads
 
 Real-time control uses **one solver per loop**. Offline reachability and morphology sweeps scale

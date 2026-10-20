@@ -859,6 +859,8 @@ void KinematicsSolver::elastic_band_update(
 }
 
 void KinematicsSolver::stall_handler_update(VelocitySolverResult &result) {
+  // An explicit original-floor contract must not implicitly relax its policy.
+  if (!collision_trajectory_floors_.empty()) return;
   if (!stall_config_.enabled) {
     return;
   }

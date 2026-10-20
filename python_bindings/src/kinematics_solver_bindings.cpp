@@ -168,6 +168,12 @@ void bind_kinematics_solver(nb::module_ &m) {
            &KinematicsSolver::clear_all_target_velocities,
            "Clear direct target velocities on all registered tasks.")
 
+      .def("set_collision_trajectory_floor_anchor", &KinematicsSolver::set_collision_trajectory_floor_anchor,
+           nb::arg("q"), nb::arg("tolerance") = 1e-9,
+           "Anchor original named-pair floors until explicitly cleared; velocity-only position stepping")
+      .def("clear_collision_trajectory_floor_anchor", &KinematicsSolver::clear_collision_trajectory_floor_anchor)
+      .def("has_collision_trajectory_floor_anchor", &KinematicsSolver::has_collision_trajectory_floor_anchor)
+      .def("get_collision_trajectory_floor_tolerance", &KinematicsSolver::get_collision_trajectory_floor_tolerance)
       .def("enable_problem_tracing", &KinematicsSolver::enable_problem_tracing,
            nb::arg("enabled") = true,
            "Enable diagnostic snapshots of nominal backend calls and priority checks; off by default")

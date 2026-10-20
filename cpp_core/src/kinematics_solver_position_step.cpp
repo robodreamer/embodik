@@ -3041,19 +3041,32 @@ PositionIKResult KinematicsSolver::solve_position(
   return result;
 }
 
+void KinematicsSolver::record_position_step_trace(const PositionIKResult &result) {
+  if (!problem_tracing_enabled_) return;
+  last_problem_trace_.position_result_q = result.q_solution;
+  last_problem_trace_.position_status = result.status;
+  last_problem_trace_.position_status_message = result.status_message;
+  last_problem_trace_.position_hold_active = result.position_step_hold_active;
+}
+
 PositionIKResult KinematicsSolver::solve_position_step(
     const Eigen::VectorXd &current_q, const Eigen::Matrix4d &target_pose,
     const std::string &frame_task_name, const PositionStepOptions &options) {
   if (problem_tracing_enabled_ && position_step_call_depth_ == 0)
     last_problem_trace_ = {};
+  if (has_collision_trajectory_floor_anchor()) {
+    PositionIKResult admission;
+    admission.q_solution = current_q;
+    if (!check_collision_trajectory_step(current_q, admission)) {
+      record_position_step_trace(admission);
+      return admission;
+    }
+  }
   PositionIKResult result = solve_position_step_impl(
       current_q, target_pose, frame_task_name, options);
-  if (problem_tracing_enabled_) {
-    last_problem_trace_.position_result_q = result.q_solution;
-    last_problem_trace_.position_status = result.status;
-    last_problem_trace_.position_status_message = result.status_message;
-    last_problem_trace_.position_hold_active = result.position_step_hold_active;
-  }
+  if (result.q_solution.size() != 0)
+    check_collision_trajectory_step(current_q, result);
+  record_position_step_trace(result);
   return result;
 }
 
@@ -3062,13 +3075,18 @@ PositionIKResult KinematicsSolver::solve_position_step(
     const PositionStepOptions &options) {
   if (problem_tracing_enabled_ && position_step_call_depth_ == 0)
     last_problem_trace_ = {};
-  PositionIKResult result = solve_position_step_impl(current_q, targets, options);
-  if (problem_tracing_enabled_) {
-    last_problem_trace_.position_result_q = result.q_solution;
-    last_problem_trace_.position_status = result.status;
-    last_problem_trace_.position_status_message = result.status_message;
-    last_problem_trace_.position_hold_active = result.position_step_hold_active;
+  if (has_collision_trajectory_floor_anchor()) {
+    PositionIKResult admission;
+    admission.q_solution = current_q;
+    if (!check_collision_trajectory_step(current_q, admission)) {
+      record_position_step_trace(admission);
+      return admission;
+    }
   }
+  PositionIKResult result = solve_position_step_impl(current_q, targets, options);
+  if (result.q_solution.size() != 0)
+    check_collision_trajectory_step(current_q, result);
+  record_position_step_trace(result);
   return result;
 }
 
