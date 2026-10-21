@@ -29,6 +29,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The acceleration velocity-collision adapter explicitly rejects original-floor
+  anchors until stopping feasibility is supported, rather than treating its
+  sampled endpoint checks as an acceleration safety contract.
+
 - Explicit CPU individual-budget position steps use bounded finite-curvature
   correction rows and partial-scale redistribution, allowing redundant joints
   to support motion inside tight pose budgets while retaining final checks.

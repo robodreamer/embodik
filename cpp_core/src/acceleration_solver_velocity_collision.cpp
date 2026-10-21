@@ -262,6 +262,12 @@ AccelerationSolverResult AccelerationSolver::solve_with_velocity_collision(
         "velocity collision lift does not certify coupled position-row stopping",
         diagnostics));
   }
+  if (collision_solver.has_collision_trajectory_floor_anchor()) {
+    return finish(velocity_collision_lift_failure(
+        SolverStatus::kInvalidInput,
+        "velocity collision lift does not certify original-floor stopping",
+        diagnostics));
+  }
   if (q.size() != robot_->nq() || dq.size() != robot_->nv()) {
     return finish(velocity_collision_lift_failure(
         SolverStatus::kShapeMismatch, "q and dq must match robot nq/nv",

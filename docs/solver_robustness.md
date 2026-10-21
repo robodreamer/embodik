@@ -1299,6 +1299,12 @@ stopping feasibility is supported. This API does not establish GPU parity.
 
 ### Explicit original collision-floor anchors
 
+These anchors currently support velocity position steps only. The separate
+`AccelerationSolver.solve_with_velocity_collision()` adapter explicitly rejects
+an anchored provider: sampled endpoint clearance does not establish stopping
+feasibility. A rejected acceleration result supplies no executable substitute
+command and must not be interpreted as an instantaneous physical stop.
+
 For velocity-only position stepping, callers may retain the original clearance
 of every configured geometry pair:
 
