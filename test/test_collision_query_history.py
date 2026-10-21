@@ -5,7 +5,7 @@ import numpy as np
 import embodik as eik
 
 
-def test_pair_query_is_repeatable_after_other_configuration_queries(tmp_path):
+def make_cylinder_solver(tmp_path):
     path = tmp_path / "rotated_cylinders.urdf"
     path.write_text(
         '<robot name="query_history"><link name="world"/><link name="fixed">'
@@ -21,6 +21,11 @@ def test_pair_query_is_repeatable_after_other_configuration_queries(tmp_path):
     robot = eik.RobotModel(str(path), floating_base=False)
     solver = eik.KinematicsSolver(robot)
     solver.configure_collision_constraint(min_distance=0.035)
+    return robot, solver
+
+
+def test_pair_query_is_repeatable_after_other_configuration_queries(tmp_path):
+    robot, solver = make_cylinder_solver(tmp_path)
     q = np.zeros(1)
     robot.update_configuration(q)
     initial = solver.evaluate_collision_pair_distances(q)[0].distance
@@ -42,3 +47,14 @@ def test_pair_query_is_repeatable_after_other_configuration_queries(tmp_path):
         result = solver.solve_position_step(q, [target], eik.PositionStepOptions())
         assert result.status != eik.SolverStatus.COLLISION_VIOLATED
         np.testing.assert_array_equal(result.q_solution, q)
+
+
+def test_strict_policy_distance_calculations_match_fresh_final_query(tmp_path):
+    robot, solver = make_cylinder_solver(tmp_path)
+    q = np.zeros(1)
+    solver.set_collision_trajectory_floor_anchor(q, 1e-9)
+    for other in np.linspace(-0.1, 0.4, 20):
+        solver.evaluate_min_collision_distance(np.array([other]))
+        internal = solver.evaluate_min_collision_distance(q)
+        fresh = solver.evaluate_collision_pair_distances(q)[0].distance
+        assert abs(internal - fresh) <= 1e-12

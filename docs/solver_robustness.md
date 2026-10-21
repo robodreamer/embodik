@@ -1268,6 +1268,10 @@ Fresh pair-distance queries use disposable cold GJK state with a tolerance of
 at most `1e-12`, avoiding query-history-dependent distances at an unchanged
 configuration. Live collision caches remain untouched. This is a numerical
 endpoint check; it is not an exact-distance or swept-path certificate.
+While the anchor is active, internal row construction, candidate backoffs and
+sampled distance checks use the same precise cold query. Distance requests for
+ordinary internal collision solving keep their existing settings. Establishing
+an anchor invalidates prior coarse distance bounds and cached candidate subsets.
 
 Near-floor pairs remain mandatory constraint rows even beyond the nominal row
 budget. Existing bounded backoffs and final fresh all-pair queries check actual

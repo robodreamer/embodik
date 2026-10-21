@@ -29,6 +29,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reported clearance at an identical configuration or falsely rejects an
   unchanged seed under an original-floor policy.
 
+- Explicit original-floor mode uses matching precise cold distance queries
+  in constraint construction, candidate backoffs and final checks, avoiding
+  repeated admission of proposals that its final clearance check rejects.
+
 - Constrained position-step merit retries now reduce the interval or terminal
   fraction by at least half after rejection. Near-one backtracking fractions no
   longer consume every retry on essentially the same rejected nonlinear step;
