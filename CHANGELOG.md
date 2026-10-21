@@ -29,6 +29,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Anchored CPU position steps can correct finite collision curvature with
+  bounded local row retries, allowing redundant joints to support motion
+  tangent to a clearance boundary without relaxing the original floors.
+
 - Physical SCALE-ray recovery honors explicit per-target pose budgets instead
   of unnecessarily contracting a valid ray through a hidden strict merit
   check. Unbudgeted recovery retains its existing acceptance policy.

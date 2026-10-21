@@ -1311,6 +1311,18 @@ an anchored provider: sampled endpoint clearance does not establish stopping
 feasibility. A rejected acceleration result supplies no executable substitute
 command and must not be interpreted as an instantaneous physical stop.
 
+On fixed-base additive scalar models without acceleration, contacts or active
+velocity centroidal hard constraints, an anchored position step can make up to
+four local correction retries when a finite candidate violates a floor. Rows
+rebuilt at the rejected candidate are recentered at the original command state
+and the original hierarchy is solved again. This can use redundant motion when
+an instantaneous tangent command curves through a clearance boundary. It does
+not lower the floor or replace the final nonlinear checks. Temporary rows and
+runtime settings are restored, and unsuccessful speculative state is discarded.
+The single-target and multi-target position-step APIs share this mechanism.
+It remains a bounded local method; failure can still produce a rejection, and
+accepted endpoints do not establish continuous swept collision safety.
+
 For velocity-only position stepping, callers may retain the original clearance
 of every configured geometry pair:
 

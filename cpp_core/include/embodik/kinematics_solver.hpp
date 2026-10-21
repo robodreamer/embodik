@@ -1474,6 +1474,12 @@ private:
   bool problem_tracing_enabled_ = false;
   SolverProblemTrace last_problem_trace_;
   void record_position_step_trace(const PositionIKResult &result);
+  bool refine_position_step_collision_candidate(
+      const Eigen::VectorXd &seed, double horizon, Eigen::VectorXd &candidate,
+      VelocitySolverResult &velocity,
+      const std::function<VelocitySolverResult()> &solve_trial,
+      const std::function<Eigen::VectorXd(VelocitySolverResult &)> &integrate_trial);
+
   PositionIKResult solve_position_step_impl(
       const Eigen::VectorXd &current_q, const Eigen::Matrix4d &target_pose,
       const std::string &frame_task_name, const PositionStepOptions &options);

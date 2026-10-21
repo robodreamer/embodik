@@ -138,6 +138,71 @@ bool KinematicsSolver::position_step_seed_corridor_acceptable(
   return true;
 }
 
+bool KinematicsSolver::refine_position_step_collision_candidate(
+    const Eigen::VectorXd &seed, double horizon, Eigen::VectorXd &candidate,
+    VelocitySolverResult &velocity,
+    const std::function<VelocitySolverResult()> &solve_trial,
+    const std::function<Eigen::VectorXd(VelocitySolverResult &)> &integrate_trial) {
+  // Explicit original-floor execution only. These local models propose
+  // candidates; unchanged nonlinear endpoint checks remain authoritative.
+  if (!has_collision_trajectory_floor_anchor() || acceleration_limits_enabled_ ||
+      robot_->is_floating_base() || robot_->nq() != robot_->nv() ||
+      has_contact_frames() || has_active_velocity_centroidal_hard_constraints() ||
+      !std::isfinite(horizon) || horizon <= 0.0 ||
+      !std::all_of(robot_->model().joints.begin() + 1, robot_->model().joints.end(),
+                   [](const auto &joint) { return joint.nq() == 1 && joint.nv() == 1; }) ||
+      candidate.size() != seed.size() || !candidate.allFinite() ||
+      (candidate - seed).squaredNorm() <= kCollisionEscapeNormEps) return false;
+  const auto before = evaluate_post_step_collision_recovery_margins(seed);
+  const auto after = evaluate_post_step_collision_recovery_margins(candidate);
+  if (collision_recovery_margins_acceptable(before, after, 0.0)) return false;
+  const auto entry = capture_position_step_mutable_state();
+  const auto entry_hard = position_step_hard_constraints_
+      ? std::optional<PositionStepHardConstraints>(*position_step_hard_constraints_)
+      : std::nullopt;
+  ScopedPositionStepValueRestore restore_rows(linear_velocity_constraints_);
+  ScopedPositionStepValueRestore restore_refinement(runtime_config_.refine_partial_scale);
+  runtime_config_.refine_partial_scale = true;
+  Eigen::VectorXd proposed = candidate;
+  for (int retry = 0; retry < 4; ++retry) {
+    robot_->update_configuration(proposed);
+    const auto rows = compute_collision_constraint(horizon);
+    if (!rows || rows->jacobian.rows() == 0 || !rows->jacobian.allFinite()) break;
+    // Recenter the signed-distance recovery model at the original command
+    // state. This changes the redundant realization instead of repeatedly
+    // shortening a tangent command that curves through the floor.
+    const Eigen::VectorXd offset = rows->jacobian * ((proposed - seed) / horizon);
+    const Eigen::VectorXd lower = rows->lower_bounds + offset;
+    const Eigen::VectorXd upper = rows->upper_bounds + offset;
+    if (!lower.allFinite() || !upper.allFinite()) break;
+    append_linear_velocity_constraints(rows->jacobian, lower, upper);
+    // Rejected proposals do not accumulate motion history or elasticity.
+    restore_position_step_mutable_state(entry);
+    robot_->update_configuration(seed);
+    auto trial = solve_trial();
+    if (trial.status != SolverStatus::kSuccess ||
+        trial.joint_velocities.size() != robot_->nv() ||
+        !trial.joint_velocities.allFinite()) break;
+    proposed = integrate_trial(trial);
+    if (!proposed.allFinite() ||
+        (proposed - seed).squaredNorm() <= kCollisionEscapeNormEps) break;
+    const auto trial_margins = evaluate_post_step_collision_recovery_margins(proposed);
+    if (collision_recovery_margins_acceptable(before, trial_margins, 0.0) &&
+        linear_position_step_acceptable(seed, proposed)) {
+      candidate = proposed;
+      velocity = std::move(trial);
+      velocity.status_message = "bounded collision-curvature correction accepted";
+      robot_->update_configuration(candidate);
+      return true;
+    }
+  }
+  restore_position_step_mutable_state(entry);
+  if (entry_hard && position_step_hard_constraints_)
+    *position_step_hard_constraints_ = *entry_hard;
+  robot_->update_configuration(candidate);
+  return false;
+}
+
 bool KinematicsSolver::make_position_step_escape_candidate(
     const Eigen::VectorXd &step_origin,
     const Eigen::VectorXd &escape_origin,
@@ -3630,58 +3695,53 @@ PositionIKResult KinematicsSolver::solve_position_step_impl(
     if (options.record_velocity_candidates) {
       diagnostic_solver_velocity = last_vel_result.joint_velocities;
     }
-    if (!options.integration_zero_velocity_indices.empty() &&
-        last_vel_result.joint_velocities.size() == robot_->nv()) {
-      apply_integration_velocity_mask(
-          last_vel_result.joint_velocities,
-          options.integration_zero_velocity_indices);
-    }
-
     Eigen::VectorXd q_pre_step = q;
     double accepted_step_dt = step_dt_eff;
     bool step_collision_rejected = false;
-    // Adaptive dt: scale integration step proportional to current position
-    // error so large-jump approach is faster; reverts to base dt near target.
-    // Proximity-aware cap: limit scale so the integration step cannot overshoot
-    // past min_distance in one tick (scale * step_dt * max_ee_speed <= clearance).
     const bool adaptive_step_large = (step_dt_eff > step_dt * 1.01);
-    if (use_position_limits_ &&
-        last_vel_result.joint_velocities.size() == robot_->nv()) {
-      auto [q_min, q_max] = robot_->get_joint_limits();
-      if (elastic_band_config_.enabled &&
-          elastic_band_state_.delta.size() == robot_->nv()) {
-        expand_scalar_joint_limits_for_velocity_delta(
-            q_min, q_max, elastic_band_state_.delta, velocity_to_config_index,
-            robot_->nv());
+    Eigen::VectorXd collision_trial_raw;
+    const auto integrate_single_candidate = [&](VelocitySolverResult &trial) {
+      if (options.record_velocity_candidates) collision_trial_raw = trial.joint_velocities;
+      if (!options.integration_zero_velocity_indices.empty())
+        apply_integration_velocity_mask(trial.joint_velocities, options.integration_zero_velocity_indices);
+      if (use_position_limits_) {
+        auto [lower, upper] = robot_->get_joint_limits();
+        if (elastic_band_config_.enabled && elastic_band_state_.delta.size() == robot_->nv())
+          expand_scalar_joint_limits_for_velocity_delta(lower, upper, elastic_band_state_.delta,
+                                                        velocity_to_config_index, robot_->nv());
+        clamp_joint_velocity_to_position_limits_for_integration(
+            trial.joint_velocities, q_pre_step, lower, upper, velocity_to_config_index,
+            step_dt_eff, robot_->nv(), step_locked_indices, tasks_);
       }
-      clamp_joint_velocity_to_position_limits_for_integration(
-          last_vel_result.joint_velocities, q, q_min, q_max,
-          velocity_to_config_index, step_dt_eff, robot_->nv(),
-          step_locked_indices, tasks_);
-    }
-    if (step == 0 &&
-        last_vel_result.joint_velocities.size() == robot_->nv() &&
-        last_vel_result.joint_velocities.allFinite()) {
-      first_tick_velocity = last_vel_result.joint_velocities;
-    }
-    q = pinocchio::integrate(robot_->model(), q,
-                             step_dt_eff * last_vel_result.joint_velocities);
-    if (use_position_limits_) {
-      auto [q_min_true, q_max_true] = robot_->get_joint_limits();
-      project_scalar_configuration_to_true_joint_limits(
-          q, q_min_true, q_max_true, velocity_to_config_index, robot_->nv());
-    }
-    const bool step_configuration_limited =
-        clamp_configuration_delta_from_reference(
-            robot_->model(), q_reference, q,
-            options.max_configuration_step_norm);
-    configuration_step_limited =
-        step_configuration_limited || configuration_step_limited;
-    if (!linear_position_step_acceptable(q_pre_step, q)) {
-      q = q_pre_step;
-      last_vel_result.joint_velocities.setZero();
-    }
-    robot_->update_configuration(q);
+      Eigen::VectorXd next = pinocchio::integrate(
+          robot_->model(), q_pre_step, step_dt_eff * trial.joint_velocities);
+      if (use_position_limits_) {
+        auto [lower, upper] = robot_->get_joint_limits();
+        project_scalar_configuration_to_true_joint_limits(
+            next, lower, upper, velocity_to_config_index, robot_->nv());
+      }
+      configuration_step_limited = clamp_configuration_delta_from_reference(
+          robot_->model(), q_reference, next, options.max_configuration_step_norm) || configuration_step_limited;
+      if (!linear_position_step_acceptable(q_pre_step, next)) {
+        next = q_pre_step;
+        trial.joint_velocities.setZero();
+      }
+      robot_->update_configuration(next);
+      return next;
+    };
+    q = integrate_single_candidate(last_vel_result);
+    const auto solve_collision_trial = [&]() {
+      pending_velocity_lock_indices_ = step_locked_indices;
+      pending_step_torso_constraint_ = step_torso_constraint;
+      pending_step_validation_dt_ = step_dt_eff;
+      return solve_velocity(q_pre_step, true);
+    };
+    if (refine_position_step_collision_candidate(q_pre_step, step_dt_eff, q, last_vel_result,
+                                                solve_collision_trial, integrate_single_candidate) &&
+        options.record_velocity_candidates)
+      diagnostic_solver_velocity = collision_trial_raw;
+    if (step == 0 && last_vel_result.joint_velocities.size() == robot_->nv() &&
+        last_vel_result.joint_velocities.allFinite()) first_tick_velocity = last_vel_result.joint_velocities;
     if (options.record_velocity_candidates) {
       result.velocity_candidates.push_back(PositionStepVelocityCandidate{
           step, step_dt_eff, q_pre_step, diagnostic_solver_velocity,
@@ -5667,6 +5727,22 @@ PositionIKResult KinematicsSolver::solve_position_step_impl(
       diagnostic_solver_velocity = last_vel_result.joint_velocities;
     }
     q = integrate_velocity_candidate(last_vel_result, step_dt_eff);
+    const auto solve_collision_trial = [&]() {
+      pending_velocity_lock_indices_ = step_locked_indices;
+      pending_step_torso_constraint_ = step_torso_constraint;
+      pending_step_validation_dt_ = step_dt_eff;
+      pending_position_step_priority_constraints_ = priority_constraint_specs;
+      return solve_velocity(q_pre_step, true);
+    };
+    Eigen::VectorXd collision_trial_raw;
+    const auto integrate_collision_trial = [&](VelocitySolverResult &trial) {
+      if (options.record_velocity_candidates) collision_trial_raw = trial.joint_velocities;
+      return integrate_velocity_candidate(trial, step_dt_eff);
+    };
+    if (refine_position_step_collision_candidate(q_pre_step, step_dt_eff, q, last_vel_result,
+                                                solve_collision_trial, integrate_collision_trial) &&
+        options.record_velocity_candidates)
+      diagnostic_solver_velocity = collision_trial_raw;
     if (options.record_velocity_candidates) {
       result.velocity_candidates.push_back(PositionStepVelocityCandidate{
           step, step_dt_eff, q_pre_step, diagnostic_solver_velocity,
