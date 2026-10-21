@@ -227,10 +227,27 @@ struct PriorityCandidateTrace {
   double accepted_fraction = 0.0;
 };
 
+struct ContinuityDecisionTrace {
+  Eigen::VectorXd seed_q;
+  Eigen::VectorXd candidate_q;
+  double initial_merit = 0.0;
+  double final_merit = 0.0;
+  double configuration_step_norm = 0.0;
+  std::vector<double> initial_block_merits;
+  std::vector<double> final_block_merits;
+  int merit_priority = 0;
+  int window_samples_before = 0;
+  int direction_reversals_before = 0;
+  bool was_holding = false;
+  bool held = false;
+  std::string reason;
+};
+
 /// Snapshot of the most recent public position-step or velocity request.
 struct SolverProblemTrace {
   std::vector<VelocityProblemTrace> velocity_problems;
   std::vector<PriorityCandidateTrace> priority_candidates;
+  std::vector<ContinuityDecisionTrace> continuity_decisions;
   Eigen::VectorXd position_result_q;
   SolverStatus position_status = SolverStatus::kInvalidInput;
   std::string position_status_message;

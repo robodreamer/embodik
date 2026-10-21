@@ -73,6 +73,17 @@ def test_trace_replays_nominal_backend_and_preserves_result(tmp_path, mode, metr
         np.testing.assert_array_equal(actual.q_solution, expected.q_solution)
         np.testing.assert_array_equal(trace.position_result_q, actual.q_solution)
         assert trace.position_status == actual.status
+        assert trace.continuity_decisions
+        for decision in trace.continuity_decisions:
+            assert decision.reason
+            assert decision.seed_q.shape == decision.candidate_q.shape == (robot.nq,)
+            assert np.isfinite(decision.initial_merit)
+            assert np.isfinite(decision.final_merit)
+            assert len(decision.initial_block_merits) == len(decision.final_block_merits)
+        snapshot = trace.continuity_decisions[0]
+        original_reason = snapshot.reason
+        snapshot.reason = "caller edit"
+        assert traced.get_last_problem_trace().continuity_decisions[0].reason == original_reason
     else:
         assert trace.position_result_q.size == 0
 

@@ -1206,6 +1206,12 @@ the accepted backtracking fraction. The trace also records the final returned
 configuration, status and hold flag. Geometry snapshots and continuous swept
 collision validation remain separate from linear backend replay.
 
+`continuity_decisions` records each continuity guard's actual seed/candidate,
+merits, commanded blocks, prior window sample/reversal counts and whether it
+was already holding. Its `held` flag and `reason` identify the guard decision;
+later safety checks can still reject a candidate. These records diagnose
+stateful decisions and do not constitute a complete solver-state replay.
+
 ### Individual target merit budgets
 
 Same-priority targets retain aggregate position/orientation merit protection by

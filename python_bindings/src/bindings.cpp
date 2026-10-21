@@ -141,10 +141,27 @@ NB_MODULE(_embodik_impl, m) {
       .def_rw("task_priorities", &eik::PriorityCandidateTrace::task_priorities)
       .def_rw("accepted_fraction", &eik::PriorityCandidateTrace::accepted_fraction);
 
+  nb::class_<eik::ContinuityDecisionTrace>(m, "ContinuityDecisionTrace")
+      .def(nb::init<>())
+      .def_rw("seed_q", &eik::ContinuityDecisionTrace::seed_q)
+      .def_rw("candidate_q", &eik::ContinuityDecisionTrace::candidate_q)
+      .def_rw("initial_merit", &eik::ContinuityDecisionTrace::initial_merit)
+      .def_rw("final_merit", &eik::ContinuityDecisionTrace::final_merit)
+      .def_rw("configuration_step_norm", &eik::ContinuityDecisionTrace::configuration_step_norm)
+      .def_rw("initial_block_merits", &eik::ContinuityDecisionTrace::initial_block_merits)
+      .def_rw("final_block_merits", &eik::ContinuityDecisionTrace::final_block_merits)
+      .def_rw("merit_priority", &eik::ContinuityDecisionTrace::merit_priority)
+      .def_rw("window_samples_before", &eik::ContinuityDecisionTrace::window_samples_before)
+      .def_rw("direction_reversals_before", &eik::ContinuityDecisionTrace::direction_reversals_before)
+      .def_rw("was_holding", &eik::ContinuityDecisionTrace::was_holding)
+      .def_rw("held", &eik::ContinuityDecisionTrace::held)
+      .def_rw("reason", &eik::ContinuityDecisionTrace::reason);
+
   nb::class_<eik::SolverProblemTrace>(m, "SolverProblemTrace")
       .def(nb::init<>())
       .def_rw("velocity_problems", &eik::SolverProblemTrace::velocity_problems)
       .def_rw("priority_candidates", &eik::SolverProblemTrace::priority_candidates)
+      .def_rw("continuity_decisions", &eik::SolverProblemTrace::continuity_decisions)
       .def_rw("position_result_q", &eik::SolverProblemTrace::position_result_q)
       .def_rw("position_status", &eik::SolverProblemTrace::position_status)
       .def_rw("position_status_message", &eik::SolverProblemTrace::position_status_message)

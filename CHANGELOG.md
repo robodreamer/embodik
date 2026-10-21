@@ -19,7 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Opt-in CPU velocity/position-step problem snapshots and nominal hierarchical
   backend replay, including objective policies, variable mapping and per-target
-  priority-candidate merits. Recording is disabled by default.
+  priority-candidate merits and continuity guard decisions. Recording is
+  disabled by default.
 
 ### Fixed
 

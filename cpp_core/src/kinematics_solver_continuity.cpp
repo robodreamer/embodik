@@ -293,8 +293,31 @@ bool KinematicsSolver::should_hold_position_step_for_continuity(
     int merit_priority, double configuration_step_norm,
     bool owns_position_step_continuity,
     bool collision_violated, bool step_constraint_tradeoff_active) {
+  ContinuityDecisionTrace trace;
+  if (problem_tracing_enabled_) {
+    trace.seed_q = current_q;
+    trace.candidate_q = result.q_solution;
+    trace.initial_merit = initial_merit;
+    trace.final_merit = final_merit;
+    trace.configuration_step_norm = configuration_step_norm;
+    trace.initial_block_merits = initial_target_block_merits;
+    trace.final_block_merits = final_target_block_merits;
+    trace.merit_priority = merit_priority;
+    trace.window_samples_before = position_step_merit_window_samples_;
+    trace.direction_reversals_before = position_step_merit_window_direction_reversals_;
+    trace.was_holding = position_step_continuity_state_ !=
+                        PositionStepContinuityState::kMonitoring;
+  }
+  const auto finish = [&](bool held, const char *reason) {
+    if (problem_tracing_enabled_) {
+      trace.held = held;
+      trace.reason = reason;
+      last_problem_trace_.continuity_decisions.push_back(std::move(trace));
+    }
+    return held;
+  };
   if (!owns_position_step_continuity) {
-    return false;
+    return finish(false, "caller_does_not_own_continuity");
   }
 
   if (!position_step_merit_priority_.has_value() ||
@@ -335,10 +358,10 @@ bool KinematicsSolver::should_hold_position_step_for_continuity(
         std::isfinite(configuration_step_norm) &&
         configuration_step_norm <= kPositionStepMeritMotionThreshold;
     if (zero_motion_collision_rejection) {
-      return false;
+      return finish(false, "zero_motion_collision_rejection");
     }
     reset_position_step_merit_window();
-    return false;
+    return finish(false, "not_a_nominal_candidate");
   }
 
   // Publish a nominal candidate that completes the selected task. A satisfied
@@ -355,7 +378,7 @@ bool KinematicsSolver::should_hold_position_step_for_continuity(
                   });
   if (newly_satisfied) {
     reset_position_step_merit_window();
-    return false;
+    return finish(false, "newly_satisfied");
   }
 
   const bool collision_constraint_active =
@@ -415,7 +438,7 @@ bool KinematicsSolver::should_hold_position_step_for_continuity(
     position_step_merit_window_direction_reversals_ = 0;
     position_step_merit_window_last_merits_ = initial_target_merits;
     position_step_merit_window_error_increases_ = 0;
-    return true;
+    return finish(true, "stationary_target_regressed");
   }
 
   if (!position_step_merit_window_anchor_.has_value()) {
@@ -474,7 +497,7 @@ bool KinematicsSolver::should_hold_position_step_for_continuity(
       position_step_merit_window_error_increases_ >
           kStationaryMaxDirectionReversals) {
     position_step_continuity_state_ = PositionStepContinuityState::kHolding;
-    return true;
+    return finish(true, "dominant_min_error_target_regressed");
   }
   position_step_merit_window_motion_ +=
       std::max(0.0, configuration_step_norm);
@@ -517,17 +540,17 @@ bool KinematicsSolver::should_hold_position_step_for_continuity(
         // optimum is useful, but must not reopen another non-improving window.
         // A new command/policy resets this history; genuine new-best progress
         // below still reopens ordinary control.
-        return false;
+        return finish(false, "progress_toward_collision_best");
       }
       if (track_collision_best_merit) {
         position_step_collision_best_merit_ = final_merit;
       }
       reset_position_step_merit_window();
-      return false;
+      return finish(false, "blockwise_progress_reopened");
     }
     if (position_step_continuity_state_ ==
         PositionStepContinuityState::kHolding) {
-      return true;
+      return finish(true, "latched_without_blockwise_progress");
     }
     const bool hold_candidate = should_hold_non_improving_position_step(
         result, current_q, initial_merit, final_merit,
@@ -539,7 +562,9 @@ bool KinematicsSolver::should_hold_position_step_for_continuity(
     if (made_sufficient_progress) {
       reset_position_step_merit_window();
     }
-    return !made_sufficient_progress;
+    return finish(!made_sufficient_progress,
+                  made_sufficient_progress ? "sufficient_progress_reopened"
+                                           : "insufficient_reopening_progress");
   }
 
   const int required_window_samples =
@@ -548,7 +573,7 @@ bool KinematicsSolver::should_hold_position_step_for_continuity(
                      runtime_config_.auto_layout_cooldown_ticks + 1)
           : kStationaryTargetDwellCalls;
   if (position_step_merit_window_samples_ < required_window_samples) {
-    return false;
+    return finish(false, "monitoring_window");
   }
 
   const bool target_is_satisfied =
@@ -596,7 +621,7 @@ bool KinematicsSolver::should_hold_position_step_for_continuity(
     position_step_merit_window_direction_reversals_ = 0;
     position_step_merit_window_last_merits_.reset();
     position_step_merit_window_error_increases_ = 0;
-    return false;
+    return finish(false, "productive_window");
   }
 
   position_step_continuity_state_ =
@@ -607,7 +632,9 @@ bool KinematicsSolver::should_hold_position_step_for_continuity(
   position_step_merit_window_anchor_ = initial_merit;
   position_step_merit_window_motion_ = 0.0;
   position_step_merit_window_samples_ = 0;
-  return true;
+  return finish(true, target_is_satisfied ? "stationary_target_satisfied"
+                      : window_was_oscillatory ? "oscillatory_window"
+                                              : "unproductive_window");
 }
 
 // ============================================================
