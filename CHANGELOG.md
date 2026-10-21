@@ -29,6 +29,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Physical SCALE-ray recovery honors explicit per-target pose budgets instead
+  of unnecessarily contracting a valid ray through a hidden strict merit
+  check. Unbudgeted recovery retains its existing acceptance policy.
+
 - The acceleration velocity-collision adapter explicitly rejects original-floor
   anchors until stopping feasibility is supported, rather than treating its
   sampled endpoint checks as an acceleration safety contract.

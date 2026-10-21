@@ -1249,6 +1249,12 @@ partial-SCALE refinement during the position step. This lets redundant joints
 support motion instead of accepting an unnecessarily small tangent-row scale.
 The caller's runtime refinement setting is restored afterward.
 
+Executable physical-ray recovery uses the same explicit zones. Its merit
+checks measure error outside each supplied budget, while unbudgeted blocks
+retain their existing protection. A valid bounded ray is not shortened merely
+because finite curvature changes an error inside a permitted zone. The
+position-step nonlinear checks and original physical constraints still apply.
+
 When finite kinematic curvature exceeds an explicit budget, disposable FK
 probes form local corrective inequality rows. Up to four correction attempts
 share the existing eight-retry budget. These rows do not relax the original

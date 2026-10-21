@@ -2980,6 +2980,38 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
       return blocks;
     };
     const auto initial_blocks = pose_blocks();
+    // Explicit individual budgets apply to executable recovery candidates too.
+    // Otherwise a second, hidden strict guard can shrink a valid ray even when
+    // its finite endpoint stays within the caller's permitted pose zone.
+    std::vector<double> recovery_block_budgets(initial_blocks.size(), -1.0);
+    std::vector<bool> recovery_task_has_budget(recovery_tasks.size(), false);
+    std::size_t recovery_block_offset = 0;
+    for (std::size_t task_index = 0; task_index < recovery_tasks.size(); ++task_index) {
+      const auto &task = recovery_tasks[task_index];
+      const auto spec = std::find_if(
+          pending_position_step_priority_constraints_.begin(),
+          pending_position_step_priority_constraints_.end(),
+          [&](const auto &candidate) {
+            return candidate.physical_velocity_budget && candidate.task.get() == task.get();
+          });
+      const int blocks = task->getError().size() >= 6 ? 2 : 1;
+      if (blocks == 2 && spec != pending_position_step_priority_constraints_.end()) {
+        for (int block = 0; block < 2; ++block) {
+          const double budget = block == 0 ? spec->position_tolerance : spec->orientation_tolerance;
+          if (std::isfinite(budget) && budget > 0.0) {
+            recovery_block_budgets[recovery_block_offset + block] = budget;
+            recovery_task_has_budget[task_index] = true;
+          }
+        }
+      }
+      recovery_block_offset += blocks;
+    }
+    const auto block_reduction = [&](std::size_t index, double before, double after) {
+      const double budget = recovery_block_budgets[index];
+      return budget > 0.0
+          ? std::max(0.0, before - budget) - std::max(0.0, after - budget)
+          : before - after;
+    };
     if (legacy_recovery_requested && position_step_physical_recovery_anchor_blocks_.size() !=
         initial_blocks.size()) {
       position_step_physical_recovery_anchor_blocks_ = initial_blocks;
@@ -3013,7 +3045,7 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
         robot_->update_kinematics(endpoint);
         const auto incumbent_blocks = pose_blocks();
         for (std::size_t index = 0; index < initial_blocks.size(); ++index) {
-          incumbent_reduction += initial_blocks[index] - incumbent_blocks[index];
+          incumbent_reduction += block_reduction(index, initial_blocks[index], incumbent_blocks[index]);
         }
         robot_->update_kinematics(q_eval);
         pose_blocks();
@@ -3197,16 +3229,21 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
            ++index) {
         const double tolerance = 64.0 * std::numeric_limits<double>::epsilon() *
             std::max({1.0, initial_blocks[index], proposed_blocks[index]});
-        improving = proposed_blocks[index] <=
-                    recovery_anchor_blocks[index] +
-                        tolerance;
-        reduction += initial_blocks[index] - proposed_blocks[index];
+        const double budget = recovery_block_budgets[index];
+        const double block_limit = budget > 0.0
+            ? std::max(initial_blocks[index], budget + 1e-9)
+            : recovery_anchor_blocks[index];
+        improving = proposed_blocks[index] <= block_limit + tolerance;
+        reduction += block_reduction(index, initial_blocks[index], proposed_blocks[index]);
       }
       for (std::size_t index = 0; index < initial_merits.size() && improving;
            ++index) {
         const double tolerance = 64.0 * std::numeric_limits<double>::epsilon() *
             std::max({1.0, initial_merits[index], proposed_merits[index]});
-        improving = proposed_merits[index] <= initial_merits[index] + tolerance;
+        // Individual block limits above replace the aggregate norm only for
+        // explicitly budgeted tasks. Unbudgeted task acceptance is unchanged.
+        improving = recovery_task_has_budget[index] ||
+                    proposed_merits[index] <= initial_merits[index] + tolerance;
       }
       const double required_reduction = generalized_candidate && !bounded_ray_preference
           ? std::max(1e-8, incumbent_reduction + 1e-8) : 1e-8;
