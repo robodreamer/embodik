@@ -1258,6 +1258,11 @@ margin relaxation, and remains fixed if nominal margins change. Clear or replace
 the anchor explicitly to select a new contract. Pair-distance queries expose the
 anchored floor in `persistent_floor_m` while it is active.
 
+Fresh pair-distance queries use disposable cold GJK state with a tolerance of
+at most `1e-12`, avoiding query-history-dependent distances at an unchanged
+configuration. Live collision caches remain untouched. This is a numerical
+endpoint check; it is not an exact-distance or swept-path certificate.
+
 Near-floor pairs remain mandatory constraint rows even beyond the nominal row
 budget. Existing bounded backoffs and final fresh all-pair queries check actual
 integrated states. Sample validation uses the anchored floor without adding its

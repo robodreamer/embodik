@@ -23,6 +23,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fresh collision-pair distance queries use isolated cold GJK state and tighter
+  distance precision. Unrelated collision-query history no longer changes the
+  reported clearance at an identical configuration or falsely rejects an
+  unchanged seed under an original-floor policy.
+
 - Constrained position-step merit retries now reduce the interval or terminal
   fraction by at least half after rejection. Near-one backtracking fractions no
   longer consume every retry on essentially the same rejected nonlinear step;

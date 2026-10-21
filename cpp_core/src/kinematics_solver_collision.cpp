@@ -345,9 +345,20 @@ KinematicsSolver::evaluate_collision_pair_distances(const Eigen::VectorXd &q) {
   if (collision_model == nullptr || collision_data == nullptr) {
     return std::nullopt;
   }
-  // Diagnostics must not overwrite shared placements/results used by later
-  // solver collision certificates. Copy request/filter settings locally.
-  pinocchio::GeometryData query_data(*collision_data);
+  // A copy of GeometryData inherits cached GJK guesses and distance functors.
+  // At the same q these can report different distances after unrelated solves,
+  // creating false violations of a fixed original floor. Use disposable cold
+  // functors while retaining caller request settings, with enough precision for
+  // the nanometre-scale trajectory gate. Live solver caches remain untouched.
+  pinocchio::GeometryData query_data(*collision_model);
+  for (std::size_t i = 0; i < query_data.distanceRequests.size(); ++i) {
+    auto &request = query_data.distanceRequests[i];
+    request = collision_data->distanceRequests[i];
+    request.enable_cached_gjk_guess = false;
+    request.gjk_initial_guess = hpp::fcl::GJKInitialGuess::DefaultGuess;
+    request.gjk_tolerance = std::min(request.gjk_tolerance, 1e-12);
+    request.gjk_max_iterations = std::max<std::size_t>(request.gjk_max_iterations, 512);
+  }
   const ScopedRobotKinematicsRestore restore_robot_state(*robot_);
   robot_->update_kinematics(q);
   pinocchio::updateGeometryPlacements(robot_->model(), robot_->data(),
