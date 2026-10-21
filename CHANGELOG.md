@@ -24,6 +24,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Explicit CPU individual-budget position steps use bounded finite-curvature
+  correction rows and partial-scale redistribution, allowing redundant joints
+  to support motion inside tight pose budgets while retaining final checks.
+
+- Opt-in partial SCALE refinement can rebuild an off-ray damped legacy seed
+  from a verified feasible task-entry witness, preserving earlier task images
+  and accepting only a certified larger scale under the original hard rows.
+
 - Fresh collision-pair distance queries use isolated cold GJK state and tighter
   distance precision. Unrelated collision-query history no longer changes the
   reported clearance at an identical configuration or falsely rejects an

@@ -318,6 +318,12 @@ It starts from the existing feasible realization and keeps it if refinement
 does not produce a verified improvement. This option does not alter
 `KinematicsSolver` defaults or select a nonlinear recovery trajectory.
 
+For CPU legacy commands whose damped partial result is not on its reported
+ray, explicit refinement may construct a new ray-consistent feasible seed from
+the verified task-entry witness. Earlier achieved task images and original
+hard rows remain fixed. Only a certified larger scale replaces the old result;
+the ordinary default-off path is unchanged.
+
 The internal GPU `WarpBoundRelease` adapter has the same constructor option.
 Its refinement requires a feasible, ray-consistent moving seed; full-scale,
 non-ray and invalid-input worlds retain their existing handling. A rounded
@@ -1237,12 +1243,24 @@ A smaller budget cannot make an infeasible direction achievable; a hold remains
 possible. These are local position-step protections, not global path planning,
 contact guarantees or an API for the separate `AccelerationSolver`.
 
-When a finite candidate violates protected task merit and hard constraints
-require re-solving, each rejected retry reduces the interval or terminal
-fraction by at least half. A near-one fraction computed for one proposal does
-not guarantee that re-solving will produce a valid nonlinear endpoint. The
-bounded eight-retry limit and all final acceptance checks remain in force;
-failure to find an acceptable candidate can still produce a hold.
+For fixed-base additive scalar joints without acceleration, contact or active
+velocity centroidal constraints, explicit budgets also enable bounded
+partial-SCALE refinement during the position step. This lets redundant joints
+support motion instead of accepting an unnecessarily small tangent-row scale.
+The caller's runtime refinement setting is restored afterward.
+
+When finite kinematic curvature exceeds an explicit budget, disposable FK
+probes form local corrective inequality rows. Up to four correction attempts
+share the existing eight-retry budget. These rows do not relax the original
+budget or other constraints; every proposal still passes the original nonlinear
+endpoint guard. Temporary rows are restored before returning. Unsupported
+configurations retain the existing interval-backoff behavior.
+
+If a rejected retry does not add a correction, its interval or terminal fraction
+contracts by at least half. Repeating a near-one backtracking fraction cannot
+consume the budget on essentially unchanged proposals. A hold remains possible
+when no candidate passes the unchanged final acceptance checks. These local
+corrections do not certify a continuous swept path.
 
 ### Explicit original collision-floor anchors
 

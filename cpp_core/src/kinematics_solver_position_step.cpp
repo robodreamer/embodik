@@ -65,6 +65,13 @@ template <typename T> struct ScopedPositionStepCapture {
   ~ScopedPositionStepCapture() { slot = previous; }
 };
 
+template <typename T> struct ScopedPositionStepValueRestore {
+  T &slot;
+  T original;
+  explicit ScopedPositionStepValueRestore(T &value) : slot(value), original(value) {}
+  ~ScopedPositionStepValueRestore() { slot = std::move(original); }
+};
+
 bool failed_strict_primary_scale(const VelocitySolverResult &result) {
   return result.status == SolverStatus::kInfeasible &&
          !result.task_scales.empty() && result.task_scales.front() <= 0.0 &&
@@ -5224,6 +5231,72 @@ PositionIKResult KinematicsSolver::solve_position_step_impl(
         return accepted_fraction;
       };
 
+  const bool can_refine_individual_budgets =
+      options.per_target_priority_budgets && !acceleration_limits_enabled_ &&
+      !robot_->is_floating_base() && robot_->nv() > 0 && robot_->nq() == robot_->nv() &&
+      !has_contact_frames() && !has_active_velocity_centroidal_hard_constraints() &&
+      std::all_of(resolved.begin(), resolved.end(), [](const auto &rt) {
+        return rt.kind == PoseTaskKind::kFrame;
+      }) &&
+      std::all_of(robot_->model().joints.begin() + 1, robot_->model().joints.end(),
+                  [](const auto &joint) { return joint.nq() == 1 && joint.nv() == 1; });
+  const auto refine_individual_budget_rows =
+      [&](const Eigen::VectorXd &before_q, const Eigen::VectorXd &candidate_q,
+          double horizon) {
+        if (!can_refine_individual_budgets) return false;
+        const auto before_merits = target_block_merits_at(before_q);
+        const auto candidate_merits = target_block_merits_at(candidate_q);
+        struct ViolatedBudget { std::size_t target; int block; double limit; };
+        std::vector<ViolatedBudget> violated;
+        for (std::size_t i = 0; i < resolved.size(); ++i) {
+          if (!resolved[i].task->isActive()) continue;
+          for (int block = 0; block < 2; ++block) {
+            const double tolerance = block == 0 ? targets[i].priority_position_tolerance
+                                                : targets[i].priority_orientation_tolerance;
+            if (!std::isfinite(tolerance) || tolerance <= 0.0) continue;
+            const double limit = std::max(before_merits[i][block], tolerance + 1e-9);
+            if (candidate_merits[i][block] > limit)
+              violated.push_back({i, block, limit});
+          }
+        }
+        if (violated.empty()) return false;
+        Eigen::MatrixXd gradients(violated.size(), robot_->nv());
+        // These are disposable FK probes on additive coordinates, not executed
+        // commands. Central differences retain masks and SO(3) error semantics.
+        constexpr double probe_step = 1e-6;
+        for (int column = 0; column < robot_->nv(); ++column) {
+          Eigen::VectorXd plus = candidate_q, minus = candidate_q;
+          plus[column] += probe_step;
+          minus[column] -= probe_step;
+          const auto plus_merits = target_block_merits_at(plus);
+          const auto minus_merits = target_block_merits_at(minus);
+          for (std::size_t row = 0; row < violated.size(); ++row) {
+            const auto &budget = violated[row];
+            gradients(row, column) =
+                (plus_merits[budget.target][budget.block] -
+                 minus_merits[budget.target][budget.block]) / (2.0 * probe_step);
+          }
+        }
+        target_block_merits_at(candidate_q);
+        if (!gradients.allFinite()) return false;
+        const Eigen::VectorXd delta = candidate_q - before_q;
+        Eigen::VectorXd lower = Eigen::VectorXd::Constant(violated.size(), -kUnboundedConstraintLimit);
+        Eigen::VectorXd upper(violated.size());
+        for (std::size_t row = 0; row < violated.size(); ++row) {
+          const auto &budget = violated[row];
+          // Reserve numerical row tolerance rather than relaxing the endpoint
+          // budget. All candidates still pass the original nonlinear guard.
+          const double reserve = std::min(
+              0.05 * budget.limit,
+              4.0 * constraint_tolerance_ * horizon *
+                  std::max(1.0, gradients.row(row).norm()));
+          upper[row] = (budget.limit - candidate_merits[budget.target][budget.block] +
+                        gradients.row(row).dot(delta) - reserve) / horizon;
+        }
+        append_linear_velocity_constraints(gradients, lower, upper);
+        return true;
+      };
+
   const bool direct_priority_backtrack_is_safe =
       !acceleration_limits_enabled_ && !step_torso_constraint.has_value() &&
       !(collision_constraint_.has_value() &&
@@ -5235,6 +5308,12 @@ PositionIKResult KinematicsSolver::solve_position_step_impl(
       get_linear_velocity_constraint_rows() == 0 &&
       tight_frame_pose_constraints_.empty() &&
       tight_point_constraints_.empty() && !has_contact_frames();
+
+  // Even the initial tangent budget row can require redistribution into a
+  // redundant coordinate. Do not accept a suboptimal partial SNS rate before
+  // trying the certified refinement, then shrinking an otherwise feasible step.
+  ScopedPositionStepValueRestore restore_budget_refinement(runtime_config_.refine_partial_scale);
+  if (can_refine_individual_budgets) runtime_config_.refine_partial_scale = true;
 
   for (int step = 0; step < steps; ++step) {
     double combined_error = 0.0;
@@ -5542,8 +5621,15 @@ PositionIKResult KinematicsSolver::solve_position_step_impl(
     }
     double priority_scale = position_step_priority_scale(q_pre_step, q);
     if (priority_scale < 1.0) {
+      ScopedPositionStepValueRestore restore_rows(linear_velocity_constraints_);
+      ScopedPositionStepValueRestore restore_refinement(runtime_config_.refine_partial_scale);
+      const auto original_rows = linear_velocity_constraints_;
+      const bool original_refinement = runtime_config_.refine_partial_scale;
+      bool refined_budget = refine_individual_budget_rows(q_pre_step, q, step_dt_eff);
+      if (refined_budget) runtime_config_.refine_partial_scale = true;
+      const bool retry_requires_solve = !direct_priority_backtrack_is_safe || refined_budget;
       bool accepted_priority_retry = false;
-      if (direct_priority_backtrack_is_safe && priority_scale > 0.0) {
+      if (direct_priority_backtrack_is_safe && !refined_budget && priority_scale > 0.0) {
         const Eigen::VectorXd nominal_delta =
             pinocchio::difference(robot_->model(), q_pre_step, q);
         Eigen::VectorXd backtracked_q = pinocchio::integrate(
@@ -5561,9 +5647,9 @@ PositionIKResult KinematicsSolver::solve_position_step_impl(
         }
       }
       double retry_dt =
-          step_dt_eff * priority_retry_contraction(priority_scale);
+          refined_budget ? step_dt_eff : step_dt_eff * priority_retry_contraction(priority_scale);
       for (int retry_index = 0;
-           !direct_priority_backtrack_is_safe &&
+           retry_requires_solve &&
            !accepted_priority_retry &&
            retry_index < kPositionStepPriorityRetryIterations;
            ++retry_index) {
@@ -5594,6 +5680,8 @@ PositionIKResult KinematicsSolver::solve_position_step_impl(
             retry.joint_velocities.size() == robot_->nv() &&
             retry.joint_velocities.allFinite();
         if (!retry_has_candidate) {
+          linear_velocity_constraints_ = original_rows;
+          runtime_config_.refine_partial_scale = original_refinement;
           retry_dt *= 0.5;
           continue;
         }
@@ -5608,6 +5696,13 @@ PositionIKResult KinematicsSolver::solve_position_step_impl(
           accepted_priority_retry = true;
           break;
         }
+        if (retry_index < 3 &&
+            refine_individual_budget_rows(q_pre_step, retry_q, retry_dt)) {
+          runtime_config_.refine_partial_scale = true;
+          continue;
+        }
+        linear_velocity_constraints_ = original_rows;
+        runtime_config_.refine_partial_scale = original_refinement;
         retry_dt *= priority_retry_contraction(retry_scale);
       }
       if (!accepted_priority_retry) {

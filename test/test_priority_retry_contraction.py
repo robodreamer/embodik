@@ -56,7 +56,12 @@ def test_rejected_retry_contracts_and_retains_feasible_motion(tmp_path, mode, ya
     assert problems and 0.9 < trace.priority_candidates[0].accepted_fraction < 1.0
     assert len(problems) <= 9  # Original solve plus the unchanged eight-retry cap.
     for previous, retry in zip(problems, problems[1:]):
-        assert retry.validation_dt <= 0.5 * previous.validation_dt
+        if retry.validation_dt == previous.validation_dt:
+            # A new finite-budget correction changes the subproblem; unchanged
+            # near-one proposals must still contract instead of repeating.
+            assert retry.constraint_matrix.shape[0] > previous.constraint_matrix.shape[0]
+        else:
+            assert retry.validation_dt <= 0.5 * previous.validation_dt
     assert np.linalg.norm(np.asarray(result.q_solution) - q) > 1e-6
     robot.update_configuration(result.q_solution)
     actual = robot.get_frame_pose("ee")
