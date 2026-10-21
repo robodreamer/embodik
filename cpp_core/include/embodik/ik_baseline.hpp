@@ -2595,6 +2595,36 @@ inline SolverResult solveHierarchicalLinearSystemEigen(
             current_jacobian, current_target, bias, protected_tasks,
             constraint_coefficients, min_bounds, max_bounds,
             seed, &velocity_solution, &velocity_scale, seed_scale);
+        // Damping can leave a partial legacy command off its reported SCALE
+        // ray. Such a vector is not a valid refinement seed. For explicit
+        // refinement, construct a new certified ray from the feasible task-entry
+        // witness instead, protecting its actual earlier objective images.
+        if (!recovered && refine_partial && preserve_legacy_velocity_behavior &&
+            previous_velocity.allFinite() &&
+            detail::ComputeMaxLinearConstraintViolation(
+                constraint_coefficients, min_bounds, max_bounds,
+                previous_velocity) <= 1e-10 &&
+            (current_jacobian * seed + bias - seed_scale * current_target).norm() >
+                1e-10 * std::max({1.0, bias.norm(),
+                                  seed_scale * current_target.norm()})) {
+          Eigen::VectorXd candidate;
+          double candidate_scale = 0.0;
+          const Eigen::VectorXd protected_values = protected_tasks * previous_velocity;
+          if (detail::RecoverScaleTaskWithFeasibleRaySeed(
+                  current_jacobian, current_target, bias, protected_tasks,
+                  protected_values, constraint_coefficients, min_bounds,
+                  max_bounds, previous_velocity, solver_config, &candidate,
+                  &candidate_scale, 0.0) &&
+              candidate_scale > seed_scale + 1e-10 && candidate.allFinite() &&
+              detail::ComputeMaxLinearConstraintViolation(
+                  constraint_coefficients, min_bounds, max_bounds, candidate) <= 1e-10 &&
+              (protected_tasks * candidate - protected_values).norm() <=
+                  1e-10 * std::max(1.0, protected_values.norm())) {
+            velocity_solution = std::move(candidate);
+            velocity_scale = candidate_scale;
+            recovered = true;
+          }
+        }
       } else {
         if (objective_index > 0) {
           // Only the objective-entry command can define protected images.
