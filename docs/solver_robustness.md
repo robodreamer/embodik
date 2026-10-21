@@ -1262,6 +1262,41 @@ consume the budget on essentially unchanged proposals. A hold remains possible
 when no candidate passes the unchanged final acceptance checks. These local
 corrections do not certify a continuous swept path.
 
+### Native coupled configuration bounds (CPU)
+
+For fixed-base models containing only additive scalar joints, configure a
+position polytope independently of static velocity rows:
+
+```python
+# Example: constrain the sum and difference of two joint coordinates.
+C = np.array([[1.0, 1.0], [1.0, -1.0]])  # Use nq columns for your model.
+solver.set_linear_position_constraints(C, np.full(2, -0.5), np.full(2, 0.5))
+```
+
+This enforces `lower <= C @ q <= upper`. Each native velocity subproblem
+rebuilds the rows from its current configuration and actual integration
+horizon, including position-step inner iterations, adaptive intervals and
+priority retries. The single-target and multi-target `solve_position_step()`
+paths independently check returned configurations after integration and final
+adapters. Caller-defined linear velocity rows remain separate and unchanged.
+
+An outside seed is not projected or reset: each violated facet permits inward
+or tangential motion without increasing its violation. This policy preserves
+the seed's existing violation until a feasible inward task makes progress; it
+does not guarantee recovery from arbitrary conflicting constraints. For this
+additive configuration space the polytope is convex, so linear interpolation
+between feasible accepted configurations remains inside it. This is not a
+collision swept-path certificate.
+
+Use `get_linear_position_constraint_rows()` to inspect the configured row
+count, and `clear_linear_position_constraints()` to remove them. Inputs are
+copied; invalid shapes, nonfinite coefficients/bounds and inverted bounds are
+rejected. Floating-base and nonscalar configuration manifolds are unsupported.
+Acceleration-limited or contact-projected execution fails explicitly, including
+when enabled after configuring the rows. The separate acceleration solver's
+velocity-collision lift also rejects a provider carrying these rows until their
+stopping feasibility is supported. This API does not establish GPU parity.
+
 ### Explicit original collision-floor anchors
 
 For velocity-only position stepping, callers may retain the original clearance

@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Native CPU coupled configuration bounds for fixed-base additive scalar joints.
+  Position-step inner states and retry horizons rebuild the velocity rows;
+  outside seeds can move inward without projection. Acceleration and contact
+  execution remain explicitly unsupported.
+
 - Explicit original collision-floor anchors for velocity-only CPU position
   steps, with named-pair retention across commands, bounded candidate checks
   and final fresh all-pair validation. Legacy recovery remains the default.

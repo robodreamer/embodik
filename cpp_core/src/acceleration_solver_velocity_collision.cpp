@@ -256,6 +256,12 @@ AccelerationSolverResult AccelerationSolver::solve_with_velocity_collision(
         "same RobotModel",
         diagnostics));
   }
+  if (collision_solver.get_linear_position_constraint_rows() > 0) {
+    return finish(velocity_collision_lift_failure(
+        SolverStatus::kInvalidInput,
+        "velocity collision lift does not certify coupled position-row stopping",
+        diagnostics));
+  }
   if (q.size() != robot_->nq() || dq.size() != robot_->nv()) {
     return finish(velocity_collision_lift_failure(
         SolverStatus::kShapeMismatch, "q and dq must match robot nq/nv",

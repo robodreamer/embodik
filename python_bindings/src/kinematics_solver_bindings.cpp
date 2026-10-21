@@ -774,6 +774,14 @@ void bind_kinematics_solver(nb::module_ &m) {
       .def("clear_com_constraint", &KinematicsSolver::clear_com_constraint,
            "Disable CoM support-polygon constraint.")
 
+      .def("set_linear_position_constraints",
+           &KinematicsSolver::set_linear_position_constraints, nb::arg("C"),
+           nb::arg("lower_bounds"), nb::arg("upper_bounds"),
+           "Set lower <= C @ q <= upper for fixed-base additive scalar joints. "
+           "Rebuilt at every inner state and integration horizon. Outside seeds "
+           "may recover without worsening any violated row. No acceleration or contacts.")
+      .def("clear_linear_position_constraints", &KinematicsSolver::clear_linear_position_constraints)
+      .def("get_linear_position_constraint_rows", &KinematicsSolver::get_linear_position_constraint_rows)
       .def("set_linear_velocity_constraints",
            &KinematicsSolver::set_linear_velocity_constraints, nb::arg("C"),
            nb::arg("lower_bounds"), nb::arg("upper_bounds"),

@@ -191,6 +191,7 @@ bool KinematicsSolver::make_position_step_escape_candidate(
         candidate, lower, upper, mapping, robot_->nv());
   }
   if (!candidate.allFinite()) return false;
+  if (!linear_position_step_acceptable(step_origin, candidate)) return false;
   const Eigen::VectorXd displacement =
       pinocchio::difference(robot_->model(), step_origin, candidate);
   const Eigen::VectorXd velocity = displacement / integration_dt;
@@ -3068,6 +3069,15 @@ PositionIKResult KinematicsSolver::solve_position_step(
     const std::string &frame_task_name, const PositionStepOptions &options) {
   if (problem_tracing_enabled_ && position_step_call_depth_ == 0)
     last_problem_trace_ = {};
+  if (!linear_position_execution_supported()) {
+    PositionIKResult unsupported;
+    unsupported.status = SolverStatus::kInvalidInput;
+    unsupported.status_message = "linear position constraints do not certify acceleration or contact execution";
+    unsupported.q_solution = current_q;
+    unsupported.joint_velocities = Eigen::VectorXd::Zero(robot_->nv());
+    record_position_step_trace(unsupported);
+    return unsupported;
+  }
   if (has_collision_trajectory_floor_anchor()) {
     PositionIKResult admission;
     admission.q_solution = current_q;
@@ -3080,6 +3090,19 @@ PositionIKResult KinematicsSolver::solve_position_step(
       current_q, target_pose, frame_task_name, options);
   if (result.q_solution.size() != 0)
     check_collision_trajectory_step(current_q, result);
+  if (result.q_solution.size() != 0 &&
+      !linear_position_step_acceptable(current_q, result.q_solution)) {
+    result.q_solution = current_q;
+    result.status = SolverStatus::kInfeasible;
+    result.status_message = "position command violated its coupled position rows";
+    reset_position_step_continuity_state();
+    result.position_step_hold_active = true;
+    result.stall_escape_count = 0;
+    sync_position_result_applied_velocity(result, robot_->model(), current_q,
+                                          options.dt > 0.0 ? options.dt : dt_);
+    previous_dq_ = result.joint_velocities;
+    robot_->update_configuration(current_q);
+  }
   record_position_step_trace(result);
   return result;
 }
@@ -3089,6 +3112,15 @@ PositionIKResult KinematicsSolver::solve_position_step(
     const PositionStepOptions &options) {
   if (problem_tracing_enabled_ && position_step_call_depth_ == 0)
     last_problem_trace_ = {};
+  if (!linear_position_execution_supported()) {
+    PositionIKResult unsupported;
+    unsupported.status = SolverStatus::kInvalidInput;
+    unsupported.status_message = "linear position constraints do not certify acceleration or contact execution";
+    unsupported.q_solution = current_q;
+    unsupported.joint_velocities = Eigen::VectorXd::Zero(robot_->nv());
+    record_position_step_trace(unsupported);
+    return unsupported;
+  }
   if (has_collision_trajectory_floor_anchor()) {
     PositionIKResult admission;
     admission.q_solution = current_q;
@@ -3100,6 +3132,19 @@ PositionIKResult KinematicsSolver::solve_position_step(
   PositionIKResult result = solve_position_step_impl(current_q, targets, options);
   if (result.q_solution.size() != 0)
     check_collision_trajectory_step(current_q, result);
+  if (result.q_solution.size() != 0 &&
+      !linear_position_step_acceptable(current_q, result.q_solution)) {
+    result.q_solution = current_q;
+    result.status = SolverStatus::kInfeasible;
+    result.status_message = "position command violated its coupled position rows";
+    reset_position_step_continuity_state();
+    result.position_step_hold_active = true;
+    result.stall_escape_count = 0;
+    sync_position_result_applied_velocity(result, robot_->model(), current_q,
+                                          options.dt > 0.0 ? options.dt : dt_);
+    previous_dq_ = result.joint_velocities;
+    robot_->update_configuration(current_q);
+  }
   record_position_step_trace(result);
   return result;
 }
@@ -3632,6 +3677,10 @@ PositionIKResult KinematicsSolver::solve_position_step_impl(
             options.max_configuration_step_norm);
     configuration_step_limited =
         step_configuration_limited || configuration_step_limited;
+    if (!linear_position_step_acceptable(q_pre_step, q)) {
+      q = q_pre_step;
+      last_vel_result.joint_velocities.setZero();
+    }
     robot_->update_configuration(q);
     if (options.record_velocity_candidates) {
       result.velocity_candidates.push_back(PositionStepVelocityCandidate{
@@ -5306,6 +5355,7 @@ PositionIKResult KinematicsSolver::solve_position_step_impl(
       !(relative_pose_constraint_.has_value() &&
         relative_pose_constraint_->enabled) &&
       get_linear_velocity_constraint_rows() == 0 &&
+      get_linear_position_constraint_rows() == 0 &&
       tight_frame_pose_constraints_.empty() &&
       tight_point_constraints_.empty() && !has_contact_frames();
 
@@ -5604,6 +5654,10 @@ PositionIKResult KinematicsSolver::solve_position_step_impl(
                   options.max_configuration_step_norm);
           configuration_step_limited =
               candidate_configuration_limited || configuration_step_limited;
+          if (!linear_position_step_acceptable(q_pre_step, candidate)) {
+            candidate = q_pre_step;
+            velocity_result.joint_velocities.setZero();
+          }
           robot_->update_configuration(candidate);
           return candidate;
         };

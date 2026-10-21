@@ -319,6 +319,13 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
     last_solution_dq_norm_ = 0.0;
     return result;
   }
+  if (!linear_position_execution_supported()) {
+    result.status = SolverStatus::kInvalidInput;
+    result.status_message = "linear position constraints do not certify acceleration or contact execution";
+    result.joint_velocities = Eigen::VectorXd::Zero(robot_->nv());
+    result.solution.assign(static_cast<std::size_t>(robot_->nv()), 0.0);
+    return result;
+  }
   const Eigen::VectorXd *explicit_current_dq = active_explicit_current_dq();
   if (velocity_zmp_constraint_.has_value() &&
       velocity_zmp_constraint_->enabled && explicit_current_dq == nullptr) {

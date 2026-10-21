@@ -1142,6 +1142,17 @@ public:
    */
   void clear_linear_velocity_constraints();
 
+  /** Configure lower <= C*q <= upper on fixed-base additive scalar joints.
+   * Rows are rebuilt from the current q and actual integration horizon.
+   * Outside seeds may move inward or tangentially, never farther outside.
+   * Acceleration-limited and contact-projected execution are not supported.
+   */
+  void set_linear_position_constraints(const Eigen::MatrixXd &C,
+                                       const Eigen::VectorXd &lower_bounds,
+                                       const Eigen::VectorXd &upper_bounds);
+  void clear_linear_position_constraints();
+  int get_linear_position_constraint_rows() const;
+
   /**
    * @brief Number of active user-defined linear velocity constraints.
    */
@@ -1912,6 +1923,11 @@ private:
   };
 
   std::optional<LinearVelocityConstraintConfig> linear_velocity_constraints_;
+  std::optional<LinearVelocityConstraintConfig> linear_position_constraints_;
+  bool linear_position_execution_supported() const;
+  bool linear_position_step_acceptable(const Eigen::VectorXd &before,
+                                       const Eigen::VectorXd &after) const;
+
   /// One-shot protected-task viability request from solve_position_step. The
   /// concrete rows are built in solve_velocity after masks, contact projection,
   /// and the current kinematics are known.

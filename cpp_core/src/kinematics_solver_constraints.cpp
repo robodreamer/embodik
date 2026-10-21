@@ -145,6 +145,54 @@ void KinematicsSolver::clear_linear_velocity_constraints() {
   linear_velocity_constraints_.reset();
 }
 
+bool KinematicsSolver::linear_position_execution_supported() const {
+  if (!linear_position_constraints_) return true;
+  return !acceleration_limits_enabled_ && !has_contact_frames();
+}
+
+void KinematicsSolver::set_linear_position_constraints(
+    const Eigen::MatrixXd &C, const Eigen::VectorXd &lower_bounds,
+    const Eigen::VectorXd &upper_bounds) {
+  if (robot_->is_floating_base() || robot_->nq() != robot_->nv() ||
+      !std::all_of(robot_->model().joints.begin() + 1, robot_->model().joints.end(),
+                   [](const auto &joint) { return joint.nq() == 1 && joint.nv() == 1; }))
+    throw std::invalid_argument("linear position constraints require fixed-base additive scalar joints");
+  std::string error;
+  if (!validate_linear_constraint_triplet(C, lower_bounds, upper_bounds, robot_->nq(), &error))
+    throw std::invalid_argument(error);
+  LinearVelocityConstraintConfig config;
+  config.enabled = true;
+  config.C = C;
+  config.lower_bounds = lower_bounds;
+  config.upper_bounds = upper_bounds;
+  if (C.rows() == 0) linear_position_constraints_.reset();
+  else linear_position_constraints_ = std::move(config);
+  reset_position_step_continuity_state();
+}
+
+void KinematicsSolver::clear_linear_position_constraints() {
+  linear_position_constraints_.reset();
+  reset_position_step_continuity_state();
+}
+
+int KinematicsSolver::get_linear_position_constraint_rows() const {
+  return linear_position_constraints_ ? linear_position_constraints_->C.rows() : 0;
+}
+
+bool KinematicsSolver::linear_position_step_acceptable(
+    const Eigen::VectorXd &before, const Eigen::VectorXd &after) const {
+  if (!linear_position_constraints_) return true;
+  if (before.size() != robot_->nq() || after.size() != robot_->nq() ||
+      !before.allFinite() || !after.allFinite()) return false;
+  const auto &config = *linear_position_constraints_;
+  const Eigen::VectorXd old_value = config.C * before;
+  const Eigen::VectorXd new_value = config.C * after;
+  constexpr double tolerance = 1e-10;
+  return new_value.allFinite() &&
+      (new_value.array() >= config.lower_bounds.cwiseMin(old_value).array() - tolerance).all() &&
+      (new_value.array() <= config.upper_bounds.cwiseMax(old_value).array() + tolerance).all();
+}
+
 void KinematicsSolver::configure_centroidal_momentum_bounds(
     const Eigen::VectorXd &lower_h, const Eigen::VectorXd &upper_h,
     const Eigen::VectorXd &axis_mask) {
@@ -512,15 +560,28 @@ Eigen::MatrixXd KinematicsSolver::compute_contact_projector() const {
 
 std::optional<KinematicsSolver::LinearVelocityConstraintResult>
 KinematicsSolver::compute_linear_velocity_constraints() {
-  if (!linear_velocity_constraints_.has_value() ||
-      !linear_velocity_constraints_->enabled ||
-      linear_velocity_constraints_->C.rows() == 0) {
-    return std::nullopt;
-  }
+  const int velocity_rows = get_linear_velocity_constraint_rows();
+  const int position_rows = get_linear_position_constraint_rows();
+  if (velocity_rows + position_rows == 0) return std::nullopt;
   LinearVelocityConstraintResult out;
-  out.jacobian = linear_velocity_constraints_->C;
-  out.lower_bounds = linear_velocity_constraints_->lower_bounds;
-  out.upper_bounds = linear_velocity_constraints_->upper_bounds;
+  out.jacobian.resize(velocity_rows + position_rows, robot_->nv());
+  out.lower_bounds.resize(velocity_rows + position_rows);
+  out.upper_bounds.resize(velocity_rows + position_rows);
+  if (velocity_rows > 0) {
+    out.jacobian.topRows(velocity_rows) = linear_velocity_constraints_->C;
+    out.lower_bounds.head(velocity_rows) = linear_velocity_constraints_->lower_bounds;
+    out.upper_bounds.head(velocity_rows) = linear_velocity_constraints_->upper_bounds;
+  }
+  if (position_rows > 0) {
+    const auto &config = *linear_position_constraints_;
+    const double horizon = pending_step_validation_dt_.value_or(dt_);
+    if (!std::isfinite(horizon) || horizon <= 0.0)
+      throw std::invalid_argument("linear position constraints require a positive finite horizon");
+    const Eigen::VectorXd value = config.C * robot_->get_current_configuration();
+    out.jacobian.bottomRows(position_rows) = config.C;
+    out.lower_bounds.tail(position_rows) = (config.lower_bounds.cwiseMin(value) - value) / horizon;
+    out.upper_bounds.tail(position_rows) = (config.upper_bounds.cwiseMax(value) - value) / horizon;
+  }
   out.violated_rows = Eigen::ArrayXi::Zero(out.jacobian.rows());
   return out;
 }

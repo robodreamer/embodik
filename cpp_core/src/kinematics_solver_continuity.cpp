@@ -391,6 +391,7 @@ bool KinematicsSolver::should_hold_position_step_for_continuity(
   const bool other_constraint_tradeoff_active =
       step_constraint_tradeoff_active ||
       get_linear_velocity_constraint_rows() > 0 ||
+      get_linear_position_constraint_rows() > 0 ||
       !tight_frame_pose_constraints_.empty() ||
       !tight_point_constraints_.empty() || has_contact_frames();
   const bool track_collision_best_merit =
