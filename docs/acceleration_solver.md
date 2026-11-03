@@ -407,6 +407,45 @@ While native certification is configured, only joint state boxes, generalized
 allocation, and soft tasks may be combined with it. Other hard families are
 rejected until they provide the same predicted-state certificate contract.
 
+## Redundant minimum-error objectives
+
+Constrained MIN_ERROR solves preserve the task residual factors for QR steps
+and gradient evaluation. This avoids squaring their condition number in normal
+equations, which can cause false numerical stalls in redundant task directions.
+The scale-relative numerical ridge, priorities, hard constraints and acceptance
+checks remain unchanged. This improves linear numerical solving; it does not
+guarantee global nonlinear recovery or stopping feasibility.
+
+## Recording a backend problem
+
+Set `options.record_linear_problems = True` to retain
+`result.linear_problems`. Each `AccelerationLinearProblemTrace` owns the exact
+backend targets, affine biases, objective matrices/configuration, hard rows and
+bounds, state, timestep, remaining refinement budget and raw backend result.
+Constraint row source IDs identify local refinement rows. Snapshots are ordered
+from the outer call to the deepest nonlinear refinement, including failed calls.
+Failures before backend assembly produce no snapshot.
+
+```python
+options.record_linear_problems = True
+result = solver.solve(q, dq, dt, options)
+for problem in result.linear_problems:
+    replay = eik.replay_acceleration_linear_problem(problem)
+    print(problem.diagnostics.termination_reason, replay.status)
+```
+
+Recording is disabled by default and adds matrix copies when enabled. It changes
+no solver policy or acceptance tolerance. Phase I status/witness and preferred
+MIN_ERROR QP attempt/success diagnostics distinguish an unsuccessful preferred
+attempt from its subsequent ordinary search. A generic helper refusal may not
+identify an internal active-set exit; it is not a proof of infeasibility.
+
+Replay covers only the linear backend in its recorded coordinates. With
+allocation enabled, these are allocation coordinates rather than physical joint
+accelerations. Neither a successful replay nor a recorded intermediate solution
+certifies integration, collision clearance, CoM acceptance or stopping safety.
+Never execute a trace as a robot command.
+
 ## Build And ABI Notes
 
 The acceleration API was introduced in `0.21.0` on top of the `0.20.x`

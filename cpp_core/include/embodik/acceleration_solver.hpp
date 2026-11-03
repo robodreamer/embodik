@@ -367,6 +367,8 @@ struct AccelerationSolveOptions {
   // hierarchy. Original scaling attempts and physical acceptance remain;
   // unsuccessful direct attempts return to the established search.
   bool prefer_direct_min_error_qp = false;
+  /// Copy backend problems for diagnostics; disabled by default. No policy change.
+  bool record_linear_problems = false;
 };
 
 /**
@@ -506,7 +508,32 @@ struct AccelerationAnalyticCollisionPairDiagnostics {
   bool step_certified = false;
 };
 
+/// One exact backend call, before integration/nonlinear acceptance. Allocation
+/// may change backend coordinates; solution is not an executable physical ddq.
+struct AccelerationLinearProblemTrace {
+  Eigen::VectorXd q, dq;
+  double dt = 0.0;
+  int refinement_budget_remaining = 0;
+  std::vector<Eigen::VectorXd> objective_targets, objective_biases;
+  std::vector<Eigen::MatrixXd> objective_matrices;
+  std::vector<ObjectiveSolveConfig> objective_configs;
+  Eigen::MatrixXd constraint_matrix;
+  Eigen::VectorXd lower_bounds, upper_bounds;
+  std::vector<std::string> constraint_row_sources;
+  VelocitySolverConfig solver_config;
+  double objective_equality_tolerance = 0.0;
+  bool constraint_rows_pre_normalized = false;
+  bool hard_constraints_prevalidated_feasible = false;
+  bool allow_best_effort_lower_tasks = false;
+  bool prefer_direct_min_error_qp = false;
+  bool allocation_applied = false;
+  LinearSolveDiagnostics diagnostics;
+  SolverResult backend_result;
+};
+
 struct AccelerationSolverResult : public SolverResult {
+  /// Outer-to-inner backend invocations; empty unless explicitly requested.
+  std::vector<AccelerationLinearProblemTrace> linear_problems;
   /// C++ time before entering the hierarchical backend.
   double preprocessing_time_ms = 0.0;
   /// Time reported by the hierarchical backend itself.

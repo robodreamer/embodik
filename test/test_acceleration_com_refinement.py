@@ -132,3 +132,71 @@ def test_curvature_correction_preserves_physical_acceptance(pendulum):
         result.q_solution, q + dt * dq + 0.5 * dt**2 * acceleration, atol=1e-14
     )
     np.testing.assert_allclose(result.joint_velocities_next, dq + dt * acceleration, atol=1e-14)
+
+
+@pytest.mark.parametrize("allocated", [False, True])
+def test_linear_trace_preserves_recursive_problems_and_replays(pendulum, allocated):
+    solver, options = pendulum
+    if allocated:
+        allocation = eik.GeneralizedAccelerationAllocation()
+        allocation.metric_diagonal = np.array([4.0])
+        allocation.reference_acceleration = np.array([0.3])
+        options.generalized_acceleration_allocation = allocation
+    q, dq, dt = np.array([-0.5]), np.array([0.1]), 0.01
+    original = solver.solve(q, dq, dt, options)
+    assert original.linear_problems == []
+    options.record_linear_problems = True
+    result = solver.solve(q, dq, dt, options)
+    assert result.status == original.status == eik.SolverStatus.SUCCESS
+    np.testing.assert_array_equal(result.joint_accelerations, original.joint_accelerations)
+    traces = result.linear_problems
+    assert len(traces) == result.nonlinear_refinement_iterations + 1
+    assert len(traces) > 1
+    assert [t.refinement_budget_remaining for t in traces] == list(range(8, 8 - len(traces), -1))
+    for trace in traces:
+        np.testing.assert_array_equal(trace.q, q)
+        np.testing.assert_array_equal(trace.dq, dq)
+        assert trace.dt == dt
+        assert trace.allocation_applied == allocated
+        assert len(trace.constraint_row_sources) == trace.constraint_matrix.shape[0]
+        assert len(trace.objective_targets) == len(trace.objective_biases)
+        assert trace.diagnostics.phase_one_status == "feasible"
+        replay = eik.replay_acceleration_linear_problem(trace)
+        assert replay.status == trace.backend_result.status
+        np.testing.assert_array_equal(replay.solution, trace.backend_result.solution)
+    assert traces[-1].constraint_matrix.shape[0] > traces[0].constraint_matrix.shape[0]
+    # Subsequent solves cannot alter a returned diagnostic snapshot.
+    matrix = traces[-1].constraint_matrix.copy()
+    options.record_linear_problems = False
+    assert solver.solve(q, dq, dt, options).linear_problems == []
+    np.testing.assert_array_equal(traces[-1].constraint_matrix, matrix)
+
+
+def test_linear_trace_survives_failed_refinement_and_output_clearing(pendulum):
+    solver, options = pendulum
+    forced = eik.AffineAccelerationConstraint()
+    forced.source_id = "forced-initial-face"
+    forced.coefficient_matrix = np.ones((1, 1))
+    forced.affine_bias = np.zeros(1)
+    forced.lower_bounds = forced.upper_bounds = np.array([1 / np.cos(0.5)])
+    options.affine_constraints = [forced]
+    options.record_linear_problems = True
+    result = solver.solve(np.array([-0.5]), np.zeros(1), 0.01, options)
+    assert result.status == eik.SolverStatus.NUMERICAL_ERROR
+    assert result.joint_accelerations.size == 0
+    assert len(result.linear_problems) == result.nonlinear_refinement_iterations + 1
+    assert result.linear_problems[0].backend_result.status == eik.SolverStatus.SUCCESS
+    assert result.linear_problems[-1].backend_result.status != eik.SolverStatus.SUCCESS
+    for trace in result.linear_problems:
+        assert "forced-initial-face" in trace.constraint_row_sources
+        replay = eik.replay_acceleration_linear_problem(trace)
+        assert replay.status == trace.backend_result.status
+        assert replay.status_message == trace.backend_result.status_message
+
+
+def test_linear_trace_is_empty_when_validation_fails_before_backend(pendulum):
+    solver, options = pendulum
+    options.record_linear_problems = True
+    result = solver.solve(np.array([np.nan]), np.zeros(1), 0.01, options)
+    assert result.status == eik.SolverStatus.NON_FINITE_INPUT
+    assert result.linear_problems == []

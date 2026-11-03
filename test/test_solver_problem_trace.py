@@ -60,6 +60,9 @@ def test_trace_replays_nominal_backend_and_preserves_result(tmp_path, mode, metr
     problem = trace.velocity_problems[0]
     assert problem.active_task_names == ["move"]
     assert problem.constraint_matrix.shape[1] == robot.nv
+    assert len(problem.constraint_row_families) == problem.constraint_matrix.shape[0]
+    assert all(problem.constraint_row_families)
+    assert problem.constraint_row_families[: robot.nv] == ["joint_velocity"] * robot.nv
     replay = eik.replay_velocity_problem(problem)
     assert replay.status == problem.backend_status
     np.testing.assert_allclose(replay.solution, problem.backend_solution, atol=1e-13, rtol=0)
@@ -95,6 +98,29 @@ def test_trace_replays_nominal_backend_and_preserves_result(tmp_path, mode, metr
     traced.enable_problem_tracing(False)
     solve(traced)
     assert not traced.get_last_problem_trace().velocity_problems
+
+
+def test_row_families_identify_user_rows_without_changing_the_problem(tmp_path):
+    path = tmp_path / "families.urdf"
+    path.write_text(URDF)
+    robot, solver, _ = make_solver(path, eik.TaskSolveMode.MIN_ERROR, True)
+    row = np.array([[1.0, -1.0]])
+    solver.set_linear_velocity_constraints(row, np.array([-0.2]), np.array([0.2]))
+    solver.enable_problem_tracing()
+    solver.solve_velocity(np.zeros(robot.nq))
+    problem = solver.get_last_problem_trace().velocity_problems[0]
+    indices = [i for i, family in enumerate(problem.constraint_row_families) if family == "linear"]
+    assert len(indices) == 1
+    np.testing.assert_allclose(
+        problem.constraint_matrix[indices] / problem.backend_column_scale, row
+    )
+    np.testing.assert_allclose(problem.lower_bounds[indices], [-0.2])
+    np.testing.assert_allclose(problem.upper_bounds[indices], [0.2])
+    problem.constraint_row_families = ["caller edit"] * len(problem.constraint_row_families)
+    assert (
+        "caller edit"
+        not in solver.get_last_problem_trace().velocity_problems[0].constraint_row_families
+    )
 
 
 def test_priority_trace_identifies_protected_tasks_and_final_result(tmp_path):

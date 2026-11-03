@@ -7,7 +7,7 @@ from scipy.optimize import minimize
 import embodik as eik
 
 
-def solve(jacobians, goals, modes, lower=None, upper=None):
+def solve(jacobians, goals, modes, lower=None, upper=None, refine=True):
     size = jacobians[0].shape[1]
     problem = eik.VelocityProblemTrace()
     problem.constraint_matrix = np.eye(size)
@@ -29,7 +29,7 @@ def solve(jacobians, goals, modes, lower=None, upper=None):
     solver.epsilon = 1e-3
     solver.precision_threshold = 1e-10
     solver.iteration_limit = 128
-    solver.refine_partial_scale = True
+    solver.refine_partial_scale = refine
     regularization = eik.RegularizedInverseConfig()
     regularization.epsilon = 1e-12
     regularization.regularization_factor = 0.0
@@ -39,7 +39,8 @@ def solve(jacobians, goals, modes, lower=None, upper=None):
 
 
 @pytest.mark.parametrize("seed", range(100))
-def test_near_parallel_min_error_suffix_preserves_primary_and_bounds(seed):
+@pytest.mark.parametrize("refine", [False, True])
+def test_near_parallel_min_error_suffix_preserves_primary_and_bounds(seed, refine):
     rng = np.random.default_rng(20261021 + seed)
     primary = rng.normal(size=(1, 4))
     primary /= np.linalg.norm(primary)
@@ -48,7 +49,7 @@ def test_near_parallel_min_error_suffix_preserves_primary_and_bounds(seed):
     )
     goal = lower_task @ rng.uniform(-1, 1, size=4)
     modes = [eik.TaskSolveMode.SCALE, eik.TaskSolveMode.MIN_ERROR]
-    result = solve([primary, lower_task], [np.array([0.2]), goal], modes)
+    result = solve([primary, lower_task], [np.array([0.2]), goal], modes, refine=refine)
     assert result.status == eik.SolverStatus.SUCCESS, result.status_message
     x = np.asarray(result.solution)
     np.testing.assert_allclose(primary @ x, [0.2], atol=1e-10, rtol=0)
@@ -61,6 +62,7 @@ def test_near_parallel_min_error_suffix_preserves_primary_and_bounds(seed):
             [primary, lower_task, np.eye(4)],
             [np.array([0.2]), goal, np.full(4, 0.75)],
             modes + [eik.TaskSolveMode.MIN_ERROR],
+            refine=refine,
         )
         assert completed.status == eik.SolverStatus.SUCCESS, completed.status_message
         np.testing.assert_allclose(primary @ completed.solution, [0.2], atol=1e-10, rtol=0)

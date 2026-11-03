@@ -50,6 +50,7 @@ add_executable(test_hierarchical_linear_solver
     test_velocity_hard_row_certification.cpp
     test_best_effort_lower_checkpoint.cpp
     test_projected_inverse_cache.cpp
+    test_least_squares_quadratic.cpp
 )
 
 target_link_libraries(test_hierarchical_linear_solver

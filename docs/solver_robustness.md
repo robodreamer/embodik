@@ -1243,6 +1243,22 @@ window. Numerical fallback modes, constraint feasibility, and collision safety
 remain separate decisions: a continuity state alone is not a safety certificate
 or proof that an unreachable command can be tracked.
 
+## Undamped projected tasks
+
+With zero singularity-robust damping (`regularization_factor=0` in the numerical
+configuration), both native hierarchical policies use an SVD inverse with a
+singular-value cutoff at the configured regularization epsilon. This preserves
+supported directions when a projected lower-priority task loses rank. A singular
+Gram matrix must not turn a feasible primary command into nonfinite output.
+The damped legacy inversion policy is unchanged.
+
+An undamped legacy solve with a feasible completed prefix and an exclusively
+MIN_ERROR suffix solves that suffix with the constrained quadratic solver.
+Each completed task image becomes an equality for the next task. A successful
+saturation loop alone is insufficient to establish the least-squares optimum
+when task rows are nearly dependent. Failure to optimize the suffix is reported
+as a numerical failure; it is not silently labeled an optimized result.
+
 ## Diagnostics worth logging
 
 `VelocitySolverResult` / `PositionIKResult` expose solver state for UI and tests:
@@ -1288,6 +1304,14 @@ later adapter recovery, contact projection, integration or collision acceptance.
 describe these different stages; a backend success is not a physical acceptance
 certificate. Constraint residuals must be interpreted in the recorded backend
 coordinates.
+
+`constraint_row_families` identifies the assembly source of each matrix row,
+such as `joint_velocity`, `joint_position`, `collision`, `com`,
+`priority_budget`, or `linear`. The labels follow matrix row order and remain
+unchanged by backend column scaling. They describe provenance, not permission
+to relax a constraint: a family may contain mandatory bounds or several
+configured policies. The initial joint velocity block can also incorporate
+locks, integration bounds and acceleration restrictions.
 
 For multi-target position stepping, `priority_candidates` records proposed
 configurations, per-task position/orientation merits, task names/priorities and

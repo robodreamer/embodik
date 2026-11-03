@@ -190,6 +190,16 @@ struct ObjectiveSolveConfig {
   bool use_goal_directed_limit_clamp = false;
 };
 
+/// Optional numerical observations; never executable commands or policy inputs.
+struct LinearSolveDiagnostics {
+  std::string phase_one_status = "not_run";
+  Eigen::VectorXd phase_one_witness;
+  bool direct_min_error_attempted = false;
+  bool direct_min_error_succeeded = false;
+  std::string direct_min_error_message;
+  std::string termination_reason;
+};
+
 /// Optional snapshot of one nominal hierarchical backend call. Matrices are in
 /// backend coordinates; physical velocity = backend_column_scale * solution.
 /// Later adapter recovery, contact projection and integration are not replayed.
@@ -197,6 +207,8 @@ struct VelocityProblemTrace {
   Eigen::VectorXd seed_q;
   double validation_dt = 0.0;
   Eigen::MatrixXd constraint_matrix;
+  /// Source family for each assembled row (diagnostic metadata only).
+  std::vector<std::string> constraint_row_families;
   Eigen::VectorXd lower_bounds;
   Eigen::VectorXd upper_bounds;
   Eigen::VectorXd maximum_softening_factors;

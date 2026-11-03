@@ -33,6 +33,7 @@ namespace eik = embodik;
 #endif
 
 // Forward declarations for sub-module bindings
+void bind_optimization(nb::module_ &m);
 void bind_robot_model(nb::module_ &m);
 void bind_tasks(nb::module_ &m);
 void bind_kinematics_solver(nb::module_ &m);
@@ -112,6 +113,7 @@ NB_MODULE(_embodik_impl, m) {
       .def_rw("seed_q", &eik::VelocityProblemTrace::seed_q)
       .def_rw("validation_dt", &eik::VelocityProblemTrace::validation_dt)
       .def_rw("constraint_matrix", &eik::VelocityProblemTrace::constraint_matrix)
+      .def_rw("constraint_row_families", &eik::VelocityProblemTrace::constraint_row_families)
       .def_rw("lower_bounds", &eik::VelocityProblemTrace::lower_bounds)
       .def_rw("upper_bounds", &eik::VelocityProblemTrace::upper_bounds)
       .def_rw("maximum_softening_factors", &eik::VelocityProblemTrace::maximum_softening_factors)
@@ -982,6 +984,8 @@ NB_MODULE(_embodik_impl, m) {
   // Module metadata
   m.attr("__version__") = EMBODIK_VERSION;
   m.attr("DEFAULT_REGULARIZATION") = eik::BasicSolverConfig{}.regularization;
+
+  bind_optimization(m);
 
   // Bind robot model with Pinocchio integration
   bind_robot_model(m);

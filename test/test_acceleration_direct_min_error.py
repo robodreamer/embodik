@@ -76,3 +76,32 @@ def test_direct_preference_rejects_infeasible_hard_rows(planar_solver):
     options.affine_constraints = [coupled]
     result = solver.solve(np.zeros(2), np.zeros(2), 0.01, options)
     assert result.status != eik.SolverStatus.SUCCESS
+
+
+@pytest.mark.parametrize("infeasible", [False, True])
+def test_optional_diagnostics_distinguish_phase_one_and_direct_qp(planar_solver, infeasible):
+    _, solver, task, options = planar_solver
+    task.solve_mode = eik.TaskSolveMode.MIN_ERROR
+    options.prefer_direct_min_error_qp = options.record_linear_problems = True
+    if infeasible:
+        coupled = options.affine_constraints[0]
+        coupled.lower_bounds, coupled.upper_bounds = np.array([3.0]), np.array([4.0])
+        options.affine_constraints = [coupled]
+    result = solver.solve(np.zeros(2), np.zeros(2), 0.01, options)
+    assert len(result.linear_problems) == 1
+    trace = result.linear_problems[0]
+    d = trace.diagnostics
+    if infeasible:
+        assert result.status == eik.SolverStatus.INFEASIBLE
+        assert d.phase_one_status == "proven_infeasible"
+        assert not d.direct_min_error_attempted
+        assert not d.direct_min_error_succeeded
+        assert d.phase_one_witness.size == 0
+    else:
+        assert result.status == eik.SolverStatus.SUCCESS
+        assert d.phase_one_status == "feasible"
+        assert d.direct_min_error_attempted and d.direct_min_error_succeeded
+        assert d.termination_reason == "direct_min_error_success"
+        values = trace.constraint_matrix @ d.phase_one_witness
+        assert np.all(values >= trace.lower_bounds - 1e-10)
+        assert np.all(values <= trace.upper_bounds + 1e-10)

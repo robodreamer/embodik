@@ -1446,8 +1446,18 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
       Eigen::VectorXd::Ones(num_constraints);
 
   int constraint_idx = 0;
+  std::vector<std::string> constraint_row_families;
+  if (problem_tracing_enabled_) {
+    constraint_row_families.resize(num_constraints);
+  }
+  const auto label_rows = [&](int first, int count, const char *family) {
+    if (problem_tracing_enabled_) {
+      std::fill_n(constraint_row_families.begin() + first, count, family);
+    }
+  };
 
   // Joint velocity constraints
+  label_rows(constraint_idx, robot_->nv(), "joint_velocity");
   C.block(constraint_idx, 0, robot_->nv(), robot_->nv()) =
       Eigen::MatrixXd::Identity(robot_->nv(), robot_->nv());
 
@@ -1553,6 +1563,8 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
   // Position-based velocity constraints (sparse: only joints near their limits)
   if (apply_limits && use_position_limits_) {
     // sparse_pos_limits was pre-computed above; fill only those rows.
+    label_rows(constraint_idx, static_cast<int>(sparse_pos_limits.size()),
+               "joint_position");
     for (int k = 0; k < static_cast<int>(sparse_pos_limits.size()); ++k) {
       const auto &e = sparse_pos_limits[k];
       C(constraint_idx + k, e.nv_idx) = 1.0;
@@ -1729,6 +1741,8 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
 
   if (use_contact_projection &&
       joint_limit_non_worsening_result.has_value()) {
+    label_rows(constraint_idx, joint_limit_non_worsening_result->jacobian.rows(),
+               "joint_non_worsening");
     constraint_idx = append_constraint_block(
         C, c_lower, c_upper, constraint_idx, robot_->nv(),
         joint_limit_non_worsening_result->jacobian,
@@ -1739,6 +1753,8 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
   if (acceleration_position_integration_box && use_contact_projection) {
     // The backend variable is projected before publication. Bound P_c*v,
     // rather than assuming a box on the unprojected variable bounds its image.
+    label_rows(constraint_idx, static_cast<int>(true_integration_indices.size()),
+               "position_integration");
     for (int vi : true_integration_indices) {
       C.row(constraint_idx) = contact_P_c.row(vi);
       c_lower[constraint_idx] = true_integration_lower[vi];
@@ -1748,6 +1764,8 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
   }
 
   if (collision_constraint_result.has_value()) {
+    label_rows(constraint_idx, collision_constraint_result->jacobian.rows(),
+               "collision");
     constraint_idx = append_constraint_block(
         C, c_lower, c_upper, constraint_idx, robot_->nv(),
         collision_constraint_result->jacobian,
@@ -1756,12 +1774,15 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
   }
 
   if (com_constraint_result.has_value()) {
+    label_rows(constraint_idx, com_constraint_result->jacobian.rows(), "com");
     constraint_idx = append_constraint_block(
         C, c_lower, c_upper, constraint_idx, robot_->nv(),
         com_constraint_result->jacobian, com_constraint_result->lower_bounds,
         com_constraint_result->upper_bounds);
   }
   if (centroidal_momentum_bounds_result.has_value()) {
+    label_rows(constraint_idx, centroidal_momentum_bounds_result->jacobian.rows(),
+               "centroidal_momentum");
     constraint_idx = append_constraint_block(
         C, c_lower, c_upper, constraint_idx, robot_->nv(),
         centroidal_momentum_bounds_result->jacobian,
@@ -1769,6 +1790,8 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
         centroidal_momentum_bounds_result->upper_bounds);
   }
   if (capture_point_constraint_result.has_value()) {
+    label_rows(constraint_idx, capture_point_constraint_result->jacobian.rows(),
+               "capture_point");
     constraint_idx = append_constraint_block(
         C, c_lower, c_upper, constraint_idx, robot_->nv(),
         capture_point_constraint_result->jacobian,
@@ -1776,6 +1799,8 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
         capture_point_constraint_result->upper_bounds);
   }
   if (velocity_zmp_constraint_result.has_value()) {
+    label_rows(constraint_idx, velocity_zmp_constraint_result->jacobian.rows(),
+               "velocity_zmp");
     constraint_idx = append_constraint_block(
         C, c_lower, c_upper, constraint_idx, robot_->nv(),
         velocity_zmp_constraint_result->jacobian,
@@ -1784,6 +1809,8 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
   }
 
   if (rel_pose_constraint_result.has_value()) {
+    label_rows(constraint_idx, rel_pose_constraint_result->jacobian.rows(),
+               "relative_pose");
     constraint_idx = append_constraint_block(
         C, c_lower, c_upper, constraint_idx, robot_->nv(),
         rel_pose_constraint_result->jacobian,
@@ -1792,6 +1819,8 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
   }
 
   if (step_torso_constraint_result.has_value()) {
+    label_rows(constraint_idx, step_torso_constraint_result->jacobian.rows(),
+               "torso_pose");
     constraint_idx = append_constraint_block(
         C, c_lower, c_upper, constraint_idx, robot_->nv(),
         step_torso_constraint_result->jacobian,
@@ -1799,6 +1828,8 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
         step_torso_constraint_result->upper_bounds);
   }
   if (position_step_priority_constraint_result.has_value()) {
+    label_rows(constraint_idx, position_step_priority_constraint_result->jacobian.rows(),
+               "priority_budget");
     constraint_idx = append_constraint_block(
         C, c_lower, c_upper, constraint_idx, robot_->nv(),
         position_step_priority_constraint_result->jacobian,
@@ -1808,6 +1839,7 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
   if (linear_constraint_result.has_value()) {
     const auto &lc = linear_constraint_result.value();
     int rows = static_cast<int>(lc.jacobian.rows());
+    label_rows(constraint_idx, rows, "linear");
     C.block(constraint_idx, 0, rows, robot_->nv()) = lc.jacobian;
     c_lower.segment(constraint_idx, rows) = lc.lower_bounds;
     c_upper.segment(constraint_idx, rows) = lc.upper_bounds;
@@ -1816,6 +1848,7 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
   if (tight_pose_constraint_result.has_value()) {
     const auto &tpc = tight_pose_constraint_result.value();
     int rows = static_cast<int>(tpc.jacobian.rows());
+    label_rows(constraint_idx, rows, "tight_pose");
     C.block(constraint_idx, 0, rows, robot_->nv()) = tpc.jacobian;
     c_lower.segment(constraint_idx, rows) = tpc.lower_bounds;
     c_upper.segment(constraint_idx, rows) = tpc.upper_bounds;
@@ -1825,6 +1858,7 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
   if (tight_point_constraint_result.has_value()) {
     const auto &tpc = tight_point_constraint_result.value();
     int rows = static_cast<int>(tpc.jacobian.rows());
+    label_rows(constraint_idx, rows, "tight_point");
     C.block(constraint_idx, 0, rows, robot_->nv()) = tpc.jacobian;
     c_lower.segment(constraint_idx, rows) = tpc.lower_bounds;
     c_upper.segment(constraint_idx, rows) = tpc.upper_bounds;
@@ -2344,6 +2378,7 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
     trace.seed_q = q_eval;
     trace.validation_dt = pending_step_validation_dt_.value_or(dt_);
     trace.constraint_matrix = *solve_C;
+    trace.constraint_row_families = std::move(constraint_row_families);
     trace.lower_bounds = c_lower;
     trace.upper_bounds = c_upper;
     trace.maximum_softening_factors = has_soft_rows

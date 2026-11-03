@@ -20,12 +20,15 @@ AccelerationSolverResult AccelerationSolver::solve_impl(
   auto backend_start = start;
   auto backend_end = start;
   bool backend_completed = false;
+  std::optional<AccelerationLinearProblemTrace> linear_problem;
   bool elastic_prepared = false;
   bool elastic_active = false;
   AccelerationSolveOptions effective_options = options;
   const auto finish = [this, &start, &backend_start, &backend_end,
                        &backend_completed, &elastic_prepared, &elastic_active,
-                       &effective_options](AccelerationSolverResult result) {
+                       &effective_options, &linear_problem](AccelerationSolverResult result) {
+    if (linear_problem)
+      result.linear_problems.insert(result.linear_problems.begin(), std::move(*linear_problem));
     const auto end = std::chrono::steady_clock::now();
     result.computation_time_ms =
         std::chrono::duration<double, std::milli>(end - start).count();
@@ -587,6 +590,50 @@ AccelerationSolverResult AccelerationSolver::solve_impl(
       !allocation.has_value() && state_box_only;
   auto backend_config = acceleration_backend_config();
   backend_config.refine_partial_scale = options.refine_partial_scale;
+  if (options.record_linear_problems) {
+    linear_problem.emplace();
+    auto &trace = *linear_problem;
+    trace.q = q;
+    trace.dq = dq;
+    trace.dt = dt;
+    trace.refinement_budget_remaining = refinement_budget;
+    trace.objective_targets = *backend_targets;
+    trace.objective_biases = *backend_biases;
+    trace.objective_matrices = *backend_matrices;
+    trace.objective_configs = objectives.configs;
+    trace.constraint_matrix = *backend_constraint_matrix;
+    trace.lower_bounds = *backend_lower_bounds;
+    trace.upper_bounds = *backend_upper_bounds;
+    trace.solver_config = backend_config;
+    trace.objective_equality_tolerance = kConstraintTolerance;
+    trace.constraint_rows_pre_normalized = prevalidated_state_box_only;
+    trace.hard_constraints_prevalidated_feasible = prevalidated_state_box_only;
+    trace.allow_best_effort_lower_tasks = options.allow_best_effort_lower_tasks;
+    trace.prefer_direct_min_error_qp = options.prefer_direct_min_error_qp;
+    trace.allocation_applied = allocation.has_value();
+    auto rows = [&](Eigen::Index count, const std::string &source) {
+      trace.constraint_row_sources.insert(trace.constraint_row_sources.end(), count, source);
+    };
+    auto affine_rows = [&](const auto &blocks) {
+      for (const auto &block : blocks) rows(block.coefficient_matrix.rows(), block.source_id);
+    };
+    rows(robot_->nv(), "joint_state_box");
+    rows(native_collision_prepared.physical_constraint.coefficient_matrix.rows(), "native_collision");
+    rows(effort_constraint.has_value() ? robot_->nv() : 0, "effort");
+    affine_rows(options.affine_constraints);
+    affine_rows(frozen_transform.transformed_constraints);
+    rows(lock_rows.coefficients.rows(), "joint_locks");
+    affine_rows(task_bound_constraints);
+    affine_rows(centroidal_bounds.constraints);
+    affine_rows(contact_constraints.constraints);
+    affine_rows(tight_point_constraints.constraints);
+    affine_rows(tight_frame_pose_constraints.constraints);
+    affine_rows(torso_pose_bound_constraints.constraints);
+    affine_rows(relative_pose_constraints.constraints);
+    affine_rows(com_support_polygon_constraints.constraints);
+    affine_rows(capture_point_constraints.constraints);
+    affine_rows(zmp_constraints.constraints);
+  }
   backend_start = std::chrono::steady_clock::now();
   auto backend = detail::SolveGeneralizedHierarchicalLinearSystemEigen(
       *backend_targets, *backend_biases, *backend_matrices,
@@ -594,7 +641,9 @@ AccelerationSolverResult AccelerationSolver::solve_impl(
       backend_config, objectives.configs, nullptr,
       kConstraintTolerance, prevalidated_state_box_only,
       prevalidated_state_box_only, options.allow_best_effort_lower_tasks,
-      options.prefer_direct_min_error_qp);
+      options.prefer_direct_min_error_qp,
+      linear_problem ? &linear_problem->diagnostics : nullptr);
+  if (linear_problem) linear_problem->backend_result = backend;
   backend_end = std::chrono::steady_clock::now();
   backend_completed = true;
 
@@ -893,6 +942,8 @@ AccelerationSolverResult AccelerationSolver::solve_impl(
     auto refined = solve_impl(q, dq, dt, refined_options, refinement_budget - 1);
     // Only the deepest finish() updates elasticity, once for the final result.
     // Re-preparation at unchanged q/dq and nominal bounds is idempotent.
+    if (linear_problem)
+      refined.linear_problems.insert(refined.linear_problems.begin(), std::move(*linear_problem));
     ++refined.nonlinear_refinement_iterations;
     refined.computation_time_ms =
         std::chrono::duration<double, std::milli>(

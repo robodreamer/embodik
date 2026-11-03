@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Experimental robot-independent CPU `solve_ls` and `solve_qp` interfaces, with
+  explicit result statuses, hard linear bounds and factor-preserving least squares.
+  The initial QP interface requires positive definite objectives; GPU dispatch
+  and general semidefinite programs remain unsupported.
+
+- Default-off acceleration backend problem traces and replay, preserving affine
+  objectives, hard-row sources, nonlinear refinement history and raw failures.
+  Optional diagnostics identify Phase I outcomes and preferred MIN_ERROR QP
+  attempts without changing execution or acceptance policy.
+
 - Opt-in fixed-base GPU `warp_polytope` backend for exact-ray primary SCALE
   velocity IK with native coupled linear configuration bounds. Native reduced
   coordinates have a checked full-space fallback; invalid lanes cannot publish
@@ -34,10 +44,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Opt-in CPU velocity/position-step problem snapshots and nominal hierarchical
   backend replay, including objective policies, variable mapping and per-target
-  priority-candidate merits and continuity guard decisions. Recording is
+  priority-candidate merits, constraint row families and continuity guard decisions. Recording is
   disabled by default.
 
 ### Fixed
+
+- Shared constrained MIN_ERROR numerical solves retain least-squares factors
+  for stable residual gradients and QR steps, avoiding false iteration stalls
+  in redundant task directions without weakening hard rows or tolerances.
+
+- Undamped legacy hierarchical solves use a rank-aware inverse for projected
+  tasks and optimize a trailing MIN_ERROR suffix with the existing constrained
+  quadratic solver, preserving completed task images and hard bounds.
 
 - Single-step finite-zone MIN_ERROR recovery checks bounded native proposal
   fractions near earlier satisfied pose boundaries. Original hard rows,

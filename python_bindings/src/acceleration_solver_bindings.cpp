@@ -12,6 +12,7 @@
 
 #include <embodik/acceleration_solver.hpp>
 #include <embodik/kinematics_solver.hpp>
+#include <embodik/ik_baseline.hpp>
 #include <embodik/robot_model.hpp>
 #include <embodik/tasks.hpp>
 
@@ -362,6 +363,7 @@ void bind_acceleration_solver(nb::module_ &m) {
               "Opt in to bounded refinement of feasible partial SCALE "
               "commands, preserving earlier task images and hard bounds. "
               "An improved primary scale can change lower task errors.")
+      .def_rw("record_linear_problems", &AccelerationSolveOptions::record_linear_problems)
       .def_rw("prefer_direct_min_error_qp",
               &AccelerationSolveOptions::prefer_direct_min_error_qp,
               "Prefer a feasible-primal quadratic solve for an all-MIN_ERROR "
@@ -601,8 +603,50 @@ void bind_acceleration_solver(nb::module_ &m) {
       .def_ro("step_certified",
               &AccelerationAnalyticCollisionPairDiagnostics::step_certified);
 
+  nb::class_<LinearSolveDiagnostics>(m, "LinearSolveDiagnostics")
+      .def_ro("phase_one_status", &LinearSolveDiagnostics::phase_one_status)
+      .def_ro("phase_one_witness", &LinearSolveDiagnostics::phase_one_witness)
+      .def_ro("direct_min_error_attempted", &LinearSolveDiagnostics::direct_min_error_attempted)
+      .def_ro("direct_min_error_succeeded", &LinearSolveDiagnostics::direct_min_error_succeeded)
+      .def_ro("direct_min_error_message", &LinearSolveDiagnostics::direct_min_error_message)
+      .def_ro("termination_reason", &LinearSolveDiagnostics::termination_reason);
+
+  nb::class_<AccelerationLinearProblemTrace>(m, "AccelerationLinearProblemTrace")
+      .def_ro("q", &AccelerationLinearProblemTrace::q)
+      .def_ro("dq", &AccelerationLinearProblemTrace::dq)
+      .def_ro("dt", &AccelerationLinearProblemTrace::dt)
+      .def_ro("refinement_budget_remaining", &AccelerationLinearProblemTrace::refinement_budget_remaining)
+      .def_ro("objective_targets", &AccelerationLinearProblemTrace::objective_targets)
+      .def_ro("objective_biases", &AccelerationLinearProblemTrace::objective_biases)
+      .def_ro("objective_matrices", &AccelerationLinearProblemTrace::objective_matrices)
+      .def_ro("objective_configs", &AccelerationLinearProblemTrace::objective_configs)
+      .def_ro("constraint_matrix", &AccelerationLinearProblemTrace::constraint_matrix)
+      .def_ro("lower_bounds", &AccelerationLinearProblemTrace::lower_bounds)
+      .def_ro("upper_bounds", &AccelerationLinearProblemTrace::upper_bounds)
+      .def_ro("constraint_row_sources", &AccelerationLinearProblemTrace::constraint_row_sources)
+      .def_ro("solver_config", &AccelerationLinearProblemTrace::solver_config)
+      .def_ro("objective_equality_tolerance", &AccelerationLinearProblemTrace::objective_equality_tolerance)
+      .def_ro("constraint_rows_pre_normalized", &AccelerationLinearProblemTrace::constraint_rows_pre_normalized)
+      .def_ro("hard_constraints_prevalidated_feasible", &AccelerationLinearProblemTrace::hard_constraints_prevalidated_feasible)
+      .def_ro("allow_best_effort_lower_tasks", &AccelerationLinearProblemTrace::allow_best_effort_lower_tasks)
+      .def_ro("prefer_direct_min_error_qp", &AccelerationLinearProblemTrace::prefer_direct_min_error_qp)
+      .def_ro("allocation_applied", &AccelerationLinearProblemTrace::allocation_applied)
+      .def_ro("diagnostics", &AccelerationLinearProblemTrace::diagnostics)
+      .def_ro("backend_result", &AccelerationLinearProblemTrace::backend_result);
+
+  m.def("replay_acceleration_linear_problem", [](const AccelerationLinearProblemTrace &trace) {
+    return detail::SolveGeneralizedHierarchicalLinearSystemEigen(
+        trace.objective_targets, trace.objective_biases, trace.objective_matrices,
+        trace.constraint_matrix, trace.lower_bounds, trace.upper_bounds,
+        trace.solver_config, trace.objective_configs, nullptr,
+        trace.objective_equality_tolerance, trace.constraint_rows_pre_normalized,
+        trace.hard_constraints_prevalidated_feasible,
+        trace.allow_best_effort_lower_tasks, trace.prefer_direct_min_error_qp);
+  }, nb::arg("trace"), "Replay the recorded backend only; no state integration or geometric acceptance.");
+
   nb::class_<AccelerationSolverResult, SolverResult>(
       m, "AccelerationSolverResult")
+      .def_ro("linear_problems", &AccelerationSolverResult::linear_problems)
       .def_ro("preprocessing_time_ms",
               &AccelerationSolverResult::preprocessing_time_ms)
       .def_ro("backend_computation_time_ms",
