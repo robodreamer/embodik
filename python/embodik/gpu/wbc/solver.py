@@ -578,7 +578,7 @@ class GpuWbcMultiFrameSolver:
             if manifest_path is None:
                 raise ValueError("fi_pesns requires a generated manifest")
             function, library_path, artifact = _load_fi_artifact(manifest_path)
-        elif solver_backend in {"torch_srinv", "warp_srinv", "cusolver_srinv"}:
+        elif solver_backend in {"torch_srinv", "warp_srinv", "cusolver_srinv", "warp_polytope"}:
             function = None
             library_path = None
             contract = (
@@ -597,7 +597,8 @@ class GpuWbcMultiFrameSolver:
             }
         else:
             raise ValueError(
-                "solver_backend must be fi_pesns, torch_srinv, warp_srinv, " "or cusolver_srinv"
+                "solver_backend must be fi_pesns, torch_srinv, warp_srinv, "
+                "or cusolver_srinv or warp_polytope"
             )
         artifact_spec = artifact.get("robot_spec")
         if artifact_spec is None:
@@ -741,7 +742,7 @@ class GpuWbcMultiFrameSolver:
                 max_angular_speed=max_angular_speed,
                 allow_nonconverged_progress_steps=True,
                 standalone_cuda_graph_enabled=(
-                    solver_backend in {"fi_pesns", "warp_srinv", "cusolver_srinv"}
+                    solver_backend in {"fi_pesns", "warp_srinv", "cusolver_srinv", "warp_polytope"}
                 ),
                 max_joint_acceleration_rad_s2=max_joint_acceleration_rad_s2,
                 velocity_solver=solver_backend,
@@ -760,7 +761,8 @@ class GpuWbcMultiFrameSolver:
                 collision_enabled=bool(collision_pairs),
                 collision_debug_enabled=(
                     bool(collision_pairs)
-                    and solver_backend in {"fi_pesns", "warp_srinv", "cusolver_srinv"}
+                    and solver_backend
+                    in {"fi_pesns", "warp_srinv", "cusolver_srinv", "warp_polytope"}
                 ),
                 collision_min_distance_m=collision_min_distance_m,
                 collision_query_distance_m=collision_query_distance_m,
@@ -818,6 +820,19 @@ class GpuWbcMultiFrameSolver:
         """
 
         return self._solver.kinematics.evaluate_body_poses(q)
+
+    def set_linear_position_constraints(self, matrix, lower, upper) -> None:
+        """Set coupled active-coordinate bounds for experimental warp_polytope.
+
+        Rows use compact active joint order. Empty rows clear the bounds. The
+        exact-ray backend supports scalar fixed-base joints and primary frames;
+        unsupported projections/dynamics fail explicitly. Configuration changes
+        invalidate captured graphs and must occur outside graph capture.
+        """
+        self._solver.set_linear_position_constraints(matrix, lower, upper)
+
+    def get_linear_position_constraint_rows(self) -> int:
+        return self._solver.get_linear_position_constraint_rows()
 
     def _world_mask(self, value, name: str):
         return GpuWbcFloatingMultiFrameSolver._world_mask(self, value, name)

@@ -1540,6 +1540,7 @@ private:
   bool suppress_best_effort_posture_retry_ = false;
   /// One bounded weighted retry after a finite MIN_ERROR command is rejected.
   bool position_step_weighted_retry_active_ = false;
+  std::optional<int> position_step_weighted_retry_priority_;
   /// Guards against recursive preferred-lock candidate retry in solve_position_step.
   bool suppress_preferred_lock_step_retry_ = false;
   struct PositionStepTargetSignature {

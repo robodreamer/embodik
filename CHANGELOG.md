@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Opt-in fixed-base GPU `warp_polytope` backend for exact-ray primary SCALE
+  velocity IK with native coupled linear configuration bounds. Native reduced
+  coordinates have a checked full-space fallback; invalid lanes cannot publish
+  unchecked commands. Collision, centroidal/CoM, torso, secondary, contact and
+  acceleration constraints remain explicitly unsupported by this backend.
+
 - Default-off `PositionStepOptions.allow_best_effort_posture_retry` permits a
   transactional retry of stalled or rejected unchanged velocity steps with strictly lower
   posture-only bands in MIN_ERROR, preserving primary targets and hard guards.
@@ -32,6 +38,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   disabled by default.
 
 ### Fixed
+
+- Single-step finite-zone MIN_ERROR recovery checks bounded native proposal
+  fractions near earlier satisfied pose boundaries. Original hard rows,
+  mandatory velocity bounds, nonlinear collision floors and finite pose zones
+  remain required; this does not guarantee sustained recovery.
+
+- Explicitly enabled CPU MIN_ERROR position-step recovery can serve the first
+  unsatisfied Cartesian priority while earlier tasks remain inside their finite
+  pose zones. A zero-motion backend success no longer prevents this bounded
+  trial. Earlier pose budgets, physical bounds and original collision-floor
+  publication checks remain mandatory; sustained recovery is not guaranteed.
 
 - Finite MIN_ERROR recovery distinguishes priority-validation rejection from
   intentional continuity holds. A permitted weighted trial may lead to a

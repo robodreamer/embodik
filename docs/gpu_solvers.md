@@ -93,6 +93,44 @@ To solve 1,024 worlds while publishing only 512 robots to the browser, pass
 
 ## Model-derived API
 
+### Opt-in primary SCALE with coupled joint bounds
+
+Fixed-base scalar-joint models can select `solver_backend="warp_polytope"`
+in `GpuWbcMultiFrameSolver.from_robot()`. This experimental backend maximizes
+the common primary task scale, subject to the original joint velocity box
+and optional coupled configuration bounds. It uses native double-precision
+Warp linear programming; reduced coordinates use a checked full-space fallback
+when numerical rank or conditioning prevents a valid reduction.
+
+Configure bounds in compact active-joint order, outside CUDA graph capture:
+
+```python
+# -0.5 <= q[0] + q[1] <= 0.5, for a two-active-joint model.
+solver.set_linear_position_constraints([[1.0, 1.0]], [-0.5], [0.5])
+assert solver.get_linear_position_constraint_rows() == 1
+```
+
+The matrix has shape `(rows, active_dofs)`; lower and upper bounds have shape
+`(rows,)`. Values must be finite and ordered. An empty matrix of shape
+`(0, active_dofs)` clears the bounds. Updating bounds invalidates the captured
+graph. Invalid updates preserve the previous configuration.
+
+Rows are rebuilt at each inner integration step. A seed already outside a
+bound can move inward without projection, but cannot worsen its starting
+violation. A small numerical inset reserves float32 integration error; the
+actual integrated configuration is independently checked against the original
+row envelope before publication. Rejected row candidates hold the incoming
+configuration. This endpoint check does not certify swept nonlinear geometry.
+
+This is primary Cartesian SCALE, with one common scale across stacked frame
+rows. It does not implement ELASTIC SCALE, secondary objectives, or general
+WBC constraints. Collision, centroidal/CoM, torso, contact, acceleration and
+non-additive joint models fail explicitly. The default `warp_srinv` behavior
+is unchanged. Benchmark the complete application: exact-ray optimization adds
+work and is not a guarantee of lower latency or nonlinear target recovery.
+
+### SRINV bounded completion and refinement
+
 Native `warp_srinv` and `cusolver_srinv` bounded completion can release an
 unnecessary joint bound when a consistent combined task stalls at zero velocity.
 The recovery search runs in one graph-compatible Warp launch. It preserves the

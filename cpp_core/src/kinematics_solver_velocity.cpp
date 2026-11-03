@@ -2176,6 +2176,14 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
         w *= orientation_weight_scale;
       }
       advisor_weights.push_back(w);
+      if (position_step_weighted_retry_priority_.has_value() &&
+          objective_configs[i].priority != *position_step_weighted_retry_priority_) {
+        // The outer finite-pose guard protects already satisfied priorities.
+        // Do not keep pulling them (or posture preferences) to an exact image
+        // inside this explicitly authorized, transactional recovery trial.
+        advisor_weights.back() = 0.0;
+        advisor_row_weights[i].setZero();
+      }
     }
 
     WeightedAdvisoryResult out = compute_constrained_weighted_advisory(
@@ -2554,8 +2562,20 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
             current_rel_violation + kViolationImproveTolerance) {
           return false;
         }
+        // A bounded finite-zone trial needs its unaccepted linear proposal
+        // to reach the outer collision-curvature and pose-budget corrections.
+        // The public position-step wrapper still freshly checks every anchored
+        // floor before publishing; standalone velocity calls keep this guard.
+        const bool defer_anchored_trial_floor =
+            position_step_weighted_retry_priority_.has_value() &&
+            position_step_call_depth_ > 0 && has_collision_trajectory_floor_anchor() &&
+            !acceleration_limits_enabled_ && !robot_->is_floating_base() &&
+            robot_->nq() == robot_->nv() && !has_contact_frames() &&
+            !has_active_velocity_centroidal_hard_constraints() &&
+            std::all_of(robot_->model().joints.begin() + 1, robot_->model().joints.end(),
+                        [](const auto &joint) { return joint.nq() == 1 && joint.nv() == 1; });
         if (collision_constraint_.has_value() &&
-            collision_constraint_->enabled) {
+            collision_constraint_->enabled && !defer_anchored_trial_floor) {
           if (!collision_recovery_margins_acceptable(
                   current_collision_margins, candidate_collision_margins,
                   0.0)) {
@@ -3599,8 +3619,9 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
   }
 
   // C is still physical here: the metric solve uses a separate C*D copy.
-  // Capture only for a stalled/failing position step. Direct escape does not
-  // certify softened rows, contact projection, or dynamic braking/history.
+  // Capture stalled/failing steps and finite-zone retry proposals before
+  // temporary correction rows are added. Direct escape does not certify
+  // softened rows, contact projection, or dynamic braking/history.
   if (position_step_hard_constraints_ != nullptr && !has_soft_rows &&
       contact_frames_.empty() && !acceleration_limits_enabled_ &&
       !has_active_velocity_centroidal_hard_constraints() &&
@@ -3608,7 +3629,8 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
       std::isfinite(*pending_step_validation_dt_) &&
       *pending_step_validation_dt_ > 0.0 &&
       (result.status != SolverStatus::kSuccess ||
-       result.joint_velocities.norm() < stall_config_.dq_stall_eps)) {
+       result.joint_velocities.norm() < stall_config_.dq_stall_eps ||
+       position_step_weighted_retry_priority_.has_value())) {
     auto &hard = *position_step_hard_constraints_;
     hard.q = current_q;
     hard.dt = *pending_step_validation_dt_;

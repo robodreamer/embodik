@@ -5350,22 +5350,29 @@ PositionIKResult KinematicsSolver::solve_position_step_impl(
         continue;
       }
       const auto &target = targets[index];
+      double position_tolerance = target.priority_position_tolerance;
+      double orientation_tolerance = target.priority_orientation_tolerance;
+      if (position_step_weighted_retry_priority_.has_value() &&
+          resolved_target.task->getPriority() < *position_step_weighted_retry_priority_) {
+        if (!std::isfinite(position_tolerance) || position_tolerance <= 0.0)
+          position_tolerance = kPositionStepSatisfiedMeritTolerance;
+        if (!std::isfinite(orientation_tolerance) || orientation_tolerance <= 0.0)
+          orientation_tolerance = kPositionStepSatisfiedMeritTolerance;
+      }
       const bool protect_position =
-          std::isfinite(target.priority_position_tolerance) &&
-          target.priority_position_tolerance > 0.0 &&
+          std::isfinite(position_tolerance) && position_tolerance > 0.0 &&
           (!options.per_target_priority_budgets || target.position_gain > 0.0);
       const bool protect_orientation =
-          std::isfinite(target.priority_orientation_tolerance) &&
-          target.priority_orientation_tolerance > 0.0 &&
+          std::isfinite(orientation_tolerance) && orientation_tolerance > 0.0 &&
           (!options.per_target_priority_budgets || target.orientation_gain > 0.0);
       if (!protect_position && !protect_orientation) {
         continue;
       }
       specs.push_back({resolved_target.task,
-                       protect_position ? target.priority_position_tolerance
+                       protect_position ? position_tolerance
                                         : -1.0,
                        protect_orientation
-                           ? target.priority_orientation_tolerance
+                           ? orientation_tolerance
                            : -1.0,
                        step_dt_eff, options.per_target_priority_budgets});
     }
@@ -5539,8 +5546,12 @@ PositionIKResult KinematicsSolver::solve_position_step_impl(
         for (std::size_t i = 0; i < resolved.size(); ++i) {
           if (!resolved[i].task->isActive()) continue;
           for (int block = 0; block < 2; ++block) {
-            const double tolerance = block == 0 ? targets[i].priority_position_tolerance
+            double tolerance = block == 0 ? targets[i].priority_position_tolerance
                                                 : targets[i].priority_orientation_tolerance;
+            if ((!std::isfinite(tolerance) || tolerance <= 0.0) &&
+                position_step_weighted_retry_priority_.has_value() &&
+                resolved[i].task->getPriority() < *position_step_weighted_retry_priority_)
+              tolerance = kPositionStepSatisfiedMeritTolerance;
             if (!std::isfinite(tolerance) || tolerance <= 0.0) continue;
             const double limit = std::max(before_merits[i][block], tolerance + 1e-9);
             if (candidate_merits[i][block] > limit)
@@ -5958,7 +5969,6 @@ PositionIKResult KinematicsSolver::solve_position_step_impl(
     if (options.record_velocity_candidates) {
       diagnostic_solver_velocity = last_vel_result.joint_velocities;
     }
-    q = integrate_velocity_candidate(last_vel_result, step_dt_eff);
     const auto solve_collision_trial = [&]() {
       pending_velocity_lock_indices_ = step_locked_indices;
       pending_step_torso_constraint_ = step_torso_constraint;
@@ -5967,9 +5977,68 @@ PositionIKResult KinematicsSolver::solve_position_step_impl(
       return solve_velocity(q_pre_step, true);
     };
     Eigen::VectorXd collision_trial_raw;
+    // Preserve the original physical rows: scaling is not safe for rows with
+    // mandatory nonzero motion. Revalidate every realized fraction explicitly.
+    auto backtrack_hard = position_step_weighted_retry_priority_.has_value()
+        ? std::optional<PositionStepHardConstraints>(hard_constraints) : std::nullopt;
+    std::vector<std::array<double, 2>> backtrack_before;
+    bool backtrack_near_zone = false;
+    double backtrack_primary_before = 0.0;
+    // Limit this supplemental realization to a single physical command;
+    // multi-step/adaptive virtual horizons retain their existing admission.
+    if (options.max_steps == 1 && step_dt_eff == step_dt &&
+        backtrack_hard && backtrack_hard->valid) {
+      backtrack_before = target_block_merits_at(q_pre_step);
+      for (std::size_t i = 0; i < resolved.size(); ++i) {
+        if (!resolved[i].task->isActive()) continue;
+        const int priority = resolved[i].task->getPriority();
+        if (priority == *position_step_weighted_retry_priority_)
+          backtrack_primary_before += backtrack_before[i][0] + backtrack_before[i][1];
+        if (priority >= *position_step_weighted_retry_priority_) continue;
+        for (int block = 0; block < 2; ++block) {
+          const double requested = block == 0 ? targets[i].priority_position_tolerance
+                                               : targets[i].priority_orientation_tolerance;
+          const double tolerance = std::isfinite(requested) && requested > 0.0
+              ? requested : kPositionStepSatisfiedMeritTolerance;
+          backtrack_near_zone |= backtrack_before[i][block] >= 0.75 * tolerance;
+        }
+      }
+    }
+    const auto integrate_guarded_trial = [&](VelocitySolverResult &trial, double trial_dt) {
+      Eigen::VectorXd proposed = integrate_velocity_candidate(trial, trial_dt);
+      if (backtrack_near_zone) {
+        const Eigen::VectorXd delta = proposed - q_pre_step;
+        for (int half = 0; half <= 12; ++half) {
+          Eigen::VectorXd candidate;
+          bool physical = false;
+          {
+            ScopedPositionStepCapture capture_rows(position_step_hard_constraints_, &*backtrack_hard);
+            physical = make_position_step_escape_candidate(
+                q_pre_step, q_pre_step, std::ldexp(1.0, -half) * delta,
+                step_dt_eff, current_q, options, candidate);
+          }
+          if (!physical) continue;
+          const auto after = target_block_merits_at(candidate);
+          if (!priority_candidate_acceptable(backtrack_before, after)) continue;
+          double merit = 0.0;
+          for (std::size_t i = 0; i < resolved.size(); ++i)
+            if (resolved[i].task->isActive() &&
+                resolved[i].task->getPriority() == *position_step_weighted_retry_priority_)
+              merit += after[i][0] + after[i][1];
+          if (merit >= backtrack_primary_before - kPositionStepMinAbsoluteErrorReduction) continue;
+          proposed = std::move(candidate);
+          trial.joint_velocities = (proposed - q_pre_step) / trial_dt;
+          hard_constraints = *backtrack_hard;
+          break;
+        }
+      }
+      robot_->update_configuration(proposed);
+      return proposed;
+    };
+    q = integrate_guarded_trial(last_vel_result, step_dt_eff);
     const auto integrate_collision_trial = [&](VelocitySolverResult &trial) {
       if (options.record_velocity_candidates) collision_trial_raw = trial.joint_velocities;
-      return integrate_velocity_candidate(trial, step_dt_eff);
+      return integrate_guarded_trial(trial, step_dt_eff);
     };
     if (refine_position_step_collision_candidate(q_pre_step, step_dt_eff, q, last_vel_result,
                                                 solve_collision_trial, integrate_collision_trial) &&
@@ -6051,14 +6120,14 @@ PositionIKResult KinematicsSolver::solve_position_step_impl(
           continue;
         }
         Eigen::VectorXd retry_q =
-            integrate_velocity_candidate(retry, retry_dt);
+            integrate_guarded_trial(retry, retry_dt);
         double retry_scale = position_step_priority_scale(q_pre_step, retry_q);
         if (retry_scale >= 1.0) {
           // A new budget realization can curve through a collision floor even
           // when the original proposal was corrected. Repair at this retry's
           // actual horizon, then repeat the unchanged finite-budget admission.
           const auto integrate_priority_retry = [&](VelocitySolverResult &trial) {
-            return integrate_velocity_candidate(trial, retry_dt);
+            return integrate_guarded_trial(trial, retry_dt);
           };
           refine_position_step_collision_candidate(
               q_pre_step, retry_dt, retry_q, retry, solve_priority_retry,
@@ -7236,7 +7305,8 @@ PositionIKResult KinematicsSolver::solve_position_step_impl(
                                   result.q_solution)
                 .norm()
           : std::numeric_limits<double>::quiet_NaN();
-  int continuity_priority = highest_active_target_priority;
+  int continuity_priority = position_step_weighted_retry_priority_.value_or(
+      highest_active_target_priority);
   std::vector<int> active_target_priorities;
   active_target_priorities.reserve(resolved.size());
   for (const auto &resolved_target : resolved) {
@@ -7250,6 +7320,8 @@ PositionIKResult KinematicsSolver::solve_position_step_impl(
                   active_target_priorities.end()),
       active_target_priorities.end());
   for (int priority : active_target_priorities) {
+    if (position_step_weighted_retry_priority_.has_value() &&
+        priority != *position_step_weighted_retry_priority_) continue;
     bool priority_unsatisfied = false;
     for (std::size_t index = 0; index < resolved.size(); ++index) {
       if (!resolved[index].task->isActive() ||
@@ -7548,8 +7620,10 @@ PositionIKResult KinematicsSolver::solve_position_step_impl(
       result.status == SolverStatus::kCollisionViolated ||
       result.status == SolverStatus::kInfeasible ||
       result.status == SolverStatus::kNumericalError ||
-      (result.status == SolverStatus::kNoProgress &&
-       (!result.position_step_hold_active || priority_candidate_rejected) &&
+      ((result.status == SolverStatus::kNoProgress ||
+        (result.status == SolverStatus::kSuccess && options.per_target_priority_budgets)) &&
+       (!result.position_step_hold_active || priority_candidate_rejected ||
+        options.per_target_priority_budgets) &&
        result.q_solution.size() == current_q.size() && result.q_solution.allFinite() &&
        (result.q_solution - current_q).norm() <=
            stall_config_.dq_stall_eps * std::max(step_dt, 1e-9));
@@ -7565,21 +7639,52 @@ PositionIKResult KinematicsSolver::solve_position_step_impl(
       !acceleration_limits_enabled_ && !has_contact_frames() &&
       !has_active_velocity_centroidal_hard_constraints() &&
       result.q_solution.size() == current_q.size() && result.q_solution.allFinite()) {
+    int recovery_priority = highest_active_target_priority;
+    if (can_refine_individual_budgets) {
+      const auto seed_blocks = target_block_merits_at(current_q);
+      for (int priority : active_target_priorities) {
+        bool satisfied = true;
+        for (std::size_t i = 0; i < resolved.size(); ++i) {
+          if (!resolved[i].task->isActive() || resolved[i].task->getPriority() != priority)
+            continue;
+          const double tolerances[2] = {targets[i].priority_position_tolerance,
+                                        targets[i].priority_orientation_tolerance};
+          for (int block = 0; block < 2; ++block) {
+            const double tolerance =
+                std::isfinite(tolerances[block]) && tolerances[block] > 0.0
+                    ? tolerances[block] : kPositionStepSatisfiedMeritTolerance;
+            satisfied &= seed_blocks[i][block] <= tolerance + 1e-9;
+          }
+        }
+        if (!satisfied) {
+          recovery_priority = priority;
+          break;
+        }
+      }
+    }
     const auto primary_merit = [&](const Eigen::VectorXd &configuration) {
       const auto blocks = target_block_merits_at(configuration);
       double merit = 0.0;
       for (std::size_t index = 0; index < resolved.size(); ++index)
         if (resolved[index].task->isActive() &&
-            resolved[index].task->getPriority() == highest_active_target_priority)
+            resolved[index].task->getPriority() == recovery_priority)
           merit += blocks[index][0] + blocks[index][1];
       return merit;
     };
     const double baseline = primary_merit(current_q);
     if (std::isfinite(baseline) &&
+        (result.status != SolverStatus::kSuccess ||
+         recovery_priority > highest_active_target_priority) &&
+        (result.status != SolverStatus::kNoProgress ||
+         !result.position_step_hold_active || priority_candidate_rejected ||
+         recovery_priority > highest_active_target_priority) &&
         baseline > std::max(1e-8, options.no_progress_error_tolerance)) {
       const auto snapshot = capture_position_step_mutable_state();
       ScopedPositionStepValueRestore restore_weighted(position_step_weighted_retry_active_);
       position_step_weighted_retry_active_ = true;
+      ScopedPositionStepValueRestore restore_recovery_priority(position_step_weighted_retry_priority_);
+      if (recovery_priority > highest_active_target_priority)
+        position_step_weighted_retry_priority_ = recovery_priority;
       auto retry_options = options;
       retry_options.allow_best_effort_posture_retry = false;
       PositionIKResult retry;
@@ -7599,6 +7704,9 @@ PositionIKResult KinematicsSolver::solve_position_step_impl(
           retry.q_solution.size() == current_q.size() && retry.q_solution.allFinite() &&
           (retry.q_solution - current_q).norm() >
               stall_config_.dq_stall_eps * std::max(step_dt, 1e-9) &&
+          (!position_step_weighted_retry_priority_.has_value() ||
+           priority_candidate_acceptable(target_block_merits_at(current_q),
+                                         target_block_merits_at(retry.q_solution))) &&
           primary_merit(retry.q_solution) < baseline - 1e-8;
       if (accepted) {
         retry.status_message = "validated finite MIN_ERROR recovery after weighted trial";

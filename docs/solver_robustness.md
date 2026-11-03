@@ -752,6 +752,36 @@ contact projection, and linear inequalities.
 
 ## Runtime policy (`SolverRuntimeConfig`)
 
+### Bounded recovery inside satisfied pose zones
+
+For fixed-base additive scalar models, enabling both
+`SolverRuntimeConfig.weighted_fallback_enabled` and
+`PositionStepOptions.per_target_priority_budgets` allows a rejected or unchanged
+Cartesian MIN_ERROR step to retry the first unsatisfied priority. Earlier tasks
+stay inside their position/orientation zones rather than imposing exact soft
+task images during the trial. Their task activity, modes and priorities are
+restored. Posture preferences do not prevent this trial from exploring a
+different realization. Strict Cartesian SCALE requests retain their mode.
+
+Use `TaskTarget.priority_position_tolerance` and
+`priority_orientation_tolerance` to declare zones. An unset protected block
+retains the existing implicit satisfaction budget (2 mm or 2 mrad), not an
+unbounded allowance. Separate numerical no-progress thresholds do not define
+these physical zones.
+
+The native retry remains bounded. With an explicit original collision-floor
+anchor, an unaccepted linear proposal may reach outer collision-curvature and
+pose-budget correction before acceptance. Every published position command
+still undergoes fresh anchored-floor validation, coupled configuration checks
+and finite pose-budget admission. Near an earlier pose-zone boundary, a
+single-step retry can also check bounded fractions of native proposals before
+adding further correction rows. Each fraction must improve the unsatisfied
+priority and satisfy the original hard velocity rows, including mandatory
+nonzero bounds, and nonlinear endpoint guards. This adds no new QP solves.
+Standalone velocity collision checks are unchanged. These retries do not support acceleration-history, contact or hard
+velocity centroidal execution. They are local recovery, not a complete planner:
+one useful command does not guarantee continued progress or target convergence.
+
 ### Experimental normalized pose recovery
 
 `normalized_pose_recovery_enabled` is an opt-in development policy, disabled
