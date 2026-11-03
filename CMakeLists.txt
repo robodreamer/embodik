@@ -91,8 +91,9 @@ else()
 endif()
 
 # Find dependencies
-find_package(Eigen3 3.3 REQUIRED NO_MODULE)
+find_package(Eigen3 3.4 REQUIRED NO_MODULE)
 message(STATUS "EmbodiK: using Eigen3_DIR='${Eigen3_DIR}'")
+message(STATUS "EmbodiK: Eigen header version '${EIGEN3_VERSION_STRING}'")
 
 find_package(pinocchio REQUIRED)
 message(STATUS "EmbodiK: using pinocchio_DIR='${pinocchio_DIR}'")

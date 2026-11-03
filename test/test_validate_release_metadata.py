@@ -1,8 +1,28 @@
+import re
+import shlex
+import tomllib
 from pathlib import Path
 
 import pytest
 
 from scripts.validate_release_metadata import validate_release_metadata
+
+
+def test_wheel_and_source_builds_use_the_development_eigen_baseline() -> None:
+    root = Path(__file__).resolve().parents[1]
+    metadata = tomllib.loads((root / "pyproject.toml").read_text())
+    requirements = metadata["build-system"]["requires"]
+    eigen = next(item for item in requirements if item.startswith("cmeel-eigen=="))
+    major_minor = ".".join(eigen.split("==")[1].split(".")[:2])
+    required = re.search(
+        r"find_package\(Eigen3\s+([\d.]+)\s+REQUIRED", (root / "CMakeLists.txt").read_text()
+    )
+    assert required is not None and required[1] == major_minor
+    pixi = tomllib.loads((root / "pixi.toml").read_text())
+    assert pixi["dependencies"]["eigen"].startswith(f">={major_minor}.")
+    for platform in ("linux", "macos"):
+        before_build = metadata["tool"]["cibuildwheel"][platform]["before-build"]
+        assert eigen in shlex.split(before_build)
 
 
 def _write_release_metadata(

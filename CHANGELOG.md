@@ -100,6 +100,10 @@ not guaranteed by this release.
 
 ### Fixed
 
+- Native builds require Eigen 3.4, matching the development baseline. Source
+  and wheel builds install pinned Eigen headers instead of silently selecting
+  older headers from the build image.
+
 - Acceleration collision refinement uses the same cold, precise distance and
   nearest-point policy as floor and sample queries, preventing optimistic local
   correction rows. Physical floors and acceptance tolerances remain unchanged.
