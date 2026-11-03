@@ -23,6 +23,11 @@ not guaranteed by this release.
 
 ### Added
 
+- CPU `initialize_collision_recovery_floors(q_start)` initializes unseeded
+  recovery floors from startup signed distances capped by active pair margins,
+  preserving nominal margins and acceleration settings. Existing native
+  numerical tolerances remain unchanged.
+
 - CPU acceleration `validate_candidate()` and
   `validate_candidate_with_velocity_collision()` check a prescribed physical
   acceleration through existing hard-row and nonlinear admission without
@@ -78,7 +83,46 @@ not guaranteed by this release.
   priority-candidate merits, constraint row families and continuity guard decisions. Recording is
   disabled by default.
 
+### Changed
+
+- CPU position-step continuity uses one stationary-progress requirement for
+  automatic target identity and explicit command revisions. Automatic low-progress
+  holds remain reversible; explicit revisions retain their identity and latching
+  behavior. This replaces the automatic mode's separate productivity criterion
+  without changing constraints, constraint or satisfaction tolerances, or recovery budgets.
+
 ### Fixed
+
+- Unallocated acceleration solves polish exact coordinate hard equalities using
+  the existing hard-row and task-image certificates, preventing numerical
+  residual commands on zero-rate locked axes without modifying input states.
+
+
+- Non-worsening collision floors tolerate arithmetic-sized distance differences
+  when constructing no-approach rows, avoiding artificial separation demands at
+  a satisfied structural floor. Raw distances and physical acceptance tolerances
+  remain unchanged; larger violations still require recovery.
+- Nonlinear acceleration refinement permits one additional bounded correction
+  near converging constraint boundaries without tightening the feasible set or
+  changing the final physical checks.
+
+
+- CPU CoM support-polygon acceleration solves can use bounded nonlinear
+  refinement to correct predicted outward boundary rates, including supported
+  seeds within the configured boundary epsilon band. Outside-state policy and
+  the original hard-row and nonlinear admission checks remain unchanged.
+
+- Collision velocity dampers permit stationary commands at satisfied recovery
+  floors. The numerical reserve remains a no-approach band; recovery below the
+  floor and approach bounds beyond that band are unchanged.
+
+- Collision trajectory validation reuses conservative clearance bounds at the
+  seed when tracked geometry and initialized pair floors permit certification.
+  Mutable geometry and unsupported cases retain exact distance checks.
+
+- The CPU affine solver can reject a coupled row inconsistent with signed-unit
+  variable bounds before Phase I. Conservative numerical guards leave uncertain
+  or unsupported arithmetic cases on the existing solver path.
 
 - Collision distance queries reject missing and failure sentinels before
   updating floors or caches. Invalid numerical results receive one deterministic

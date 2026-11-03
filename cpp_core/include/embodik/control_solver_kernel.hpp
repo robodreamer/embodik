@@ -25,8 +25,11 @@
 #include <Eigen/SVD>
 
 #include <algorithm>
+#include <cfloat>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
+#include <cstring>
 #include <limits>
 #include <optional>
 #include <string>
@@ -84,6 +87,127 @@ enum class HardConstraintFeasibilityStatus {
   kProvenInfeasible,
   kUnknown,
 };
+
+// A sufficient certificate only: exact signed-unit scalar rows enclose a box,
+// whose interval image may exclude another row. Include the original double
+// row acceptance test, not just the exact real dot product. Wide intermediates
+// keep double products/divisions away from overflow and underflow; unsupported
+// platforms, nonfinite inputs and unbounded images simply give no certificate.
+inline bool UnitScalarBoxProvesLinearInfeasibility(
+    const Eigen::MatrixXd &coefficients, const Eigen::VectorXd &lower,
+    const Eigen::VectorXd &upper, double tolerance) {
+#if defined(__FAST_MATH__) || (defined(__FINITE_MATH_ONLY__) && __FINITE_MATH_ONLY__ > 0)
+  return false;
+#else
+  if (!std::numeric_limits<double>::is_iec559 ||
+      std::numeric_limits<double>::radix != 2 ||
+      std::numeric_limits<double>::digits != 53 ||
+      sizeof(double) != sizeof(std::uint64_t) || FLT_EVAL_METHOD != 0 ||
+      std::numeric_limits<long double>::digits < 64 ||
+      std::numeric_limits<long double>::max_exponent <
+          4 * std::numeric_limits<double>::max_exponent ||
+      std::numeric_limits<long double>::min_exponent >
+          4 * std::numeric_limits<double>::min_exponent ||
+      !std::isfinite(tolerance)) return false;
+  // Compilers can narrow widened comparisons back to double. Fail open under
+  // FTZ/DAZ rather than letting a subnormal coefficient masquerade as zero.
+  // Volatile operands force exact representable probes; no mode is changed.
+  volatile double normal_probe = std::numeric_limits<double>::min();
+  volatile double tiny_probe = std::numeric_limits<double>::denorm_min();
+  volatile double half_probe = 0.5, one_probe = 1.0;
+  volatile double half_result = normal_probe * half_probe;
+  volatile double tiny_result = tiny_probe * one_probe;
+  const double half_value = half_result, tiny_value = tiny_result;
+  std::uint64_t half_bits, tiny_bits;
+  std::memcpy(&half_bits, &half_value, sizeof(half_bits));
+  std::memcpy(&tiny_bits, &tiny_value, sizeof(tiny_bits));
+  if (half_bits != UINT64_C(0x0008000000000000) || tiny_bits != UINT64_C(1)) return false;
+  const long double infinity = std::numeric_limits<long double>::infinity();
+  const auto down = [infinity](long double value) {
+    return value == 0.0L ? -static_cast<long double>(std::numeric_limits<double>::denorm_min())
+                         : std::nextafter(value, -infinity);
+  };
+  const auto up = [infinity](long double value) {
+    return value == 0.0L ? static_cast<long double>(std::numeric_limits<double>::denorm_min())
+                         : std::nextafter(value, infinity);
+  };
+  const long double epsilon = std::numeric_limits<double>::epsilon();
+  const long double tiny = std::numeric_limits<double>::min();
+  const long double accepted_tolerance =
+      std::nextafter(tolerance, std::numeric_limits<double>::infinity());
+  std::vector<long double> box_lower(coefficients.cols(), -infinity);
+  std::vector<long double> box_upper(coefficients.cols(), infinity);
+  std::vector<bool> scalar_rows(coefficients.rows(), false);
+  for (Eigen::Index row = 0; row < coefficients.rows(); ++row) {
+    Eigen::Index coordinate = -1;
+    for (Eigen::Index col = 0; col < coefficients.cols(); ++col) {
+      // Widen before comparing: DAZ must not hide a nonzero coefficient and
+      // incorrectly turn a coupled row into a signed-unit scalar row.
+      if (static_cast<long double>(coefficients(row, col)) == 0.0L) continue;
+      if (coordinate >= 0) { coordinate = -1; break; }
+      coordinate = col;
+    }
+    if (coordinate < 0) continue;
+    const long double coefficient = coefficients(row, coordinate);
+    if ((coefficient != 1.0L && coefficient != -1.0L) ||
+        !std::isfinite(lower(row)) || !std::isfinite(upper(row))) continue;
+    long double lo = down(static_cast<long double>(lower(row)) - accepted_tolerance);
+    long double hi = up(static_cast<long double>(upper(row)) + accepted_tolerance);
+    // Multiplication by +/-1 is exact. Cover flushed subnormal coordinates or
+    // bounds without changing the floating-point environment; no general
+    // scalar-product inversion or division participates in this certificate.
+    lo = down(lo - 2.0L * tiny);
+    hi = up(hi + 2.0L * tiny);
+    const long double first = coefficient > 0.0 ? lo : -hi;
+    const long double second = coefficient > 0.0 ? hi : -lo;
+    box_lower[coordinate] = std::max(box_lower[coordinate], first);
+    box_upper[coordinate] = std::min(box_upper[coordinate], second);
+    scalar_rows[row] = true;
+    if (box_lower[coordinate] > box_upper[coordinate]) return true;
+  }
+  const long double operations = 2.0L * coefficients.cols();
+  const long double roundoff = up(operations * epsilon);
+  if (!(roundoff < 0.5L)) return false;
+  const long double gamma = up(roundoff / down(1.0L - roundoff));
+  for (Eigen::Index row = 0; row < coefficients.rows(); ++row) {
+    if (scalar_rows[row]) continue;
+    long double image_lower = 0.0L, image_upper = 0.0L;
+    long double magnitude = 0.0L, input_flush = 0.0L;
+    bool bounded = true;
+    for (Eigen::Index col = 0; col < coefficients.cols(); ++col) {
+      const long double a = coefficients(row, col);
+      if (a == 0.0L) continue;
+      if (!std::isfinite(a) || std::abs(a) < tiny ||
+          !std::isfinite(box_lower[col]) || !std::isfinite(box_upper[col])) {
+        bounded = false;
+        break;
+      }
+      const long double lo = down(a * (a > 0.0L ? box_lower[col] : box_upper[col]));
+      const long double hi = up(a * (a > 0.0L ? box_upper[col] : box_lower[col]));
+      image_lower = down(image_lower + lo);
+      image_upper = up(image_upper + hi);
+      magnitude = up(magnitude + std::max(std::abs(lo), std::abs(hi)));
+      input_flush = up(input_flush + up(std::abs(a) * tiny));
+    }
+    if (!bounded) continue;
+    // At most n multiplies and n additions, including Eigen's SIMD/FMA dot
+    // reductions. The absolute enclosure includes input DAZ and operation FTZ.
+    const long double error = up(up(gamma * magnitude) +
+        up(up(1.0L + gamma) * up(input_flush + up(operations * tiny))));
+    // An overflowing double reduction can produce inf/NaN rather than a
+    // bounded rounding error. Do not draw a conclusion from that row.
+    if (up(magnitude + error) > std::numeric_limits<double>::max()) continue;
+    image_lower = down(image_lower - error);
+    image_upper = up(image_upper + error);
+    if (!std::isfinite(image_lower) || !std::isfinite(image_upper)) continue;
+    if ((std::isfinite(lower(row)) && image_upper <
+             down(static_cast<long double>(lower(row)) - accepted_tolerance)) ||
+        (std::isfinite(upper(row)) && image_lower >
+             up(static_cast<long double>(upper(row)) + accepted_tolerance))) return true;
+  }
+  return false;
+#endif
+}
 
 // Select a wrong active pin only when the computed motion is numerical drift
 // in the Phase-I objective nullspace. This changes the search, never acceptance.
@@ -162,6 +286,11 @@ inline HardConstraintFeasibilityStatus FindHardConstraintFeasibleWitnessImpl(
     if (scalar_lower(coordinate) > scalar_upper(coordinate)) {
       return HardConstraintFeasibilityStatus::kProvenInfeasible;
     }
+  }
+
+  if (UnitScalarBoxProvesLinearInfeasibility(
+          constraint_coefficients, min_bounds, max_bounds, tolerance)) {
+    return HardConstraintFeasibilityStatus::kProvenInfeasible;
   }
 
   // Phase I minimizes the nonnegative maximum normalized violation t:

@@ -122,6 +122,8 @@ struct LinearizedStateBoxResult {
   AffineAccelerationConstraint physical_constraint;
   std::vector<StateBoxRowInput> state_rows;
   std::vector<StateBoxRowResult> shaped_rows;
+  StateBoxFailure failure = StateBoxFailure::kNone;
+  Eigen::Index failure_row = -1;
 };
 
 LinearizedStateBoxResult prepare_linearized_state_box(

@@ -602,15 +602,9 @@ bool KinematicsSolver::should_hold_position_step_for_continuity(
   const bool caller_owns_command_identity =
       last_position_step_target_signature_.has_value() &&
       last_position_step_target_signature_->command_revision >= 0;
-  const bool window_has_required_progress =
-      caller_owns_command_identity
-          ? window_has_strong_net_progress
-          : has_sufficient_position_step_merit_reduction(
-                *position_step_merit_window_anchor_, final_merit,
-                position_step_merit_window_motion_,
-                kPositionStepMinErrorReductionPerConfiguration,
-                kStationaryMinErrorReductionPerCall *
-                    static_cast<double>(position_step_merit_window_samples_));
+  // Command ownership determines identity and latching, not whether slow
+  // stationary motion is productive. Use one progress contract for both.
+  const bool window_has_required_progress = window_has_strong_net_progress;
   const bool window_was_productive =
       !target_is_satisfied && !window_was_oscillatory &&
       window_has_required_progress;

@@ -152,7 +152,7 @@ def test_linear_trace_preserves_recursive_problems_and_replays(pendulum, allocat
     traces = result.linear_problems
     assert len(traces) == result.nonlinear_refinement_iterations + 1
     assert len(traces) > 1
-    assert [t.refinement_budget_remaining for t in traces] == list(range(8, 8 - len(traces), -1))
+    assert [t.refinement_budget_remaining for t in traces] == list(range(9, 9 - len(traces), -1))
     for trace in traces:
         np.testing.assert_array_equal(trace.q, q)
         np.testing.assert_array_equal(trace.dq, dq)

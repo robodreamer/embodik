@@ -3,6 +3,7 @@
 import numpy as np
 import pytest
 from scipy.spatial.transform import Rotation
+
 import embodik as eik
 
 

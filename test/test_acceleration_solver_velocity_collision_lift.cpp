@@ -4,10 +4,12 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <fstream>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <string>
 
 namespace embodik::test {
@@ -506,7 +508,7 @@ TEST_F(AccelerationVelocityCollisionLiftTest,
   EXPECT_EQ(cold.collision_validation_pairs_checked, 3U);
   EXPECT_EQ(cold.collision_validation_conservative_checks, 3U);
   EXPECT_GT(cold.collision_validation_conservative_certified_pairs, 0U);
-  EXPECT_EQ(cold.collision_validation_initial_exact_queries, 1U);
+  EXPECT_EQ(cold.collision_validation_initial_exact_queries, 0U);
   EXPECT_LT(cold.collision_validation_sample_exact_queries,
             cold.collision_validation_pairs_checked);
   EXPECT_FALSE(cold.collision_validation_initial_certificate_reused);
@@ -524,6 +526,68 @@ TEST_F(AccelerationVelocityCollisionLiftTest,
       << untrackable.status_message;
   EXPECT_FALSE(untrackable.collision_validation_initial_certificate_reused);
   EXPECT_EQ(untrackable.collision_validation_initial_exact_queries, 1U);
+}
+
+TEST(AccelerationVelocityCollisionLiftSeedBounds, RefinementAndRejectionMatchExactSeedQueries) {
+  const ScopedUrdf urdf("embodik_seed_bound_refinement.urdf", R"(
+<robot name="seed_bound_refinement">
+  <link name="base"><collision><origin xyz="0 0 .449"/>
+    <geometry><box size="4 4 1"/></geometry></collision></link>
+  <link name="carriage"/>
+  <joint name="lift" type="prismatic"><parent link="base"/><child link="carriage"/>
+    <axis xyz="0 0 1"/><limit lower="-.1" upper=".1" velocity="100" effort="1000"/></joint>
+  <link name="pendulum"><collision><origin xyz="0 0 1"/>
+    <geometry><sphere radius=".01"/></geometry></collision></link>
+  <joint name="angle" type="revolute"><parent link="carriage"/><child link="pendulum"/>
+    <axis xyz="0 1 0"/><limit lower="-1" upper="1" velocity="100" effort="1000"/></joint>
+</robot>)");
+  for (int budget : {0, 2}) {
+    SCOPED_TRACE(budget);
+    std::optional<AccelerationSolverResult> exact;
+    for (bool broadphase : {false, true}) {
+      SCOPED_TRACE(broadphase);
+      auto robot = std::make_shared<RobotModel>(urdf.path(), false);
+      AccelerationSolver solver(robot);
+      auto task = solver.add_posture_task("command");
+      task->setSolveMode(TaskSolveMode::kMinError);
+      task->setAllowMinErrorFallback(false);
+      AccelerationTaskReference reference;
+      reference.proportional_gain = reference.derivative_gain = 0.0;
+      reference.desired_acceleration = vector({0.0, 40.0});
+      solver.set_task_reference("command", reference);
+      KinematicsSolver provider(robot);
+      provider.configure_collision_constraint(0.02, {}, {}, true, 1);
+      provider.set_proximity_gated_collision_activation_enabled(false);
+      provider.enable_sphere_broadphase(broadphase);
+      AccelerationSolveOptions options;
+      options.acceleration_limits_override = Eigen::Vector2d::Constant(50.0);
+      auto lift = lift_options(4);
+      lift.max_refinement_iterations = budget;
+      const auto result = solver.solve_with_velocity_collision(
+          provider, Eigen::Vector2d::Zero(), Eigen::Vector2d(0.0, 0.1), 0.1,
+          options, lift);
+      if (budget == 0) {
+        EXPECT_EQ(result.status, SolverStatus::kCollisionViolated) << result.status_message;
+        expect_no_motion_outputs(result);
+      } else {
+        ASSERT_EQ(result.status, SolverStatus::kSuccess) << result.status_message;
+        EXPECT_GE(result.q_solution(0) + std::cos(result.q_solution(1)) - 0.959,
+                  0.02 - 1e-8);
+        EXPECT_TRUE(result.collision_endpoint_validated);
+        EXPECT_GT(result.collision_refinement_iterations, 0U);
+      }
+      if (!exact.has_value()) {
+        exact = result;
+      } else {
+        EXPECT_EQ(result.status, exact->status);
+        EXPECT_EQ(result.collision_refinement_iterations, exact->collision_refinement_iterations);
+        EXPECT_EQ(result.collision_refinement_exact_queries, exact->collision_refinement_exact_queries);
+        EXPECT_TRUE(result.joint_accelerations.isApprox(exact->joint_accelerations, 1e-10));
+        EXPECT_EQ(result.collision_validation_initial_exact_queries, 0U);
+        EXPECT_GT(exact->collision_validation_initial_exact_queries, 0U);
+      }
+    }
+  }
 }
 
 } // namespace

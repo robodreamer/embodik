@@ -11,7 +11,10 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
   // Sampled curvature corrections may need more than four contractions to
   // satisfy the unchanged nonlinear tolerance. Successful candidates still
   // return immediately; keep a finite budget for nonconvergent local models.
-  return solve_impl(q, dq, dt, options, 8);
+  // Tangent refinements can converge linearly at a feasible nonlinear
+  // boundary. Keep the original feasible set and final acceptance checks;
+  // allow one more bounded correction rather than tightening that boundary.
+  return solve_impl(q, dq, dt, options, 9);
 }
 
 AccelerationSolverResult AccelerationSolver::validate_candidate(
@@ -799,9 +802,30 @@ AccelerationSolverResult AccelerationSolver::solve_impl(
         state_box_only ? state_box.lower : constraints->lower_bounds();
     const Eigen::VectorXd &physical_upper =
         state_box_only ? state_box.upper : constraints->upper_bounds();
+    // Exact coordinate equalities are singleton acceleration bounds too.
+    // Canonicalize only arithmetic-sized residuals using the existing full
+    // hard-row/task-image certificate; never infer sparsity with a tolerance.
+    Eigen::VectorXd polish_lower = state_box.lower;
+    Eigen::VectorXd polish_upper = state_box.upper;
+    for (Eigen::Index row = 0; row < physical_matrix.rows(); ++row) {
+      if (!std::isfinite(physical_lower(row)) ||
+          physical_lower(row) != physical_upper(row)) continue;
+      Eigen::Index coordinate = -1;
+      for (Eigen::Index column = 0; column < physical_matrix.cols(); ++column) {
+        if (physical_matrix(row, column) == 0.0) continue;
+        if (coordinate >= 0) { coordinate = -1; break; }
+        coordinate = column;
+      }
+      if (coordinate < 0) continue;
+      const double value = physical_lower(row) / physical_matrix(row, coordinate);
+      if (!std::isfinite(value) ||
+          (value == 0.0 && physical_lower(row) != 0.0)) continue;
+      polish_lower(coordinate) = std::max(polish_lower(coordinate), value);
+      polish_upper(coordinate) = std::min(polish_upper(coordinate), value);
+    }
     bool polished = false;
     if (!detail::polish_state_box_acceleration(
-            state_box.lower, state_box.upper, physical_matrix, physical_lower,
+            polish_lower, polish_upper, physical_matrix, physical_lower,
             physical_upper, objectives.matrices, kConstraintTolerance,
             backend_config.epsilon, kConstraintTolerance,
             &result.joint_accelerations, &polished)) {
@@ -1131,6 +1155,20 @@ AccelerationSolverResult AccelerationSolver::solve_impl(
               prepared, *robot_, q, dq, result.joint_accelerations, dt,
               predicted_state_box->lower, predicted_state_box->upper);
       if (!acceptance.satisfied()) {
+        if (acceptance.predicted_boundary_outward_edge >= 0 &&
+            refinement_budget > 0) {
+          AffineAccelerationConstraint refinement;
+          const auto linearized =
+              detail::linearize_com_support_polygon_endpoint_rate(
+                  prepared, *robot_, q, dq, result.joint_accelerations, dt,
+                  acceptance.predicted_boundary_outward_edge, &refinement);
+          if (!linearized.satisfied()) {
+            return finish(clear_outputs(failure(
+                SolverStatus::kNumericalError, linearized.message)));
+          }
+          return retry_nonlinear_refinement(
+              std::move(refinement), "__com_endpoint_rate_refinement", "CoM");
+        }
         if (acceptance.path_acceleration_violation && refinement_budget > 0) {
           AffineAccelerationConstraint refinement;
           const auto linearized =

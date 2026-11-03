@@ -1,8 +1,10 @@
 """A coarse accounting regression, not a latency benchmark."""
 
 from time import perf_counter
+
 import numpy as np
 import pytest
+
 import embodik as eik
 
 

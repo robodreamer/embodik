@@ -578,8 +578,9 @@ void bind_kinematics_solver(nb::module_ &m) {
       // ---- Tunable collision boundary parameters (for sweep / autoresearch) ----
       .def("set_collision_repulsion_deadband",
            &KinematicsSolver::set_collision_repulsion_deadband, nb::arg("metres"),
-           "Width (m) of the no-braking zone above min_distance. Defaults to 0, "
-           "which keeps the velocity bound continuous at the boundary.")
+           "Width (m) of the explicit no-approach band above the effective "
+           "collision target. Default 0; the construction reserve still limits "
+           "approach near the boundary. Violated clearances retain recovery.")
       .def("get_collision_repulsion_deadband",
            &KinematicsSolver::get_collision_repulsion_deadband)
       .def("set_collision_recovery_scale",
@@ -595,6 +596,17 @@ void bind_kinematics_solver(nb::module_ &m) {
            "Off by default on a new solver; the bimanual teleop app opts in.")
       .def("get_non_worsening_collision_floor_enabled",
            &KinematicsSolver::get_non_worsening_collision_floor_enabled)
+      .def("initialize_collision_recovery_floors",
+           &KinematicsSolver::initialize_collision_recovery_floors,
+           nb::arg("q_start"),
+           "Initialize unseeded recovery floors to min(startup signed distance, "
+           "active pair minimum) for every allowed runtime-active pair. Requires "
+           "enabled collision avoidance and non-worsening recovery, no existing "
+           "floors, trajectory anchor or pending overrides. Preserves q/dq and "
+           "nominal margins; failures leave floors unchanged. Call before the "
+           "first solve and freeze policy/catalog when retaining this context. "
+           "Native floating-point tolerances remain unchanged; this is not a "
+           "continuous collision certificate.")
       .def("set_collision_structural_floor",
            &KinematicsSolver::set_collision_structural_floor, nb::arg("metres"),
            "Minimum clearance (m) maintained for structurally-close pairs when the "

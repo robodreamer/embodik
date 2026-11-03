@@ -2275,7 +2275,7 @@ class DeviceResidentMultiFramePoseSolver:
         return self._compiled_native_velocity(twist, jacobian, lower, upper)
 
     def _collision_lower_bound(self, distance: Any) -> Any:
-        """Apply EmbodiK's continuous velocity-damper recovery policy."""
+        """Apply the collision velocity damper and violated-clearance recovery."""
 
         torch = self.torch
         minimum = self.config.collision_min_distance_m
@@ -2285,7 +2285,7 @@ class DeviceResidentMultiFramePoseSolver:
         within_deadband = (distance >= minimum) & ~outside
         nonpenetrating_violation = (distance >= 0.0) & (distance < minimum)
         penetrating = distance < 0.0
-        lower = torch.where(outside, desired, torch.zeros_like(distance))
+        lower = torch.where(outside, torch.clamp_max(desired, 0.0), torch.zeros_like(distance))
         lower = torch.where(within_deadband, torch.zeros_like(lower), lower)
         recovery = torch.clamp_min(desired * self.config.collision_recovery_scale, 0.0)
         recovery = torch.clamp_max(

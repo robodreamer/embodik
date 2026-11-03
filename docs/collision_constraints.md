@@ -188,6 +188,43 @@ pair overrides and command-local anchors, rather than applying the global nomina
 distance a second time. An independent penetration guard remains active. With the
 structural policy disabled, configured nominal pair clearances remain enforced.
 
+To retain startup clearance rather than initialize from the structural floor,
+initialize the existing recovery-floor map once, before the first solve:
+
+```python
+solver.set_non_worsening_collision_floor_enabled(True)
+solver.initialize_collision_recovery_floors(q_start)
+```
+
+For every currently allowed and runtime-active pair this stores
+`min(signed_distance(q_start), active_pair_minimum)`. For example, with a
+40 mm nominal margin, a 20 mm startup gap and a 5 mm structural floor, the
+initialized target is 20 mm. The default structural policy would permit loss
+toward 5 mm. Nominal margins, active pair overrides, actuator acceleration
+settings and robot configuration/velocity are preserved. A signed negative
+startup distance remains negative in this map; initialization does not establish
+that a configuration is collision-free. Applications requiring a nonpenetrating
+startup state must reject negative startup distances before initialization.
+
+At a satisfied recovery floor, the velocity damper permits stationary motion.
+Its numerical reserve forms a no-approach band above the floor rather than
+requiring separation from an already satisfied boundary. Recovery below the
+declared floor remains active, including below a negative initialized floor.
+
+Initialization requires enabled collision avoidance and non-worsening recovery,
+an empty recovery-floor map, no trajectory-floor anchor, and no pending pair
+overrides. Missing/invalid pair evidence rejects the whole initialization;
+floors are committed only after the complete cold query succeeds. Initialization
+after any recovery floors have been seeded is rejected; callers must initialize
+before their first solve. Explicit later reconfiguration, pair/catalog
+or geometry changes can clear or change floors, so applications retaining a
+startup contract must freeze that context and avoid reseeding on target changes.
+
+This CPU API keeps the ordinary native floating-point and normalized-row
+acceptance tolerances. It does not promise a particular nanometre threshold or
+continuous path clearance. Applications needing a stricter sampled criterion
+must independently check the original floor map before adopting a command.
+
 See [KinematicsSolver — Collision recovery floor](api/kinematics_solver.md#collision-recovery-floor).
 
 ### Tangential sliding at an active boundary

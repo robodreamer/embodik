@@ -17,6 +17,11 @@ target_include_directories(test_bounded_interval PRIVATE ${CMAKE_SOURCE_DIR}/cpp
 target_link_libraries(test_bounded_interval GTest::gtest_main GTest::gtest)
 add_test(NAME test_bounded_interval COMMAND test_bounded_interval)
 
+add_executable(test_phase_one_box_certificate test_phase_one_box_certificate.cpp)
+target_include_directories(test_phase_one_box_certificate PRIVATE ${CMAKE_SOURCE_DIR}/cpp_core/include)
+target_link_libraries(test_phase_one_box_certificate Eigen3::Eigen GTest::gtest_main GTest::gtest)
+add_test(NAME test_phase_one_box_certificate COMMAND test_phase_one_box_certificate)
+
 add_executable(test_interval_scalar_kinematics test_interval_scalar_kinematics.cpp)
 target_include_directories(test_interval_scalar_kinematics PRIVATE ${CMAKE_SOURCE_DIR}/cpp_core/src)
 target_link_libraries(test_interval_scalar_kinematics Eigen3::Eigen GTest::gtest_main GTest::gtest)

@@ -117,6 +117,36 @@ def test_query_returns_all_pairs_with_their_own_threshold_and_restores_configura
     assert moving_near.distance - second_near.distance == pytest.approx(QUERY_DISPLACEMENT)
 
 
+def test_startup_floor_initialization_preserves_pair_margins_and_state(pair_solver):
+    robot, solver = pair_solver
+    solver.configure_collision_constraint(min_distance=0.15, max_constraints=1)
+    solver.set_non_worsening_collision_floor_enabled(True)
+    solver.set_collision_structural_floor(0.01)
+    solver.set_collision_pair_min_distance("far", "moving", 0.2, activate_when_clear=False)
+    actual_q = robot.get_current_configuration().copy()
+    actual_dq = np.array([INITIAL_VELOCITY])
+    robot.update_kinematics(actual_q, actual_dq)
+    startup = np.array([QUERY_DISPLACEMENT])
+    before = solver.evaluate_collision_pair_distances(startup)
+    assert len(before) > 1  # Initialize the full catalog despite a one-row budget.
+    assert all(pair.persistent_floor_m is None for pair in before)
+    with pytest.raises(ValueError):
+        solver.initialize_collision_recovery_floors(np.array([np.nan]))
+    assert all(
+        pair.persistent_floor_m is None
+        for pair in solver.evaluate_collision_pair_distances(startup)
+    )
+    solver.initialize_collision_recovery_floors(startup)
+    after = solver.evaluate_collision_pair_distances(startup)
+    for initial, initialized in zip(before, after, strict=True):
+        assert initialized.minimum_distance == initial.minimum_distance
+        assert initialized.persistent_floor_m == min(initial.distance, initial.minimum_distance)
+    np.testing.assert_array_equal(robot.get_current_configuration(), actual_q)
+    np.testing.assert_array_equal(robot.get_current_velocity(), actual_dq)
+    with pytest.raises(ValueError, match="already initialized"):
+        solver.initialize_collision_recovery_floors(actual_q)
+
+
 def test_query_obeys_include_exclude_and_unavailable_policy(pair_solver):
     robot, solver = pair_solver
     configuration = robot.get_current_configuration()

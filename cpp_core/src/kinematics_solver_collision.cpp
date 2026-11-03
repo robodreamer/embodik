@@ -200,6 +200,101 @@ void KinematicsSolver::configure_collision_constraint(
 #endif
 }
 
+void KinematicsSolver::initialize_collision_recovery_floors(
+    const Eigen::VectorXd &q_start) {
+  if (q_start.size() != robot_->nq() || !q_start.allFinite()) {
+    throw std::invalid_argument(
+        "collision recovery floor initialization requires finite full nq");
+  }
+  if (!collision_constraint_ || !collision_constraint_->enabled ||
+      !non_worsening_collision_floor_enabled_) {
+    throw std::invalid_argument(
+        "collision recovery floor initialization requires enabled collision "
+        "avoidance and non-worsening recovery");
+  }
+  if (!collision_pair_distance_floor_.empty()) {
+    throw std::invalid_argument("collision recovery floors are already initialized");
+  }
+  if (!collision_trajectory_floors_.empty() ||
+      !per_pair_deferred_overrides_.empty()) {
+    throw std::invalid_argument(
+        "collision recovery floor initialization does not support trajectory "
+        "anchors or pending pair overrides");
+  }
+#ifdef PINOCCHIO_WITH_HPP_FCL
+  const auto *model = static_cast<const RobotModel &>(*robot_).collision_model();
+  const auto *data = static_cast<const RobotModel &>(*robot_).collision_data();
+  if (!model || !data || collision_allowed_pair_mask_.size() != model->collisionPairs.size() ||
+      (!data->activeCollisionPairs.empty() &&
+       data->activeCollisionPairs.size() != model->collisionPairs.size())) {
+    throw std::invalid_argument("collision recovery floor catalog is inconsistent");
+  }
+  std::unordered_set<std::string> expected;
+  for (std::size_t i = 0; i < model->collisionPairs.size(); ++i) {
+    if (!collision_allowed_pair_mask_[i] ||
+        (!data->activeCollisionPairs.empty() && !data->activeCollisionPairs[i])) {
+      continue;
+    }
+    const auto &pair = model->collisionPairs[i];
+    if (pair.first >= model->geometryObjects.size() ||
+        pair.second >= model->geometryObjects.size()) {
+      throw std::invalid_argument("collision recovery floor pair geometry is invalid");
+    }
+    const auto key = canonical_pair_key(model->geometryObjects[pair.first].name,
+                                        model->geometryObjects[pair.second].name);
+    if (!expected.insert(key).second) {
+      throw std::invalid_argument("collision recovery floor catalog has duplicate identities");
+    }
+  }
+  const auto records = evaluate_collision_pair_distances(q_start);
+  if (!records || records->empty() || records->size() != expected.size()) {
+    throw std::invalid_argument("collision recovery floor initialization requires a complete nonempty catalog");
+  }
+  std::unordered_map<std::string, double> floors;
+  floors.reserve(records->size());
+  for (const auto &record : *records) {
+    const auto key = canonical_pair_key(record.geometry_a, record.geometry_b);
+    if (!std::isfinite(record.distance) || !std::isfinite(record.minimum_distance) ||
+        expected.count(key) == 0 ||
+        !floors.emplace(key, std::min(record.distance, record.minimum_distance)).second) {
+      throw std::invalid_argument("collision recovery floor initialization returned invalid pair evidence");
+    }
+  }
+  // Commit only after the complete cold query and catalog validation succeed.
+  collision_pair_distance_floor_.swap(floors);
+  last_collision_constraint_result_.reset();
+  last_collision_constraint_q_ = Eigen::VectorXd{};
+  last_collision_constraint_row_dt_ = std::numeric_limits<double>::quiet_NaN();
+  last_collision_constraint_pair_indices_.clear();
+  collision_cached_candidate_pair_indices_.clear();
+  collision_cache_frozen_indices_.clear();
+  std::fill(collision_pair_bound_valid_.begin(), collision_pair_bound_valid_.end(),
+            static_cast<std::uint8_t>(0));
+  collision_pair_cache_has_full_scan_ = false;
+  collision_pair_cache_steps_since_refresh_ = 0;
+  last_constraint_min_distance_ = std::numeric_limits<double>::infinity();
+  last_constraint_min_recovery_margin_ = std::numeric_limits<double>::infinity();
+  last_constraint_was_full_scan_ = false;
+  position_step_collision_command_floor_distances_.clear();
+  post_step_collision_distance_cache_.clear();
+  collision_stuck_counters_.clear();
+  collision_stuck_last_distances_.clear();
+  last_collision_debug_.reset();
+  last_collision_debug_list_.clear();
+  last_collision_pairs_considered_ = 0;
+  last_collision_exact_distance_queries_ = 0;
+  last_collision_bound_culled_pairs_ = 0;
+  last_collision_sphere_culled_pairs_ = 0;
+  last_collision_budget_exhausted_ = false;
+  last_post_step_collision_exact_distance_queries_ = 0;
+  last_post_step_collision_motion_bound_culled_pairs_ = 0;
+  ++collision_validation_policy_revision_;
+  invalidate_collision_validation_cache();
+#else
+  throw std::invalid_argument("collision recovery floor initialization requires collision geometry support");
+#endif
+}
+
 void KinematicsSolver::set_collision_trajectory_floor_anchor(
     const Eigen::VectorXd &q, double tolerance) {
   if (!std::isfinite(tolerance) || tolerance < 0.0)
@@ -2387,10 +2482,10 @@ KinematicsSolver::compute_collision_constraint(double row_dt,
     // Velocity-damper lower bound:
     // - outside deadband: allow approach up to the damper limit (negative lb)
     // - inside deadband (min <= d < min+deadband): no-approach (lb=0)
-    // - violated (d < min): continuous recovery ramp without discrete tiers
-    // Note: collision_repulsion_deadband_ defaults to kCollisionRepulsionDeadband
-    // (3mm) but is tunable at runtime via set_collision_repulsion_deadband().
-    // Setting it to 0 removes the discontinuity that causes boundary oscillation.
+    // - violated (d < min): existing proportional/capped recovery
+    // The explicit deadband defaults to zero and is tunable at runtime.
+    // The construction reserve still provides a no-approach band; no
+    // continuity across the violated-clearance branch is assumed.
     const double repulsion_deadband  = collision_repulsion_deadband_;
     const double recovery_scale      = collision_recovery_scale_;
     const double max_sep_speed_nonpen = collision_max_sep_speed_nonpen_;
@@ -2406,15 +2501,23 @@ KinematicsSolver::compute_collision_constraint(double row_dt,
     }
     double lower_bound = 0.0;
     if (signed_distance >= (recovery_target + repulsion_deadband)) {
+      // A satisfied floor must permit rest. Keep the numerical reserve as a
+      // no-approach band rather than requiring artificial separation motion.
       lower_bound =
-          (recovery_target + config.tolerance - signed_distance) /
-          constraint_dt;
-    } else if (signed_distance >= recovery_target) {
+          std::min(0.0, (recovery_target + config.tolerance - signed_distance) /
+                            constraint_dt);
+    } else if (signed_distance >= recovery_target ||
+               (non_worsening_collision_floor_enabled_ &&
+                recovery_target - signed_distance <=
+                    64.0 * std::numeric_limits<double>::epsilon() *
+                        std::max({1.0, std::abs(recovery_target),
+                                  std::abs(signed_distance)}))) {
+      // Query roundoff at a persistent floor must not turn no-approach into
+      // a finite recovery-speed demand. Keep the raw distance, floor and all
+      // physical acceptance checks unchanged; this is arithmetic scale only.
       lower_bound = 0.0;
     } else {
-      // Violated region: uniform continuous recovery ramp from the moment
-      // signed_distance drops below the (non-worsening) recovery target. No
-      // dead-zone — recovery force is active at all violation depths.
+      // Material floor violations retain proportional/capped recovery.
       const double desired =
           (recovery_target + config.tolerance - signed_distance) /
           constraint_dt;
@@ -2740,7 +2843,10 @@ KinematicsSolver::validate_collision_samples(
   const auto pair_sphere_lower_bound =
       [&](const CollisionValidationPairMetadata &metadata, double required_distance)
       -> std::optional<double> {
-    if (!sphere_broadphase_enabled_ || !sphere_broadphase_.is_built()) {
+    // Mutable geometry can outlive a broadphase build. Its cached shapes must
+    // not certify seeds or samples after untracked placement/shape edits.
+    if (!geometry_trackable || !sphere_broadphase_enabled_ ||
+        !sphere_broadphase_.is_built()) {
       return std::nullopt;
     }
     const auto &object_a = collision_model->geometryObjects[metadata.object_a];
@@ -2859,19 +2965,48 @@ KinematicsSolver::validate_collision_samples(
   std::vector<double> effective_floors(collision_validation_catalog_.size());
   for (std::size_t cursor = 0; cursor < collision_validation_catalog_.size();
        ++cursor) {
-    if (!result.initial_state_certificate_reused) {
-      double seed_distance = 0.0;
-      if (const auto error = query_exact_distance(
-              collision_validation_catalog_[cursor], true, &seed_distance);
-          error.has_value()) {
-        return fail(SolverStatus::kNumericalError, *error);
-      }
-      seed_distance_lower_bounds[cursor] = seed_distance;
-    }
+    const auto &metadata = collision_validation_catalog_[cursor];
     const auto policy_revision_before = collision_validation_policy_revision_;
-    const auto recovery = resolve_collision_recovery_distances(
-        collision_validation_catalog_[cursor].pair_index,
-        seed_distance_lower_bounds[cursor]);
+    std::optional<CollisionRecoveryDistances> prepared_recovery;
+    if (!result.initial_state_certificate_reused) {
+      bool seed_certified = false;
+      // Active floors need exact initialization, and deferred overrides need
+      // actual distances. Outside those cases floor resolution ignores distance.
+      if (geometry_trackable && sphere_broadphase_enabled_ &&
+          sphere_broadphase_.is_built() &&
+          per_pair_deferred_overrides_.count(metadata.key) == 0U &&
+          (!non_worsening_collision_floor_enabled_ ||
+           collision_pair_distance_floor_.count(metadata.key) != 0U)) {
+        prepared_recovery =
+            resolve_collision_recovery_distances(metadata.pair_index, 0.0);
+        const double reserve = std::max(1e-8, sphere_broadphase_.safety_margin);
+        // Refinement also distinguishes positive-clearance seeds. Certify that
+        // branch as well, including when a caller configured a negative floor.
+        const double required =
+            std::max(0.0, prepared_recovery->recovery_target) + reserve;
+        if (std::isfinite(required)) {
+          if (const auto bound = pair_sphere_lower_bound(metadata, required);
+              bound.has_value() && *bound >= required) {
+            // Both this lower bound and the true distance are above the floor;
+            // subsequent samples therefore use the same absolute-floor branch.
+            seed_distance_lower_bounds[cursor] = *bound;
+            seed_certified = true;
+          }
+        }
+      }
+      if (!seed_certified) {
+        double seed_distance = 0.0;
+        if (const auto error = query_exact_distance(metadata, true, &seed_distance);
+            error.has_value()) {
+          return fail(SolverStatus::kNumericalError, *error);
+        }
+        seed_distance_lower_bounds[cursor] = seed_distance;
+      }
+    }
+    const auto recovery = prepared_recovery.has_value()
+        ? *prepared_recovery
+        : resolve_collision_recovery_distances(
+              metadata.pair_index, seed_distance_lower_bounds[cursor]);
     if (collision_validation_policy_revision_ != policy_revision_before) {
       result.initial_state_certificate_reused = false;
     }

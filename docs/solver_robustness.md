@@ -1060,8 +1060,8 @@ pose target and solve policy remain unchanged. Productive windows continue even 
 joint steps reverse direction, as can happen while an automatic layout or redundant whole-body
 solve makes useful net progress. A window that moves without enough merit reduction, or repeatedly
 reverses without strong net progress, activates a hold at the last accepted configuration. The
-minimum absolute benefit scales with the number of calls in the window, so a longer policy dwell
-cannot hide the same low-rate drift. Aggregate progress also cannot excuse repeatedly worsening
+progress requirement combines net merit reduction per accumulated configuration motion with
+absolute and numerical benefit floors. Aggregate progress also cannot excuse repeatedly worsening
 the currently worst commanded target. This prevents persistent null-space motion, target trading,
 and limit cycles after a far or constrained target has exhausted useful progress.
 
@@ -1102,6 +1102,14 @@ Requiring machine-precision improvement of an already satisfied block would reje
 coupled motion with small nonlinear residuals. This permits recovery
 after active constraint rows change or measured state moves away from a limit. Historical
 oscillation alone does not veto this fresh progress; collision and priority checks still apply.
+
+Stationary commands use the same windowed nonlinear-progress requirement for
+both automatic pose-based identity and explicit source revisions. Small positive
+error reductions alone need not keep an inefficient stationary trajectory active;
+the existing bounded recovery can run when that window is unproductive. This
+changes the automatic policy's previous separate progress requirement. Command
+identity still determines when monitoring resets and whether the hold is reversible;
+no constraint, satisfaction tolerance or recovery budget is relaxed.
 
 When an adapter re-expresses one source command into changing world-frame poses, set
 `PositionStepOptions.continuity_command_revision` to a non-negative caller-owned revision. Keep

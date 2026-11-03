@@ -105,3 +105,37 @@ def test_optional_diagnostics_distinguish_phase_one_and_direct_qp(planar_solver,
         values = trace.constraint_matrix @ d.phase_one_witness
         assert np.all(values >= trace.lower_bounds - 1e-10)
         assert np.all(values <= trace.upper_bounds + 1e-10)
+
+
+@pytest.mark.parametrize("direct", [False, True])
+@pytest.mark.parametrize("scale,target", [(2.0, 0.0), (-2.0, 0.0), (2.0, 0.25), (-2.0, 0.25)])
+def test_coordinate_equalities_keep_their_exact_command(planar_solver, direct, scale, target):
+    _, solver, task, options = planar_solver
+    task.solve_mode = eik.TaskSolveMode.MIN_ERROR
+    options.prefer_direct_min_error_qp = direct
+    row = eik.AffineAccelerationConstraint()
+    row.source_id = "coordinate"
+    row.coefficient_matrix = np.array([[scale, 0.0]])
+    row.affine_bias = np.zeros(1)
+    row.lower_bounds = row.upper_bounds = np.array([scale * target])
+    options.affine_constraints = [row]
+    result = solver.solve(np.zeros(2), np.zeros(2), 0.01, options)
+    assert result.status == eik.SolverStatus.SUCCESS, result.status_message
+    assert result.joint_accelerations[0] == target
+    assert abs(result.joint_accelerations[1]) <= 1.0
+
+
+def test_near_coordinate_equality_retains_its_coupled_column(planar_solver):
+    _, solver, task, options = planar_solver
+    task.solve_mode = eik.TaskSolveMode.MIN_ERROR
+    options.prefer_direct_min_error_qp = True
+    row = eik.AffineAccelerationConstraint()
+    row.source_id = "coupled"
+    row.coefficient_matrix = np.array([[1.0, 1e-8]])
+    row.affine_bias = np.zeros(1)
+    row.lower_bounds = row.upper_bounds = np.zeros(1)
+    options.affine_constraints = [row]
+    result = solver.solve(np.zeros(2), np.zeros(2), 0.01, options)
+    assert result.status == eik.SolverStatus.SUCCESS, result.status_message
+    assert result.joint_accelerations[1] > 0.5
+    np.testing.assert_allclose(row.coefficient_matrix @ result.joint_accelerations, 0.0, atol=1e-10)

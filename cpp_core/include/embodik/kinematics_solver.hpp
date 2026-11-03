@@ -767,8 +767,9 @@ public:
   get_collision_pair_min_distance_overrides() const;
 
   // ---- Tunable collision boundary behaviour --------------------------------
-  /** Width (metres) of the no-braking zone above min_distance.  Default 3 mm.
-   *  Set to 0 to eliminate the discontinuity that causes boundary oscillation. */
+  /** Width (metres) of the explicit no-approach band above the effective
+   *  collision target. Default 0; the construction reserve still limits
+   *  approach near the boundary. Violated clearances retain recovery. */
   void   set_collision_repulsion_deadband(double metres) { collision_repulsion_deadband_ = std::max(0.0, metres); }
   double get_collision_repulsion_deadband() const        { return collision_repulsion_deadband_; }
 
@@ -793,6 +794,23 @@ public:
     }
   }
   bool   get_non_worsening_collision_floor_enabled() const      { return non_worsening_collision_floor_enabled_; }
+
+  /**
+   * @brief Initialize existing recovery floors from one startup configuration.
+   *
+   * For every currently allowed and runtime-active collision pair, stores
+   * min(signed distance at q_start, configured global or active pair minimum).
+   * Requires enabled collision avoidance, enabled non-worsening recovery, and
+   * an empty recovery-floor map. Trajectory anchors and pending pair overrides
+   * are unsupported. Invalid inputs or distance-query failures leave floors
+   * unchanged. Preserves robot q/dq, nominal margins and acceleration policy.
+   *
+   * Call before the first collision solve. This does not change native floating
+   * point acceptance tolerances or certify a continuous collision-free path.
+   * Later explicit policy/catalog changes can clear or change recovery floors;
+   * callers that require a fixed startup contract must freeze that context.
+   */
+  void initialize_collision_recovery_floors(const Eigen::VectorXd &q_start);
 
   /** Minimum penetration-prevention clearance (metres) for pairs first observed
    *  below min_distance. Default 5 mm. */
