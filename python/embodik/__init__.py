@@ -202,6 +202,7 @@ __all__ = [
     "RelativePoseAccelerationConstraint",
     "TorsoPoseBoundAccelerationConstraint",
     "VelocityCollisionLiftOptions",
+    "CollisionCandidateValidation",
     "CollisionConstraintAccelerationPolicy",
     "CollisionGeometryPair",
     "CollisionPairMinimumDistance",

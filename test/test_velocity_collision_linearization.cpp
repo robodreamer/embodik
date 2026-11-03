@@ -1,5 +1,6 @@
 #include "velocity_constraint_lift.hpp"
 #include "velocity_constraint_test_observer.hpp"
+#include "collision_acceleration_braking.hpp"
 
 #include <embodik/kinematics_solver.hpp>
 #include <embodik/robot_model.hpp>
@@ -167,6 +168,56 @@ TEST(VelocityConstraintLiftTest, RejectsInvalidInputs) {
                    A, Eigen::Vector2d(1.0, -1.0),
                    Eigen::Vector2d(0.0, 1.0), dq, 0.01),
                std::invalid_argument);
+}
+
+TEST_F(VelocityCollisionLinearizationTest,
+       AccelerationBrakingTimingDoesNotContaminateVelocityCache) {
+  auto robot = make_robot(urdf_path_);
+  auto solver = make_solver(robot, 0.01, 0.01);
+  solver.enable_acceleration_limits(true);
+  solver.set_acceleration_limits(Eigen::VectorXd::Ones(1));
+  robot->update_kinematics(Eigen::VectorXd::Zero(1),
+                           Eigen::VectorXd::Constant(1, -0.13));
+  const auto legacy = detail::VelocityConstraintTestObserver::
+      compute_collision_constraint(solver, 0.01);
+  const auto acceleration = detail::VelocityConstraintTestObserver::
+      linearize_collision_velocity_constraint(solver, 0.01);
+  const auto legacy_after = detail::VelocityConstraintTestObserver::
+      compute_collision_constraint(solver, 0.01);
+  ASSERT_TRUE(legacy && acceleration && legacy_after);
+  EXPECT_NEAR(legacy->lower_bounds(0),
+              -std::sqrt(2.0 * (0.01 - 1e-4)) + 0.01, 1e-9);
+  EXPECT_LT(acceleration->lower_bounds(0), -0.131);
+  EXPECT_GT(legacy->lower_bounds(0), -0.131);
+  EXPECT_TRUE(legacy_after->lower_bounds.isApprox(legacy->lower_bounds, 1e-10));
+  const auto acceleration_after = detail::VelocityConstraintTestObserver::
+      linearize_collision_velocity_constraint(solver, 0.01);
+  ASSERT_TRUE(acceleration_after);
+  EXPECT_TRUE(acceleration_after->lower_bounds.isApprox(acceleration->lower_bounds, 1e-10));
+}
+
+TEST_F(VelocityCollisionLinearizationTest,
+       AccelerationUsesPositiveClearanceInsideCommandReserve) {
+  auto robot = make_robot(urdf_path_);
+  auto solver = make_solver(robot, 0.01, 0.01995);
+  solver.enable_acceleration_limits(true);
+  solver.set_acceleration_limits(Eigen::VectorXd::Ones(1));
+  robot->update_kinematics(Eigen::VectorXd::Zero(1), Eigen::VectorXd::Zero(1));
+  const auto legacy = detail::VelocityConstraintTestObserver::
+      compute_collision_constraint(solver, 0.01);
+  const auto acceleration = detail::VelocityConstraintTestObserver::
+      linearize_collision_velocity_constraint(solver, 0.01);
+  ASSERT_TRUE(legacy && acceleration);
+  EXPECT_DOUBLE_EQ(legacy->lower_bounds(0), 0.0);
+  EXPECT_LT(acceleration->lower_bounds(0), -0.004);
+  // Constant acceleration -0.4 leaves 30 micrometres and needs only
+  // 8 micrometres for the subsequent unit-authority stop.
+  EXPECT_GT(5e-5 - 0.5 * 0.4 * 0.01 * 0.01, 0.004 * 0.004 / 2.0);
+  solver.set_collision_repulsion_deadband(1e-4);
+  const auto explicit_deadband = detail::VelocityConstraintTestObserver::
+      linearize_collision_velocity_constraint(solver, 0.01);
+  ASSERT_TRUE(explicit_deadband);
+  EXPECT_DOUBLE_EQ(explicit_deadband->lower_bounds(0), 0.0);
 }
 
 TEST_F(VelocityCollisionLinearizationTest,

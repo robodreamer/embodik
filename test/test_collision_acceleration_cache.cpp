@@ -1,6 +1,8 @@
 #include "velocity_collision_constraint_provider.hpp"
 #include "sphere_pair_distance_lower_bound.hpp"
 #include "collision_distance_evidence.hpp"
+#include "acceleration_collision_refinement.hpp"
+#include "acceleration_solver_internal.hpp"
 #include "kinematics_solver_internal.hpp"
 
 #include <embodik/kinematics_solver.hpp>
@@ -131,6 +133,47 @@ TEST(CurrentCollisionCatalogTest, RotatedCylinderRowsIgnoreUnrelatedQueryHistory
     };
     const auto initial = query();
     ASSERT_TRUE(initial.has_value());
+    // Exercise the production refinement cut against an independent cold,
+    // high-precision query, including its nearest-point distance derivative.
+    pinocchio::Data reference_data(robot->model());
+    const auto &geometry = *robot->collision_model();
+    pinocchio::GeometryData reference_geometry(geometry);
+    pinocchio::forwardKinematics(robot->model(), reference_data, q);
+    pinocchio::updateGeometryPlacements(robot->model(), reference_data,
+                                      geometry, reference_geometry);
+    auto &reference_request = reference_geometry.distanceRequests[0];
+    reference_request.enable_signed_distance = true;
+    reference_request.enable_nearest_points = true;
+    reference_request.enable_cached_gjk_guess = false;
+    reference_request.gjk_initial_guess = hpp::fcl::GJKInitialGuess::DefaultGuess;
+    reference_request.gjk_tolerance = 1e-12;
+    reference_request.gjk_max_iterations = 512;
+    pinocchio::computeDistance(geometry, reference_geometry, 0);
+    const auto &reference = reference_geometry.distanceResults[0];
+    ASSERT_GT(reference.min_distance, 0.0);
+    detail::VelocityCollisionSampleValidationResult failed_sample;
+    failed_sample.failed_pair_model_index = 0;
+    failed_sample.failed_sample_distance = reference.min_distance;
+    failed_sample.failed_seed_distance = reference.min_distance;
+    failed_sample.failed_required_distance = reference.min_distance + 1e-5;
+    const Eigen::VectorXd anchor = Eigen::VectorXd::Constant(1, 0.3);
+    constexpr double sample_time = 0.1;
+    constexpr double reserve = 2e-6;
+    AffineAccelerationConstraint cut;
+    acceleration_solver_internal::VelocityCollisionLiftDiagnostics diagnostics;
+    ASSERT_TRUE(detail::make_sample_distance_cut(
+        *robot, failed_sample, q, anchor, sample_time, reserve, &cut, &diagnostics));
+    const double cut_distance = failed_sample.failed_required_distance + reserve +
+        cut.coefficient_matrix.row(0).dot(anchor) - cut.lower_bounds[0];
+    EXPECT_NEAR(cut_distance, reference.min_distance, 1e-12);
+    const auto &pair = geometry.collisionPairs[0];
+    const double moving_sign =
+        geometry.geometryObjects[pair.first].parentJoint == 0 ? -1.0 : 1.0;
+    const Eigen::Vector3d normal =
+        (reference.nearest_points[0] - reference.nearest_points[1]).normalized();
+    EXPECT_NEAR(cut.coefficient_matrix(0, 0),
+                0.5 * sample_time * sample_time * moving_sign * normal.x(), 1e-12);
+    EXPECT_EQ(diagnostics.refinement_exact_queries, 1u);
     for (const double other : {-0.1, 0.4, 0.1, -0.05, 0.3, 0.0}) {
       solver.evaluate_min_collision_distance(Eigen::VectorXd::Constant(1, other));
       const auto actual = query();
@@ -141,6 +184,30 @@ TEST(CurrentCollisionCatalogTest, RotatedCylinderRowsIgnoreUnrelatedQueryHistory
       EXPECT_TRUE(actual->upper_bounds.isApprox(initial->upper_bounds, 1e-12));
       EXPECT_TRUE(actual->point_a_world.isApprox(initial->point_a_world, 1e-12));
       EXPECT_TRUE(actual->point_b_world.isApprox(initial->point_b_world, 1e-12));
+    }
+    // Sample acceptance must retain cold-query accuracy even when callers
+    // configure coarse GJK requests for unrelated interactive queries.
+    solver.configure_collision_constraint(initial->distance + .001, {}, {},
+                                         all_nearest_points, 1);
+    solver.set_non_worsening_collision_floor_enabled(true);
+    solver.initialize_collision_recovery_floors(q);
+    robot->collision_data()->distanceRequests[0].gjk_tolerance = 1e-3;
+    const auto seed = solver.evaluate_collision_pair_distances(q);
+    ASSERT_TRUE(seed && seed->size() == 1);
+    ASSERT_TRUE(seed->front().persistent_floor_m.has_value());
+    const double floor = *seed->front().persistent_floor_m;
+    for (const double displacement : {-1e-4, -1e-6, -1e-8, 0., 1e-8, 1e-6}) {
+      SCOPED_TRACE(displacement);
+      const auto sample = Eigen::VectorXd::Constant(1, displacement).eval();
+      const auto cold = solver.evaluate_collision_pair_distances(sample);
+      ASSERT_TRUE(cold && cold->size() == 1);
+      const auto acceptance = provider.validate_samples(q, {sample});
+      const bool physically_clear = cold->front().distance >= floor - 1e-8;
+      EXPECT_EQ(acceptance.acceptable, physically_clear) << acceptance.message;
+      if (!physically_clear) {
+        EXPECT_NEAR(acceptance.failed_sample_distance, cold->front().distance, 1e-12);
+        EXPECT_EQ(acceptance.status, SolverStatus::kCollisionViolated);
+      }
     }
   }
   std::remove(path.c_str());

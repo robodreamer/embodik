@@ -1555,7 +1555,11 @@ inline SolverResult solveHierarchicalLinearSystemEigen(
     }
   }
   const bool run_hard_constraint_phase_one =
-      !execution_options.hard_constraints_prevalidated_feasible &&
+      // Prevalidation proves feasibility but does not supply the concrete
+      // witness required by the requested feasible-primal MIN_ERROR route.
+      // Obtain that witness instead of silently bypassing the requested route.
+      (!execution_options.hard_constraints_prevalidated_feasible ||
+       (execution_options.prefer_direct_min_error_qp && all_explicit_min_error)) &&
       !immutable_constraint_rows.empty();
   Eigen::MatrixXd phase_one_coefficients(immutable_constraint_rows.size(),
                                          degrees_of_freedom);

@@ -35,6 +35,13 @@ not guaranteed by this release.
   not task achievement or complete stopping. Nominal envelopes, allocation,
   nonzero elastic history and collision-refinement budgets remain unsupported.
 
+- Prescribed acceleration collision validation can explicitly select
+  `CollisionCandidateValidation.PHYSICAL_SAMPLES` to omit internal frozen
+  construction rows while retaining caller constraints and sampled physical
+  floors. The default remains `FROZEN_ROWS`; optimization rejects the new mode.
+  Physical sampling requires initially satisfied floors and zero repulsion
+  deadband, and does not certify continuous clearance or complete stopping.
+
 - Native CPU `AffineStateConstraint` acceleration envelopes for fixed-base
   additive scalar coordinates `y=Cq+b`, sharing state shaping, exact quadratic
   extrema checks and per-axis next-state viability. Complete stopping and
@@ -92,6 +99,33 @@ not guaranteed by this release.
   without changing constraints, constraint or satisfaction tolerances, or recovery budgets.
 
 ### Fixed
+
+- Acceleration collision refinement uses the same cold, precise distance and
+  nearest-point policy as floor and sample queries, preventing optimistic local
+  correction rows. Physical floors and acceptance tolerances remain unchanged.
+
+- Acceleration collision sample validation uses the same cold, precise distance
+  query as floor initialization and explicit-state constraint construction.
+  Caller query tuning no longer permits accepting a sampled floor violation;
+  physical floors, acceptance tolerances and sampling counts are unchanged.
+
+- Acceleration frame refinements can release their own local trust box when
+  it prevents a certified feasible solve. Geometric correction cuts, caller
+  constraints, nonlinear acceptance and the existing refinement budget remain
+  enforced; caller rows are never selected for removal by their names.
+
+- Explicit-state CPU acceleration collision rows now budget current-interval
+  displacement before their subsequent braking proxy, using physical-floor
+  clearance. Satisfied-floor acceleration rows likewise budget integrated
+  displacement, permitting use of positive clearance inside the legacy command
+  reserve. Explicit deadbands, recovery rules, sampled geometry checks and
+  legacy velocity-command behavior remain unchanged. This does not guarantee
+  nonlinear stopping viability; applications still need complete-stop admission.
+
+- CPU acceleration and generalized linear solves now honor the opt-in direct
+  `MIN_ERROR` preference when hard constraints were already prevalidated.
+  A concrete feasibility witness is obtained before attempting the existing
+  direct backend; physical checks and the default backend remain unchanged.
 
 - Unallocated acceleration solves polish exact coordinate hard equalities using
   the existing hard-row and task-image certificates, preventing numerical

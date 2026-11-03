@@ -3,6 +3,7 @@
 #include <embodik/kinematics_solver.hpp>
 
 #include <Eigen/Dense>
+#include <cmath>
 #include <cstdint>
 #include <limits>
 #include <optional>
@@ -73,6 +74,66 @@ public:
   bool has_enabled_collision_constraint() const {
     return solver_.collision_constraint_.has_value() &&
            solver_.collision_constraint_->enabled;
+  }
+
+  // This contract admits floor-satisfied prescribed intervals, rather than
+  // replacing the legacy controller's recovery or deadband requirements.
+  std::optional<std::string>
+  physical_candidate_ineligibility(const Eigen::VectorXd &q) {
+    if (solver_.get_collision_repulsion_deadband() != 0.0) {
+      return "physical-sample candidate validation requires zero collision "
+             "repulsion deadband";
+    }
+#ifdef PINOCCHIO_WITH_HPP_FCL
+    const auto records = solver_.evaluate_collision_pair_distances(q);
+    if (!records || records->empty()) {
+      return "physical-sample candidate validation requires a nonempty "
+             "collision catalog";
+    }
+    const auto &robot = static_cast<const RobotModel &>(*solver_.robot_);
+    const auto *model = robot.collision_model();
+    const auto *data = robot.collision_data();
+    if (!model || !data ||
+        solver_.collision_allowed_pair_mask_.size() !=
+            model->collisionPairs.size() ||
+        (!data->activeCollisionPairs.empty() &&
+         data->activeCollisionPairs.size() != model->collisionPairs.size())) {
+      return "physical-sample candidate validation collision catalog is "
+             "inconsistent";
+    }
+    std::size_t cursor = 0;
+    constexpr double kSampleFloorTolerance = 1e-8;
+    for (std::size_t index = 0; index < model->collisionPairs.size(); ++index) {
+      if (!solver_.collision_allowed_pair_mask_[index] ||
+          (!data->activeCollisionPairs.empty() &&
+           !data->activeCollisionPairs[index])) {
+        continue;
+      }
+      if (cursor >= records->size()) {
+        return "physical-sample candidate validation collision catalog changed";
+      }
+      const auto &record = (*records)[cursor++];
+      const auto &pair = model->collisionPairs[index];
+      if (record.geometry_a != model->geometryObjects[pair.first].name ||
+          record.geometry_b != model->geometryObjects[pair.second].name) {
+        return "physical-sample candidate validation collision identities changed";
+      }
+      const auto floor =
+          solver_.resolve_collision_recovery_distances(index, record.distance);
+      if (!std::isfinite(floor.recovery_target) ||
+          record.distance < floor.recovery_target - kSampleFloorTolerance) {
+        return "physical-sample candidate validation requires initially satisfied "
+               "collision floors";
+      }
+    }
+    if (cursor != records->size()) {
+      return "physical-sample candidate validation collision catalog changed";
+    }
+    return std::nullopt;
+#else
+    (void)q;
+    return "physical-sample candidate validation requires collision support";
+#endif
   }
 
   std::optional<VelocityCollisionConstraintRows> compute() {

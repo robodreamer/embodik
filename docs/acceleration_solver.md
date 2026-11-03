@@ -78,11 +78,30 @@ it does not establish safety between samples, complete stopping or recovery.
 To validate a prescribed multi-step rollout, use each original control interval
 and its actual incoming velocity, then validate its terminal rest command.
 
+For prescribed commands, setting
+`lift_options.candidate_validation = embodik.CollisionCandidateValidation.PHYSICAL_SAMPLES`
+omits only the adapter's internal frozen collision construction rows. This
+allows a curved, floor-safe interval ending at rest even when its incoming
+distance Jacobian predicts a floor violation. All caller affine and frozen
+rows, joint limits, acceleration limits, CoM checks, and the configured collision
+samples remain active. The default `FROZEN_ROWS` retains the existing behavior;
+`solve_with_velocity_collision()` rejects `PHYSICAL_SAMPLES`.
+
+This mode requires zero collision repulsion deadband and initially satisfied
+effective floors at the existing `1e-8` sample tolerance. It validates sampled
+geometry rather than the legacy recovery controller. It changes neither the
+number of samples nor their floor tolerance. Complete stopping admission
+remains the application's responsibility; the result still does not certify
+the continuous path between samples.
+
 Explicit-state acceleration collision row construction uses isolated precise
 distance queries for pair ranking and nearest-point Jacobians. These queries
 do not inherit warm GJK guesses from earlier configurations or debug calls.
 Ordinary velocity-solver queries retain their existing behavior. Physical
 clearance checks and numerical acceptance tolerances are unchanged.
+Sampled acceleration collision validation also uses cold, precise queries,
+matching explicit pair-distance evaluation rather than inheriting coarse GJK
+guesses from earlier samples.
 An invalid numerical distance, including the collision library's finite failure
 sentinels, receives one fresh query initialized from the shapes' local bounding
 box centers. Precision settings remain unchanged. The retry computes a signed
@@ -260,8 +279,10 @@ error quality or reduce inverse operations; latency depends on the objective
 structure and quadratic iterations. An unsuccessful direct attempt returns to
 the established search.
 It does not bypass original SCALE/ELASTIC attempts or authorize new fallbacks.
-State-box-only solves that skip the full feasibility search retain their
-existing route. Physical and nonlinear acceptance checks still apply.
+For an all-`MIN_ERROR` hierarchy, this preference also obtains a concrete
+feasibility witness when the joint box was already prevalidated. This lets
+state-box-only solves use the requested direct route. Physical and nonlinear
+acceptance checks still apply.
 
 When the combined box requires braking, zero acceleration is outside the hard
 set. The default `allow_state_box_task_fallback = True` makes the resulting
@@ -407,6 +428,13 @@ reference.derivative_gain = kd
 solver.set_task_reference("ee_position", reference)
 ```
 
+The proportional term also multiplies `task.weight`; measured-rate damping
+does not. For a static posture target with unit joint weights, the requested acceleration is
+`kp * task.weight * (q_target - q) - kd * dq`. `PostureTask` defaults to
+weight `0.1`, so set `posture.weight = 1.0` explicitly when the desired law is
+`kp * (q_target - q) - kd * dq`. A smaller weight with unchanged damping can
+produce a slow, overdamped response even when the numerical solve is fast.
+
 Each call takes explicit `q` and `dq`. Keep them synchronized with the measured
 or actually applied state when switching controllers or rejecting a result.
 A rejected result does not establish zero physical velocity; do not silently
@@ -455,6 +483,24 @@ every requested constant-acceleration sample is accounted for in canonical
 order. A conservative enclosing-sphere lower bound may prove a pair safe;
 ambiguous geometry falls back to the exact collision backend.
 
+With provider acceleration limits enabled, this explicit-state path constructs
+its braking proxy for the endpoint of the current constant-acceleration interval.
+For frozen distance rate `r`, endpoint rate `w`, physical-floor slack `s` and
+estimated separating acceleration `A`, it budgets
+`w*w/(2*A) <= s + dt*(r+w)/2` for closing motion. This uses physical-floor slack
+in the braking proxy. Outside any explicitly configured repulsion deadband,
+the satisfied-floor row also budgets the integrated interval:
+`w >= -r - 2*s/dt`. Positive physical clearance remains usable inside the
+legacy velocity-command construction reserve. Explicit deadbands and
+violated-floor recovery rules remain unchanged. Ordinary velocity commands
+retain their construction reserve and separate command-delay braking policy.
+
+This is a local construction policy, not a nonlinear braking certificate.
+Changing nearest features, distance curvature and simultaneously available
+multi-pair acceleration are not established by this frozen model. Original
+sampled geometry acceptance still applies, and applications requiring complete
+stopping must independently admit a stopping continuation.
+
 This path is fail-closed but sampled. A successful result reports
 `collision_endpoint_validated = True` and
 `collision_step_certified = False`; increasing validation substeps does not
@@ -479,6 +525,9 @@ result = solver.solve_with_velocity_collision(collision_solver, q, dq, dt, optio
 
 Each correction adds a hard linearized distance row at the failed sample and a
 hard acceleration trust box. Earlier correction rows always remain hard.
+Its distance and nearest-point derivatives use the same cold, precise query
+policy as collision floors and sampled acceptance. Original floors and the
+acceptance tolerance remain unchanged.
 If a corrective solve fails numerically, makes no progress, or reports
 infeasibility, the wrapper
 may remove only its internally appended trust boxes and retry over the original

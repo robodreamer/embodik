@@ -2093,7 +2093,8 @@ private:
 
   std::optional<CollisionConstraintResult> compute_collision_constraint();
   std::optional<CollisionConstraintResult>
-  compute_collision_constraint(double row_dt, bool require_current_catalog = false);
+  compute_collision_constraint(double row_dt, bool require_current_catalog = false,
+                               bool velocity_command_timing = true);
   struct CollisionRecoveryDistances {
     double effective_min_distance = 0.0;
     double recovery_target = 0.0;

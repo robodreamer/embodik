@@ -88,6 +88,32 @@ def _collision_robot(tmp_path: pathlib.Path) -> eik.RobotModel:
     return robot
 
 
+def test_prevalidated_joint_box_honors_direct_min_error_preference(tmp_path):
+    robot = _two_joint_robot(tmp_path)
+    solver = eik.AccelerationSolver(robot)
+    task = solver.add_posture_task("posture")
+    task.solve_mode = eik.TaskSolveMode.MIN_ERROR
+    task.set_target_configuration(np.zeros(2))
+    reference = eik.AccelerationTaskReference()
+    reference.proportional_gain = reference.derivative_gain = 0.0
+    reference.desired_acceleration = np.array([3.0, 1.0])
+    solver.set_task_reference("posture", reference)
+    options = eik.AccelerationSolveOptions()
+    options.acceleration_limits_override = np.ones(2)
+    options.prefer_direct_min_error_qp = True
+    options.record_linear_problems = True
+
+    result = solver.solve(np.zeros(2), np.zeros(2), 0.01, options)
+
+    assert result.status == eik.SolverStatus.SUCCESS
+    np.testing.assert_allclose(result.joint_accelerations, [1.0, 1.0], atol=1e-8)
+    assert len(result.linear_problems) == 1
+    trace = result.linear_problems[0]
+    assert trace.hard_constraints_prevalidated_feasible
+    assert trace.diagnostics.direct_min_error_attempted
+    assert trace.diagnostics.direct_min_error_succeeded
+
+
 @pytest.mark.parametrize("joint_index", [0, 1])
 def test_state_box_failure_identifies_joint_and_physical_state(tmp_path, joint_index):
     robot = _two_joint_robot(tmp_path)

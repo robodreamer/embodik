@@ -100,6 +100,14 @@ pixi run lint
 pixi run docs-build
 ```
 
+To inspect an installed wheel when building docs from an unbuilt checkout,
+set `EMBODIK_DOCS_PYTHON_PATH` to that environment's absolute `site-packages`
+directory. This keeps the local documentation sources while resolving native
+API members from the installed package. The value is one directory containing
+`embodik`, rather than the package directory or a colon-separated search path.
+Without this variable, API inspection uses the checkout's `python` directory
+and requires its native extension to be built and installed.
+
 ### Writing Documentation
 
 - API documentation is auto-generated from docstrings

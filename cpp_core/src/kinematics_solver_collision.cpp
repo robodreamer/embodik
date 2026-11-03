@@ -5,54 +5,14 @@
 
 #include "kinematics_solver_internal.hpp"
 #include "collision_distance_evidence.hpp"
+#include "collision_distance_query.hpp"
 #include "sphere_pair_distance_lower_bound.hpp"
+#include "collision_acceleration_braking.hpp"
 
 namespace embodik {
 
 #ifdef PINOCCHIO_WITH_HPP_FCL
 namespace {
-// Strict original floors need the same numerical query in row construction,
-// candidate checks and final publication. A coarse warm-started row distance
-// can otherwise admit a step that every precise final query rejects.
-void compute_policy_collision_distance(const pinocchio::GeometryModel &model,
-                                       pinocchio::GeometryData &data,
-                                       std::size_t index, bool strict) {
-  const auto &pair = model.collisionPairs[index];
-  auto request = data.distanceRequests[index];
-  auto &result = data.distanceResults[index];
-  const auto cold_query = [&](const hpp::fcl::DistanceRequest &cold_request) {
-    pinocchio::GeometryData::ComputeDistance cold_distance(
-        model.geometryObjects[pair.first], model.geometryObjects[pair.second]);
-    result.clear();
-    cold_distance(pinocchio::toFclTransform3f(data.oMg[pair.first]),
-                  pinocchio::toFclTransform3f(data.oMg[pair.second]),
-                  cold_request, result);
-  };
-  if (strict) {
-    request.enable_cached_gjk_guess = false;
-    request.gjk_initial_guess = hpp::fcl::GJKInitialGuess::DefaultGuess;
-    request.gjk_tolerance = std::min(request.gjk_tolerance, 1e-12);
-    request.gjk_max_iterations = std::max<std::size_t>(request.gjk_max_iterations, 512);
-    cold_query(request);
-  } else {
-    pinocchio::computeDistance(model, data, index);
-  }
-  if (detail::collision_distance_evidence_is_valid(result.min_distance)) return;
-
-  // A degenerate initial simplex can fail for separated shapes. Retry exactly
-  // once from their local AABB centers, preserving all precision settings and
-  // avoiding history from previous configurations. This remains a full signed
-  // distance query, not a bounding-volume distance substituted for its result.
-  request.enable_cached_gjk_guess = false;
-  request.gjk_initial_guess = hpp::fcl::GJKInitialGuess::BoundingVolumeGuess;
-  cold_query(request);
-  if (detail::collision_distance_evidence_is_valid(result.min_distance)) return;
-  result.clear();
-  throw std::runtime_error(
-      "Collision distance query returned invalid evidence for " +
-      model.geometryObjects[pair.first].name + " / " +
-      model.geometryObjects[pair.second].name);
-}
 // A sufficient sphere certificate avoids the box/SAT refinement. Ambiguous
 // pairs retain the stronger bound and the same exact-query fallback.
 double collision_pair_lower_bound_for_threshold(
@@ -439,7 +399,7 @@ KinematicsSolver::evaluate_collision_debug(const Eigen::VectorXd &current_q) {
         !collision_data->activeCollisionPairs[idx]) {
       continue;
     }
-    compute_policy_collision_distance(*collision_model, *collision_data, idx,
+    detail::compute_policy_collision_distance(*collision_model, *collision_data, idx,
                                       has_collision_trajectory_floor_anchor());
     const double distance = collision_data->distanceResults[idx].min_distance;
     if (!std::isfinite(distance)) {
@@ -463,7 +423,7 @@ KinematicsSolver::evaluate_collision_debug(const Eigen::VectorXd &current_q) {
     previous_nearest_points_flag = req.enable_nearest_points;
     if (!req.enable_nearest_points) {
       req.enable_nearest_points = true;
-      compute_policy_collision_distance(*collision_model, *collision_data, idx,
+      detail::compute_policy_collision_distance(*collision_model, *collision_data, idx,
                                       has_collision_trajectory_floor_anchor());
       restore_nearest_points_flag = true;
     }
@@ -535,7 +495,7 @@ KinematicsSolver::evaluate_collision_pair_distances(const Eigen::VectorXd &q) {
     const auto &pair = pairs[pair_index];
     const auto &geometry_a = collision_model->geometryObjects[pair.first].name;
     const auto &geometry_b = collision_model->geometryObjects[pair.second].name;
-    compute_policy_collision_distance(*collision_model, query_data, pair_index,
+    detail::compute_policy_collision_distance(*collision_model, query_data, pair_index,
                                       true);
     const double distance = query_data.distanceResults[pair_index].min_distance;
     if (!std::isfinite(distance)) {
@@ -610,7 +570,7 @@ KinematicsSolver::evaluate_min_collision_distance(const Eigen::VectorXd &current
         !collision_data->activeCollisionPairs[idx]) {
       continue;
     }
-    compute_policy_collision_distance(*collision_model, *collision_data, idx,
+    detail::compute_policy_collision_distance(*collision_model, *collision_data, idx,
                                       has_collision_trajectory_floor_anchor());
     const double distance = collision_data->distanceResults[idx].min_distance;
     if (!std::isfinite(distance)) {
@@ -667,7 +627,7 @@ KinematicsSolver::evaluate_min_collision_distance_targeted(
         !collision_data->activeCollisionPairs[idx]) {
       continue;
     }
-    compute_policy_collision_distance(*collision_model, *collision_data, idx,
+    detail::compute_policy_collision_distance(*collision_model, *collision_data, idx,
                                       has_collision_trajectory_floor_anchor());
     const double distance = collision_data->distanceResults[idx].min_distance;
     if (!std::isfinite(distance)) continue;
@@ -953,7 +913,7 @@ KinematicsSolver::evaluate_post_step_collision_recovery_margins(
       }
 
       last_post_step_collision_exact_distance_queries_++;
-      compute_policy_collision_distance(*collision_model, *collision_data, pair_index,
+      detail::compute_policy_collision_distance(*collision_model, *collision_data, pair_index,
                                       has_collision_trajectory_floor_anchor());
       signed_distance_lower_bounds[pair_index] =
           collision_data->distanceResults[pair_index].min_distance;
@@ -1678,7 +1638,8 @@ KinematicsSolver::compute_collision_constraint() {
 
 std::optional<KinematicsSolver::CollisionConstraintResult>
 KinematicsSolver::compute_collision_constraint(double row_dt,
-                                               bool require_current_catalog) {
+                                               bool require_current_catalog,
+                                               bool velocity_command_timing) {
   if (row_dt <= 0.0 || !std::isfinite(row_dt)) {
     throw std::invalid_argument(
         "collision constraint row_dt must be finite and positive");
@@ -1901,7 +1862,7 @@ KinematicsSolver::compute_collision_constraint(double row_dt,
     }
     req.enable_nearest_points = true;
     last_collision_exact_distance_queries_++;
-    compute_policy_collision_distance(*collision_model, *collision_data, idx,
+    detail::compute_policy_collision_distance(*collision_model, *collision_data, idx,
                                       precise_current_query);
     req.enable_nearest_points = false;
   };
@@ -2129,7 +2090,7 @@ KinematicsSolver::compute_collision_constraint(double row_dt,
     // below only for the globally closest debug pair and selected QP rows.
     // Cached subsets can contain dozens of candidates on dense robot models.
     last_collision_exact_distance_queries_++;
-    compute_policy_collision_distance(*collision_model, *collision_data, idx,
+    detail::compute_policy_collision_distance(*collision_model, *collision_data, idx,
                                       precise_current_query);
 
     const auto &distance_result = collision_data->distanceResults[idx];
@@ -2611,6 +2572,26 @@ KinematicsSolver::compute_collision_constraint(double row_dt,
     double recovery_margin = std::numeric_limits<double>::infinity();
     auto [lb, ub] = compute_bounds_for_pair(
         pair_idx, signed_distance, nullptr, &recovery_margin);
+    if (!velocity_command_timing && acceleration_limits_enabled_ &&
+        collision_trajectory_floors_.empty() &&
+        std::isfinite(recovery_margin) &&
+        recovery_margin >= collision_repulsion_deadband_) {
+      const auto &incoming_velocity = robot_->get_current_velocity();
+      if (incoming_velocity.size() != nv || !incoming_velocity.allFinite()) {
+        throw std::invalid_argument(
+            "collision acceleration rows require finite current velocity");
+      }
+      // Budget the current acceleration interval, s + h*(r+w)/2 >= 0,
+      // instead of treating its endpoint rate as a held velocity command.
+      // Positive physical clearance inside the legacy construction reserve
+      // is usable. Explicit deadbands, violated-floor recovery, braking and
+      // nonlinear sample acceptance remain separate requirements.
+      lb = -result.jacobian.row(row).dot(incoming_velocity) -
+           2.0 * recovery_margin / constraint_dt;
+      if (!std::isfinite(lb)) {
+        throw std::overflow_error("collision acceleration interval budget overflow");
+      }
+    }
     if (acceleration_limits_enabled_ &&
         acceleration_limits_.size() == nv &&
         std::isfinite(recovery_margin) && recovery_margin > 0.0) {
@@ -2627,12 +2608,27 @@ KinematicsSolver::compute_collision_constraint(double row_dt,
             std::abs(result.jacobian(row, index)) *
                 acceleration_limits_[index]);
       }
-      const double braking_slack =
-          std::max(0.0, recovery_margin - config.tolerance);
-      const double braking_speed = std::max(
-          0.0,
-          std::sqrt(2.0 * separating_acceleration_limit * braking_slack) -
-              separating_acceleration_limit * constraint_dt);
+      double braking_speed = 0.0;
+      if (velocity_command_timing) {
+        const double braking_slack =
+            std::max(0.0, recovery_margin - config.tolerance);
+        braking_speed = std::max(
+            0.0,
+            std::sqrt(2.0 * separating_acceleration_limit * braking_slack) -
+                separating_acceleration_limit * constraint_dt);
+      } else {
+        const auto &incoming_velocity = robot_->get_current_velocity();
+        if (incoming_velocity.size() != nv || !incoming_velocity.allFinite()) {
+          throw std::invalid_argument("collision acceleration rows require finite current velocity");
+        }
+        // This row bounds the endpoint of a constant-acceleration interval,
+        // not a velocity command applied after another full control delay.
+        // Use actual-floor clearance for this braking proxy. The independent
+        // velocity damper's reserve/deadband/recovery rules above remain intact.
+        braking_speed = detail::collision_acceleration_braking_speed(
+            recovery_margin, result.jacobian.row(row).dot(incoming_velocity),
+            separating_acceleration_limit, constraint_dt);
+      }
       const double braking_lower_bound = -braking_speed;
       lb = std::max(lb, braking_lower_bound);
     }
@@ -2682,7 +2678,10 @@ KinematicsSolver::linearize_collision_velocity_constraint(double row_dt) {
   // rollouts need current rows. A historical candidate subset can omit a pair
   // that entered the activation shell since the last full scan. Keep current
   // geometry broadphase culling, but bypass historical row/subset shortcuts.
-  auto rows = compute_collision_constraint(row_dt, true);
+  auto rows = compute_collision_constraint(row_dt, true, false);
+  // Acceleration endpoint bounds must never be reused as legacy velocity
+  // command rows at the same configuration/dt. Explicit queries already rebuild.
+  last_collision_constraint_row_dt_ = std::numeric_limits<double>::quiet_NaN();
   if (!rows.has_value()) {
     return std::nullopt;
   }
@@ -2912,10 +2911,12 @@ KinematicsSolver::validate_collision_samples(
       return "collision pair mask changed during sample validation";
     }
     try {
-      compute_policy_collision_distance(*collision_model,
+      // Acceptance uses the same cold precise query as floor initialization
+      // and explicit-state rows. A warm coarse distance can overestimate
+      // clearance by more than the fixed sample acceptance tolerance.
+      detail::compute_policy_collision_distance(*collision_model,
                                         *collision_validation_geometry_data_,
-                                        metadata.pair_index,
-                                        has_collision_trajectory_floor_anchor());
+                                        metadata.pair_index, true);
     } catch (const std::exception &error) {
       return std::string("collision distance query failed: ") + error.what();
     }

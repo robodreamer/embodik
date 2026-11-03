@@ -1,6 +1,8 @@
 #include "acceleration_solver_internal.hpp"
 #include "acceleration_affine_state_constraint.hpp"
 
+#include <iterator>
+
 namespace embodik {
 using namespace acceleration_solver_internal;
 
@@ -26,7 +28,8 @@ AccelerationSolverResult AccelerationSolver::validate_candidate(
 AccelerationSolverResult AccelerationSolver::solve_impl(
     const Eigen::VectorXd &q, const Eigen::VectorXd &dq, double dt,
     const AccelerationSolveOptions &options, int refinement_budget,
-    const Eigen::VectorXd *candidate) {
+    const Eigen::VectorXd *candidate, bool *local_hard_feasibility_failed) {
+  if (local_hard_feasibility_failed) *local_hard_feasibility_failed = false;
   const auto start = std::chrono::steady_clock::now();
   auto backend_start = start;
   auto backend_end = start;
@@ -698,6 +701,12 @@ AccelerationSolverResult AccelerationSolver::solve_impl(
   }
   backend_start = std::chrono::steady_clock::now();
   SolverResult backend;
+  LinearSolveDiagnostics local_feasibility_diagnostics;
+  auto *backend_diagnostics =
+      linear_problem ? &linear_problem->diagnostics
+                     : local_hard_feasibility_failed
+                           ? &local_feasibility_diagnostics
+                           : nullptr;
   if (candidate) {
     candidate_admission_started = true;
     // Match the backend's normalized certificate without changing ddq. Raw
@@ -739,7 +748,13 @@ AccelerationSolverResult AccelerationSolver::solve_impl(
         kConstraintTolerance, prevalidated_state_box_only,
         prevalidated_state_box_only, options.allow_best_effort_lower_tasks,
         options.prefer_direct_min_error_qp,
-        linear_problem ? &linear_problem->diagnostics : nullptr);
+        backend_diagnostics);
+  }
+  if (local_hard_feasibility_failed && backend_diagnostics &&
+      backend.status != SolverStatus::kSuccess &&
+      (backend_diagnostics->phase_one_status == "unknown" ||
+       backend_diagnostics->phase_one_status == "proven_infeasible")) {
+    *local_hard_feasibility_failed = true;
   }
   if (linear_problem) linear_problem->backend_result = backend;
   backend_end = std::chrono::steady_clock::now();
@@ -1052,20 +1067,58 @@ AccelerationSolverResult AccelerationSolver::solve_impl(
   }
   auto retry_nonlinear_refinement = [&](AffineAccelerationConstraint refinement,
                                         const std::string &source_prefix,
-                                        const std::string &label) {
+                                        const std::string &label,
+                                        std::optional<detail::FixedFramePoseTrustRows>
+                                            frame_trust_rows = std::nullopt) {
     auto refined_options = options;
     refinement.source_id = source_prefix;
     while (constraint_source_ids.count(refinement.source_id) != 0U) {
       refinement.source_id += "_";
     }
+    const std::size_t owned_model_index = refined_options.affine_constraints.size();
     refined_options.affine_constraints.push_back(std::move(refinement));
     const auto retry_start = std::chrono::steady_clock::now();
-    auto refined = solve_impl(q, dq, dt, refined_options, refinement_budget - 1);
+    bool local_feasibility_failed = false;
+    const auto attempt = [&](int remaining_budget) {
+      auto retried = solve_impl(q, dq, dt, refined_options,
+                                remaining_budget - 1, nullptr,
+                                &local_feasibility_failed);
+      ++retried.nonlinear_refinement_iterations;
+      return retried;
+    };
+    auto refined = attempt(refinement_budget);
+    const int remaining_budget =
+        refinement_budget - refined.nonlinear_refinement_iterations;
+    if (frame_trust_rows && frame_trust_rows->count > 0 &&
+        local_feasibility_failed && refined.status != SolverStatus::kSuccess &&
+        refined.nonlinear_refinement_iterations == 1 &&
+        remaining_budget > 0) {
+      // Only this invocation owns these row indices and this appended block.
+      // Keep every local geometric cut and caller row, including matching IDs.
+      detail::remove_fixed_frame_pose_trust_rows(
+          &refined_options.affine_constraints[owned_model_index],
+          *frame_trust_rows);
+      auto previous_attempt = std::move(refined);
+      refined = attempt(remaining_budget);
+      refined.nonlinear_refinement_iterations +=
+          previous_attempt.nonlinear_refinement_iterations;
+      refined.preprocessing_time_ms += previous_attempt.preprocessing_time_ms;
+      refined.backend_computation_time_ms +=
+          previous_attempt.backend_computation_time_ms;
+      refined.postprocessing_time_ms += previous_attempt.postprocessing_time_ms;
+      refined.native_collision_pair_evaluations +=
+          previous_attempt.native_collision_pair_evaluations;
+      refined.linear_problems.insert(
+          refined.linear_problems.begin(),
+          std::make_move_iterator(previous_attempt.linear_problems.begin()),
+          std::make_move_iterator(previous_attempt.linear_problems.end()));
+    }
+    // Do not propagate a descendant's feasibility failure. Its geometric cuts
+    // belong to that deeper attempt and must never be lost by an ancestor retry.
     // Only the deepest finish() updates elasticity, once for the final result.
     // Re-preparation at unchanged q/dq and nominal bounds is idempotent.
     if (linear_problem)
       refined.linear_problems.insert(refined.linear_problems.begin(), std::move(*linear_problem));
-    ++refined.nonlinear_refinement_iterations;
     refined.computation_time_ms =
         std::chrono::duration<double, std::milli>(
             std::chrono::steady_clock::now() - start).count();
@@ -1113,13 +1166,15 @@ AccelerationSolverResult AccelerationSolver::solve_impl(
         if (acceptance.violation &&
             acceptance.violation->time > 0.0 && refinement_budget > 0) {
           AffineAccelerationConstraint refinement;
+          detail::FixedFramePoseTrustRows owned_trust_rows;
           const auto linearized =
               detail::linearize_fixed_frame_pose_violations(
                   prepared, *robot_, q, dq, result.joint_accelerations,
-                  dt, *acceptance.violation, &refinement);
+                  dt, *acceptance.violation, &refinement, &owned_trust_rows);
           if (linearized.satisfied()) {
             return retry_nonlinear_refinement(
-                std::move(refinement), "__frame_pose_refinement", "frame pose");
+                std::move(refinement), "__frame_pose_refinement", "frame pose",
+                owned_trust_rows);
           }
         }
         return finish(clear_outputs(

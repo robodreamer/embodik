@@ -1,4 +1,6 @@
 #include "acceleration_solver_internal.hpp"
+#include "acceleration_collision_refinement.hpp"
+#include "collision_distance_query.hpp"
 
 #include <pinocchio/algorithm/geometry.hpp>
 #include <pinocchio/algorithm/jacobian.hpp>
@@ -86,6 +88,9 @@ bool scalar_revolute_prismatic_model(const RobotModel &robot) {
 }
 #endif
 
+} // namespace
+
+namespace detail {
 bool make_sample_distance_cut(
     const RobotModel &robot,
     const detail::VelocityCollisionSampleValidationResult &validation,
@@ -126,7 +131,7 @@ bool make_sample_distance_cut(
   pinocchio::updateGeometryPlacements(robot.model(), data, *geometry,
                                     geometry_data);
   ++diagnostics->refinement_geometry_updates;
-  pinocchio::computeDistance(*geometry, geometry_data, pair_index);
+  compute_policy_collision_distance(*geometry, geometry_data, pair_index, true);
   ++diagnostics->refinement_exact_queries;
   const auto &distance = geometry_data.distanceResults[pair_index];
   const double value = distance.min_distance;
@@ -187,6 +192,9 @@ bool make_sample_distance_cut(
 #endif
 }
 
+} // namespace detail
+
+namespace {
 // Include every family checked by the solver's common source-ID registry.
 std::string collision_refinement_source_id(
     const AccelerationSolveOptions &options, const std::string &stem) {
@@ -255,6 +263,22 @@ AccelerationSolverResult AccelerationSolver::solve_with_velocity_collision_impl(
   };
 
   VelocityCollisionLiftDiagnostics diagnostics;
+  const bool physical_samples =
+      lift_options.candidate_validation ==
+      CollisionCandidateValidation::kPhysicalSamples;
+  if (lift_options.candidate_validation !=
+          CollisionCandidateValidation::kFrozenRows &&
+      !physical_samples) {
+    return finish(velocity_collision_lift_failure(
+        SolverStatus::kInvalidInput, "unknown collision candidate validation policy",
+        diagnostics));
+  }
+  if (physical_samples && !candidate) {
+    return finish(velocity_collision_lift_failure(
+        SolverStatus::kInvalidInput,
+        "physical-sample collision validation requires a prescribed candidate",
+        diagnostics));
+  }
   if (candidate && lift_options.max_refinement_iterations != 0) {
     return finish(velocity_collision_lift_failure(
         SolverStatus::kInvalidInput,
@@ -345,7 +369,16 @@ AccelerationSolverResult AccelerationSolver::solve_with_velocity_collision_impl(
 
   std::optional<detail::VelocityCollisionConstraintLinearization> linearization;
   try {
-    linearization = collision_provider.linearize(dt);
+    if (physical_samples) {
+      if (const auto error =
+              collision_provider.physical_candidate_ineligibility(q);
+          error.has_value()) {
+        return finish(velocity_collision_lift_failure(
+            SolverStatus::kInvalidInput, *error, diagnostics));
+      }
+    } else {
+      linearization = collision_provider.linearize(dt);
+    }
   } catch (const std::invalid_argument &error) {
     return finish(velocity_collision_lift_failure(
         SolverStatus::kInvalidInput,
@@ -359,9 +392,11 @@ AccelerationSolverResult AccelerationSolver::solve_with_velocity_collision_impl(
             error.what(),
         diagnostics));
   }
-  const auto row_accounting = collision_provider.accounting_snapshot();
-  diagnostics.pairs_considered = row_accounting.pairs_considered;
-  diagnostics.row_exact_queries = row_accounting.exact_distance_queries;
+  if (!physical_samples) {
+    const auto row_accounting = collision_provider.accounting_snapshot();
+    diagnostics.pairs_considered = row_accounting.pairs_considered;
+    diagnostics.row_exact_queries = row_accounting.exact_distance_queries;
+  }
   AccelerationSolveOptions lifted_options = options;
   if (linearization.has_value()) {
     if (linearization->coefficient_matrix.rows() == 0 ||
@@ -600,7 +635,7 @@ AccelerationSolverResult AccelerationSolver::solve_with_velocity_collision_impl(
         static_cast<double>(lift_options.validation_substeps);
     AffineAccelerationConstraint cut;
     try {
-      if (!make_sample_distance_cut(
+      if (!detail::make_sample_distance_cut(
               *robot_, validation,
               validation_samples[validation.failed_sample_index - 1],
               result.joint_accelerations, sample_time,

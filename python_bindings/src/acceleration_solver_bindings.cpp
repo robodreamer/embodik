@@ -419,11 +419,17 @@ void bind_acceleration_solver(nb::module_ &m) {
       .def_rw("fixed_current_position_joint_indices",
               &AccelerationSolveOptions::fixed_current_position_joint_indices);
 
+  nb::enum_<CollisionCandidateValidation>(m, "CollisionCandidateValidation")
+      .value("FROZEN_ROWS", CollisionCandidateValidation::kFrozenRows)
+      .value("PHYSICAL_SAMPLES", CollisionCandidateValidation::kPhysicalSamples);
+
   nb::class_<VelocityCollisionLiftOptions>(
       m, "VelocityCollisionLiftOptions")
       .def(nb::init<>())
       .def_rw("validation_substeps",
               &VelocityCollisionLiftOptions::validation_substeps)
+      .def_rw("candidate_validation",
+              &VelocityCollisionLiftOptions::candidate_validation)
       .def_rw("max_refinement_iterations",
               &VelocityCollisionLiftOptions::max_refinement_iterations)
       .def_rw("refinement_trust_radius",
@@ -914,8 +920,10 @@ void bind_acceleration_solver(nb::module_ &m) {
            nb::arg("dt"), nb::arg("ddq"),
            nb::arg("options") = AccelerationSolveOptions{},
            nb::arg("lift_options") = VelocityCollisionLiftOptions{},
-           "Validate an unchanged ddq with the original velocity collision rows "
-           "and sampled checks. Collision refinement budget must be zero. "
+           "Validate an unchanged ddq with sampled checks and, by default, frozen "
+           "collision rows. PHYSICAL_SAMPLES omits only internal construction rows "
+           "for initially satisfied floors and zero repulsion deadband. "
+           "Collision refinement budget must be zero. "
            "This does not certify continuous collision safety or complete stopping.");
 }
 

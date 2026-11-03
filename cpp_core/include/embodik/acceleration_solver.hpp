@@ -388,6 +388,11 @@ struct AccelerationSolveOptions {
   bool record_linear_problems = false;
 };
 
+enum class CollisionCandidateValidation {
+  kFrozenRows,
+  kPhysicalSamples,
+};
+
 /**
  * @brief Sampling policy for velocity-row collision compatibility.
  *
@@ -404,6 +409,11 @@ struct VelocityCollisionLiftOptions {
   double refinement_trust_radius = 0.5;
   /// Additional distance required by local models, never an acceptance tolerance.
   double refinement_clearance_reserve = 1e-6;
+  /// Prescribed commands only: omit internal construction rows, retaining all
+  /// caller constraints and sampled floors. Requires zero repulsion deadband
+  /// and initially satisfied floors at the existing sampled tolerance.
+  CollisionCandidateValidation candidate_validation =
+      CollisionCandidateValidation::kFrozenRows;
 };
 
 enum class CollisionConstraintOutsidePolicy {
@@ -759,8 +769,10 @@ public:
       const VelocityCollisionLiftOptions &lift_options =
           VelocityCollisionLiftOptions{});
 
-  /// Same prescribed-command contract, retaining velocity collision rows and
-  /// sampled validation. Positive collision refinement budgets are rejected.
+  /// Same prescribed-command contract, retaining velocity collision rows by
+  /// default. kPhysicalSamples omits only internal construction rows; it checks
+  /// sampled geometry, not recovery-controller behavior or complete stopping.
+  /// Positive collision refinement budgets are rejected.
   AccelerationSolverResult validate_candidate_with_velocity_collision(
       KinematicsSolver &collision_solver, const Eigen::VectorXd &q,
       const Eigen::VectorXd &dq, double dt, const Eigen::VectorXd &ddq,
@@ -772,7 +784,8 @@ private:
   AccelerationSolverResult solve_impl(
       const Eigen::VectorXd &q, const Eigen::VectorXd &dq, double dt,
       const AccelerationSolveOptions &options, int refinement_budget,
-      const Eigen::VectorXd *candidate = nullptr);
+      const Eigen::VectorXd *candidate = nullptr,
+      bool *local_hard_feasibility_failed = nullptr);
   AccelerationSolverResult solve_with_velocity_collision_impl(
       KinematicsSolver &collision_solver, const Eigen::VectorXd &q,
       const Eigen::VectorXd &dq, double dt,

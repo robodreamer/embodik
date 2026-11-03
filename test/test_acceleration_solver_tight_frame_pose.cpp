@@ -10,6 +10,8 @@
 #include <fstream>
 #include <limits>
 #include <memory>
+#include <set>
+#include <stdexcept>
 #include <string>
 
 namespace embodik::test {
@@ -598,6 +600,165 @@ TEST_F(AccelerationSolverTightFramePoseTest,
       *prepared.prepared, *robot_, q, dq, result.joint_accelerations, 0.01,
       Eigen::Vector2d::Constant(-15.0), Eigen::Vector2d::Constant(15.0));
   EXPECT_TRUE(accepted.satisfied()) << accepted.message;
+}
+
+class FrameTrustRecoveryTest : public ::testing::Test {
+protected:
+  void SetUp() override {
+    urdf_ = std::make_unique<ScopedUrdf>(
+        "embodik_frame_trust_recovery.urdf", R"(<robot name="frame_trust">
+      <link name="base"/><link name="carriage"/>
+      <joint name="slide" type="prismatic"><parent link="base"/>
+      <child link="carriage"/><axis xyz="1 0 0"/>
+      <limit lower="-1" upper="1" velocity="10" effort="100"/></joint>
+      <link name="rotor"/><joint name="angle" type="revolute">
+      <parent link="carriage"/><child link="rotor"/><axis xyz="0 0 1"/>
+      <limit lower="-3.2" upper="3.2" velocity="10" effort="100"/></joint>
+      <link name="tool"/><joint name="tool_fixed" type="fixed">
+      <parent link="rotor"/><child link="tool"/><origin xyz="1 0 0"/>
+      </joint></robot>)");
+    robot_ = std::make_shared<RobotModel>(urdf_->path(), false);
+    robot_->update_kinematics(q_, dq_);
+    solver_ = std::make_unique<AccelerationSolver>(robot_);
+    auto task = solver_->add_posture_task("request");
+    task->setSolveMode(TaskSolveMode::kMinError);
+    set_request(4.0);
+    options_ = options_with_limits(15.0);
+    options_.prefer_direct_min_error_qp = true;
+    options_.record_linear_problems = true;
+    Eigen::Matrix<double, 6, 1> mask =
+        Eigen::Matrix<double, 6, 1>::Zero();
+    mask(0) = 1.0;
+    Eigen::Matrix4d pose = Eigen::Matrix4d::Identity();
+    pose(0, 3) = 1.0019; // x >= .9999; 0.1 mm initial clearance.
+    options_.tight_frame_pose_constraints.push_back(tight_frame(
+        "held_x", "tool", pose, mask, .002, .1, policy6(1., 20., 2.)));
+    // This caller row deliberately collides with the internal source-ID stem.
+    AffineAccelerationConstraint locked_slide;
+    locked_slide.source_id = "__frame_pose_refinement";
+    locked_slide.coefficient_matrix = Eigen::Matrix<double, 1, 2>(1., 0.);
+    locked_slide.affine_bias = Eigen::VectorXd::Zero(1);
+    locked_slide.lower_bounds = locked_slide.upper_bounds = vector({0.});
+    options_.affine_constraints.push_back(locked_slide);
+    AffineAccelerationConstraint collision_cut = locked_slide;
+    collision_cut.source_id = "__collision_sample_refinement";
+    collision_cut.coefficient_matrix = Eigen::Matrix<double, 1, 2>(0., 1.);
+    collision_cut.upper_bounds = vector({4.});
+    options_.affine_constraints.push_back(collision_cut);
+  }
+
+  void set_request(double value) {
+    AccelerationTaskReference reference;
+    reference.proportional_gain = reference.derivative_gain = 0.;
+    reference.desired_acceleration = vector({0., value});
+    solver_->set_task_reference("request", reference);
+  }
+
+  std::unique_ptr<ScopedUrdf> urdf_;
+  std::shared_ptr<RobotModel> robot_;
+  std::unique_ptr<AccelerationSolver> solver_;
+  AccelerationSolveOptions options_;
+  Eigen::Vector2d q_ = Eigen::Vector2d::Zero();
+  Eigen::Vector2d dq_ = Eigen::Vector2d::Zero();
+};
+
+TEST_F(FrameTrustRecoveryTest, ReleasesOnlyOwnedBoxAndRetainsCallerRowsAndCuts) {
+  // The exact nonlinear feasible set contains a useful nonzero command.
+  ASSERT_EQ(solver_->validate_candidate(q_, dq_, .1, vector({0., 2.}), options_).status,
+            SolverStatus::kSuccess);
+  const auto result = solver_->solve(q_, dq_, .1, options_);
+  ASSERT_EQ(result.status, SolverStatus::kSuccess) << result.status_message;
+  EXPECT_GT(result.nonlinear_refinement_iterations, 1);
+  EXPECT_LE(result.nonlinear_refinement_iterations, 9);
+  EXPECT_LE(result.linear_problems.size(), 10u);
+  EXPECT_NEAR(result.joint_accelerations(0), 0., 1e-12);
+  EXPECT_GT(result.joint_accelerations(1), 0.);
+  EXPECT_LT(result.joint_accelerations(1), 4.);
+  ASSERT_EQ(options_.affine_constraints.size(), 2u);
+  for (const auto &problem : result.linear_problems) {
+    for (const auto &caller : options_.affine_constraints) {
+      int found = 0;
+      for (Eigen::Index row = 0; row < problem.constraint_matrix.rows(); ++row) {
+        if (problem.constraint_row_sources[row] != caller.source_id) continue;
+        ++found;
+        EXPECT_TRUE(problem.constraint_matrix.row(row).isApprox(
+            caller.coefficient_matrix.row(0), 0.));
+        EXPECT_DOUBLE_EQ(problem.lower_bounds(row), caller.lower_bounds(0));
+        EXPECT_DOUBLE_EQ(problem.upper_bounds(row), caller.upper_bounds(0));
+      }
+      EXPECT_EQ(found, 1);
+    }
+  }
+  const auto checked = solver_->validate_candidate(
+      q_, dq_, .1, result.joint_accelerations, options_);
+  EXPECT_EQ(checked.status, SolverStatus::kSuccess) << checked.status_message;
+}
+
+TEST_F(FrameTrustRecoveryTest, IncompatiblePhysicalCommandStillFailsClosed) {
+  AffineAccelerationConstraint forced = options_.affine_constraints.back();
+  forced.source_id = "forced_unsafe_rotation";
+  forced.lower_bounds = forced.upper_bounds = vector({4.});
+  options_.affine_constraints.push_back(forced);
+  const auto result = solver_->solve(q_, dq_, .1, options_);
+  EXPECT_NE(result.status, SolverStatus::kSuccess);
+  expect_no_motion_outputs(result);
+  EXPECT_LE(result.nonlinear_refinement_iterations, 9);
+  EXPECT_LE(result.linear_problems.size(), 10u);
+  const auto prescribed = solver_->validate_candidate(
+      q_, dq_, .1, vector({0., 4.}), options_);
+  EXPECT_NE(prescribed.status, SolverStatus::kSuccess);
+  expect_no_motion_outputs(prescribed);
+}
+
+TEST_F(FrameTrustRecoveryTest, ExhaustionNeverRestartsBudgetOrDiscardsDescendantCuts) {
+  auto constraint = options_.tight_frame_pose_constraints.front();
+  auto definition = constraint.definition;
+  definition.target_pose(0, 3) = 1.002; // Tangent boundary: only rest is exact.
+  constraint.definition = definition;
+  options_.tight_frame_pose_constraints = {constraint};
+  options_.affine_constraints.back().upper_bounds = vector({15.});
+  set_request(15.);
+  ASSERT_EQ(solver_->validate_candidate(q_, dq_, .1, vector({0., 0.}), options_).status,
+            SolverStatus::kSuccess);
+  const auto result = solver_->solve(q_, dq_, .1, options_);
+  EXPECT_NE(result.status, SolverStatus::kSuccess);
+  expect_no_motion_outputs(result);
+  EXPECT_EQ(result.nonlinear_refinement_iterations, 9);
+  EXPECT_EQ(result.linear_problems.size(), 10u);
+  std::set<std::string> prior_sources;
+  for (const auto &problem : result.linear_problems) {
+    const std::set<std::string> sources(problem.constraint_row_sources.begin(),
+                                         problem.constraint_row_sources.end());
+    for (const auto &source : prior_sources)
+      EXPECT_EQ(sources.count(source), 1u) << source;
+    prior_sources = sources;
+  }
+}
+
+TEST(FrameTrustRowOwnershipTest, ExplicitIndicesPreserveOtherRowsAndErrorsAreAtomic) {
+  AffineAccelerationConstraint model;
+  model.source_id = "arbitrary_caller_visible_name";
+  model.coefficient_matrix.resize(4, 2);
+  model.coefficient_matrix << 1., 0., 1., 0., 0., 1., 0., 1.;
+  model.affine_bias = vector({1., 2., 3., 4.});
+  model.lower_bounds = vector({-1., -2., -3., -4.});
+  model.upper_bounds = vector({1., 2., 3., 4.});
+  model.lower_bound_active = {false, true, true, false};
+  model.upper_bound_active = {true, true, true, true};
+  auto invalid = model;
+  invalid.affine_bias.conservativeResize(3);
+  EXPECT_THROW(detail::remove_fixed_frame_pose_trust_rows(&invalid, {1, 2}),
+               std::logic_error);
+  EXPECT_TRUE(invalid.coefficient_matrix.isApprox(model.coefficient_matrix, 0.));
+  detail::remove_fixed_frame_pose_trust_rows(&model, {1, 2});
+  ASSERT_EQ(model.coefficient_matrix.rows(), 2);
+  EXPECT_EQ(model.source_id, "arbitrary_caller_visible_name");
+  EXPECT_TRUE(model.coefficient_matrix.isIdentity());
+  EXPECT_TRUE(model.affine_bias.isApprox(vector({1., 4.}), 0.));
+  EXPECT_TRUE(model.lower_bounds.isApprox(vector({-1., -4.}), 0.));
+  EXPECT_TRUE(model.upper_bounds.isApprox(vector({1., 4.}), 0.));
+  EXPECT_EQ(model.lower_bound_active, (std::vector<bool>{false, false}));
+  EXPECT_EQ(model.upper_bound_active, (std::vector<bool>{true, true}));
 }
 
 TEST_F(AccelerationSolverTightFramePoseTest,

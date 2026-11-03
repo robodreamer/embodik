@@ -107,6 +107,30 @@ SolverResult solve_canonical(
 }
 
 TEST(HierarchicalLinearSolverTest,
+     PrevalidatedBoxStillRunsRequestedDirectMinError) {
+  ObjectiveSolveConfig objective;
+  objective.solve_mode = TaskSolveMode::kMinError;
+  for (bool prevalidated : {false, true}) {
+    LinearSolveDiagnostics diagnostics;
+    const auto result = detail::SolveGeneralizedHierarchicalLinearSystemEigen(
+        {vector({4.0, -1.0}), vector({1.0, -1.0})},
+        {vector({0.0, 0.0}), vector({0.0, 0.0})},
+        {matrix({{1.0, 2.0}, {2.0, 1.0}}), Eigen::Matrix2d::Identity()},
+        Eigen::Matrix2d::Identity(), vector({-1.0, -1.0}),
+        vector({1.0, 1.0}), exact_config(), {objective, objective}, nullptr,
+        1e-8, true, prevalidated, false, true, &diagnostics);
+    ASSERT_EQ(result.status, SolverStatus::kSuccess) << result.status_message;
+    EXPECT_TRUE(diagnostics.direct_min_error_attempted);
+    EXPECT_TRUE(diagnostics.direct_min_error_succeeded)
+        << diagnostics.direct_min_error_message;
+    EXPECT_EQ(diagnostics.termination_reason, "direct_min_error_success");
+    // The primary optimum is on x1=1; its tangential derivative gives x0=-0.4.
+    // A lower objective must preserve this unique primary image.
+    expect_double_vectors_near(result.solution, {-0.4, 1.0});
+  }
+}
+
+TEST(HierarchicalLinearSolverTest,
      RevalidatedPhaseOneWitnessPreservesMixedPriorityFallback) {
   const Eigen::MatrixXd constraints = Eigen::Matrix2d::Identity();
   const Eigen::VectorXd lower = vector({0.1, -0.5});

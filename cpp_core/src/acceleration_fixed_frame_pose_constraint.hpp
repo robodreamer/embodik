@@ -44,6 +44,17 @@ struct FixedFramePosePreparationResult : FixedFramePoseConstraintResult {
   std::optional<PreparedFixedFramePoseConstraint> prepared;
 };
 
+// Source-private row ownership; caller IDs and coefficient patterns are not
+// authority to remove a row from an assembled hard-constraint block.
+struct FixedFramePoseTrustRows {
+  Eigen::Index first = 0;
+  Eigen::Index count = 0;
+};
+
+void remove_fixed_frame_pose_trust_rows(
+    AffineAccelerationConstraint *refinement,
+    const FixedFramePoseTrustRows &owned_rows);
+
 FixedFramePoseConstraintRecord make_tight_frame_pose_record(
     const TightFramePoseAccelerationConstraint &constraint);
 
@@ -72,12 +83,14 @@ FixedFramePoseConstraintResult linearize_fixed_frame_pose_violation(
     AffineAccelerationConstraint *refinement);
 
 // Gather violated scalar faces at the triggering sample and endpoint into one
-// local solve. All nonlinear acceptance and the original trust box still apply.
+// local solve. The optional output records the generated trust box separately
+// from the violation cuts; all original nonlinear acceptance still applies.
 FixedFramePoseConstraintResult linearize_fixed_frame_pose_violations(
     const PreparedFixedFramePoseConstraint &prepared, const RobotModel &robot,
     const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
     const Eigen::VectorXd &acceleration, double dt,
     const ScalarGeometricViolation &trigger,
-    AffineAccelerationConstraint *refinement);
+    AffineAccelerationConstraint *refinement,
+    FixedFramePoseTrustRows *owned_trust_rows = nullptr);
 
 } // namespace embodik::detail
