@@ -153,6 +153,10 @@ When an authorized fallback has already selected `MIN_ERROR`, a numerical
 hard-bound rejection can retry that effective policy from the original
 problem. This does not authorize fallback for other tasks or soften hard rows;
 task diagnostics retain the fallback flag.
+If a higher-priority numerical repair has already completed, a lower-task retry
+carries its achieved images as exact equality constraints. The verified feasible
+checkpoint seeds the existing optimizer; it is not returned as a substitute for
+optimization. Original hard bounds and completed-image tolerances still apply.
 An almost-zero Cartesian task error does not suppress this retry when the
 candidate violates hard bounds; tracking accuracy alone is not feasibility.
 

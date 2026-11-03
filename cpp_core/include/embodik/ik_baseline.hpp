@@ -1130,6 +1130,7 @@ inline SolverResult solveHierarchicalLinearSystemEigen(
                   });
   std::vector<Eigen::VectorXd> completed_objective_images(num_objectives);
   size_t repaired_prefix_size = 0;
+  Eigen::VectorXd repaired_prefix_witness;
   // A later projector is an execution device, not a certificate that weak
   // achieved directions survived. Check the frozen images again at publication,
   // including candidates returned by the existing terminal recovery dispatch.
@@ -1368,6 +1369,15 @@ inline SolverResult solveHierarchicalLinearSystemEigen(
   // exact achieved-image rows retain each earlier objective's hierarchy.
   Eigen::VectorXd hard_constraint_witness;
   bool full_hard_constraint_witness_available = false;
+  const auto full_hard_witness_is_valid = [&]() {
+    return full_hard_constraint_witness_available &&
+        hard_constraint_witness.size() == degrees_of_freedom &&
+        hard_constraint_witness.allFinite() &&
+        (constraint_coefficients * hard_constraint_witness).allFinite() &&
+        detail::ComputeMaxLinearConstraintViolation(
+            constraint_coefficients, min_bounds, max_bounds,
+            hard_constraint_witness) <= solver_config.epsilon;
+  };
   auto retry_invalid_min_error = [&](const Eigen::VectorXd &failed_velocity,
                                      bool direct_primal = false)
       -> std::optional<SolverResult> {
@@ -1396,13 +1406,7 @@ inline SolverResult solveHierarchicalLinearSystemEigen(
     if (direct_primal &&
         (preserve_legacy_velocity_behavior ||
          !execution_options.prefer_direct_min_error_qp ||
-         !full_hard_constraint_witness_available ||
-         hard_constraint_witness.size() != degrees_of_freedom ||
-         !hard_constraint_witness.allFinite() ||
-         !(constraint_coefficients * hard_constraint_witness).allFinite() ||
-         detail::ComputeMaxLinearConstraintViolation(
-             constraint_coefficients, min_bounds, max_bounds,
-             hard_constraint_witness) > solver_config.epsilon)) {
+         !full_hard_witness_is_valid())) {
       return std::nullopt;
     }
     if (preserve_legacy_velocity_behavior) {
@@ -1436,7 +1440,8 @@ inline SolverResult solveHierarchicalLinearSystemEigen(
       Eigen::VectorXd candidate;
       if (!solve_min_error_band(
               index, recovery_C, recovery_lower, recovery_upper, solver_config,
-              index == 0 ? (direct_primal ? &hard_constraint_witness : nullptr)
+              index == 0 ? (full_hard_witness_is_valid()
+                                ? &hard_constraint_witness : nullptr)
                          : &recovered,
               !direct_primal, &candidate, &iterations,
               direct_primal && execution_options.diagnostics
@@ -3017,11 +3022,21 @@ inline SolverResult solveHierarchicalLinearSystemEigen(
     if (invalid_stage_command) {
       const double prefix_tolerance = std::min(1e-10, objective_equality_tolerance);
       bool repaired = false;
-      if (previous_velocity.allFinite() &&
+      const bool entry_feasible = previous_velocity.allFinite() &&
           (constraint_coefficients * previous_velocity).allFinite() &&
           detail::ComputeMaxLinearConstraintViolation(
               constraint_coefficients, min_bounds, max_bounds,
-              previous_velocity) <= solver_config.epsilon) {
+              previous_velocity) <= solver_config.epsilon;
+      const Eigen::VectorXd *repair_seed =
+          entry_feasible ? &previous_velocity : nullptr;
+      // Mandatory hard rows can exclude the primary's zero entry. A certified
+      // full Phase-I witness may seed the existing MIN_ERROR optimization at
+      // priority zero; it is never returned in place of an optimized result.
+      // Later priorities still require their feasible, protected task entry.
+      if (!repair_seed && objective_index == 0 && full_hard_witness_is_valid()) {
+        repair_seed = &hard_constraint_witness;
+      }
+      if (repair_seed) {
         Eigen::MatrixXd repair_rows = constraint_coefficients;
         Eigen::VectorXd repair_lower = min_bounds, repair_upper = max_bounds;
         std::vector<Eigen::VectorXd> prefix_images;
@@ -3082,7 +3097,7 @@ inline SolverResult solveHierarchicalLinearSystemEigen(
           Eigen::VectorXd candidate;
           unsigned int repair_iterations = 0;
           if (solve_min_error_band(objective_index, repair_rows, repair_lower,
-                  repair_upper, repair_config, &previous_velocity, false,
+                  repair_upper, repair_config, repair_seed, false,
                   &candidate, &repair_iterations) && candidate.allFinite() &&
               (constraint_coefficients * candidate).allFinite() &&
               detail::ComputeMaxLinearConstraintViolation(
@@ -3108,6 +3123,7 @@ inline SolverResult solveHierarchicalLinearSystemEigen(
               saturated_constraint_matrix.setZero();
               saturated_values.setZero();
               repaired_prefix_size = objective_index + 1;
+              repaired_prefix_witness = velocity_solution;
             }
           }
         }
@@ -3446,11 +3462,71 @@ inline SolverResult solveHierarchicalLinearSystemEigen(
           retry_execution_options.initial_hard_constraint_witness =
               &hard_constraint_witness;
         }
+        Eigen::MatrixXd retry_rows;
+        Eigen::VectorXd retry_lower, retry_upper, retry_softening;
+        const Eigen::MatrixXd *rows = &constraint_coefficients;
+        const Eigen::VectorXd *lower = &min_bounds, *upper = &max_bounds;
+        const Eigen::VectorXd *softening = max_constraint_softening_factors;
+        const bool protect_repaired_prefix = !preserve_legacy_velocity_behavior &&
+            repaired_prefix_size > 0 && index >= repaired_prefix_size;
+        if (protect_repaired_prefix) {
+          // An authorized lower-task retry must not recompute a repaired
+          // prefix's image. Carry its exact equalities and feasible checkpoint
+          // into the existing retry instead of relying on another optimizer
+          // to reproduce that image to working precision.
+          if (repaired_prefix_witness.size() != degrees_of_freedom ||
+              !preserves_repaired_prefix(repaired_prefix_witness) ||
+              !(constraint_coefficients * repaired_prefix_witness).allFinite() ||
+              detail::ComputeMaxLinearConstraintViolation(
+                  constraint_coefficients, min_bounds, max_bounds,
+                  repaired_prefix_witness) > solver_config.epsilon) continue;
+          retry_rows = constraint_coefficients;
+          retry_lower = min_bounds;
+          retry_upper = max_bounds;
+          for (size_t prior = 0; prior < repaired_prefix_size; ++prior)
+            append_min_error_image(prior, completed_objective_images[prior],
+                                   retry_rows, retry_lower, retry_upper);
+          if (!(retry_rows * repaired_prefix_witness).allFinite() ||
+              detail::ComputeMaxLinearConstraintViolation(
+                  retry_rows, retry_lower, retry_upper,
+                  repaired_prefix_witness) > solver_config.epsilon) continue;
+          Eigen::MatrixXd normalized_rows;
+          Eigen::VectorXd normalized_lower, normalized_upper;
+          detail::NormalizeLinearConstraintRows(
+              retry_rows, retry_lower, retry_upper,
+              &normalized_rows, &normalized_lower, &normalized_upper);
+          retry_rows = std::move(normalized_rows);
+          retry_lower = std::move(normalized_lower);
+          retry_upper = std::move(normalized_upper);
+          rows = &retry_rows;
+          lower = &retry_lower;
+          upper = &retry_upper;
+          retry_execution_options.initial_hard_constraint_witness =
+              &repaired_prefix_witness;
+          retry_execution_options.hard_constraints_prevalidated_feasible = false;
+          if (max_constraint_softening_factors) {
+            retry_softening = Eigen::VectorXd::Ones(retry_rows.rows());
+            retry_softening.head(max_constraint_softening_factors->size()) =
+                *max_constraint_softening_factors;
+            softening = &retry_softening;
+          }
+        }
         SolverResult retry = solveHierarchicalLinearSystemEigen(
             scalable_objective_targets, affine_objective_biases,
-            objective_matrices, constraint_coefficients, min_bounds, max_bounds,
-            solver_config, retry_configs, max_constraint_softening_factors,
+            objective_matrices, *rows, *lower, *upper,
+            solver_config, retry_configs, softening,
             retry_execution_options);
+        if (protect_repaired_prefix && retry.status == SolverStatus::kSuccess) {
+          if (retry.solution.size() != static_cast<size_t>(degrees_of_freedom)) continue;
+          const Eigen::Map<const Eigen::VectorXd> candidate(
+              retry.solution.data(), retry.solution.size());
+          // Normalized retry rows never replace the original raw-row gate.
+          if (!candidate.allFinite() ||
+              !(constraint_coefficients * candidate).allFinite() ||
+              detail::ComputeMaxLinearConstraintViolation(
+                  constraint_coefficients, min_bounds, max_bounds,
+                  candidate) > solver_config.epsilon) continue;
+        }
         if (retry.task_used_fallback.size() > index) {
           retry.task_used_fallback[index] = true;
           for (size_t prior = 0; prior < objective_used_fallback.size() &&

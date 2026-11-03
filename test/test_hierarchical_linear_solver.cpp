@@ -107,6 +107,72 @@ SolverResult solve_canonical(
 }
 
 TEST(HierarchicalLinearSolverTest,
+     AuthorizedLowerFallbackPreservesRepairedPrimaryImage) {
+  // A strong constant residual must not erase the already attained weak row
+  // when a later task needs its explicitly authorized minimum-error fallback.
+  const Eigen::MatrixXd primary = matrix({{10000000, 10000000, 0, 0},
+                                           {1, 4, 0, 0}});
+  const Eigen::VectorXd primary_target = vector({-100000000, 12});
+  const Eigen::MatrixXd secondary = matrix({{0, 0, 1, 1}});
+  const Eigen::MatrixXd constraints = matrix({{1, 0, 0, 0},
+                                             {0, 1, 0, 0},
+                                             {0, 0, 1, 0},
+                                             {0, 0, 0, 1},
+                                             {1, 1, 0, 0}});
+  const Eigen::VectorXd lower = vector({1, 0, 1, 1, 5});
+  const Eigen::VectorXd upper = vector({3, 3, 3, 3, 6});
+  Eigen::MatrixXd normalized;
+  Eigen::VectorXd normalized_lower, normalized_upper;
+  detail::NormalizeLinearConstraintRows(constraints, lower, upper, &normalized,
+                                       &normalized_lower, &normalized_upper);
+  ObjectiveSolveConfig first, second;
+  first.solve_mode = TaskSolveMode::kMinError;
+  first.allow_min_error_fallback = false;
+  second.priority = 1;
+  second.solve_mode = TaskSolveMode::kScale;
+  second.allow_min_error_fallback = true;
+  detail::HierarchicalLinearSolverExecutionOptions options;
+  options.objective_equality_tolerance = 1e-8;
+  const Eigen::VectorXd hard_softening = Eigen::VectorXd::Ones(lower.size());
+  for (const bool explicit_hard_softening : {false, true}) {
+    SCOPED_TRACE(explicit_hard_softening);
+    const Eigen::VectorXd *softening =
+        explicit_hard_softening ? &hard_softening : nullptr;
+    const auto reference = solveHierarchicalLinearSystemEigen(
+        {primary_target, vector({0})}, {vector({0, 0}), vector({0})},
+        {primary, Eigen::MatrixXd::Zero(1, 4)}, normalized, normalized_lower,
+        normalized_upper, exact_config(), {first, second}, softening, options);
+    ASSERT_EQ(reference.status, SolverStatus::kSuccess) << reference.status_message;
+    const Eigen::VectorXd reference_image = primary * solution_vector(reference);
+    for (const bool allow_fallback : {false, true}) {
+      SCOPED_TRACE(allow_fallback);
+      second.allow_min_error_fallback = allow_fallback;
+      const auto result = solveHierarchicalLinearSystemEigen(
+          {primary_target, vector({-3})}, {vector({0, 0}), vector({0})},
+          {primary, secondary}, normalized, normalized_lower, normalized_upper,
+          exact_config(), {first, second}, softening, options);
+      if (!allow_fallback) {
+        EXPECT_EQ(result.status, SolverStatus::kNoProgress);
+        EXPECT_EQ(result.task_used_fallback, std::vector<bool>({false, false}));
+        continue;
+      }
+      ASSERT_EQ(result.status, SolverStatus::kSuccess) << result.status_message;
+      const Eigen::VectorXd command = solution_vector(result);
+      ASSERT_EQ(command.size(), 4);
+      EXPECT_LE(detail::ComputeMaxLinearConstraintViolation(
+                    constraints, lower, upper, command), 1e-10);
+      EXPECT_LE((primary * command - reference_image).cwiseAbs().maxCoeff(), 1e-10);
+      EXPECT_NEAR(command(2), 1.0, 1e-10);
+      EXPECT_NEAR(command(3), 1.0, 1e-10);
+      EXPECT_EQ(result.task_modes_effective,
+                std::vector<TaskSolveMode>({TaskSolveMode::kMinError,
+                                            TaskSolveMode::kMinError}));
+      EXPECT_EQ(result.task_used_fallback, std::vector<bool>({false, true}));
+    }
+  }
+}
+
+TEST(HierarchicalLinearSolverTest,
      PrevalidatedBoxStillRunsRequestedDirectMinError) {
   ObjectiveSolveConfig objective;
   objective.solve_mode = TaskSolveMode::kMinError;
@@ -210,6 +276,76 @@ TEST(HierarchicalLinearSolverTest,
   const auto original = run();
   execution.initial_hard_constraint_witness = &witness;
   expect_results_equal_except_timing(run(), original);
+}
+
+SolverResult solve_mandatory_primary_motion(
+    TaskSolveMode primary_mode, bool allow_fallback, double primary_target,
+    LinearSolveDiagnostics *diagnostics = nullptr) {
+  ObjectiveSolveConfig primary;
+  primary.solve_mode = primary_mode;
+  primary.allow_min_error_fallback = allow_fallback;
+  ObjectiveSolveConfig secondary;
+  secondary.priority = 1;
+  secondary.solve_mode = TaskSolveMode::kScale;
+  // The feasible triangle excludes zero and makes x >= 2 mandatory. Trial
+  // saturation can pin x=1 before x+y=5, conflicting with the later y<=3 pin.
+  return detail::SolveGeneralizedHierarchicalLinearSystemEigen(
+      {vector({primary_target}), vector({3.0})},
+      {vector({0.0}), vector({0.0})},
+      {matrix({{1.0, 0.0}}), matrix({{0.0, 1.0}})},
+      matrix({{1.0, 0.0}, {0.0, 1.0}, {1.0, 1.0}}),
+      vector({1.0, 0.0, 5.0}), vector({3.0, 3.0, 6.0}), exact_config(),
+      {primary, secondary}, nullptr, kTolerance, false, false, false, false,
+      diagnostics);
+}
+
+TEST(HierarchicalLinearSolverTest,
+     InfeasiblePrimaryEntryUsesPhaseOneOnlyAsMinErrorOptimizationSeed) {
+  LinearSolveDiagnostics diagnostics;
+  const auto result = solve_mandatory_primary_motion(
+      TaskSolveMode::kMinError, false, -10.0, &diagnostics);
+  ASSERT_EQ(result.status, SolverStatus::kSuccess) << result.status_message;
+  ASSERT_EQ(diagnostics.phase_one_status, "feasible");
+  ASSERT_EQ(diagnostics.phase_one_witness.size(), 2);
+  // Minimizing (x+10)^2 over the triangle has the unique optimum (2,3).
+  // Phase I instead supplies a feasible point, not this task optimum.
+  expect_double_vectors_near(result.solution, {2.0, 3.0});
+  EXPECT_GT((solution_vector(result) - diagnostics.phase_one_witness).norm(), 0.1);
+  EXPECT_GT(std::abs(diagnostics.phase_one_witness(0) + 10.0),
+            std::abs(solution_vector(result)(0) + 10.0));
+  EXPECT_EQ(result.task_modes_effective,
+            (std::vector<TaskSolveMode>{TaskSolveMode::kMinError,
+                                        TaskSolveMode::kScale}));
+  EXPECT_EQ(result.task_used_fallback, (std::vector<bool>{false, false}));
+  EXPECT_NEAR(result.task_errors[0], 12.0, kTolerance);
+}
+
+TEST(HierarchicalLinearSolverTest,
+     MandatoryPrimaryMotionStillRequiresScaleFallbackAuthorization) {
+  // x=alpha*(-10), alpha in [0,1], cannot satisfy the mandatory x>=2.
+  const auto strict = solve_mandatory_primary_motion(
+      TaskSolveMode::kScale, false, -10.0);
+  EXPECT_NE(strict.status, SolverStatus::kSuccess);
+  const auto authorized = solve_mandatory_primary_motion(
+      TaskSolveMode::kScale, true, -10.0);
+  ASSERT_EQ(authorized.status, SolverStatus::kSuccess)
+      << authorized.status_message;
+  expect_double_vectors_near(authorized.solution, {2.0, 3.0});
+  EXPECT_EQ(authorized.task_modes_effective.front(), TaskSolveMode::kMinError);
+  EXPECT_EQ(authorized.task_used_fallback, (std::vector<bool>{true, false}));
+}
+
+TEST(HierarchicalLinearSolverTest,
+     FeasibleScaleRayKeepsItsOriginalContractWithMandatoryMotion) {
+  const auto result = solve_mandatory_primary_motion(
+      TaskSolveMode::kScale, false, 3.0);
+  ASSERT_EQ(result.status, SolverStatus::kSuccess) << result.status_message;
+  expect_double_vectors_near(result.solution, {3.0, 3.0});
+  expect_double_vectors_near(result.task_scales, {1.0, 1.0});
+  EXPECT_EQ(result.task_modes_effective,
+            (std::vector<TaskSolveMode>{TaskSolveMode::kScale,
+                                        TaskSolveMode::kScale}));
+  EXPECT_EQ(result.task_used_fallback, (std::vector<bool>{false, false}));
 }
 
 TEST(HierarchicalLinearSolverTest,

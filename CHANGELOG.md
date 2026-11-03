@@ -100,6 +100,17 @@ not guaranteed by this release.
 
 ### Fixed
 
+- Authorized lower-task MIN_ERROR retries preserve repaired higher-priority
+  images as exact constraints and reuse a verified full hard-set witness.
+  This avoids numerical rejection caused by recomputing an already completed
+  image; hard bounds, fallback permissions and prefix tolerances are unchanged.
+
+- A primary MIN_ERROR repair in a mixed hierarchy can use the certified
+  Phase-I feasible point to initialize its existing optimizer when zero violates
+  mandatory hard rows. The returned command must still pass optimization and
+  feasibility checks; SCALE fallback authorization and higher-priority task
+  protection are unchanged.
+
 - Bimanual viewer "Hold non-dragged arm" keeps the held hand at higher task
   priority while the commanded motion is unfinished, including after dragging
   stops. New input, mode changes and resets clear that ownership; shared torso
