@@ -31,12 +31,31 @@ struct SolveOptions {
   std::optional<Eigen::VectorXd> x0;
 };
 
+/// Weighted distances from affine values to closed scalar intervals.
+/// Empty weights mean unit weights. Zero weights and [-inf,+inf] rows have
+/// no effect. Bounds describe penalties, never additional hard constraints.
+struct SoftBounds {
+  Eigen::MatrixXd matrix;
+  Eigen::VectorXd lower, upper;
+  Eigen::VectorXd weights;
+};
+
 /// min .5 ||J x - target||^2 + .5 ridge ||x||^2, l <= A x <= u.
 /// Zero ridge preserves the exact least-squares objective, including rank loss.
 SolveResult solve_ls(const Eigen::MatrixXd &J, const Eigen::VectorXd &target,
                      const Eigen::MatrixXd &A, const Eigen::VectorXd &l,
                      const Eigen::VectorXd &u, double ridge = 0.0,
                      const SolveOptions &options = {});
+
+/// Add .5 sum_i weights_i dist((soft.matrix*x)_i,
+///                             [soft.lower_i,soft.upper_i])^2 to solve_ls.
+/// Ridge applies only to x. Initial CPU implementation uses one auxiliary
+/// projection variable per effective soft row and the existing LS kernel.
+/// Ridge and options are explicit to keep existing brace arguments unambiguous.
+SolveResult solve_ls(const Eigen::MatrixXd &J, const Eigen::VectorXd &target,
+                     const Eigen::MatrixXd &A, const Eigen::VectorXd &l,
+                     const Eigen::VectorXd &u, const SoftBounds &soft,
+                     double ridge, const SolveOptions &options);
 
 /// min .5 x' P x + q' x, l <= A x <= u.
 /// Initial CPU implementation requires positive-definite P. Other Hessian

@@ -188,6 +188,7 @@ __all__ = [
     "AccelerationAllocationDiagnostics",
     "AccelerationAnalyticCollisionPairDiagnostics",
     "AffineAccelerationConstraint",
+    "AffineStateConstraint",
     "FrozenNextVelocityConstraint",
     "TaskAccelerationBounds",
     "GeneralizedAccelerationAllocation",

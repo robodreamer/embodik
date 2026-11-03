@@ -16,6 +16,7 @@
 
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <Eigen/Core>
 #include <optional>
@@ -255,11 +256,28 @@ struct ContinuityDecisionTrace {
   std::string reason;
 };
 
+/// Observation of the common physical escape-candidate validator. Acceptance
+/// here does not include later task-budget, merit or publication checks.
+struct EscapeCandidateTrace {
+  Eigen::VectorXd step_origin;
+  Eigen::VectorXd escape_origin;
+  Eigen::VectorXd command_origin;
+  Eigen::VectorXd proposed_delta;
+  double integration_dt = 0.0;
+  bool candidate_constructed = false;
+  Eigen::VectorXd candidate_q;
+  bool accepted = false;
+  std::string first_rejection_family;
+  /// Number of nominal problems observed at entry, not a problem identifier.
+  std::size_t nominal_problem_count = 0;
+};
+
 /// Snapshot of the most recent public position-step or velocity request.
 struct SolverProblemTrace {
   std::vector<VelocityProblemTrace> velocity_problems;
   std::vector<PriorityCandidateTrace> priority_candidates;
   std::vector<ContinuityDecisionTrace> continuity_decisions;
+  std::vector<EscapeCandidateTrace> escape_candidates;
   Eigen::VectorXd position_result_q;
   SolverStatus position_status = SolverStatus::kInvalidInput;
   std::string position_status_message;

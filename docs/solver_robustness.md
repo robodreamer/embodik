@@ -402,8 +402,23 @@ achieved prefix images, including legacy lower SCALE projected preferences,
 and optimizes every trailing MIN_ERROR objective in priority order under the
 same constraints. It does not demote SCALE tasks, omit trailing objectives, or
 enable policy fallback. Protected-image and hard-row validation also applies
-when the original numerical loop reports success. The default legacy path
-without refinement is unchanged.
+when the original numerical loop reports success. This suffix policy leaves
+unrefined legacy execution unchanged.
+
+In a mixed hierarchy, an intermediate `MIN_ERROR` saturation trial can violate
+hard rows even though its entry command is feasible. Before a later task runs,
+one constrained minimum-error solve can repair that stage under the original
+hard bounds and all previously committed task images. Successful damped stages
+retain their existing result. The repair preserves task modes and fallback
+permissions, clears trial saturation pins, and rechecks protected images before
+publishing any later command. An invalid prefix or failed repair follows the
+existing numerical failure and recovery handling; it does not authorize an
+unentered lower task's fallback.
+All-`MIN_ERROR` problems and already protected trailing `MIN_ERROR` suffixes
+retain their existing whole-problem or suffix recovery. Relaxable rows do not
+enter this original-bound repair. The legacy final `iterations` field counts
+entered objectives; helper working-set iterations are separate diagnostics.
+
 In the generalized solver, explicit fallback also covers an unsatisfied SCALE
 equality whose trial scale remains positive, for example when part of the
 requested task lies outside the Jacobian's range. Only the objective with the
@@ -1324,6 +1339,21 @@ merits, commanded blocks, prior window sample/reversal counts and whether it
 was already holding. Its `held` flag and `reason` identify the guard decision;
 later safety checks can still reject a candidate. These records diagnose
 stateful decisions and do not constitute a complete solver-state replay.
+
+`escape_candidates` records each return from the common physical escape validator,
+including calls inside rejected nested recovery attempts. It owns the actual
+step, escape and command origins, proposed displacement and integration horizon.
+`candidate_q` is present only when `candidate_constructed` is true, after
+integration and any joint-limit projection. `accepted` describes this validator
+only; later task-budget, merit or publication checks can still reject it.
+`first_rejection_family` is empty on acceptance; otherwise it identifies the
+first failed check: `invalid_context`, `nonfinite`, `coupled_position`, `locks`,
+`hard_rows`, `corridor`, `outer_rate_corridor`, `max_configuration_step_norm`,
+`collision` or `com`. Checks retain their original short-circuit order, so a
+record does not enumerate every violated constraint. `nominal_problem_count`
+is the number of nominal problems observed at entry, not a stable problem ID
+or a mapping to the candidate's originating solve. These records share the
+outer request's trace lifetime and survive speculative-state rollback.
 
 ### Individual target merit budgets
 

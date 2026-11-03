@@ -181,6 +181,22 @@ struct GeometricConstraintAccelerationPolicy {
   Eigen::VectorXd upper_braking_accelerations = Eigen::VectorXd::Ones(3);
 };
 
+/** Affine coordinates y=C*q+b on fixed-base additive scalar joints.
+ *
+ * Position, rate and acceleration bounds use the shared state-envelope
+ * machinery. Braking magnitudes describe per-axis one-step viability, not a
+ * certificate of a complete jointly feasible stopping trajectory. Matrices
+ * are frozen for one call; no derivative of C is inferred.
+ */
+struct AffineStateConstraint {
+  std::string source_id;
+  Eigen::MatrixXd coefficient_matrix;
+  Eigen::VectorXd offset;
+  Eigen::VectorXd lower_bounds;
+  Eigen::VectorXd upper_bounds;
+  GeometricConstraintAccelerationPolicy policy;
+};
+
 enum class ComSupportPolygonOutsidePolicy {
   kReject,
   kRecoverNonWorsening,
@@ -339,6 +355,7 @@ struct AccelerationSolveOptions {
       generalized_acceleration_allocation;
   std::optional<EffortConstraintOptions> effort_constraints;
   std::vector<AffineAccelerationConstraint> affine_constraints;
+  std::vector<AffineStateConstraint> affine_state_constraints;
   std::vector<FrozenNextVelocityConstraint> frozen_next_velocity_constraints;
   std::vector<TaskAccelerationBounds> task_acceleration_bounds;
   std::vector<CentroidalMomentumRateObjective>

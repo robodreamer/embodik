@@ -9,8 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Native CPU `AffineStateConstraint` acceleration envelopes for fixed-base
+  additive scalar coordinates `y=Cq+b`, sharing state shaping, exact quadratic
+  extrema checks and per-axis next-state viability. Complete stopping and
+  collision integration remain explicitly unsupported.
+
 - Experimental robot-independent CPU `solve_ls` and `solve_qp` interfaces, with
   explicit result statuses, hard linear bounds and factor-preserving least squares.
+  `solve_ls` also accepts weighted soft affine intervals through `S`, `sl`, `su`
+  and `weights`, keeping hard constraints and original-variable ridge separate.
+  The initial soft-bound implementation uses exact auxiliary projection variables.
   The initial QP interface requires positive definite objectives; GPU dispatch
   and general semidefinite programs remain unsupported.
 
@@ -48,6 +56,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   disabled by default.
 
 ### Fixed
+
+- Mixed hierarchies repair hard-invalid intermediate MIN_ERROR stages before
+  lower tasks run, preserving original bounds, completed task images and
+  fallback permissions. Existing all-MIN_ERROR and trailing-suffix optimizers
+  retain ownership of their problems. Valid damped stages keep their existing
+  construction.
+
+- Standalone CPU LS and positive-definite QP solves preserve the minimizing
+  active face when the entire objective changes units, including explicit ridge
+  weights and warm starts. Unrepresentable normalization returns `NO_PROGRESS`.
 
 - Shared constrained MIN_ERROR numerical solves retain least-squares factors
   for stable residual gradients and QR steps, avoiding false iteration stalls

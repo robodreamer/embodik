@@ -138,13 +138,22 @@ ScalarGeometricConstraintResult validate_scalar_geometric_joint_box_support(
     const ScalarGeometricDifferential &differential,
     const Eigen::VectorXd &joint_acceleration_lower,
     const Eigen::VectorXd &joint_acceleration_upper,
-    const std::string &state_label) {
+    const std::string &state_label,
+    BrakingSupportRequirement braking_support, double support_horizon) {
   const auto specification_validation =
       validate_scalar_geometric_specification(specification);
   if (!specification_validation.satisfied()) {
     return specification_validation;
   }
+  if (braking_support != BrakingSupportRequirement::kBothDirections &&
+      braking_support != BrakingSupportRequirement::kReachableBoundary) {
+    return failure(SolverStatus::kInvalidInput,
+                   "invalid braking support requirement");
+  }
   if (differential.coefficient_matrix.rows() != specification.dimension ||
+      (braking_support == BrakingSupportRequirement::kReachableBoundary &&
+       (differential.coordinates.rate.size() != specification.dimension ||
+        differential.coordinates.value.size() != specification.dimension)) ||
       differential.affine_bias.size() != specification.dimension ||
       differential.coefficient_matrix.cols() !=
           joint_acceleration_lower.size() ||
@@ -154,7 +163,11 @@ ScalarGeometricConstraintResult validate_scalar_geometric_joint_box_support(
                        " support-check dimensions are inconsistent");
   }
   if (!differential.coefficient_matrix.allFinite() ||
-      !differential.affine_bias.allFinite()) {
+      !differential.affine_bias.allFinite() ||
+      (braking_support == BrakingSupportRequirement::kReachableBoundary &&
+       (!differential.coordinates.rate.allFinite() ||
+        !differential.coordinates.value.allFinite() ||
+        !std::isfinite(support_horizon) || support_horizon <= 0.0))) {
     return failure(SolverStatus::kNumericalError,
                    constraint_identity(specification) + " " + state_label +
                        " support differential was non-finite");
@@ -192,14 +205,45 @@ ScalarGeometricConstraintResult validate_scalar_geometric_joint_box_support(
         specification.policy.lower_braking_accelerations(axis);
     const double upper_braking =
         specification.policy.upper_braking_accelerations(axis);
-    if (maximum < lower_braking -
+    const bool both = braking_support == BrakingSupportRequirement::kBothDirections;
+    bool support_arithmetic_valid = true;
+    const auto requires_support = [&](bool lower_side, double braking) {
+      if (both) return true;
+      const double outward_rate = (lower_side ? -1.0 : 1.0) * differential.coordinates.rate(axis);
+      if (outward_rate <= 0.0) return false;
+      const double margin = lower_side
+          ? differential.coordinates.value(axis) - specification.state_lower_bounds(axis)
+          : specification.state_upper_bounds(axis) - differential.coordinates.value(axis);
+      const double braking_denominator = 2.0 * braking;
+      if (!std::isfinite(braking_denominator)) {
+        support_arithmetic_valid = false;
+        return true;
+      }
+      const double stopping_distance = outward_rate * outward_rate / braking_denominator;
+      const double reach = outward_rate * support_horizon +
+          0.5 * specification.policy.acceleration_limits(axis) * support_horizon * support_horizon;
+      const double threshold = stopping_distance + reach;
+      if (!std::isfinite(margin) || !std::isfinite(threshold)) {
+        support_arithmetic_valid = false;
+        return true;
+      }
+      return margin <= threshold + comparison_tolerance(margin, threshold);
+    };
+    const bool needs_lower = requires_support(true, lower_braking);
+    const bool needs_upper = requires_support(false, upper_braking);
+    if (!support_arithmetic_valid) {
+      return failure(SolverStatus::kNumericalError,
+                     constraint_identity(specification) +
+                         " braking support reach arithmetic was non-finite");
+    }
+    if (needs_lower && maximum < lower_braking -
                       comparison_tolerance(maximum, lower_braking)) {
       return failure(SolverStatus::kInfeasible,
                      constraint_identity(specification) + " " + state_label +
                          " axis " + std::to_string(axis) +
                          " lacks lower-side braking support");
     }
-    if (minimum > -upper_braking +
+    if (needs_upper && minimum > -upper_braking +
                       comparison_tolerance(minimum, -upper_braking)) {
       return failure(SolverStatus::kInfeasible,
                      constraint_identity(specification) + " " + state_label +
@@ -216,7 +260,8 @@ ScalarGeometricPreparationResult prepare_scalar_geometric_constraint(
     const ScalarGeometricDifferential &differential, double dt,
     Eigen::Index variable_count,
     const Eigen::VectorXd &joint_acceleration_lower,
-    const Eigen::VectorXd &joint_acceleration_upper) {
+    const Eigen::VectorXd &joint_acceleration_upper,
+    BrakingSupportRequirement braking_support) {
   ScalarGeometricPreparationResult result;
   const auto differential_validation =
       validate_scalar_geometric_differential(specification, differential,
@@ -270,7 +315,7 @@ ScalarGeometricPreparationResult prepare_scalar_geometric_constraint(
 
   const auto support = validate_scalar_geometric_joint_box_support(
       specification, differential, joint_acceleration_lower,
-      joint_acceleration_upper, "current-state");
+      joint_acceleration_upper, "current-state", braking_support, dt);
   if (!support.satisfied()) {
     result.status = support.status;
     result.message = support.message;

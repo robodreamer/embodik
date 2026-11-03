@@ -130,6 +130,49 @@ the effective nominal bounds, and each side's expansion capacity. Post-solve
 expansion and decay run only after a successful native solve. This band is
 solver adaptation, not accepted physical history.
 
+## Affine State Envelopes
+
+For fixed-base additive scalar joints, `AffineStateConstraint` expresses
+`y = C @ q + offset`. Its position bounds, symmetric rate/acceleration ceilings
+and declared braking magnitudes use the same envelope builder as geometric
+constraints. This supports coupled joint facets without projecting a solved
+command back onto a position bound.
+
+```python
+import numpy as np
+import embodik
+
+envelope = embodik.AffineStateConstraint()
+envelope.source_id = "coupled-joints"
+# For a two-coordinate model: -0.5 <= q[0] + q[1] + 0.25 <= 0.5.
+envelope.coefficient_matrix = np.array([[1.0, 1.0]])
+envelope.offset = np.array([0.25])
+envelope.lower_bounds = np.array([-0.5])
+envelope.upper_bounds = np.array([0.5])
+policy = embodik.GeometricConstraintAccelerationPolicy()
+policy.rate_limits = np.array([1.0])
+policy.acceleration_limits = np.array([10.0])
+policy.lower_braking_accelerations = np.array([2.0])
+policy.upper_braking_accelerations = np.array([2.0])
+envelope.policy = policy
+options = embodik.AccelerationSolveOptions()
+options.affine_state_constraints = [envelope]
+```
+
+Every policy vector must match the number of rows. Matrices and offsets are
+frozen for one call; state-dependent coefficients require a different model.
+The adapter validates endpoints and every interior quadratic position extremum,
+then checks next-state viability and joint acceleration support. Outside states
+are rejected. Braking support is required toward a moving coordinate's active
+boundary when its remaining margin is within stopping distance plus one
+control horizon's maximum outward travel. This is re-evaluated at the actual
+integrated endpoint.
+A stationary coordinate does not require acceleration further into a limit.
+Per-axis braking support is not a certificate of a complete
+jointly feasible stopping trajectory, especially with other hard constraints.
+Native collision certification and the sampled velocity-collision adapter
+explicitly reject this family until their stopping integration is qualified.
+
 ## Compatible Joint Box
 
 Every solve starts from one combined state box. Position, velocity, and

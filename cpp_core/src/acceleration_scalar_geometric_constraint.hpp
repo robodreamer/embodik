@@ -12,6 +12,8 @@
 
 namespace embodik::detail {
 
+enum class BrakingSupportRequirement { kBothDirections, kReachableBoundary };
+
 enum class ScalarGeometricViolationKind { kStateBound, kBrakingViability };
 
 struct ScalarGeometricViolation {
@@ -100,14 +102,17 @@ ScalarGeometricPreparationResult prepare_scalar_geometric_constraint(
     const ScalarGeometricDifferential &differential, double dt,
     Eigen::Index variable_count,
     const Eigen::VectorXd &joint_acceleration_lower,
-    const Eigen::VectorXd &joint_acceleration_upper);
+    const Eigen::VectorXd &joint_acceleration_upper,
+    BrakingSupportRequirement braking_support = BrakingSupportRequirement::kBothDirections);
 
 ScalarGeometricConstraintResult validate_scalar_geometric_joint_box_support(
     const ScalarGeometricConstraintSpecification &specification,
     const ScalarGeometricDifferential &differential,
     const Eigen::VectorXd &joint_acceleration_lower,
     const Eigen::VectorXd &joint_acceleration_upper,
-    const std::string &state_label);
+    const std::string &state_label,
+    BrakingSupportRequirement braking_support = BrakingSupportRequirement::kBothDirections,
+    double support_horizon = 0.0);
 
 ScalarGeometricConstraintResult validate_scalar_geometric_linearized_acceptance(
     const PreparedScalarGeometricConstraint &prepared,

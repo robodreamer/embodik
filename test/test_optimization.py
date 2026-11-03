@@ -64,6 +64,55 @@ def test_explicit_ridge_changes_only_the_requested_objective():
     assert_solution(eik.solve_ls(np.eye(2), np.ones(2), ridge=1.0), [0.5, 0.5], 0.5)
 
 
+@pytest.mark.parametrize("scale", [1e-100, 1e-4, 1.0, 1e100])
+@pytest.mark.parametrize("kind", ["ls", "qp"])
+@pytest.mark.parametrize("warm", [None, [0.6, -0.2]])
+def test_uniform_objective_units_do_not_pin_a_nonoptimal_face(scale, kind, warm):
+    J = np.array([[2.0, 2.0], [1.0, 0.0]])
+    target = np.array([4.0, 5.0])
+    A = np.array([[-2.0, -1.0], [-1.0, 2.0]])
+    lower, upper = -np.ones(2), np.ones(2)
+    options = dict(x0=None if warm is None else np.array(warm))
+    if kind == "ls":
+        result = eik.solve_ls(scale * J, scale * target, A, lower, upper, **options)
+        objective = 14.4
+    else:
+        result = eik.solve_qp(
+            scale**2 * (J.T @ J), -(scale**2) * (J.T @ target), A, lower, upper, **options
+        )
+        objective = -6.1
+    assert_solution(result, [0.2, 0.6])
+    assert result.objective / scale**2 == pytest.approx(objective, abs=1e-10)
+
+
+@pytest.mark.parametrize("scale", [1e-100, 1e-4, 1.0, 1e100])
+def test_residual_unit_normalization_preserves_explicit_ridge_weight(scale):
+    J = np.array([[2.0, 2.0], [1.0, 0.0]])
+    target = np.array([4.0, 5.0])
+    A = np.array([[-2.0, -1.0], [-1.0, 2.0]])
+    result = eik.solve_ls(
+        scale * J, scale * target, A, -np.ones(2), np.ones(2), ridge=0.5 * scale**2
+    )
+    assert_solution(result, [4.0 / 15.0, 7.0 / 15.0])
+    assert result.objective / scale**2 == pytest.approx(869.0 / 60.0, abs=1e-10)
+
+
+@pytest.mark.parametrize("kind", ["ls", "qp", "ridge", "target", "linear_term"])
+def test_unrepresentable_objective_rescaling_is_not_reported_solved(kind):
+    if kind == "ls":
+        result = eik.solve_ls(np.diag([1e200, 1e-200]), np.zeros(2))
+    elif kind == "qp":
+        result = eik.solve_qp(np.diag([1e200, 1e-200]), np.zeros(2))
+    elif kind == "ridge":
+        result = eik.solve_ls(np.ones((1, 1)) * 1e100, np.zeros(1), ridge=1e-300)
+    elif kind == "target":
+        result = eik.solve_ls(np.ones((1, 1)) * 1e-300, np.ones(1) * 1e100)
+    else:
+        result = eik.solve_qp(np.ones((1, 1)) * 1e-300, np.ones(1) * 1e100)
+    assert result.status == eik.SolveStatus.NO_PROGRESS
+    assert not result.success and result.x.size == 0
+
+
 def test_stacked_horizon_dynamics_and_control_bounds():
     J = np.diag([1.0, 1.0, np.sqrt(0.1), np.sqrt(0.1)])
     A = np.array(
@@ -168,7 +217,7 @@ def test_dependent_inconsistent_ls_is_conservatively_uncertified():
 
 def test_rounded_schur_pivot_is_not_an_exact_rank_certificate():
     a = 0.1
-    r = eik.solve_ls(np.array([[1.0, a], [a, a*a]]), np.array([-a, 1.0]))
+    r = eik.solve_ls(np.array([[1.0, a], [a, a * a]]), np.array([-a, 1.0]))
     assert not r.success and r.status == eik.SolveStatus.NO_PROGRESS
     assert r.x.size == 0
 

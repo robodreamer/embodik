@@ -256,7 +256,8 @@ AccelerationSolverResult AccelerationSolver::solve_with_velocity_collision(
         "same RobotModel",
         diagnostics));
   }
-  if (collision_solver.get_linear_position_constraint_rows() > 0) {
+  if (collision_solver.get_linear_position_constraint_rows() > 0 ||
+      !options.affine_state_constraints.empty()) {
     return finish(velocity_collision_lift_failure(
         SolverStatus::kInvalidInput,
         "velocity collision lift does not certify coupled position-row stopping",

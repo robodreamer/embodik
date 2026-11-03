@@ -230,6 +230,16 @@ void bind_acceleration_solver(nb::module_ &m) {
       DEF_VALUE_PROP(GeometricConstraintAccelerationPolicy,
                      upper_braking_accelerations);
 
+  nb::class_<AffineStateConstraint>(m, "AffineStateConstraint",
+      "Affine y=Cq+b state envelope for fixed-base additive scalar joints.")
+      .def(nb::init<>())
+      .def_rw("source_id", &AffineStateConstraint::source_id)
+      DEF_VALUE_PROP(AffineStateConstraint, coefficient_matrix)
+      DEF_VALUE_PROP(AffineStateConstraint, offset)
+      DEF_VALUE_PROP(AffineStateConstraint, lower_bounds)
+      DEF_VALUE_PROP(AffineStateConstraint, upper_bounds)
+      DEF_VALUE_PROP(AffineStateConstraint, policy);
+
   nb::class_<ComSupportPolygonAccelerationPolicy>(
       m, "ComSupportPolygonAccelerationPolicy")
       .def(nb::init<>())
@@ -389,6 +399,7 @@ void bind_acceleration_solver(nb::module_ &m) {
             self.effort_constraints = std::move(value);
           })
       DEF_VALUE_PROP(AccelerationSolveOptions, affine_constraints)
+      DEF_VALUE_PROP(AccelerationSolveOptions, affine_state_constraints)
       DEF_VALUE_PROP(AccelerationSolveOptions, frozen_next_velocity_constraints)
       DEF_VALUE_PROP(AccelerationSolveOptions, task_acceleration_bounds)
       DEF_VALUE_PROP(AccelerationSolveOptions, centroidal_momentum_rate_objectives)

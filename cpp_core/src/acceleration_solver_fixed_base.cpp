@@ -1,4 +1,5 @@
 #include "acceleration_solver_internal.hpp"
+#include "acceleration_affine_state_constraint.hpp"
 
 namespace embodik {
 using namespace acceleration_solver_internal;
@@ -170,12 +171,22 @@ AccelerationSolverResult AccelerationSolver::solve_impl(
     effort_constraint = std::move(prepared_effort);
   }
 
+  std::vector<detail::PreparedAffineStateConstraint> affine_state_constraints;
+  for (const auto &constraint : options.affine_state_constraints) {
+    auto prepared = detail::prepare_affine_state_constraint(
+        constraint, *robot_, q, dq, dt, state_box.lower, state_box.upper);
+    if (!prepared.satisfied())
+      return finish(clear_outputs(failure(prepared.status, prepared.message)));
+    effective_options.affine_constraints.push_back(
+        prepared.prepared->scalar.state_box.physical_constraint);
+    affine_state_constraints.push_back(std::move(*prepared.prepared));
+  }
   std::unordered_set<std::string> constraint_source_ids;
   ConstraintValidation constraint_validation;
-  if (!options.affine_constraints.empty() ||
+  if (!effective_options.affine_constraints.empty() ||
       !options.frozen_next_velocity_constraints.empty()) {
     constraint_validation = validate_acceleration_constraints(
-        options.affine_constraints, options.frozen_next_velocity_constraints,
+        effective_options.affine_constraints, options.frozen_next_velocity_constraints,
         robot_->nv(), &constraint_source_ids);
   }
   if (constraint_validation.status != SolverStatus::kSuccess) {
@@ -408,10 +419,10 @@ AccelerationSolverResult AccelerationSolver::solve_impl(
     return finish(failure(SolverStatus::kNumericalError,
                           "failed to assemble effort constraints"));
   }
-  if (!options.affine_constraints.empty() &&
+  if (!effective_options.affine_constraints.empty() &&
       !constraints->append_block(make_affine_constraint_block(
-          options.affine_constraints, robot_->nv(),
-          count_constraint_rows(options.affine_constraints)))) {
+          effective_options.affine_constraints, robot_->nv(),
+          count_constraint_rows(effective_options.affine_constraints)))) {
     return finish(failure(
         SolverStatus::kNumericalError,
         "failed to assemble affine acceleration constraints"));
@@ -620,7 +631,7 @@ AccelerationSolverResult AccelerationSolver::solve_impl(
     rows(robot_->nv(), "joint_state_box");
     rows(native_collision_prepared.physical_constraint.coefficient_matrix.rows(), "native_collision");
     rows(effort_constraint.has_value() ? robot_->nv() : 0, "effort");
-    affine_rows(options.affine_constraints);
+    affine_rows(effective_options.affine_constraints);
     affine_rows(frozen_transform.transformed_constraints);
     rows(lock_rows.coefficients.rows(), "joint_locks");
     affine_rows(task_bound_constraints);
@@ -755,9 +766,9 @@ AccelerationSolverResult AccelerationSolver::solve_impl(
         SolverStatus::kNumericalError,
         "accepted acceleration violates native collision constraints"));
   }
-  if (!options.affine_constraints.empty() &&
+  if (!effective_options.affine_constraints.empty() &&
       !accepted_affine_constraints_are_satisfied(
-          options.affine_constraints, result.joint_accelerations)) {
+          effective_options.affine_constraints, result.joint_accelerations)) {
     return finish(clear_outputs(failure(
         SolverStatus::kNumericalError,
         "accepted acceleration violates an affine acceleration constraint")));
@@ -908,6 +919,7 @@ AccelerationSolverResult AccelerationSolver::solve_impl(
         "accepted acceleration produced non-finite next state"));
   }
   const bool has_predicted_geometric_acceptance =
+      !affine_state_constraints.empty() ||
       !tight_point_constraints.prepared_constraints.empty() ||
       !tight_frame_pose_constraints.prepared_constraints.empty() ||
       !torso_pose_bound_constraints.prepared_constraints.empty() ||
@@ -963,6 +975,14 @@ AccelerationSolverResult AccelerationSolver::solve_impl(
     return refined;
   };
   if (has_predicted_geometric_acceptance) {
+    for (const auto &prepared : affine_state_constraints) {
+      const auto acceptance = detail::validate_affine_state_constraint_acceptance(
+          prepared, result.joint_accelerations, dt,
+          result.q_solution, result.joint_velocities_next,
+          predicted_state_box->lower, predicted_state_box->upper);
+      if (!acceptance.satisfied())
+        return finish(clear_outputs(failure(acceptance.status, acceptance.message)));
+    }
     for (const auto &prepared :
          tight_point_constraints.prepared_constraints) {
       const auto acceptance =

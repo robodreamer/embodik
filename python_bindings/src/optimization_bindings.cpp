@@ -55,16 +55,40 @@ void bind_optimization(nb::module_ &m) {
           const std::optional<Eigen::VectorXd> &l,
           const std::optional<Eigen::VectorXd> &u,
           double ridge, const std::optional<Eigen::VectorXd> &x0,
-          double tol, unsigned int max_iter, const std::string &backend) {
+          double tol, unsigned int max_iter, const std::string &backend,
+          const std::optional<Eigen::MatrixXd> &S,
+          const std::optional<Eigen::VectorXd> &sl,
+          const std::optional<Eigen::VectorXd> &su,
+          const std::optional<Eigen::VectorXd> &weights) {
     if (backend != "auto" && backend != "cpu") return backend_failure(backend);
     const auto c = constraints(J.cols(), A, l, u);
+    if (S) {
+      if (weights && weights->size() != S->rows()) {
+        SolveResult invalid;
+        invalid.message = "weights must have one value per soft row";
+        return invalid;
+      }
+      const auto soft = constraints(J.cols(), S, sl, su);
+      return solve_ls(J, target, c.A, c.l, c.u,
+          SoftBounds{soft.A, soft.l, soft.u, weights.value_or(Eigen::VectorXd())},
+          ridge, SolveOptions{tol, max_iter, x0});
+    }
+    if (sl || su || weights) {
+      SolveResult invalid;
+      invalid.message = "soft bounds and weights require S";
+      return invalid;
+    }
     return solve_ls(J, target, c.A, c.l, c.u, ridge, SolveOptions{tol, max_iter, x0});
   }, nb::arg("J"), nb::arg("target"), nb::arg("A") = nb::none(),
      nb::arg("l") = nb::none(), nb::arg("u") = nb::none(), nb::kw_only(),
      nb::arg("ridge") = 0.0, nb::arg("x0") = nb::none(), nb::arg("tol") = 1e-8,
      nb::arg("max_iter") = 200, nb::arg("backend") = "auto",
+     nb::arg("S") = nb::none(), nb::arg("sl") = nb::none(),
+     nb::arg("su") = nb::none(), nb::arg("weights") = nb::none(),
      "Minimize .5*||J*x-target||^2 + .5*ridge*||x||^2 subject to l<=A*x<=u. "
-     "CPU dense arrays only initially; zero ridge is supported. tol applies to normalized hard rows.");
+     "Optional S, sl, su, weights add .5*sum(weights*dist(S*x,[sl,su])^2); "
+     "weights default to one and soft bounds default to infinite. "
+     "CPU dense arrays only; tol applies to normalized hard rows.");
   m.def("solve_qp", [](const Eigen::MatrixXd &P, const Eigen::VectorXd &q,
           const std::optional<Eigen::MatrixXd> &A,
           const std::optional<Eigen::VectorXd> &l,

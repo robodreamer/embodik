@@ -142,3 +142,91 @@ def test_priority_trace_identifies_protected_tasks_and_final_result(tmp_path):
     assert len(candidate.baseline_block_merits) == 2
     assert candidate.accepted_fraction == 1.0
     np.testing.assert_array_equal(trace.position_result_q, result.q_solution)
+
+
+def test_escape_trace_records_have_owned_storage():
+    record = eik.EscapeCandidateTrace()
+    assert not record.candidate_constructed
+    assert record.candidate_q.size == 0
+    assert not record.accepted
+    assert record.nominal_problem_count == 0
+    record.step_origin = np.array([1.0, 2.0])
+    record.escape_origin = np.array([3.0, 4.0])
+    record.command_origin = np.array([5.0, 6.0])
+    record.proposed_delta = np.array([0.01, 0.02])
+    record.integration_dt = 0.03
+    record.first_rejection_family = "invalid_context"
+    record.nominal_problem_count = 7
+    trace = eik.SolverProblemTrace()
+    trace.escape_candidates = [record]
+    record.step_origin = np.zeros(2)
+    saved = trace.escape_candidates[0]
+    np.testing.assert_array_equal(saved.step_origin, [1.0, 2.0])
+    np.testing.assert_array_equal(saved.escape_origin, [3.0, 4.0])
+    np.testing.assert_array_equal(saved.command_origin, [5.0, 6.0])
+    np.testing.assert_array_equal(saved.proposed_delta, [0.01, 0.02])
+    assert saved.integration_dt == 0.03
+    assert saved.first_rejection_family == "invalid_context"
+    assert saved.nominal_problem_count == 7
+
+
+@pytest.mark.parametrize("mandatory", [False, True])
+def test_escape_trace_preserves_outcomes_and_rejected_attempts(tmp_path, mandatory):
+    from test_finite_zone_collision_backtracking import _case
+
+    baseline, options, targets, seed, _ = _case(tmp_path, 1.0, True, mandatory=mandatory)
+    expected = baseline.solve_position_step(seed, targets, options)
+    assert not baseline.get_last_problem_trace().escape_candidates
+
+    solver, options, targets, seed, _ = _case(tmp_path, 1.0, True, mandatory=mandatory)
+    solver.enable_problem_tracing()
+    actual = solver.solve_position_step(seed, targets, options)
+    assert actual.status == expected.status
+    assert actual.status_message == expected.status_message
+    assert actual.position_step_hold_active == expected.position_step_hold_active
+    assert actual.stall_escape_count == expected.stall_escape_count
+    np.testing.assert_array_equal(actual.q_solution, expected.q_solution)
+    np.testing.assert_array_equal(actual.joint_velocities, expected.joint_velocities)
+    trace = solver.get_last_problem_trace()
+    assert trace.escape_candidates
+    if mandatory:
+        # Records from rejected recovery attempts belong to the outer request.
+        assert actual.status != eik.SolverStatus.SUCCESS
+    families = {
+        "invalid_context",
+        "nonfinite",
+        "coupled_position",
+        "locks",
+        "hard_rows",
+        "corridor",
+        "outer_rate_corridor",
+        "max_configuration_step_norm",
+        "collision",
+        "com",
+    }
+    for record in trace.escape_candidates:
+        assert record.step_origin.shape == seed.shape
+        assert record.escape_origin.shape == seed.shape
+        assert record.command_origin.shape == seed.shape
+        assert record.proposed_delta.shape == seed.shape
+        assert record.integration_dt > 0
+        assert 0 <= record.nominal_problem_count <= len(trace.velocity_problems)
+        assert record.accepted == (record.first_rejection_family == "")
+        if not record.accepted:
+            assert record.first_rejection_family in families
+        if record.candidate_constructed:
+            assert record.candidate_q.shape == seed.shape
+        else:
+            assert record.candidate_q.size == 0
+
+    saved = trace.escape_candidates[0]
+    original_family = saved.first_rejection_family
+    original_origin = saved.step_origin.copy()
+    saved.first_rejection_family = "caller edit"
+    saved.step_origin = np.full(seed.shape, 999.0)
+    fresh = solver.get_last_problem_trace().escape_candidates[0]
+    assert fresh.first_rejection_family == original_family
+    np.testing.assert_array_equal(fresh.step_origin, original_origin)
+    solver.solve_velocity(seed)
+    assert not solver.get_last_problem_trace().escape_candidates
+    assert trace.escape_candidates

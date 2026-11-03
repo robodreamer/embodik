@@ -159,11 +159,25 @@ NB_MODULE(_embodik_impl, m) {
       .def_rw("held", &eik::ContinuityDecisionTrace::held)
       .def_rw("reason", &eik::ContinuityDecisionTrace::reason);
 
+  nb::class_<eik::EscapeCandidateTrace>(m, "EscapeCandidateTrace")
+      .def(nb::init<>())
+      .def_rw("step_origin", &eik::EscapeCandidateTrace::step_origin)
+      .def_rw("escape_origin", &eik::EscapeCandidateTrace::escape_origin)
+      .def_rw("command_origin", &eik::EscapeCandidateTrace::command_origin)
+      .def_rw("proposed_delta", &eik::EscapeCandidateTrace::proposed_delta)
+      .def_rw("integration_dt", &eik::EscapeCandidateTrace::integration_dt)
+      .def_rw("candidate_constructed", &eik::EscapeCandidateTrace::candidate_constructed)
+      .def_rw("candidate_q", &eik::EscapeCandidateTrace::candidate_q)
+      .def_rw("accepted", &eik::EscapeCandidateTrace::accepted)
+      .def_rw("first_rejection_family", &eik::EscapeCandidateTrace::first_rejection_family)
+      .def_rw("nominal_problem_count", &eik::EscapeCandidateTrace::nominal_problem_count);
+
   nb::class_<eik::SolverProblemTrace>(m, "SolverProblemTrace")
       .def(nb::init<>())
       .def_rw("velocity_problems", &eik::SolverProblemTrace::velocity_problems)
       .def_rw("priority_candidates", &eik::SolverProblemTrace::priority_candidates)
       .def_rw("continuity_decisions", &eik::SolverProblemTrace::continuity_decisions)
+      .def_rw("escape_candidates", &eik::SolverProblemTrace::escape_candidates)
       .def_rw("position_result_q", &eik::SolverProblemTrace::position_result_q)
       .def_rw("position_status", &eik::SolverProblemTrace::position_status)
       .def_rw("position_status_message", &eik::SolverProblemTrace::position_status_message)

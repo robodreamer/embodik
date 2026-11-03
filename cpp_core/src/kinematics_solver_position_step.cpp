@@ -209,14 +209,35 @@ bool KinematicsSolver::make_position_step_escape_candidate(
     const Eigen::VectorXd &proposed_delta, double integration_dt,
     const Eigen::VectorXd &command_origin,
     const PositionStepOptions &options, Eigen::VectorXd &candidate) {
+  std::optional<EscapeCandidateTrace> trace;
+  if (problem_tracing_enabled_) {
+    trace.emplace();
+    trace->step_origin = step_origin;
+    trace->escape_origin = escape_origin;
+    trace->command_origin = command_origin;
+    trace->proposed_delta = proposed_delta;
+    trace->integration_dt = integration_dt;
+    trace->nominal_problem_count = last_problem_trace_.velocity_problems.size();
+  }
+  const auto finish = [&](bool accepted, const char *rejection_family) {
+    if (trace) {
+      trace->accepted = accepted;
+      trace->first_rejection_family = rejection_family;
+      // This shared request trace is not part of speculative state rollback.
+      last_problem_trace_.escape_candidates.push_back(std::move(*trace));
+    }
+    return accepted;
+  };
   const auto *hard = position_step_hard_constraints_;
-  if (hard == nullptr || !hard->valid || !std::isfinite(integration_dt) ||
-      integration_dt <= 0.0 || hard->dt != integration_dt ||
+  if (hard == nullptr || !hard->valid)
+    return finish(false, "invalid_context");
+  if (!std::isfinite(integration_dt)) return finish(false, "nonfinite");
+  if (integration_dt <= 0.0 || hard->dt != integration_dt ||
       hard->q.size() != step_origin.size() ||
       (hard->q.array() != step_origin.array()).any() ||
-      proposed_delta.size() != robot_->nv() || !proposed_delta.allFinite()) {
-    return false;
-  }
+      proposed_delta.size() != robot_->nv())
+    return finish(false, "invalid_context");
+  if (!proposed_delta.allFinite()) return finish(false, "nonfinite");
   const auto &mapping = velocity_to_config_index_cache();
   std::vector<int> frozen = build_step_locked_indices(options);
   append_unique_indices(frozen, options.integration_zero_velocity_indices);
@@ -255,46 +276,57 @@ bool KinematicsSolver::make_position_step_escape_candidate(
     project_scalar_configuration_to_true_joint_limits(
         candidate, lower, upper, mapping, robot_->nv());
   }
-  if (!candidate.allFinite()) return false;
-  if (!linear_position_step_acceptable(step_origin, candidate)) return false;
+  if (trace) {
+    trace->candidate_constructed = true;
+    trace->candidate_q = candidate;
+  }
+  if (!candidate.allFinite()) return finish(false, "nonfinite");
+  if (!linear_position_step_acceptable(step_origin, candidate))
+    return finish(false, "coupled_position");
   const Eigen::VectorXd displacement =
       pinocchio::difference(robot_->model(), step_origin, candidate);
   const Eigen::VectorXd velocity = displacement / integration_dt;
-  if (!velocity.allFinite()) return false;
+  if (!velocity.allFinite()) return finish(false, "nonfinite");
   constexpr double tolerance = 1e-8;
   for (int vi : frozen) {
     if (vi >= 0 && vi < displacement.size() &&
-        std::abs(displacement[vi]) > 1e-12) return false;
+        std::abs(displacement[vi]) > 1e-12) return finish(false, "locks");
   }
   if (hard->matrix.cols() != velocity.size() ||
       hard->matrix.rows() != hard->lower.size() ||
-      hard->matrix.rows() != hard->upper.size()) return false;
+      hard->matrix.rows() != hard->upper.size())
+    return finish(false, "invalid_context");
   const Eigen::VectorXd image = hard->matrix * velocity;
-  if (!image.allFinite() ||
-      (image.array() < hard->lower.array() - tolerance).any() ||
-      (image.array() > hard->upper.array() + tolerance).any()) return false;
-  if (!position_step_seed_corridor_acceptable(candidate)) return false;
+  if (!image.allFinite()) return finish(false, "nonfinite");
+  if ((image.array() < hard->lower.array() - tolerance).any() ||
+      (image.array() > hard->upper.array() + tolerance).any())
+    return finish(false, "hard_rows");
+  if (!position_step_seed_corridor_acceptable(candidate))
+    return finish(false, "corridor");
   // Direct escapes already enforced all tangent coordinates, including joints
   // without a scalar nq mapping. Preserve that stronger check.
   if (position_step_seed_corridor_ != nullptr) {
     const auto &corridor = *position_step_seed_corridor_;
     const Eigen::VectorXd command_delta = pinocchio::difference(
         robot_->model(), corridor.reference_q, candidate);
-    if (!command_delta.allFinite() ||
-        (command_delta.cwiseAbs().array() >
+    if (!command_delta.allFinite()) return finish(false, "nonfinite");
+    if ((command_delta.cwiseAbs().array() >
          corridor.velocity_limits.array() * corridor.outer_dt + tolerance).any())
-      return false;
+      return finish(false, "outer_rate_corridor");
   }
   if (options.max_configuration_step_norm > 0.0 &&
       pinocchio::difference(robot_->model(), command_origin, candidate).norm() >
-          options.max_configuration_step_norm + tolerance) return false;
+          options.max_configuration_step_norm + tolerance)
+    return finish(false, "max_configuration_step_norm");
   const auto before = evaluate_post_step_collision_recovery_margins(step_origin);
   const auto after = evaluate_post_step_collision_recovery_margins(candidate);
-  const bool acceptable =
-      collision_recovery_margins_acceptable(before, after, 0.0) &&
+  const bool collision_acceptable =
+      collision_recovery_margins_acceptable(before, after, 0.0);
+  const bool acceptable = collision_acceptable &&
       position_step_com_recovery_acceptable(step_origin, candidate);
   robot_->update_configuration(escape_origin);
-  return acceptable;
+  return finish(acceptable,
+                acceptable ? "" : (collision_acceptable ? "com" : "collision"));
 }
 
 bool KinematicsSolver::position_step_com_recovery_acceptable(

@@ -36,6 +36,7 @@ bool native_collision_options_are_supported(
   const bool unsupported =
       options.effort_constraints.has_value() ||
       !options.affine_constraints.empty() ||
+      !options.affine_state_constraints.empty() ||
       !options.frozen_next_velocity_constraints.empty() ||
       !options.task_acceleration_bounds.empty() ||
       !options.centroidal_momentum_rate_bounds.empty() ||
