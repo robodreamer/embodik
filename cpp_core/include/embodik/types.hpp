@@ -190,6 +190,70 @@ struct ObjectiveSolveConfig {
   bool use_goal_directed_limit_clamp = false;
 };
 
+/// Optional snapshot of one nominal hierarchical backend call. Matrices are in
+/// backend coordinates; physical velocity = backend_column_scale * solution.
+/// Later adapter recovery, contact projection and integration are not replayed.
+struct VelocityProblemTrace {
+  Eigen::VectorXd seed_q;
+  double validation_dt = 0.0;
+  Eigen::MatrixXd constraint_matrix;
+  Eigen::VectorXd lower_bounds;
+  Eigen::VectorXd upper_bounds;
+  Eigen::VectorXd maximum_softening_factors;
+  std::vector<Eigen::VectorXd> objective_goals;
+  std::vector<Eigen::MatrixXd> objective_jacobians;
+  std::vector<ObjectiveSolveConfig> objective_configs;
+  VelocitySolverConfig solver_config;
+  Eigen::VectorXd backend_column_scale;
+  Eigen::MatrixXd stationary_primary;
+  bool validate_primary_range = true;
+  std::vector<std::string> active_task_names;
+  std::vector<int> active_task_priorities;
+  Eigen::VectorXd backend_solution;
+  SolverStatus backend_status = SolverStatus::kInvalidInput;
+  std::string backend_status_message;
+  Eigen::VectorXd returned_velocity;
+  SolverStatus returned_status = SolverStatus::kInvalidInput;
+  std::string returned_status_message;
+};
+
+struct PriorityCandidateTrace {
+  Eigen::VectorXd before_q;
+  Eigen::VectorXd proposed_q;
+  std::vector<Eigen::Vector2d> baseline_block_merits;
+  std::vector<Eigen::Vector2d> proposed_block_merits;
+  std::vector<std::string> task_names;
+  std::vector<int> task_priorities;
+  double accepted_fraction = 0.0;
+};
+
+struct ContinuityDecisionTrace {
+  Eigen::VectorXd seed_q;
+  Eigen::VectorXd candidate_q;
+  double initial_merit = 0.0;
+  double final_merit = 0.0;
+  double configuration_step_norm = 0.0;
+  std::vector<double> initial_block_merits;
+  std::vector<double> final_block_merits;
+  int merit_priority = 0;
+  int window_samples_before = 0;
+  int direction_reversals_before = 0;
+  bool was_holding = false;
+  bool held = false;
+  std::string reason;
+};
+
+/// Snapshot of the most recent public position-step or velocity request.
+struct SolverProblemTrace {
+  std::vector<VelocityProblemTrace> velocity_problems;
+  std::vector<PriorityCandidateTrace> priority_candidates;
+  std::vector<ContinuityDecisionTrace> continuity_decisions;
+  Eigen::VectorXd position_result_q;
+  SolverStatus position_status = SolverStatus::kInvalidInput;
+  std::string position_status_message;
+  bool position_hold_active = false;
+};
+
 /**
  * @brief Exact collision-geometry names that identify one unordered pair.
  *
@@ -440,6 +504,9 @@ struct PositionStepOptions {
   /// Capture the native velocity and nominal integrated configuration per step.
   /// These records precede candidate acceptance/backoff guards.
   bool record_velocity_candidates = false;
+  /// Enforce each explicitly configured TaskTarget merit budget separately.
+  /// Default false retains the same-priority aggregate merit contract.
+  bool per_target_priority_budgets = false;
   double dt = -1.0;              // Integration timestep per step (≤0 → solver.dt)
   /// Optional caller-owned current generalized velocity (size nv). Required
   /// when a velocity-ZMP constraint is active so solve_position_step can form
@@ -538,6 +605,10 @@ struct PositionStepOptions {
   /// scale collapse or NUMERICAL_ERROR under active collision/CoM constraints.
   /// Mirrors PositionIKOptions::primary_allow_min_error_fallback semantics.
   bool primary_allow_min_error_fallback = false;
+  /// Retry stalled or rejected, unchanged ordinary velocity commands once with strictly
+  /// lower posture-only bands temporarily using MIN_ERROR. Primary targets,
+  /// priorities and physical constraints are unchanged. Disabled by default.
+  bool allow_best_effort_posture_retry = false;
   /// Try one extra solve with these nv-indices hard locked before the normal
   /// solve. The locked candidate is accepted when it is continuous and each
   /// active-target error component is either inside tolerance or still making

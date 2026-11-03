@@ -124,6 +124,22 @@ TEST_F(CollisionAccelerationCacheTest,
   }
 }
 
+TEST_F(CollisionAccelerationCacheTest,
+       ExplicitTrajectoryFloorDoesNotSpendAdditionalSampleTolerance) {
+  auto anchored = solver(false, 1.0);
+  anchored.configure_collision_constraint(0.1, {}, {}, true, 1);
+  const Eigen::Vector2d seed = Eigen::Vector2d::Zero();
+  constexpr double tolerance = 1e-9;
+  anchored.set_collision_trajectory_floor_anchor(seed, tolerance);
+  const Eigen::Vector2d near(0.5 * tolerance, 0.0);
+  const Eigen::Vector2d beyond(1.5 * tolerance, 0.0);
+  detail::VelocityCollisionConstraintProvider provider(anchored);
+  EXPECT_TRUE(provider.validate_samples(seed, {near}).acceptable);
+  EXPECT_FALSE(provider.validate_samples(seed, {beyond}).acceptable);
+  // The allowed first loss cannot become the next call's floor.
+  EXPECT_FALSE(provider.validate_samples(near, {beyond}).acceptable);
+}
+
 TEST(SpherePairDistanceLowerBound, IncludesRotatedOffsetsAndSignedOverlap) {
   BoundingSphere a{}, b{};
   a.center = Eigen::Vector3d(1.0, 0.0, 0.0);

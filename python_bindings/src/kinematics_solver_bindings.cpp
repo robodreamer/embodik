@@ -168,6 +168,17 @@ void bind_kinematics_solver(nb::module_ &m) {
            &KinematicsSolver::clear_all_target_velocities,
            "Clear direct target velocities on all registered tasks.")
 
+      .def("set_collision_trajectory_floor_anchor", &KinematicsSolver::set_collision_trajectory_floor_anchor,
+           nb::arg("q"), nb::arg("tolerance") = 1e-9,
+           "Anchor original named-pair floors until explicitly cleared; velocity-only position stepping")
+      .def("clear_collision_trajectory_floor_anchor", &KinematicsSolver::clear_collision_trajectory_floor_anchor)
+      .def("has_collision_trajectory_floor_anchor", &KinematicsSolver::has_collision_trajectory_floor_anchor)
+      .def("get_collision_trajectory_floor_tolerance", &KinematicsSolver::get_collision_trajectory_floor_tolerance)
+      .def("enable_problem_tracing", &KinematicsSolver::enable_problem_tracing,
+           nb::arg("enabled") = true,
+           "Enable diagnostic snapshots of nominal backend calls and priority checks; off by default")
+      .def("get_last_problem_trace", &KinematicsSolver::get_last_problem_trace,
+           "Return an owned snapshot for the latest velocity or position-step request")
       .def("get_task", &KinematicsSolver::get_task, nb::arg("name"),
            "Get a task by name")
 
@@ -763,6 +774,14 @@ void bind_kinematics_solver(nb::module_ &m) {
       .def("clear_com_constraint", &KinematicsSolver::clear_com_constraint,
            "Disable CoM support-polygon constraint.")
 
+      .def("set_linear_position_constraints",
+           &KinematicsSolver::set_linear_position_constraints, nb::arg("C"),
+           nb::arg("lower_bounds"), nb::arg("upper_bounds"),
+           "Set lower <= C @ q <= upper for fixed-base additive scalar joints. "
+           "Rebuilt at every inner state and integration horizon. Outside seeds "
+           "may recover without worsening any violated row. No acceleration or contacts.")
+      .def("clear_linear_position_constraints", &KinematicsSolver::clear_linear_position_constraints)
+      .def("get_linear_position_constraint_rows", &KinematicsSolver::get_linear_position_constraint_rows)
       .def("set_linear_velocity_constraints",
            &KinematicsSolver::set_linear_velocity_constraints, nb::arg("C"),
            nb::arg("lower_bounds"), nb::arg("upper_bounds"),

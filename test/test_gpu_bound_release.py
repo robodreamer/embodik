@@ -398,3 +398,33 @@ def test_rank_deficient_active_set_graph_rebuilds_changed_equality_prefix() -> N
         assert bool(torch.all(output <= inputs[3] + 1e-8))
         if index in (0, 2):
             torch.testing.assert_close(output, first, atol=0, rtol=0)
+
+
+@pytest.mark.parametrize("coupling", [6e-11, 7e-11, 9e-11])
+def test_numeric_blocker_exhaustion_retains_verified_cuda_checkpoint(coupling):
+    torch, native = _runtime()
+    convert = lambda value: torch.tensor(value, dtype=torch.float64, device="cuda")
+    jacobian = convert([[[0.0, 0.0, 0.0, 0.01, 0.0], [-coupling, -coupling, -coupling, -1.0, 1.0]]])
+    target = convert([[0.01, 0.0]])
+    lower, upper = convert([[-1.0] * 4 + [-10.0]]), convert([[1.0] * 4 + [0.4]])
+    original = torch.zeros_like(lower)
+    solver = native(2, 5, batch_capacity=1, device="cuda")
+    for _ in range(3):
+        solver.solve(jacobian, target, lower, upper, original)
+    torch.cuda.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        result = solver.solve(jacobian, target, lower, upper, original)
+    for requested in (0.01, 0.02, 0.01):
+        target[0, 0] = requested
+        graph.replay()
+        torch.cuda.synchronize()
+        assert solver.recovered.item()
+        scale = result[0, 3].item() * 0.01 / requested
+        expected = 0.4 * 0.01 / requested
+        assert expected - 1e-9 <= scale <= expected + 3 * coupling + 1e-9
+        torch.testing.assert_close(
+            (jacobian @ result.unsqueeze(-1)).squeeze(-1), scale * target, atol=1e-10, rtol=0
+        )
+        assert torch.all(result >= lower - 1e-10).item()
+        assert torch.all(result <= upper + 1e-10).item()

@@ -297,3 +297,24 @@ def test_sampled_velocity_collision_lift_is_non_certifying(tmp_path):
     assert result.collision_validation_allowed_pairs == 1
     assert result.collision_validation_pairs_checked == 3
     assert result.collision_lift_pairs_considered == 1
+
+
+def test_velocity_collision_lift_rejects_anchored_floors_without_stopping_certificate(tmp_path):
+    if not eik.AccelerationSolver.capabilities().supports_velocity_collision_lift:
+        pytest.skip("velocity collision lift unavailable")
+    robot = _collision_robot(tmp_path)
+    provider = eik.KinematicsSolver(robot)
+    provider.configure_collision_constraint(0.01, [], [], True, 1)
+    provider.set_collision_trajectory_floor_anchor(np.zeros(1), 1e-9)
+    solver = eik.AccelerationSolver(robot)
+    result = solver.solve_with_velocity_collision(
+        provider,
+        np.zeros(1),
+        np.zeros(1),
+        0.01,
+        _options_with_limits([10.0]),
+        eik.VelocityCollisionLiftOptions(),
+    )
+    assert result.status == eik.SolverStatus.INVALID_INPUT
+    assert "original-floor stopping" in result.status_message
+    assert not result.collision_step_certified

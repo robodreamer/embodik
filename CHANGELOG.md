@@ -7,34 +7,133 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.23.3] - 2026-11-18
-
-This patch adds official Rainbow RB-Y1 fixed-base adapters and keeps Linux
-wheels building on Eigen 3.3. The unqualified `rby1` preset follows official
-M v1.3. The previous `robot_descriptions` bimanual profile remains available
-as `rby1-legacy`.
-
 ### Added
 
-- Official Rainbow RB-Y1 A v1.2 and M v1.3 model adapters, pinned to SDK v0.10.1,
-  with cached assets, ready configurations and basic/collision/bimanual example
-  presets. `rby1` aliases official M v1.3; `rby1a` selects A v1.2. The old bimanual
-  profile is explicitly named `rby1-legacy`. Fixed-base IK retains 20 torso/arm
-  DOFs; wheel, head and finger joints are locked. SDK capsules are preserved as
-  equivalent standard URDF primitives.
-- `RobotVisualizer` accepts an explicit `urdf_path` for its ViserUrdf backend so
-  custom or adapted models can use the same description for solving and display.
+- Default-off `PositionStepOptions.allow_best_effort_posture_retry` permits a
+  transactional retry of stalled or rejected unchanged velocity steps with strictly lower
+  posture-only bands in MIN_ERROR, preserving primary targets and hard guards.
+
+- Native CPU coupled configuration bounds for fixed-base additive scalar joints.
+  Position-step inner states and retry horizons rebuild the velocity rows;
+  outside seeds can move inward without projection. Acceleration and contact
+  execution remain explicitly unsupported.
+
+- Explicit original collision-floor anchors for velocity-only CPU position
+  steps, with named-pair retention across commands, bounded candidate checks
+  and final fresh all-pair validation. Legacy recovery remains the default.
+
+- Opt-in individual position/orientation merit budgets for CPU multi-target
+  position steps, with physical velocity rows and finite-candidate validation.
+  The default same-priority aggregate policy is preserved.
+
+- Opt-in CPU velocity/position-step problem snapshots and nominal hierarchical
+  backend replay, including objective policies, variable mapping and per-target
+  priority-candidate merits and continuity guard decisions. Recording is
+  disabled by default.
 
 ### Fixed
 
+- Finite MIN_ERROR recovery distinguishes priority-validation rejection from
+  intentional continuity holds. A permitted weighted trial may lead to a
+  fully validated nominal correction; that command is retained without
+  incorrectly requiring the final backend to report weighted fallback.
+
+- CPU multi-target Cartesian MIN_ERROR steps can use an enabled constrained
+  weighted fallback after finite command rejection, even when the nominal
+  linear solve succeeded. The bounded retry retains original hard guards and
+  requires actual commanded primary-error reduction.
+
+- Opt-in best-effort posture recovery retries rejected finite candidates from
+  the incoming configuration even when their diagnostic output is nonzero.
+  An unaccepted candidate no longer suppresses recovery as apparent motion.
+
+- Finite pose-budget correction uses analytic physical norm gradients, including
+  fractional masks and soft-task joint exclusions, avoiding repeated disposable
+  FK probes away from the orientation log-map branch.
+
+- Individual finite pose-budget corrections reserve a bounded part of observed
+  nonlinear overshoot inside the original tolerance, avoiding repeated
+  near-boundary rejections that can stall feasible redundant motion.
+
+- Opt-in CPU velocity refinement recovers numerically invalid trailing MIN_ERROR
+  objectives using constrained least squares, preserving achieved higher-task
+  images, task modes, and original hard bounds without skipping suffix tasks.
+
+- Native hierarchical solves reject zero-row objective matrices explicitly
+  instead of entering an invalid numerical decomposition.
+
+- Opt-in CPU SCALE refinement protects achieved weak higher-priority directions
+  using numerical rank independently of task acceptance tolerance. Redundant
+  prefix rows retain an orthogonal nullspace for lower objectives.
+
+
+- Original-floor collision execution preserves a feasible Cartesian objective
+  through redundant joint motion before tangent projection. Multi-target
+  pose-budget retries also correct finite collision curvature and retain
+  bounded budget refinement, preventing avoidable holds with coupled guards.
+
+
+- Collision row and recovery checks use an enclosing-sphere certificate before
+  box/SAT refinement when it already proves the required clearance threshold.
+  Ambiguous pairs retain stronger bounds and precise distance validation.
+
+- Opt-in SCALE ray certification preserves legacy lower-task projected
+  preferences and skips incompatible lower raw-ray construction, retaining
+  primary protection while avoiding unnecessary feasibility searches.
+
+- Position-step `computation_time_ms` covers the complete native call, including
+  inner iterations, recovery and final guards, instead of the last velocity
+  solve. Rebaseline historical timing comparisons across this correction.
+
+- Explicitly authorized primary MIN_ERROR retries also cover final collision
+  rejections and held commands whose backend already reported MIN_ERROR. The
+  complete adapter is retried once from the unchanged state; original targets
+  and physical guards remain active, and acceleration commands are excluded.
+
+- CPU and Warp SCALE bound-release searches retain strictly verified positive checkpoints
+  when numerical direction and blocking-row thresholds disagree near a vertex,
+  preserving ray, hard bounds and prior task values without claiming optimality.
+
+- Explicitly authorized CPU position-step MIN_ERROR fallback can retry a
+  nominal positive-scale command rejected by final endpoint validation. The
+  bounded retry retains targets, physical guards and protected pose budgets.
+
+- Anchored CPU position steps can correct finite collision curvature with
+  bounded local row retries, allowing redundant joints to support motion
+  tangent to a clearance boundary without relaxing the original floors.
+
+- Physical SCALE-ray recovery honors explicit per-target pose budgets instead
+  of unnecessarily contracting a valid ray through a hidden strict merit
+  check. Unbudgeted recovery retains its existing acceptance policy.
+
+- The acceleration velocity-collision adapter explicitly rejects original-floor
+  anchors until stopping feasibility is supported, rather than treating its
+  sampled endpoint checks as an acceleration safety contract.
+
+- Explicit CPU individual-budget position steps use bounded finite-curvature
+  correction rows and partial-scale redistribution, allowing redundant joints
+  to support motion inside tight pose budgets while retaining final checks.
+
+- Opt-in partial SCALE refinement can rebuild an off-ray damped legacy seed
+  from a verified feasible task-entry witness, preserving earlier task images
+  and accepting only a certified larger scale under the original hard rows.
+
+- Fresh collision-pair distance queries use isolated cold GJK state and tighter
+  distance precision. Unrelated collision-query history no longer changes the
+  reported clearance at an identical configuration or falsely rejects an
+  unchanged seed under an original-floor policy.
+
+- Explicit original-floor mode uses matching precise cold distance queries
+  in constraint construction, candidate backoffs and final checks, avoiding
+  repeated admission of proposals that its final clearance check rejects.
+
+- Constrained position-step merit retries now reduce the interval or terminal
+  fraction by at least half after rejection. Near-one backtracking fractions no
+  longer consume every retry on essentially the same rejected nonlinear step;
+  the retry cap and final constraint checks are unchanged.
+
 - SVD factor checks no longer call `info()` on Eigen 3.3. The manylinux wheel
   image ships that version, which exposes singular values but not `SVD::info()`.
-- The bimanual example opens official and legacy RB-Y1 descriptions on visual
-  geometry. Collision and both-geometry views stay available in the dropdown.
-- Whole-body posture sliders no longer duplicate joints that already have a
-  manual joint slider, and manual joint control wins for those joints.
-- Checking or unchecking Auto IK Solve copies the current end-effector pose
-  into the arm targets.
 
 ## [0.23.2] - 2026-10-16
 
@@ -74,7 +173,10 @@ GPU acceleration support remains a subset of the CPU constraint API; see
   backoff order remain disabled by default.
 
 - `SolverRuntimeConfig.refine_partial_scale` exposes opt-in CPU refinement of
-  feasible partial directional SCALE solutions. The default remains disabled.
+  feasible partial directional SCALE solutions. Explicit CPU refinement also
+  repairs off-ray damped results, including reported full-scale commands, using
+  a verified feasible witness while preserving earlier task images and hard
+  rows. The default remains disabled.
 
 - Constrained weighted velocity IK accepts an optional validated feasible seed
   for primal optimization when a preceding solve already provides one.

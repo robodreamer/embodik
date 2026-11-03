@@ -211,7 +211,10 @@ def test_constrained_stationary_hold_reopens_for_productive_motion(structural_so
 
 
 @pytest.mark.parametrize("step_dt, should_reopen", [(0.001, True), (0.2, False)])
-def test_constrained_hold_keeps_satisfied_block_within_tolerance(tmp_path, step_dt, should_reopen):
+@pytest.mark.parametrize("weighted", [False, True])
+def test_constrained_hold_keeps_satisfied_block_within_tolerance(
+    tmp_path, step_dt, should_reopen, weighted
+):
     """A satisfied hold must admit small residuals, but reject excessive ones."""
     urdf = tmp_path / "coupled_rotation.urdf"
     urdf.write_text(
@@ -227,6 +230,9 @@ def test_constrained_hold_keeps_satisfied_block_within_tolerance(tmp_path, step_
     robot = eik.RobotModel(str(urdf))
     solver = eik.KinematicsSolver(robot)
     solver.dt = step_dt
+    runtime = solver.runtime_config()
+    runtime.weighted_fallback_enabled = weighted
+    solver.configure_runtime(runtime)
     solver.enable_position_limits(True)
     solver.enable_velocity_limits(True)
     solver.configure_collision_constraint(min_distance=0.05, max_constraints=1)
