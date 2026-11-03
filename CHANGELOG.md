@@ -100,6 +100,12 @@ not guaranteed by this release.
 
 ### Fixed
 
+- Bimanual viewer "Hold non-dragged arm" keeps the held hand at higher task
+  priority while the commanded motion is unfinished, including after dragging
+  stops. New input, mode changes and resets clear that ownership; shared torso
+  control stays below active hand tasks. This is a task-priority policy, not a
+  hard pose constraint or a guarantee of target acquisition.
+
 - Native builds require Eigen 3.4, matching the development baseline. Source
   and wheel builds install pinned Eigen headers instead of silently selecting
   older headers from the build image.

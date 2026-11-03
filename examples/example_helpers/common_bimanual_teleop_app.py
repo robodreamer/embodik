@@ -215,6 +215,7 @@ try:
         default_common_bimanual_ik_joint_names,
         resolve_common_bimanual_frames,
     )
+    from example_helpers.held_arm_priority import HeldArmPriority
     from example_helpers.ik_common import (
         DEFAULT_VISER_PORT,
         configure_solver_runtime_policy,
@@ -256,6 +257,7 @@ except ModuleNotFoundError as exc:
         default_common_bimanual_ik_joint_names,
         resolve_common_bimanual_frames,
     )
+    from examples.example_helpers.held_arm_priority import HeldArmPriority
     from examples.example_helpers.ik_common import (
         DEFAULT_VISER_PORT,
         configure_solver_runtime_policy,
@@ -664,10 +666,11 @@ def _apply_torso_control_priority_policy(
     decouple_torso_and_arms: bool,
     posture_controlled_indices: list[int],
     lift_posture_indices: list[int],
+    ee_priorities: tuple[int, ...] = (0,),
 ) -> bool:
     """Place shared torso control below EE tasks and remove lift posture bias."""
     torso_secondary = bool(torso_active and not decouple_torso_and_arms)
-    torso_task.priority = 1 if torso_secondary else 0
+    torso_task.priority = max(ee_priorities, default=0) + 1 if torso_secondary else 0
     if hasattr(posture_task, "set_controlled_joint_indices"):
         controlled_indices = list(posture_controlled_indices)
         if torso_secondary:
@@ -1698,6 +1701,7 @@ def main() -> None:
         if "lift" in name and (idx := joint_name_to_cfg.get(name)) is not None
     ]
     q = _apply_named_joint_seed(q, joint_name_to_cfg, q_lo, q_hi, default_joint_seed)
+    held_arm_priority = HeldArmPriority()
     q = _apply_soft_lift_margin(q, joint_name_to_cfg=joint_name_to_cfg, q_lo=q_lo, q_hi=q_hi)
     current_dq = np.zeros(robot.nv, dtype=float)
     nullspace_bias_q = np.asarray(q, dtype=float).copy()
@@ -2880,6 +2884,7 @@ def main() -> None:
     @backend_select.on_update
     def _(_evt) -> None:
         nonlocal gpu_fault, gpu_result
+        held_arm_priority.reset()
         gpu_fault = None
         gpu_result = None
         gpu_active = backend_select.value == "GPU Newton/Warp"
@@ -2981,6 +2986,7 @@ def main() -> None:
     def _reset_solver_state(reason: str) -> None:
         nonlocal solver, right_task, left_task, torso_task, posture, arm_nullspace
         nonlocal momentum_task, collision_cfg, com_cfg, accel_cfg, gpu_fault
+        held_arm_priority.reset()
         (
             solver,
             right_task,
@@ -3041,6 +3047,7 @@ def main() -> None:
 
     @snap_targets.on_click
     def _(_evt) -> None:
+        held_arm_priority.reset()
         _sync_targets_from_robot()
         status.value = "Status: Targets snapped to current EE poses"
 
@@ -3049,6 +3056,8 @@ def main() -> None:
     ) -> None:
         nonlocal q, current_dq, posture_target, nullspace_bias_q
         nonlocal prev_right_target_pose, prev_left_target_pose
+        nonlocal prev_torso_target_pose
+        held_arm_priority.reset()
         reset_adaptive_gain_state(_adaptive_gain_state)
         q = robot.neutral_configuration()
         q = _apply_named_joint_seed(q, joint_name_to_cfg, q_lo, q_hi, default_joint_seed)
@@ -3072,6 +3081,7 @@ def main() -> None:
         status.value = status_message
         prev_right_target_pose = None
         prev_left_target_pose = None
+        prev_torso_target_pose = None
         if _seg_player is not None:
             _seg_player.stop()
             if _seg_gui.get("status") is not None:
@@ -3113,6 +3123,7 @@ def main() -> None:
     # solve loop can tell which gizmo the user is actively dragging.
     prev_right_target_pose: np.ndarray | None = None
     prev_left_target_pose: np.ndarray | None = None
+    prev_torso_target_pose: np.ndarray | None = None
     seer_target_poses: dict[str, embodik.Rt | None] = {"left": None, "right": None}
 
     def _seer_side_active(side: str) -> bool:
@@ -3219,6 +3230,7 @@ def main() -> None:
         _configure_com_constraint_if_needed()
 
         if manual_control.value:
+            held_arm_priority.reset()
             if not prev_manual_state:
                 _sync_joint_sliders_from_q(q)
             right_ctrl.visible = False
@@ -3308,14 +3320,6 @@ def main() -> None:
             if idx is not None and idx < posture_target.size:
                 posture_target[idx] = float(nullspace_bias_q[idx])
         posture.set_target_configuration(posture_target)
-        _apply_torso_control_priority_policy(
-            torso_task=torso_task,
-            posture_task=posture,
-            torso_active=_torso_marker_on,
-            decouple_torso_and_arms=_decouple_torso_and_arms,
-            posture_controlled_indices=posture_controlled_indices,
-            lift_posture_indices=lift_posture_indices,
-        )
         if bool(arm_nullspace_enable.value) and float(arm_nullspace_weight.value) > 0.0:
             arm_nullspace.set_target_configuration(nullspace_bias_q)
             if hasattr(arm_nullspace, "set_controlled_joint_indices"):
@@ -3365,7 +3369,6 @@ def main() -> None:
             seer_target_poses["left"] = None
             seer_target_poses["right"] = None
 
-        right_pos_err, left_pos_err, right_rot_err, left_rot_err = _current_task_errors()
         if posture_controlled_indices:
             posture_err = float(
                 np.linalg.norm(
@@ -3376,51 +3379,9 @@ def main() -> None:
         else:
             posture_err = 0.0
 
-        # Held-arm protection: detect which target is actively moving (gizmo drag
-        # or teleop stream), then demote that arm to priority 1 so the held arm
-        # stays planted while the torso/CoM shift to serve the moving arm.
-        cur_right_target_pose = _target_pose_matrix("right")
-        cur_left_target_pose = _target_pose_matrix("left")
-        if _seer_side_active("right") and _seer_states is not None:
-            right_target_moved = bool(_seer_states["right"].streaming) or _target_pose_moved(
-                cur_right_target_pose,
-                prev_right_target_pose,
-                pos_eps=1e-4,
-                rot_eps=1e-3,
-            )
-        else:
-            right_target_moved = _target_pose_moved(
-                cur_right_target_pose,
-                prev_right_target_pose,
-                pos_eps=1e-4,
-                rot_eps=1e-3,
-            )
-        if _seer_side_active("left") and _seer_states is not None:
-            left_target_moved = bool(_seer_states["left"].streaming) or _target_pose_moved(
-                cur_left_target_pose,
-                prev_left_target_pose,
-                pos_eps=1e-4,
-                rot_eps=1e-3,
-            )
-        else:
-            left_target_moved = _target_pose_moved(
-                cur_left_target_pose,
-                prev_left_target_pose,
-                pos_eps=1e-4,
-                rot_eps=1e-3,
-            )
-        prev_right_target_pose = cur_right_target_pose
-        prev_left_target_pose = cur_left_target_pose
-        right_task.priority = 0
-        left_task.priority = 0
-        if bool(hold_inactive_arm.value) and right_active and left_active:
-            if left_target_moved and not right_target_moved:
-                left_task.priority = 1
-            elif right_target_moved and not left_target_moved:
-                right_task.priority = 1
-
         # Segment replay block — gated so flag-off is byte-equivalent (no-op).
-        if _seg_player is not None and _seg_player.state != "idle":
+        segment_owns_targets = _seg_player is not None and _seg_player.state != "idle"
+        if segment_owns_targets:
             _seg_player.speed = float(_seg_gui["speed"].value)
             _left_now_rt = _solver_rt_from_ctrl("left", left_ctrl)
             _right_now_rt = _solver_rt_from_ctrl("right", right_ctrl)
@@ -3473,6 +3434,67 @@ def main() -> None:
                         right_ctrl,
                         robot.get_frame_pose(frame_map["right_tool"]),
                     )
+
+        # Resolve ownership after all input sources have published their targets.
+        # A stationary marker still requests completion of the same motion.
+        cur_right_target_pose = _target_pose_matrix("right")
+        cur_left_target_pose = _target_pose_matrix("left")
+        right_target_moved = bool(
+            _seer_side_active("right")
+            and _seer_states is not None
+            and _seer_states["right"].streaming
+        ) or _target_pose_moved(
+            cur_right_target_pose, prev_right_target_pose, pos_eps=1e-4, rot_eps=1e-3
+        )
+        left_target_moved = bool(
+            _seer_side_active("left")
+            and _seer_states is not None
+            and _seer_states["left"].streaming
+        ) or _target_pose_moved(
+            cur_left_target_pose, prev_left_target_pose, pos_eps=1e-4, rot_eps=1e-3
+        )
+        cur_torso_target_pose = _torso_target_matrix() if _torso_marker_on else None
+        torso_target_moved = _torso_marker_on and _target_pose_moved(
+            cur_torso_target_pose, prev_torso_target_pose, pos_eps=1e-4, rot_eps=1e-3
+        )
+        prev_right_target_pose = cur_right_target_pose
+        prev_left_target_pose = cur_left_target_pose
+        prev_torso_target_pose = cur_torso_target_pose
+        right_pos_err, left_pos_err, right_rot_err, left_rot_err = _current_task_errors()
+        right_task.priority, left_task.priority = held_arm_priority.update(
+            enabled=bool(hold_inactive_arm.value) and bool(auto_ik_solve.value),
+            right_active=right_active,
+            left_active=left_active,
+            right_changed=right_target_moved,
+            left_changed=left_target_moved,
+            right_settled=(
+                right_pos_err <= EE_POSITION_DEADBAND and right_rot_err <= EE_ROTATION_DEADBAND
+            ),
+            left_settled=(
+                left_pos_err <= EE_POSITION_DEADBAND and left_rot_err <= EE_ROTATION_DEADBAND
+            ),
+            context=(
+                str(backend_select.value),
+                _torso_policy_value,
+                _torso_marker_on,
+                segment_owns_targets,
+                id(solver),
+            ),
+            other_input=bool(torso_target_moved or segment_owns_targets),
+        )
+        _apply_torso_control_priority_policy(
+            torso_task=torso_task,
+            posture_task=posture,
+            torso_active=_torso_marker_on,
+            decouple_torso_and_arms=_decouple_torso_and_arms,
+            posture_controlled_indices=posture_controlled_indices,
+            lift_posture_indices=lift_posture_indices,
+            ee_priorities=tuple(
+                task.priority
+                for task, active in ((right_task, right_active), (left_task, left_active))
+                if active
+            ),
+        )
 
         right_settled = (not right_active) or (
             right_pos_err <= EE_POSITION_DEADBAND and right_rot_err <= EE_ROTATION_DEADBAND
