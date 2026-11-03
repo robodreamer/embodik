@@ -222,8 +222,32 @@ AccelerationSolverResult AccelerationSolver::solve_with_velocity_collision(
     const Eigen::VectorXd &dq, double dt,
     const AccelerationSolveOptions &options,
     const VelocityCollisionLiftOptions &lift_options) {
+  return solve_with_velocity_collision_impl(collision_solver, q, dq, dt, options,
+                                            lift_options, nullptr);
+}
+
+AccelerationSolverResult
+AccelerationSolver::validate_candidate_with_velocity_collision(
+    KinematicsSolver &collision_solver, const Eigen::VectorXd &q,
+    const Eigen::VectorXd &dq, double dt, const Eigen::VectorXd &ddq,
+    const AccelerationSolveOptions &options,
+    const VelocityCollisionLiftOptions &lift_options) {
+  return solve_with_velocity_collision_impl(collision_solver, q, dq, dt, options,
+                                            lift_options, &ddq);
+}
+
+AccelerationSolverResult AccelerationSolver::solve_with_velocity_collision_impl(
+    KinematicsSolver &collision_solver, const Eigen::VectorXd &q,
+    const Eigen::VectorXd &dq, double dt,
+    const AccelerationSolveOptions &options,
+    const VelocityCollisionLiftOptions &lift_options,
+    const Eigen::VectorXd *candidate) {
   const auto start = std::chrono::steady_clock::now();
-  const auto finish = [&start](AccelerationSolverResult result) {
+  const auto finish = [&start, candidate](AccelerationSolverResult result) {
+    if (candidate) {
+      result.final_error = std::numeric_limits<double>::quiet_NaN();
+      result.condition_number = std::numeric_limits<double>::quiet_NaN();
+    }
     const auto end = std::chrono::steady_clock::now();
     result.computation_time_ms =
         std::chrono::duration<double, std::milli>(end - start).count();
@@ -231,6 +255,12 @@ AccelerationSolverResult AccelerationSolver::solve_with_velocity_collision(
   };
 
   VelocityCollisionLiftDiagnostics diagnostics;
+  if (candidate && lift_options.max_refinement_iterations != 0) {
+    return finish(velocity_collision_lift_failure(
+        SolverStatus::kInvalidInput,
+        "prescribed acceleration validation requires zero collision refinement budget",
+        diagnostics));
+  }
   if (lift_options.validation_substeps < 1 ||
       lift_options.validation_substeps > 1024) {
     return finish(velocity_collision_lift_failure(
@@ -278,6 +308,16 @@ AccelerationSolverResult AccelerationSolver::solve_with_velocity_collision(
     return finish(velocity_collision_lift_failure(
         SolverStatus::kNonFiniteInput, "q, dq, and dt must be finite",
         diagnostics));
+  }
+  if (candidate && candidate->size() != robot_->nv()) {
+    return finish(velocity_collision_lift_failure(
+        SolverStatus::kShapeMismatch,
+        "candidate acceleration must match robot nv", diagnostics));
+  }
+  if (candidate && !candidate->allFinite()) {
+    return finish(velocity_collision_lift_failure(
+        SolverStatus::kNonFiniteInput,
+        "candidate acceleration must be finite", diagnostics));
   }
   if (dt <= 0.0) {
     return finish(velocity_collision_lift_failure(
@@ -432,7 +472,8 @@ AccelerationSolverResult AccelerationSolver::solve_with_velocity_collision(
   };
 
   while (true) {
-    auto result = solve(q, dq, dt, lifted_options);
+    auto result = candidate ? validate_candidate(q, dq, dt, *candidate, lifted_options)
+                            : solve(q, dq, dt, lifted_options);
     accumulated_preprocessing_ms += result.preprocessing_time_ms;
     accumulated_backend_ms += result.backend_computation_time_ms;
     accumulated_postprocessing_ms += result.postprocessing_time_ms;

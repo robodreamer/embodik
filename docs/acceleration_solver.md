@@ -38,6 +38,57 @@ Unsupported scope fails explicitly. This includes floating bases, dynamic
 contact forces, friction cones, wheel rolling/steering constraints, general
 native collision geometry, and ROS 2 controller or wheelbase integration.
 
+## Prescribed acceleration validation
+
+`validate_candidate(q, dq, dt, ddq, options)` checks a caller-supplied physical
+joint acceleration through the same hard-row preparation, integration and
+nonlinear acceptance used by `solve()`. It skips command optimization and never
+polishes, refines or replaces `ddq`. Success returns that unchanged acceleration,
+`q_solution` and `joint_velocities_next`. A rejected candidate has empty motion
+outputs; it does not prove that every other command is infeasible.
+The normalized hard-row certificate and each physical constraint family's
+acceptance tolerances match those used by `solve()`.
+
+```python
+options = embodik.AccelerationSolveOptions()
+options.acceleration_limits_override = np.full(robot.nv, 10.0)
+result = solver.validate_candidate(q, dq, 0.01, proposed_ddq, options)
+if result.status == embodik.SolverStatus.SUCCESS:
+    q_next = result.q_solution
+    dq_next = result.joint_velocities_next
+```
+
+The result is a command-feasibility check, not an optimum or task-achievement
+report: task diagnostics, scales and backend problem traces are empty, and
+`final_error` and `condition_number` are NaN. `backend_computation_time_ms` is
+zero. Total native timing includes preparation
+and acceptance. Geometric support checks may still perform numerical
+feasibility searches. Registered tasks are still prepared when needed by hard
+task bounds, but their objectives are not optimized.
+
+The initial API rejects nominal-position envelopes, generalized allocation and
+nonzero stored elastic deltas or capacities. It leaves persistent elasticity
+unchanged. Optimization preferences do not authorize candidate modification.
+
+`validate_candidate_with_velocity_collision(provider, q, dq, dt, ddq, options,
+lift_options)` additionally retains the original velocity-collision rows and
+sampled checks. Its collision refinement budget must be zero. All existing
+unsupported-family guards apply. This retains sampled collision validation;
+it does not establish safety between samples, complete stopping or recovery.
+To validate a prescribed multi-step rollout, use each original control interval
+and its actual incoming velocity, then validate its terminal rest command.
+
+Explicit-state acceleration collision row construction uses isolated precise
+distance queries for pair ranking and nearest-point Jacobians. These queries
+do not inherit warm GJK guesses from earlier configurations or debug calls.
+Ordinary velocity-solver queries retain their existing behavior. Physical
+clearance checks and numerical acceptance tolerances are unchanged.
+An invalid numerical distance, including the collision library's finite failure
+sentinels, receives one fresh query initialized from the shapes' local bounding
+box centers. Precision settings remain unchanged. The retry computes a signed
+geometry distance; it does not substitute a bounding-volume distance. An
+unresolved query failure remains an error and cannot become a collision floor.
+
 ## Inequality Constraint Parity
 
 The acceleration surface represents velocity inequalities on
@@ -173,6 +224,12 @@ jointly feasible stopping trajectory, especially with other hard constraints.
 Native collision certification and the sampled velocity-collision adapter
 explicitly reject this family until their stopping integration is qualified.
 
+These are caller-supplied acceleration constraints. Rows configured through
+`KinematicsSolver.set_linear_position_constraints()` remain velocity/position-step
+constraints and are not automatically imported into acceleration solves. The
+velocity-collision adapter rejects both those provider rows and explicit affine
+state envelopes while their combined stopping integration remains unsupported.
+
 ## Compatible Joint Box
 
 Every solve starts from one combined state box. Position, velocity, and
@@ -298,6 +355,17 @@ The corrected command must pass all existing acceptance checks. These local rows
 do not establish global nonlinear optimality or continuous collision safety.
 Accumulated local rows can exclude a feasible nonlinear solution, so failure
 to complete refinement is not a proof of physical infeasibility.
+
+Joint-limit braking and CoM acceleration bounds can also become jointly
+infeasible after an accepted step, even while the CoM is well inside its support
+polygon. Per-joint braking viability and sampled CoM validation do not establish
+feasibility of their intersection at the next control step. Returning a Cartesian
+target cannot resolve an infeasible hard set at an unchanged configuration and
+velocity. Applications that require continuous recovery must retain a stopping
+policy validated against all active constraints; the current solver does not
+provide that guarantee. Do not interpret a rejected step as zero physical
+velocity or reset velocity history to conceal the conflict.
+
 For tight-frame pose constraints, translation and rotation state-bound and endpoint braking
 violations can also trigger bounded corrective solves. The local model includes
 both the endpoint configuration and velocity derivatives. Each correction

@@ -1,8 +1,10 @@
 #include <embodik/acceleration_solver.hpp>
+#include <embodik/kinematics_solver.hpp>
 
 #include <gtest/gtest.h>
 
 #include <cstdio>
+#include <cmath>
 #include <algorithm>
 #include <fstream>
 #include <limits>
@@ -110,6 +112,110 @@ static_assert(!std::is_copy_constructible_v<AccelerationSolver>);
 static_assert(!std::is_copy_assignable_v<AccelerationSolver>);
 static_assert(std::is_nothrow_move_constructible_v<AccelerationSolver>);
 static_assert(std::is_nothrow_move_assignable_v<AccelerationSolver>);
+
+TEST_F(AccelerationSolverTest, PrescribedCandidateIsNotOptimizedOrPolished) {
+  AccelerationSolver solver(robot_);
+  auto task = solver.add_posture_task("opposed_objective");
+  task->setSolveMode(TaskSolveMode::kMinError);
+  AccelerationTaskReference reference;
+  reference.proportional_gain = reference.derivative_gain = 0.0;
+  reference.desired_acceleration = vector({-3.0, -3.0});
+  solver.set_task_reference("opposed_objective", reference);
+  auto configuration = options(vector({4.0, 4.0}));
+  configuration.record_linear_problems = true;
+  const auto q = vector({0.0, 0.0});
+  const auto dq = vector({0.1, -0.1});
+  const auto candidate = vector({0.25, 0.5});
+  const auto result = solver.validate_candidate(q, dq, 0.01, candidate, configuration);
+  ASSERT_EQ(result.status, SolverStatus::kSuccess) << result.status_message;
+  EXPECT_TRUE(result.joint_accelerations.isApprox(candidate, 0.0));
+  EXPECT_TRUE(result.joint_velocities_next.isApprox(dq + 0.01 * candidate, 0.0));
+  EXPECT_TRUE(result.task_scales.empty());
+  EXPECT_TRUE(result.task_diagnostics.empty());
+  EXPECT_TRUE(result.linear_problems.empty());
+  EXPECT_FALSE(result.state_box_task_fallback_applied);
+  EXPECT_EQ(result.backend_computation_time_ms, 0.0);
+  EXPECT_EQ(result.iterations, 0U);
+}
+
+TEST_F(AccelerationSolverTest, PrescribedCandidateFailureDoesNotProveHardInfeasibility) {
+  AccelerationSolver solver(robot_);
+  const auto configuration = options(vector({4.0, 4.0}));
+  const auto q = vector({0.0, 0.0});
+  const auto result = solver.validate_candidate(q, q, 0.01, vector({4.1, 0.0}), configuration);
+  EXPECT_EQ(result.status, SolverStatus::kNoProgress);
+  expect_no_motion_outputs(result);
+  const auto valid = solver.validate_candidate(q, q, 0.01, q, configuration);
+  EXPECT_EQ(valid.status, SolverStatus::kSuccess) << valid.status_message;
+  const auto malformed = solver.validate_candidate(q, q, 0.01, vector({0.0}), configuration);
+  EXPECT_EQ(malformed.status, SolverStatus::kShapeMismatch);
+  expect_no_motion_outputs(malformed);
+  EXPECT_TRUE(solver.get_elastic_band_deltas().isZero(0.0));
+}
+
+TEST_F(AccelerationSolverTest, MalformedCollisionCandidateCannotQueryHypotheticalState) {
+  AccelerationSolver solver(robot_);
+  KinematicsSolver provider(robot_);
+  const auto actual_q = vector({0.2, -0.2});
+  const auto actual_dq = vector({0.1, -0.1});
+  robot_->update_kinematics(actual_q, actual_dq);
+  const auto q = vector({0.0, 0.0});
+  for (const auto &candidate : {
+           vector({0.0}), vector({std::numeric_limits<double>::quiet_NaN(), 0.0})}) {
+    const auto result = solver.validate_candidate_with_velocity_collision(
+        provider, q, q, 0.01, candidate, options(vector({4.0, 4.0})));
+    EXPECT_TRUE(result.status == SolverStatus::kShapeMismatch ||
+                result.status == SolverStatus::kNonFiniteInput);
+    expect_no_motion_outputs(result);
+    EXPECT_EQ(result.collision_lift_pairs_considered, 0U);
+    EXPECT_TRUE(std::isnan(result.final_error));
+    EXPECT_TRUE(std::isnan(result.condition_number));
+    EXPECT_TRUE(robot_->get_current_configuration().isApprox(actual_q, 0.0));
+    EXPECT_TRUE(robot_->get_current_velocity().isApprox(actual_dq, 0.0));
+  }
+}
+
+TEST_F(AccelerationSolverTest,
+       CandidateMatchesScaledAffineAcceptanceWithoutRelaxingEitherCheck) {
+  AccelerationSolver solver(robot_);
+  const auto q = vector({0.0, 0.0});
+  auto configuration = options(vector({4.0, 4.0}));
+  AffineAccelerationConstraint row;
+  row.source_id = "scaled_affine";
+  row.coefficient_matrix = Eigen::MatrixXd::Zero(1, 2);
+  row.affine_bias = vector({0.0});
+  row.lower_bounds = vector({-1e8});
+  row.upper_bounds = vector({(1.0 / 3.0) * 1e8});
+  row.coefficient_matrix(0, 0) = 1e8;
+  configuration.affine_constraints = {row};
+  double near = std::nextafter(1.0 / 3.0, std::numeric_limits<double>::infinity());
+  near = std::nextafter(near, std::numeric_limits<double>::infinity());
+  const auto candidate = vector({near, 0.0});
+  ASSERT_GT(1e8 * near - row.upper_bounds(0), 1e-8);
+  const auto accepted = solver.validate_candidate(q, q, 0.01, candidate, configuration);
+  ASSERT_EQ(accepted.status, SolverStatus::kSuccess) << accepted.status_message;
+  EXPECT_TRUE(accepted.joint_accelerations.isApprox(candidate, 0.0));
+  // This still fits the normalized 1e-10 certificate, but violates the
+  // existing physical affine tolerance, which must still reject it.
+  const auto physical_failure = solver.validate_candidate(
+      q, q, 0.01, vector({1.0 / 3.0 + 5e-11, 0.0}), configuration);
+  EXPECT_EQ(physical_failure.status, SolverStatus::kNoProgress);
+  EXPECT_NE(physical_failure.status_message.find("affine acceleration constraint"),
+            std::string::npos);
+  expect_no_motion_outputs(physical_failure);
+  // Conversely, tiny row units fit the physical absolute tolerance but not
+  // the unchanged normalized backend certificate.
+  row.coefficient_matrix(0, 0) = 1e-8;
+  row.lower_bounds = vector({-1e-8});
+  row.upper_bounds = vector({(1.0 / 3.0) * 1e-8});
+  configuration.affine_constraints = {row};
+  const auto normalized_failure = solver.validate_candidate(
+      q, q, 0.01, vector({1.0 / 3.0 + 1e-6, 0.0}), configuration);
+  EXPECT_EQ(normalized_failure.status, SolverStatus::kNoProgress);
+  EXPECT_NE(normalized_failure.status_message.find("violates hard rows"),
+            std::string::npos);
+  expect_no_motion_outputs(normalized_failure);
+}
 
 TEST_F(AccelerationSolverTest, CapabilitiesExposeCurrentNativeScope) {
   const auto capabilities = AccelerationSolver::capabilities();

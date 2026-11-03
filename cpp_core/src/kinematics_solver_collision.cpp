@@ -4,6 +4,7 @@
  */
 
 #include "kinematics_solver_internal.hpp"
+#include "collision_distance_evidence.hpp"
 #include "sphere_pair_distance_lower_bound.hpp"
 
 namespace embodik {
@@ -16,22 +17,41 @@ namespace {
 void compute_policy_collision_distance(const pinocchio::GeometryModel &model,
                                        pinocchio::GeometryData &data,
                                        std::size_t index, bool strict) {
-  if (!strict) {
-    pinocchio::computeDistance(model, data, index);
-    return;
-  }
   const auto &pair = model.collisionPairs[index];
   auto request = data.distanceRequests[index];
-  request.enable_cached_gjk_guess = false;
-  request.gjk_initial_guess = hpp::fcl::GJKInitialGuess::DefaultGuess;
-  request.gjk_tolerance = std::min(request.gjk_tolerance, 1e-12);
-  request.gjk_max_iterations = std::max<std::size_t>(request.gjk_max_iterations, 512);
-  pinocchio::GeometryData::ComputeDistance cold_distance(
-      model.geometryObjects[pair.first], model.geometryObjects[pair.second]);
   auto &result = data.distanceResults[index];
+  const auto cold_query = [&](const hpp::fcl::DistanceRequest &cold_request) {
+    pinocchio::GeometryData::ComputeDistance cold_distance(
+        model.geometryObjects[pair.first], model.geometryObjects[pair.second]);
+    result.clear();
+    cold_distance(pinocchio::toFclTransform3f(data.oMg[pair.first]),
+                  pinocchio::toFclTransform3f(data.oMg[pair.second]),
+                  cold_request, result);
+  };
+  if (strict) {
+    request.enable_cached_gjk_guess = false;
+    request.gjk_initial_guess = hpp::fcl::GJKInitialGuess::DefaultGuess;
+    request.gjk_tolerance = std::min(request.gjk_tolerance, 1e-12);
+    request.gjk_max_iterations = std::max<std::size_t>(request.gjk_max_iterations, 512);
+    cold_query(request);
+  } else {
+    pinocchio::computeDistance(model, data, index);
+  }
+  if (detail::collision_distance_evidence_is_valid(result.min_distance)) return;
+
+  // A degenerate initial simplex can fail for separated shapes. Retry exactly
+  // once from their local AABB centers, preserving all precision settings and
+  // avoiding history from previous configurations. This remains a full signed
+  // distance query, not a bounding-volume distance substituted for its result.
+  request.enable_cached_gjk_guess = false;
+  request.gjk_initial_guess = hpp::fcl::GJKInitialGuess::BoundingVolumeGuess;
+  cold_query(request);
+  if (detail::collision_distance_evidence_is_valid(result.min_distance)) return;
   result.clear();
-  cold_distance(pinocchio::toFclTransform3f(data.oMg[pair.first]),
-                pinocchio::toFclTransform3f(data.oMg[pair.second]), request, result);
+  throw std::runtime_error(
+      "Collision distance query returned invalid evidence for " +
+      model.geometryObjects[pair.first].name + " / " +
+      model.geometryObjects[pair.second].name);
 }
 // A sufficient sphere certificate avoids the box/SAT refinement. Ambiguous
 // pairs retain the stronger bound and the same exact-query fallback.
@@ -403,10 +423,6 @@ KinematicsSolver::evaluate_collision_pair_distances(const Eigen::VectorXd &q) {
   for (std::size_t i = 0; i < query_data.distanceRequests.size(); ++i) {
     auto &request = query_data.distanceRequests[i];
     request = collision_data->distanceRequests[i];
-    request.enable_cached_gjk_guess = false;
-    request.gjk_initial_guess = hpp::fcl::GJKInitialGuess::DefaultGuess;
-    request.gjk_tolerance = std::min(request.gjk_tolerance, 1e-12);
-    request.gjk_max_iterations = std::max<std::size_t>(request.gjk_max_iterations, 512);
   }
   const ScopedRobotKinematicsRestore restore_robot_state(*robot_);
   robot_->update_kinematics(q);
@@ -424,7 +440,8 @@ KinematicsSolver::evaluate_collision_pair_distances(const Eigen::VectorXd &q) {
     const auto &pair = pairs[pair_index];
     const auto &geometry_a = collision_model->geometryObjects[pair.first].name;
     const auto &geometry_b = collision_model->geometryObjects[pair.second].name;
-    pinocchio::computeDistance(*collision_model, query_data, pair_index);
+    compute_policy_collision_distance(*collision_model, query_data, pair_index,
+                                      true);
     const double distance = query_data.distanceResults[pair_index].min_distance;
     if (!std::isfinite(distance)) {
       throw std::runtime_error("Nonfinite collision pair distance for " +
@@ -1573,6 +1590,11 @@ KinematicsSolver::compute_collision_constraint(double row_dt,
   }
 #ifdef PINOCCHIO_WITH_HPP_FCL
   const double constraint_dt = row_dt;
+  // Explicit-state callers rebuild the current catalog and must also avoid
+  // GJK history in its distances/normals. Ranking and selected nearest-point
+  // refinement use the same policy; ordinary velocity queries remain warm.
+  const bool precise_current_query =
+      require_current_catalog || has_collision_trajectory_floor_anchor();
   const bool acceleration_braking_lookahead_active =
       acceleration_limits_enabled_ && position_step_call_depth_ > 0 &&
       previous_dq_.size() == robot_->nv() && previous_dq_.allFinite() &&
@@ -1785,7 +1807,7 @@ KinematicsSolver::compute_collision_constraint(double row_dt,
     req.enable_nearest_points = true;
     last_collision_exact_distance_queries_++;
     compute_policy_collision_distance(*collision_model, *collision_data, idx,
-                                      has_collision_trajectory_floor_anchor());
+                                      precise_current_query);
     req.enable_nearest_points = false;
   };
 
@@ -2013,7 +2035,7 @@ KinematicsSolver::compute_collision_constraint(double row_dt,
     // Cached subsets can contain dozens of candidates on dense robot models.
     last_collision_exact_distance_queries_++;
     compute_policy_collision_distance(*collision_model, *collision_data, idx,
-                                      has_collision_trajectory_floor_anchor());
+                                      precise_current_query);
 
     const auto &distance_result = collision_data->distanceResults[idx];
     double distance = distance_result.min_distance;

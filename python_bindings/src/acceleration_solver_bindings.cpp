@@ -895,12 +895,28 @@ void bind_acceleration_solver(nb::module_ &m) {
       .def("solve", &AccelerationSolver::solve, nb::arg("q"), nb::arg("dq"),
            nb::arg("dt"),
            nb::arg("options") = AccelerationSolveOptions{})
+      .def("validate_candidate", &AccelerationSolver::validate_candidate,
+           nb::arg("q"), nb::arg("dq"), nb::arg("dt"), nb::arg("ddq"),
+           nb::arg("options") = AccelerationSolveOptions{},
+           "Validate an unchanged physical ddq without command optimization. "
+           "Success reports feasibility and integrated state, not task achievement. "
+           "Nominal envelopes, allocation and nonzero elastic history are unsupported; "
+           "elastic history is unchanged. Geometric support may require feasibility searches.")
       .def("solve_with_velocity_collision",
            &AccelerationSolver::solve_with_velocity_collision,
            nb::arg("collision_solver"), nb::arg("q"), nb::arg("dq"),
            nb::arg("dt"),
            nb::arg("options") = AccelerationSolveOptions{},
-           nb::arg("lift_options") = VelocityCollisionLiftOptions{});
+           nb::arg("lift_options") = VelocityCollisionLiftOptions{})
+      .def("validate_candidate_with_velocity_collision",
+           &AccelerationSolver::validate_candidate_with_velocity_collision,
+           nb::arg("collision_solver"), nb::arg("q"), nb::arg("dq"),
+           nb::arg("dt"), nb::arg("ddq"),
+           nb::arg("options") = AccelerationSolveOptions{},
+           nb::arg("lift_options") = VelocityCollisionLiftOptions{},
+           "Validate an unchanged ddq with the original velocity collision rows "
+           "and sampled checks. Collision refinement budget must be zero. "
+           "This does not certify continuous collision safety or complete stopping.");
 }
 
 #undef DEF_VALUE_PROP

@@ -731,6 +731,19 @@ public:
   solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq, double dt,
         const AccelerationSolveOptions &options = AccelerationSolveOptions{});
 
+  /** Validate a prescribed physical acceleration without command optimization.
+   * The candidate is never polished, refined, or replaced. Success supplies
+   * its integrated state and physical diagnostics, not task achievement or an
+   * optimum. Task diagnostics/scales and backend traces are empty. Geometric
+   * support checks can still require numerical feasibility searches.
+   * Nominal-position envelopes, allocation, and nonzero elastic history are
+   * initially unsupported. Validation does not update elastic history.
+   */
+  AccelerationSolverResult validate_candidate(
+      const Eigen::VectorXd &q, const Eigen::VectorXd &dq, double dt,
+      const Eigen::VectorXd &ddq,
+      const AccelerationSolveOptions &options = AccelerationSolveOptions{});
+
   /**
    * @brief Reuse a configured velocity solver's collision rows and pair policy.
    *
@@ -746,10 +759,26 @@ public:
       const VelocityCollisionLiftOptions &lift_options =
           VelocityCollisionLiftOptions{});
 
+  /// Same prescribed-command contract, retaining velocity collision rows and
+  /// sampled validation. Positive collision refinement budgets are rejected.
+  AccelerationSolverResult validate_candidate_with_velocity_collision(
+      KinematicsSolver &collision_solver, const Eigen::VectorXd &q,
+      const Eigen::VectorXd &dq, double dt, const Eigen::VectorXd &ddq,
+      const AccelerationSolveOptions &options = AccelerationSolveOptions{},
+      const VelocityCollisionLiftOptions &lift_options =
+          VelocityCollisionLiftOptions{});
+
 private:
   AccelerationSolverResult solve_impl(
       const Eigen::VectorXd &q, const Eigen::VectorXd &dq, double dt,
-      const AccelerationSolveOptions &options, int refinement_budget);
+      const AccelerationSolveOptions &options, int refinement_budget,
+      const Eigen::VectorXd *candidate = nullptr);
+  AccelerationSolverResult solve_with_velocity_collision_impl(
+      KinematicsSolver &collision_solver, const Eigen::VectorXd &q,
+      const Eigen::VectorXd &dq, double dt,
+      const AccelerationSolveOptions &options,
+      const VelocityCollisionLiftOptions &lift_options,
+      const Eigen::VectorXd *candidate);
   void ensure_unique_task_name(const std::string &name) const;
   SolverStatus
   prepare_elastic_bounds(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,

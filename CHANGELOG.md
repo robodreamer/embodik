@@ -7,7 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.24.0] - 2026-10-26
+
+Reusable CPU optimization interfaces, constrained IK reliability fixes, and
+diagnostics that distinguish solver status from actual robot behavior.
+Standalone optimization and newly introduced backends retain their documented
+experimental status; sustained saturation recovery and complete stopping are
+not guaranteed by this release.
+
+### Compatibility
+
+- Native C++ interfaces and public structure layouts have changed. Rebuild
+  the core library, Python bindings, and native applications together against
+  matching headers; do not mix binaries from earlier releases.
+
 ### Added
+
+- CPU acceleration `validate_candidate()` and
+  `validate_candidate_with_velocity_collision()` check a prescribed physical
+  acceleration through existing hard-row and nonlinear admission without
+  command optimization or candidate modification. Results report feasibility,
+  not task achievement or complete stopping. Nominal envelopes, allocation,
+  nonzero elastic history and collision-refinement budgets remain unsupported.
 
 - Native CPU `AffineStateConstraint` acceleration envelopes for fixed-base
   additive scalar coordinates `y=Cq+b`, sharing state shaping, exact quadratic
@@ -39,8 +60,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Native CPU coupled configuration bounds for fixed-base additive scalar joints.
   Position-step inner states and retry horizons rebuild the velocity rows;
-  outside seeds can move inward without projection. Acceleration and contact
-  execution remain explicitly unsupported.
+  outside seeds can move inward without projection. Automatic transfer of these
+  velocity-solver rows into acceleration execution, including collision adapters, and contact
+  execution, remain unsupported. The separate explicit `AffineStateConstraint`
+  acceleration API does not certify complete coupled stopping.
 
 - Explicit original collision-floor anchors for velocity-only CPU position
   steps, with named-pair retention across commands, bounded candidate checks
@@ -56,6 +79,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   disabled by default.
 
 ### Fixed
+
+- Collision distance queries reject missing and failure sentinels before
+  updating floors or caches. Invalid numerical results receive one deterministic
+  cold retry with unchanged precision; unresolved failures remain errors.
+
+- Prescribed acceleration validation retains the optimizer's normalized row
+  certificate and existing physical constraint tolerances across row units.
+
+- Explicit-state acceleration collision rows use isolated precise distance
+  queries for both pair ranking and selected nearest points. Warm GJK history
+  no longer perturbs their distance and nearest-point data at a fixed state.
+  Legacy velocity queries retain their existing warm-start behavior.
 
 - Mixed hierarchies repair hard-invalid intermediate MIN_ERROR stages before
   lower tasks run, preserving original bounds, completed task images and
