@@ -1333,5 +1333,118 @@ TEST(HierarchicalLinearSolverTest,
   }
 }
 
+TEST(HierarchicalLinearSolverTest,
+     InheritedActiveRowCannotChangeCompletedMinimumErrorImage) {
+  // The mandatory sum excludes the primary's zero ray. After its authorized
+  // MIN_ERROR fallback fixes that sum, it must not be inverted as a new
+  // constraint direction in either lower objective.
+  const auto primary = matrix({{1.0, 2.0, 3.0}});
+  const auto secondary = matrix({{1.0, 0.0, 0.0}});
+  const auto constraints = matrix({{1.0, 0.0, 0.0}, {0.0, 1.0, 0.0},
+                                   {0.0, 0.0, 1.0}, {1.0, 2.0, 3.0}});
+  std::vector<ObjectiveSolveConfig> policies(3);
+  for (size_t i = 0; i < policies.size(); ++i) {
+    policies[i].priority = static_cast<int>(i);
+    policies[i].solve_mode = i < 2 ? TaskSolveMode::kScale
+                                  : TaskSolveMode::kMinError;
+    policies[i].allow_min_error_fallback = i < 2;
+  }
+  for (double floor : {0.3, 1.0, 2.0}) {
+    SCOPED_TRACE(floor);
+    const auto lower = vector({-3.0, -3.0, -3.0, floor});
+    const auto upper = vector({3.0, 3.0, 3.0, 20.0});
+    const auto result = solve_canonical(
+        {vector({0.0}), vector({0.5}), vector({-1.0, -1.0, -1.0})},
+        {vector({0.0}), vector({0.0}), vector({0.0, 0.0, 0.0})},
+        {primary, secondary, Eigen::MatrixXd::Identity(3, 3)},
+        constraints, lower, upper, policies);
+    ASSERT_EQ(result.status, SolverStatus::kSuccess) << result.status_message;
+    const auto x = solution_vector(result);
+    EXPECT_NEAR((primary * x)(0), floor, 1e-10);
+    EXPECT_NEAR(x(0), 0.5, 1e-10);
+    EXPECT_LE(detail::ComputeMaxLinearConstraintViolation(
+                  constraints, lower, upper, x), 1e-10);
+    ASSERT_EQ(result.task_modes_effective.size(), 3U);
+    EXPECT_EQ(result.task_modes_effective[0], TaskSolveMode::kMinError);
+    EXPECT_TRUE(result.task_used_fallback[0]);
+    EXPECT_EQ(result.task_modes_effective[1], TaskSolveMode::kScale);
+    EXPECT_DOUBLE_EQ(result.task_scales[1], 1.0);
+  }
+}
+
+TEST(HierarchicalLinearSolverTest,
+     ProjectedConstraintRankRejectsCancellationAtOriginalRowScale) {
+  const auto original = matrix({{1.0, 2.0, 3.0}});
+  const Eigen::MatrixXd residual = 1e-16 * original;
+  Eigen::MatrixXd inverse, legacy, expected_legacy;
+  detail::ComputeProjectedConstraintInverse(
+      original, residual, 1e-10, &inverse, false);
+  EXPECT_TRUE(inverse.allFinite());
+  EXPECT_TRUE(inverse.isZero(0.0));
+  detail::ComputeGeneralizedInverse(residual, 1e-10, &expected_legacy);
+  detail::ComputeProjectedConstraintInverse(
+      original, residual, 1e-10, &legacy, true);
+  EXPECT_TRUE((legacy.array() == expected_legacy.array()).all());
+}
+
+TEST(HierarchicalLinearSolverTest,
+     ProjectedConstraintRankRetainsWeakDirectionsAndRowScaling) {
+  for (double row_scale : {1e-6, 1.0, 1e6}) {
+    for (double independent : {1e-6, 1e-9}) {
+      SCOPED_TRACE(row_scale);
+      SCOPED_TRACE(independent);
+      const Eigen::MatrixXd original =
+          row_scale * matrix({{1.0, independent, 0.0}});
+      const Eigen::MatrixXd projected =
+          row_scale * matrix({{0.0, independent, 0.0}});
+      Eigen::MatrixXd inverse, old_inverse;
+      detail::ComputeGeneralizedInverse(projected, 1e-10, &old_inverse);
+      detail::ComputeProjectedConstraintInverse(
+          original, projected, 1e-10, &inverse, false);
+      EXPECT_TRUE((inverse.array() == old_inverse.array()).all());
+      EXPECT_NEAR((projected * inverse)(0, 0), 1.0, 1e-14);
+    }
+    const Eigen::MatrixXd original = row_scale * matrix({{1.0, 2.0, 3.0}});
+    const Eigen::MatrixXd projected = 1e-16 * original;
+    Eigen::MatrixXd inverse;
+    detail::ComputeProjectedConstraintInverse(
+        original, projected, 1e-10, &inverse, false);
+    EXPECT_TRUE(inverse.isZero(0.0));
+  }
+}
+
+TEST(HierarchicalLinearSolverTest,
+     ProjectedConstraintRankAcceptsMatchingUnnormalizedRows) {
+  const auto original = matrix({{1e-3, 2e-3, 3e-3}, {0.0, 0.0, 1e3}});
+  const auto projected = matrix({{1e-19, 2e-19, 3e-19}, {0.0, 0.0, 1e3}});
+  Eigen::MatrixXd inverse;
+  detail::ComputeProjectedConstraintInverse(
+      original, projected, 1e-10, &inverse, false);
+  ASSERT_EQ(inverse.rows(), 3);
+  ASSERT_EQ(inverse.cols(), 2);
+  EXPECT_TRUE(inverse.allFinite());
+  EXPECT_NEAR(inverse.col(0).norm(), 0.0, 1e-20);
+  EXPECT_NEAR(inverse(2, 1), 1e-3, 1e-16);
+  EXPECT_NEAR((projected * inverse)(1, 1), 1.0, 1e-14);
+}
+
+TEST(HierarchicalLinearSolverTest,
+     ProjectedConstraintRankHandlesDependentRowsAndNoRemainingSpace) {
+  const auto original = matrix({{1.0, 1.0, 0.0}, {2.0, 1.0, 0.0}});
+  const auto projected = matrix({{1e-16, 1.0, 0.0}, {2e-16, 1.0, 0.0}});
+  Eigen::MatrixXd inverse;
+  detail::ComputeProjectedConstraintInverse(
+      original, projected, 1e-10, &inverse, false);
+  EXPECT_TRUE(inverse.allFinite());
+  EXPECT_NEAR(inverse(0, 0), 0.0, 1e-14);
+  EXPECT_NEAR(inverse(0, 1), 0.0, 1e-14);
+  EXPECT_NEAR(inverse(1, 0), 0.5, 1e-14);
+  EXPECT_NEAR(inverse(1, 1), 0.5, 1e-14);
+  detail::ComputeProjectedConstraintInverse(
+      original, Eigen::MatrixXd::Zero(2, 3), 1e-10, &inverse, false);
+  EXPECT_TRUE(inverse.allFinite());
+  EXPECT_TRUE(inverse.isZero(0.0));
+}
+
 } // namespace
 } // namespace embodik::test

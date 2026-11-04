@@ -580,6 +580,14 @@ The scale-relative numerical ridge, priorities, hard constraints and acceptance
 checks remain unchanged. This improves linear numerical solving; it does not
 guarantee global nonlinear recovery or stopping feasibility.
 
+When a higher-priority task already fixes an active constraint, projecting that
+constraint into the remaining motion space can leave only cancellation
+roundoff. Generalized hierarchical solves use the original constraint-row scale
+as a floor for the inverse's numerical rank decision, rather than magnifying
+that residual into a new motion direction. The original hard row and completed
+task images still require validation. This numerical correction preserves the
+SCALE ray, fallback permissions and physical tolerances.
+
 ## Recording a backend problem
 
 Set `options.record_linear_problems = True` to retain

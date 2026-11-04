@@ -86,6 +86,34 @@ inline void ComputeGeneralizedInverse(
   result_matrix->noalias() = orthogonal_decomp.pseudoInverse();
 }
 
+
+// A projected active row may contain only cancellation roundoff after its
+// direction was completed by a higher task. A purely relative cutoff would
+// invert that noise as a new direction and corrupt the protected task image.
+// Calibrate its absolute rank floor to the original row scale. Keep every
+// original hard row in the final feasibility check; this is only an inverse
+// rank decision, never constraint softening.
+inline void ComputeProjectedConstraintInverse(
+    const Eigen::MatrixXd &original, const Eigen::MatrixXd &projected,
+    double relative_tolerance, Eigen::MatrixXd *inverse,
+    bool relative_rank_only) {
+  if (relative_rank_only) {
+    ComputeGeneralizedInverse(projected, relative_tolerance, inverse);
+    return;
+  }
+  Eigen::CompleteOrthogonalDecomposition<Eigen::MatrixXd> decomposition;
+  decomposition.setThreshold(relative_tolerance);
+  decomposition.compute(projected);
+  const double reference = original.rows() ? original.rowwise().norm().maxCoeff() : 0.;
+  const double pivot = decomposition.maxPivot();
+  const double absolute_floor = relative_tolerance * reference;
+  if (pivot > 0. && absolute_floor > relative_tolerance * pivot) {
+    decomposition.setThreshold(absolute_floor / pivot);
+    decomposition.compute(projected);
+  }
+  inverse->noalias() = decomposition.pseudoInverse();
+}
+
 // The owning solver validates shapes and finite original inputs first. This
 // gate validates a completed numerical checkpoint; it does not certify that
 // an unoptimized lower task is optimal or that nonlinear constraints hold.
@@ -2296,9 +2324,10 @@ inline SolverResult solveHierarchicalLinearSystemEigen(
       constraints_violated = false;
 
       // Compute augmented projection operator
-      detail::ComputeGeneralizedInverse(
-          saturated_constraints_on_previous_space, active_constraint_rank_tolerance,
-          &inverse_saturated_constraints_projected);
+      detail::ComputeProjectedConstraintInverse(
+          saturated_constraint_matrix, saturated_constraints_on_previous_space,
+          active_constraint_rank_tolerance, &inverse_saturated_constraints_projected,
+          preserve_legacy_velocity_behavior || objective_index == 0);
       augmented_projector.noalias() =
           (Eigen::MatrixXd::Identity(damped_inverse_projected_jacobian.rows(),
                                      current_jacobian.cols()) -
@@ -2628,9 +2657,10 @@ inline SolverResult solveHierarchicalLinearSystemEigen(
           saturated_constraints_on_previous_space.noalias() =
               saturated_constraint_matrix * previous_null_space;
 
-          detail::ComputeGeneralizedInverse(
-              saturated_constraints_on_previous_space, active_constraint_rank_tolerance,
-              &inverse_saturated_constraints_projected);
+          detail::ComputeProjectedConstraintInverse(
+          saturated_constraint_matrix, saturated_constraints_on_previous_space,
+          active_constraint_rank_tolerance, &inverse_saturated_constraints_projected,
+          preserve_legacy_velocity_behavior || objective_index == 0);
           constrained_projector.noalias() =
               previous_null_space - inverse_saturated_constraints_projected *
                                         saturated_constraints_on_previous_space;
@@ -2725,10 +2755,10 @@ inline SolverResult solveHierarchicalLinearSystemEigen(
                     saturated_constraint_selector * constraint_coefficients;
                 saturated_constraints_on_previous_space.noalias() =
                     saturated_constraint_matrix * previous_null_space;
-                detail::ComputeGeneralizedInverse(
-                    saturated_constraints_on_previous_space,
-                    active_constraint_rank_tolerance,
-                    &inverse_saturated_constraints_projected);
+                detail::ComputeProjectedConstraintInverse(
+          saturated_constraint_matrix, saturated_constraints_on_previous_space,
+          active_constraint_rank_tolerance, &inverse_saturated_constraints_projected,
+          preserve_legacy_velocity_behavior || objective_index == 0);
                 constrained_projector.noalias() =
                     previous_null_space -
                     inverse_saturated_constraints_projected *
@@ -2870,10 +2900,10 @@ inline SolverResult solveHierarchicalLinearSystemEigen(
             if (rebuild_current_augmented_projector) {
               saturated_constraints_on_previous_space.noalias() =
                   saturated_constraint_matrix * previous_null_space;
-              detail::ComputeGeneralizedInverse(
-                  saturated_constraints_on_previous_space,
-                  active_constraint_rank_tolerance,
-                  &inverse_saturated_constraints_projected);
+              detail::ComputeProjectedConstraintInverse(
+          saturated_constraint_matrix, saturated_constraints_on_previous_space,
+          active_constraint_rank_tolerance, &inverse_saturated_constraints_projected,
+          preserve_legacy_velocity_behavior || objective_index == 0);
               double augmented_cond = 1.0;
               const Eigen::MatrixXd final_task_inverse =
                   compute_projected_objective_inverse(

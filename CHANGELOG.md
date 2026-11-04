@@ -100,6 +100,13 @@ not guaranteed by this release.
 
 ### Fixed
 
+- Generalized hierarchical solves calibrate projected active-constraint rank
+  against the original row scale. A constraint already fixed by a higher task
+  can otherwise turn cancellation roundoff into a spurious correction, changing
+  the completed task image or rejecting a feasible lower-task solve. Original
+  hard bounds and task-image checks remain unchanged; the legacy velocity route
+  retains its existing inverse policy.
+
 - Authorized lower-task MIN_ERROR retries preserve repaired higher-priority
   images as exact constraints and reuse a verified full hard-set witness.
   This avoids numerical rejection caused by recomputing an already completed
