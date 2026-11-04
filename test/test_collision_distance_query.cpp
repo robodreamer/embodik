@@ -31,6 +31,15 @@ TEST(CollisionDistanceQueryTest, OverlapOrUnavailableBoundsPreservePenetration) 
       -std::numeric_limits<double>::max(), 0.0));
 }
 
+TEST(CollisionDistanceQueryTest, EvidenceCheckRespectsQueryPrecisionOnly) {
+  // A separated approximate query may lie slightly below an enclosing bound.
+  // This allowance does not modify the reported distance or physical floors.
+  EXPECT_TRUE(detail::collision_distance_evidence_is_valid(
+      0.12 - 5e-12, 0.12, 1e-6));
+  EXPECT_FALSE(detail::collision_distance_evidence_is_valid(0.005, 0.08, 1e-6));
+  EXPECT_FALSE(detail::collision_distance_evidence_is_valid(0.12, 0.12, -1.0));
+}
+
 TEST(CollisionDistanceQueryTest, RotatedBoxesProvideConservativeWorldBound) {
   const auto box = object(std::make_shared<coal::Box>(2.0, 2.0, 2.0));
   const pinocchio::SE3 first(

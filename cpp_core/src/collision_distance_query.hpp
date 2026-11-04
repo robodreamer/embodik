@@ -68,9 +68,18 @@ inline void compute_policy_collision_distance(
       model.geometryObjects[pair.first], data.oMg[pair.first],
       model.geometryObjects[pair.second], data.oMg[pair.second]);
   const auto valid_evidence = [&]() {
-    return lower_bound
-        ? detail::collision_distance_evidence_is_valid(result.min_distance, *lower_bound)
-        : detail::collision_distance_evidence_is_valid(result.min_distance);
+    // Coal distance is an estimate. Its documented signed-query precision is
+    // max(GJK, EPA); this allowance checks evidence only, never changes the
+    // reported distance or any downstream physical floor. Caller-requested
+    // mesh approximations have a separate error contract: no auxiliary bound
+    // comparison is made for those requests.
+    if (!lower_bound || request.abs_err != 0.0 || request.rel_err != 0.0)
+      return detail::collision_distance_evidence_is_valid(result.min_distance);
+    const double query_error = request.enable_signed_distance
+        ? std::max(request.gjk_tolerance, request.epa_tolerance)
+        : request.gjk_tolerance;
+    return detail::collision_distance_evidence_is_valid(
+        result.min_distance, *lower_bound, query_error);
   };
   const auto cold_query = [&](const hpp::fcl::DistanceRequest &cold_request) {
     pinocchio::GeometryData::ComputeDistance cold_distance(

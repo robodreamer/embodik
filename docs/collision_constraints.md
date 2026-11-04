@@ -319,8 +319,10 @@ margin cannot establish this per-pair condition.
 A finite narrow-phase result can still be numerically inconsistent. When
 initialized enclosing AABBs prove positive separation, the shared distance
 query checks that its result respects a conservative world-space lower bound.
-Contradictory evidence triggers the existing single cold retry with an
-alternate initial guess; if that evidence is also invalid, the query fails.
+The comparison accounts for the query's stated numerical precision without
+changing its reported distance. Contradictory evidence triggers the existing
+single cold retry with an alternate initial guess; if that evidence is also
+invalid, the query fails.
 The returned distance and closest points come from the full narrow-phase query,
 never from the enclosing bound. Overlapping or unavailable bounds do not
 restrict valid signed penetration. This changes neither collision floors nor

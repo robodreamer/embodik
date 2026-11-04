@@ -17,10 +17,13 @@ inline bool collision_distance_evidence_is_valid(double distance) {
 // conservative separation. Overlapping/unavailable bounds say nothing about
 // signed penetration and must not reject ordinary contact evidence.
 inline bool collision_distance_evidence_is_valid(
-    double distance, double separation_lower_bound) {
+    double distance, double separation_lower_bound, double query_error = 0.0) {
   return collision_distance_evidence_is_valid(distance) &&
          (!std::isfinite(separation_lower_bound) ||
-          separation_lower_bound <= 0.0 || distance >= separation_lower_bound);
+          separation_lower_bound <= 0.0 ||
+          (std::isfinite(query_error) && query_error >= 0.0 &&
+           (distance >= separation_lower_bound ||
+            separation_lower_bound - distance <= query_error)));
 }
 
 } // namespace embodik::detail
