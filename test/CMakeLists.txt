@@ -4,6 +4,11 @@ enable_testing()
 # Find GTest
 find_package(GTest REQUIRED)
 
+add_executable(test_collision_distance_query test_collision_distance_query.cpp)
+target_include_directories(test_collision_distance_query PRIVATE ${CMAKE_SOURCE_DIR}/cpp_core/src)
+target_link_libraries(test_collision_distance_query pinocchio::pinocchio GTest::gtest_main GTest::gtest)
+add_test(NAME test_collision_distance_query COMMAND test_collision_distance_query)
+
 add_executable(test_collision_acceleration_braking test_collision_acceleration_braking.cpp)
 target_include_directories(test_collision_acceleration_braking PRIVATE ${CMAKE_SOURCE_DIR}/cpp_core/src)
 target_link_libraries(test_collision_acceleration_braking GTest::gtest_main GTest::gtest)

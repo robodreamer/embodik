@@ -314,6 +314,18 @@ already inside its margin, require nonworsening clearance relative to that
 pair's previous distance. A single minimum distance and the largest override
 margin cannot establish this per-pair condition.
 
+### Distance evidence consistency
+
+A finite narrow-phase result can still be numerically inconsistent. When
+initialized enclosing AABBs prove positive separation, the shared distance
+query checks that its result respects a conservative world-space lower bound.
+Contradictory evidence triggers the existing single cold retry with an
+alternate initial guess; if that evidence is also invalid, the query fails.
+The returned distance and closest points come from the full narrow-phase query,
+never from the enclosing bound. Overlapping or unavailable bounds do not
+restrict valid signed penetration. This changes neither collision floors nor
+the scope of sampled or swept trajectory guarantees.
+
 ## API reference
 
 - [KinematicsSolver](api/kinematics_solver.md) — `configure_collision_constraint`, tuning presets, floors

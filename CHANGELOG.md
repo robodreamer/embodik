@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Collision distance queries reject finite results that contradict a sound
+  separation bound for disjoint geometry. The existing cold-query retry
+  recovers full distance and closest-point evidence without relaxing floors.
+
 ## [0.24.0] - 2026-10-26
 
 Reusable CPU optimization interfaces, constrained IK reliability fixes, and
