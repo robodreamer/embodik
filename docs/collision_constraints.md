@@ -320,7 +320,9 @@ A finite narrow-phase result can still be numerically inconsistent. When
 initialized enclosing AABBs prove positive separation, the shared distance
 query checks that its result respects a conservative world-space lower bound.
 The comparison accounts for the query's stated numerical precision without
-changing its reported distance. Contradictory evidence triggers the existing
+changing its reported distance. Requests with nonzero `abs_err` or `rel_err`
+skip this auxiliary bound comparison and retain the existing finite-result
+checks. Contradictory evidence triggers the existing
 single cold retry with an alternate initial guess; if that evidence is also
 invalid, the query fails.
 The returned distance and closest points come from the full narrow-phase query,
