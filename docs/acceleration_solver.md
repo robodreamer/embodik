@@ -288,6 +288,11 @@ feasibility witness when the joint box was already prevalidated. This lets
 state-box-only solves use the requested direct route. Physical and nonlinear
 acceptance checks still apply.
 
+Zero or subthreshold references are valid for this explicit direct route.
+They request minimum task error or motion subject to the hard constraints;
+they do not force a zero command when the hard set requires motion. This also
+applies when scalable targets and affine biases cancel.
+
 When the combined box requires braking, zero acceleration is outside the hard
 set. The default `allow_state_box_task_fallback = True` makes the resulting
 MIN_ERROR task fallback explicit while preserving the mandatory braking

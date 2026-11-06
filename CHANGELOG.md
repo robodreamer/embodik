@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The opt-in CPU direct MIN_ERROR acceleration route now accepts zero and
+  subthreshold references when hard constraints require nonzero motion.
+  Previously these references incorrectly skipped the requested quadratic
+  optimization. Default and legacy routes retain their existing dispatch.
+
 - CPU velocity and acceleration collision-row selection no longer refills an
   underfilled candidate list with historical pairs culled at the current state.
   This prevents stale distances and nearest points from creating spurious

@@ -1423,7 +1423,11 @@ inline SolverResult solveHierarchicalLinearSystemEigen(
     }
     if (has_relaxable_rows ||
         !all_explicit_min_error || !failed_velocity.allFinite() ||
-        !has_nonzero_target ||
+        // A zero MIN_ERROR reference still requires optimization when hard
+        // rows exclude zero. Honor the explicit canonical direct request;
+        // retain the existing stationary guard for legacy and late retries.
+        (!has_nonzero_target &&
+         !(direct_primal && !preserve_legacy_velocity_behavior)) ||
         (!direct_primal && detail::ComputeMaxLinearConstraintViolation(
             constraint_coefficients, min_bounds, max_bounds, failed_velocity) <=
             solver_config.epsilon)) {
