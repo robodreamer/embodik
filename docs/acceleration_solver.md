@@ -560,7 +560,15 @@ Budget exhaustion retains `COLLISION_VIOLATED` with cleared outputs.
 `collision_refinement_iterations` counts extra full solves, including a
 retry after internal trust removal, and is separate from
 `nonlinear_refinement_iterations`, which counts CoM and tight-frame translation corrections across these
-attempts. `collision_refinement_exact_queries` and its kinematics/geometry
+attempts. With multiple validation samples, refinement selects one materially
+violating time sample of the first failed pair by its normalized affine-cut
+violation in acceleration coordinates, including the configured clearance
+reserve. Passing samples add no cut; exact score ties keep the earlier time.
+The generated row source identifies the selected sample. All original sampled
+collision checks still decide acceptance. This selection does not guarantee
+recovery within the bounded budget.
+
+`collision_refinement_exact_queries` and its kinematics/geometry
 counters report extra local-model work, separately from sampled-validation
 counters. Validation counters accumulate across attempts. Inner phase timings
 sum the inner solves; total time also includes row lifting, validation, and local

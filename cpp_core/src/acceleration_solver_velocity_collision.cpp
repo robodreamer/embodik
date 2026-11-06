@@ -91,12 +91,14 @@ bool scalar_revolute_prismatic_model(const RobotModel &robot) {
 } // namespace
 
 namespace detail {
-bool make_sample_distance_cut(
+static bool make_sample_distance_cut_with_distance(
     const RobotModel &robot,
     const detail::VelocityCollisionSampleValidationResult &validation,
     const Eigen::VectorXd &sample_q, const Eigen::VectorXd &anchor_ddq,
     double sample_time, double reserve, AffineAccelerationConstraint *cut,
-    VelocityCollisionLiftDiagnostics *diagnostics) {
+    VelocityCollisionLiftDiagnostics *diagnostics, double *queried_distance) {
+  if (queried_distance)
+    *queried_distance = std::numeric_limits<double>::quiet_NaN();
 #ifdef PINOCCHIO_WITH_HPP_FCL
   if (!scalar_revolute_prismatic_model(robot) ||
       !std::isfinite(sample_time) || sample_time <= 0.0 ||
@@ -135,6 +137,9 @@ bool make_sample_distance_cut(
   ++diagnostics->refinement_exact_queries;
   const auto &distance = geometry_data.distanceResults[pair_index];
   const double value = distance.min_distance;
+  // A passing sample needs no gradient. Expose its queried distance even when
+  // a local cut cannot be constructed, without admitting a failing sample.
+  if (queried_distance && std::isfinite(value)) *queried_distance = value;
   const Eigen::Vector3d point_a = distance.nearest_points[0].cast<double>();
   const Eigen::Vector3d point_b = distance.nearest_points[1].cast<double>();
   const Eigen::Vector3d delta = point_a - point_b;
@@ -188,8 +193,20 @@ bool make_sample_distance_cut(
   (void)reserve;
   (void)cut;
   (void)diagnostics;
+  (void)queried_distance;
   return false;
 #endif
+}
+
+bool make_sample_distance_cut(
+    const RobotModel &robot,
+    const VelocityCollisionSampleValidationResult &validation,
+    const Eigen::VectorXd &sample_q, const Eigen::VectorXd &anchor_ddq,
+    double sample_time, double reserve, AffineAccelerationConstraint *cut,
+    VelocityCollisionLiftDiagnostics *diagnostics) {
+  return make_sample_distance_cut_with_distance(
+      robot, validation, sample_q, anchor_ddq, sample_time, reserve, cut,
+      diagnostics, nullptr);
 }
 
 } // namespace detail
@@ -630,18 +647,46 @@ AccelerationSolverResult AccelerationSolver::solve_with_velocity_collision_impl(
       return reject();
     }
 
-    const double sample_time =
-        dt * static_cast<double>(validation.failed_sample_index) /
-        static_cast<double>(lift_options.validation_substeps);
     AffineAccelerationConstraint cut;
+    std::size_t selected_sample = 0;
     try {
-      if (!detail::make_sample_distance_cut(
-              *robot_, validation,
-              validation_samples[validation.failed_sample_index - 1],
-              result.joint_accelerations, sample_time,
-              lift_options.refinement_clearance_reserve, &cut, &diagnostics)) {
-        return reject();
+      // Earlier samples already passed the original validator. For this same
+      // pair, select one strongest acceleration-space separating row among
+      // the remaining materially failing samples, rather than the first time.
+      // The validator's original non-worsening tolerance remains unchanged.
+      const double sample_tolerance =
+          collision_solver.has_collision_trajectory_floor_anchor() ? 0.0 : 1e-8;
+      double greatest_violation = -1.0;
+      for (std::size_t index = validation.failed_sample_index - 1;
+           index < validation_samples.size(); ++index) {
+        const double sample_time = dt * static_cast<double>(index + 1) /
+                                   lift_options.validation_substeps;
+        AffineAccelerationConstraint candidate_cut;
+        double distance = std::numeric_limits<double>::quiet_NaN();
+        const bool constructed = detail::make_sample_distance_cut_with_distance(
+            *robot_, validation, validation_samples[index],
+            result.joint_accelerations, sample_time,
+            lift_options.refinement_clearance_reserve, &candidate_cut,
+            &diagnostics, &distance);
+        if (!std::isfinite(distance)) return reject();
+        if (distance >= validation.failed_required_distance - sample_tolerance)
+          continue;
+        if (!constructed) return reject();
+        const double norm = candidate_cut.coefficient_matrix.row(0).norm();
+        if (!std::isfinite(norm) || norm <= 0.0) return reject();
+        const double violation =
+            (candidate_cut.lower_bounds(0) - candidate_cut.affine_bias(0) -
+             candidate_cut.coefficient_matrix.row(0).dot(
+                 result.joint_accelerations)) / norm;
+        if (!std::isfinite(violation)) return reject();
+        // Strict comparison keeps the earliest sample for exact score ties.
+        if (violation > greatest_violation) {
+          greatest_violation = violation;
+          selected_sample = index + 1;
+          cut = std::move(candidate_cut);
+        }
       }
+      if (selected_sample == 0) return reject();
     } catch (const std::exception &) {
       // Unsupported geometry or failed local differentiation never grants
       // acceptance and never changes the existing rejection classification.
@@ -655,7 +700,8 @@ AccelerationSolverResult AccelerationSolver::solve_with_velocity_collision_impl(
       return reject();
     }
     cut.source_id = collision_refinement_source_id(
-        lifted_options, "__collision_sample_refinement");
+        lifted_options, "__collision_sample_refinement_sample_" +
+                            std::to_string(selected_sample));
     lifted_options.affine_constraints.push_back(std::move(cut));
     AffineAccelerationConstraint trust;
     trust.source_id = collision_refinement_source_id(

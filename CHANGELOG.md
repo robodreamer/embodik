@@ -14,6 +14,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Previously these references incorrectly skipped the requested quadratic
   optimization. Default and legacy routes retain their existing dispatch.
 
+- Opt-in CPU acceleration collision refinement selects a strongest normalized
+  violating time sample for the first failed pair instead of always using its
+  earliest failure. It retains one cut per refinement, the existing retry
+  budget and complete sampled collision validation.
+
 - CPU velocity and acceleration collision-row selection no longer refills an
   underfilled candidate list with historical pairs culled at the current state.
   This prevents stale distances and nearest points from creating spurious
