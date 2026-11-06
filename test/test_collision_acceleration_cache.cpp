@@ -18,6 +18,7 @@
 #include <limits>
 #include <memory>
 #include <sstream>
+#include <tuple>
 
 namespace embodik::test {
 namespace {
@@ -212,6 +213,118 @@ TEST(CurrentCollisionCatalogTest, RotatedCylinderRowsIgnoreUnrelatedQueryHistory
   }
   std::remove(path.c_str());
 }
+
+class CulledCollisionHistoryTest
+    : public ::testing::TestWithParam<std::tuple<bool, bool>> {};
+
+TEST_P(CulledCollisionHistoryTest,
+       UnderfilledCurrentCatalogDoesNotRestorePreviouslyClosePairs) {
+  const auto [explicit_state, all_nearest_points] = GetParam();
+  const std::string path =
+      "/tmp/embodik_culled_collision_history_" +
+      std::to_string(explicit_state) + std::to_string(all_nearest_points) +
+      ".urdf";
+  {
+    std::ofstream file(path);
+    file << R"(<robot name="culled_collision_history">
+      <link name="world"/>
+      <link name="historical_anchor"><collision><geometry>
+        <sphere radius="0.05"/></geometry></collision></link>
+      <joint name="historical_anchor_fixed" type="fixed">
+        <parent link="world"/><child link="historical_anchor"/></joint>
+      <link name="historical_moving"><collision><geometry>
+        <sphere radius="0.05"/></geometry></collision></link>
+      <joint name="historical_slide" type="prismatic">
+        <parent link="world"/><child link="historical_moving"/>
+        <origin xyz="0.12 0 0"/><axis xyz="1 0 0"/>
+        <limit lower="-0.01" upper="2" velocity="2" effort="100"/></joint>
+      <link name="present_anchor"><collision><geometry>
+        <sphere radius="0.05"/></geometry></collision></link>
+      <joint name="present_anchor_fixed" type="fixed">
+        <parent link="world"/><child link="present_anchor"/>
+        <origin xyz="0 1 0"/></joint>
+      <link name="present_moving"><collision><geometry>
+        <sphere radius="0.05"/></geometry></collision></link>
+      <joint name="present_slide" type="prismatic">
+        <parent link="world"/><child link="present_moving"/>
+        <origin xyz="0.15 1 0"/><axis xyz="1 0 0"/>
+        <limit lower="-0.01" upper="2" velocity="2" effort="100"/></joint>
+    </robot>)";
+  }
+  const std::vector<std::pair<std::string, std::string>> pairs{
+      {"historical_anchor_0", "historical_moving_0"},
+      {"present_anchor_0", "present_moving_0"}};
+  const auto configure = [&](KinematicsSolver &solver) {
+    solver.configure_collision_constraint(0.005, pairs, {},
+                                          all_nearest_points, 2);
+    solver.set_proximity_gated_collision_activation_enabled(false);
+    solver.enable_sphere_broadphase(true);
+    // Exercise a full scan in both APIs. Only geometric broadphase culling
+    // may omit the historical pair; approximate row reuse is not involved.
+    solver.enable_collision_pair_cache(false, 100, 0.10);
+  };
+  const auto query = [&](KinematicsSolver &solver) -> Eigen::MatrixXd {
+    detail::VelocityCollisionConstraintProvider provider(solver);
+    if (explicit_state) {
+      const auto rows = provider.linearize(0.01);
+      return rows ? rows->coefficient_matrix : Eigen::MatrixXd{};
+    }
+    const auto rows = provider.compute(0.01);
+    return rows ? rows->jacobian : Eigen::MatrixXd{};
+  };
+  auto warmed_robot = std::make_shared<RobotModel>(path, false);
+  KinematicsSolver warmed(warmed_robot);
+  configure(warmed);
+  Eigen::VectorXd q = Eigen::VectorXd::Zero(warmed_robot->nq());
+  const Eigen::VectorXd dq = Eigen::VectorXd::Zero(warmed_robot->nv());
+  warmed_robot->update_kinematics(q, dq);
+  const auto initial = query(warmed);
+  ASSERT_EQ(initial.rows(), 2);
+  ASSERT_EQ(warmed.get_last_collision_debug_list().size(), 2u);
+
+  // One pair becomes far and is provably culled. The other stays near, so
+  // the current candidate set has fewer entries than the two-row budget.
+  q[warmed_robot->model().joints[
+        warmed_robot->model().getJointId("historical_slide")].idx_q()] = 1.0;
+  auto fresh_robot = std::make_shared<RobotModel>(path, false);
+  KinematicsSolver fresh(fresh_robot);
+  configure(fresh);
+  fresh_robot->update_kinematics(q, dq);
+  const auto expected = query(fresh);
+  ASSERT_EQ(expected.rows(), 1);
+  const auto expected_debug = fresh.get_last_collision_debug_list();
+  ASSERT_EQ(expected_debug.size(), 1u);
+  ASSERT_EQ(expected_debug[0].object_a, "present_anchor_0");
+  ASSERT_EQ(expected_debug[0].object_b, "present_moving_0");
+
+  warmed_robot->update_kinematics(q, dq);
+  const auto actual = query(warmed);
+  const auto actual_debug = warmed.get_last_collision_debug_list();
+  EXPECT_EQ(actual.rows(), expected.rows());
+  EXPECT_EQ(actual_debug.size(), expected_debug.size());
+  for (const auto &pair : actual_debug) {
+    EXPECT_EQ(pair.object_a, "present_anchor_0");
+    EXPECT_EQ(pair.object_b, "present_moving_0");
+  }
+  if (actual.rows() == expected.rows() &&
+      actual_debug.size() == expected_debug.size()) {
+    EXPECT_TRUE(actual.isApprox(expected, 1e-12));
+    EXPECT_NEAR(actual_debug[0].distance, expected_debug[0].distance, 1e-12);
+    EXPECT_TRUE(actual_debug[0].point_a_world.isApprox(
+        expected_debug[0].point_a_world, 1e-12));
+    EXPECT_TRUE(actual_debug[0].point_b_world.isApprox(
+        expected_debug[0].point_b_world, 1e-12));
+  }
+  std::remove(path.c_str());
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    CurrentAndVelocityRows, CulledCollisionHistoryTest,
+    ::testing::Combine(::testing::Bool(), ::testing::Bool()),
+    [](const ::testing::TestParamInfo<std::tuple<bool, bool>> &info) {
+      return std::string(std::get<0>(info.param) ? "Explicit" : "Velocity") +
+             (std::get<1>(info.param) ? "AllNearestPoints" : "SelectedNearestPoints");
+    });
 
 class CollisionAccelerationCacheTest : public ::testing::Test {
 protected:
