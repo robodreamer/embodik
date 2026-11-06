@@ -482,6 +482,10 @@ candidate-subset and approximate row reuse. Current-state geometry broadphase
 culling remains available. This avoids missing a newly active pair during
 explicit-state solves or hypothetical stopping rollouts; a successful solve
 does not certify that a complete future stopping trajectory exists.
+If fewer current candidates remain than the row budget, the list stays
+underfilled. Historical pairs culled by the current query do not supply rows
+using old distances or nearest points. Mandatory current near-floor rows still
+remain active even when they exceed the nominal row budget.
 The lifted rows constrain `dq_next = dq + dt * ddq`. Every allowed pair at
 every requested constant-acceleration sample is accounted for in canonical
 order. A conservative enclosing-sphere lower bound may prove a pair safe;

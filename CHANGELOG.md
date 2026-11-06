@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- CPU velocity and acceleration collision-row selection no longer refills an
+  underfilled candidate list with historical pairs culled at the current state.
+  This prevents stale distances and nearest points from creating spurious
+  constraints. Current near-floor rows and physical validation remain intact.
+
 - Collision distance queries reject finite results that contradict a sound
   separation bound for disjoint geometry. The existing cold-query retry
   recovers full distance and closest-point evidence without relaxing floors.

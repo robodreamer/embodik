@@ -2168,7 +2168,7 @@ KinematicsSolver::compute_collision_constraint(double row_dt,
     return !link_has_free_dof(pairs[pidx].first) && !link_has_free_dof(pairs[pidx].second);
   };
 
-  // ---- Pair selection: top-K with hysteresis ----
+  // ---- Pair selection: current top-K and mandatory recovery rows ----
   // Sort all allowed candidates by distance (ascending).
   std::sort(allowed_candidates.begin(), allowed_candidates.end());
 
@@ -2219,48 +2219,14 @@ KinematicsSolver::compute_collision_constraint(double row_dt,
     }
   }
 
-  // Determine the distance threshold below which a previous pair "sticks".
-  // A previous pair is kept if its distance is within hysteresis of the
-  // current K-th best candidate.
-  double hysteresis_cutoff = std::numeric_limits<double>::infinity();
-  if (!selectable_candidates.empty()) {
-    const std::size_t kth = static_cast<std::size_t>(
-        std::min(max_k, static_cast<int>(selectable_candidates.size())) - 1);
-    hysteresis_cutoff = selectable_candidates[kth].first +
-                        kCollisionPairSwitchHysteresis;
-  }
-
-  // Build the selected set: start with top-K candidates, then admit any
-  // previous pairs that fall within hysteresis_cutoff.
+  // Select only from this query's evaluated candidates. Top-K already fills
+  // the budget or includes every current candidate; historical padding can
+  // only add unevaluated pairs, including ones broadphase just culled. Their
+  // stored distances and nearest points may belong to another configuration.
   std::unordered_set<std::size_t> selected_set;
   for (int i = 0;
        i < max_k && i < static_cast<int>(selectable_candidates.size()); ++i) {
     selected_set.insert(selectable_candidates[i].second);
-  }
-  for (std::size_t prev_idx : last_collision_constraint_pair_indices_) {
-    if (static_cast<int>(selected_set.size()) >= max_k) {
-      break;
-    }
-    if (prev_idx >= pairs.size()) {
-      continue;
-    }
-    if (pair_uncontrollable(prev_idx)) {
-      continue;
-    }
-    if (!collision_data->activeCollisionPairs.empty() &&
-        !collision_data->activeCollisionPairs[prev_idx]) {
-      continue;
-    }
-    if (!collision_allowed_pair_mask_.empty() &&
-        prev_idx < collision_allowed_pair_mask_.size() &&
-        !collision_allowed_pair_mask_[prev_idx]) {
-      continue;
-    }
-    const double prev_dist =
-        collision_data->distanceResults[prev_idx].min_distance;
-    if (std::isfinite(prev_dist) && prev_dist <= hysteresis_cutoff) {
-      selected_set.insert(prev_idx);
-    }
   }
   selected_set.insert(mandatory_pair_indices.begin(),
                       mandatory_pair_indices.end());
@@ -2316,7 +2282,7 @@ KinematicsSolver::compute_collision_constraint(double row_dt,
         selected_sorted.end());
   }
 
-  // Update the per-step active indices for next step's hysteresis.
+  // Retain selected indices for the next step's candidate cache.
   last_collision_constraint_pair_indices_.clear();
   for (const auto &[dist, idx] : selected_sorted) {
     last_collision_constraint_pair_indices_.push_back(idx);
