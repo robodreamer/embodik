@@ -173,6 +173,38 @@ TEST(HierarchicalLinearSolverTest,
 }
 
 TEST(HierarchicalLinearSolverTest,
+     DirectZeroReferenceMinErrorHonorsMandatoryCoupledMotion) {
+  // Zero reference asks for minimum motion, not a zero command: the immutable
+  // equality requires x+y=1. The lower identity objective selects (1/2,1/2)
+  // without changing the primary image. Include subthreshold references and
+  // affine cancellation, as stopping controllers can produce either.
+  const auto constraints = matrix({{1, 0}, {0, 1}, {1, 1}});
+  ObjectiveSolveConfig primary, secondary;
+  primary.solve_mode = secondary.solve_mode = TaskSolveMode::kMinError;
+  secondary.priority = 1;
+  for (double reference : {0.0, 1e-17, 2.0}) {
+    SCOPED_TRACE(reference);
+    const double bias = reference == 2.0 ? reference : 0.0;
+    LinearSolveDiagnostics diagnostics;
+    const auto result = detail::SolveGeneralizedHierarchicalLinearSystemEigen(
+        {vector({reference}), vector({reference, reference})},
+        {vector({bias}), vector({bias, bias})},
+        {matrix({{1, 1}}), Eigen::Matrix2d::Identity()},
+        constraints, vector({-2, -2, 1}), vector({2, 2, 1}), exact_config(),
+        {primary, secondary}, nullptr, 1e-8, false, false, false, true,
+        &diagnostics);
+    ASSERT_EQ(result.status, SolverStatus::kSuccess) << result.status_message;
+    EXPECT_TRUE(diagnostics.direct_min_error_succeeded)
+        << diagnostics.direct_min_error_message;
+    expect_double_vectors_near(result.solution, {0.5, 0.5});
+    EXPECT_LE(detail::ComputeMaxLinearConstraintViolation(
+                  constraints, vector({-2, -2, 1}), vector({2, 2, 1}),
+                  solution_vector(result)), exact_config().epsilon);
+    EXPECT_NEAR((constraints * solution_vector(result))(2), 1.0, 1e-10);
+  }
+}
+
+TEST(HierarchicalLinearSolverTest,
      PrevalidatedBoxStillRunsRequestedDirectMinError) {
   ObjectiveSolveConfig objective;
   objective.solve_mode = TaskSolveMode::kMinError;
