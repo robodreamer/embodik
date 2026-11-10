@@ -381,6 +381,29 @@ protected:
   std::shared_ptr<RobotModel> robot_;
 };
 
+TEST_F(CollisionAccelerationCacheTest, FloorMetadataReadsActiveMaskWithoutSeeding) {
+  auto provider = solver(false, 1.0);
+  provider.set_non_worsening_collision_floor_enabled(true);
+  const auto q = robot_->get_current_configuration();
+  const auto v = robot_->get_current_velocity();
+  const auto request = robot_->collision_data()->distanceRequests[0];
+  const auto first = provider.get_collision_pair_floors();
+  ASSERT_TRUE(first.has_value());
+  ASSERT_EQ(first->size(), 1u);
+  EXPECT_FALSE(first->front().persistent_floor_m.has_value());
+  robot_->collision_data()->activeCollisionPairs[0] = false;
+  EXPECT_FALSE(provider.get_collision_pair_floors().has_value());
+  robot_->collision_data()->activeCollisionPairs[0] = true;
+  const auto restored = provider.get_collision_pair_floors();
+  ASSERT_TRUE(restored.has_value());
+  EXPECT_EQ(restored->front().geometry_a, first->front().geometry_a);
+  EXPECT_EQ(restored->front().geometry_b, first->front().geometry_b);
+  EXPECT_FALSE(restored->front().persistent_floor_m.has_value());
+  EXPECT_TRUE(robot_->get_current_configuration().isApprox(q, 0.0));
+  EXPECT_TRUE(robot_->get_current_velocity().isApprox(v, 0.0));
+  EXPECT_TRUE(robot_->collision_data()->distanceRequests[0] == request);
+}
+
 TEST_F(CollisionAccelerationCacheTest, EnablingLimitsRefreshesWarmedRows) {
   auto cached = solver(false, 1.0);
   const auto before = rows(cached);

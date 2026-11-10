@@ -29,6 +29,12 @@ void bind_kinematics_solver(nb::module_ &m) {
           const Eigen::VectorXd &, const std::vector<TaskTarget> &,
           const PositionStepOptions &)>(&KinematicsSolver::solve_position_step);
 
+  nb::class_<CollisionPairFloor>(m, "CollisionPairFloor")
+      .def_ro("geometry_a", &CollisionPairFloor::geometry_a)
+      .def_ro("geometry_b", &CollisionPairFloor::geometry_b)
+      .def_ro("minimum_distance", &CollisionPairFloor::minimum_distance)
+      .def_ro("persistent_floor_m", &CollisionPairFloor::persistent_floor_m);
+
   nb::class_<CollisionPairDistance>(m, "CollisionPairDistance")
       .def_ro("geometry_a", &CollisionPairDistance::geometry_a)
       .def_ro("geometry_b", &CollisionPairDistance::geometry_b)
@@ -906,6 +912,11 @@ void bind_kinematics_solver(nb::module_ &m) {
            "Return post-step pair checks certified by cached rigid-body "
            "motion bounds in the latest outer position step.")
 
+      .def("get_collision_pair_floors", &KinematicsSolver::get_collision_pair_floors,
+           "Live clearance metadata for every allowed active pair, in the same "
+           "order as evaluate_collision_pair_distances. No FK, distance queries, "
+           "floor initialization or state mutation. Returns None without enabled "
+           "policy, geometry, or active pairs. Does not validate collision safety.")
       .def("evaluate_collision_pair_distances",
            &KinematicsSolver::evaluate_collision_pair_distances, nb::arg("q"),
            "Fresh exact distances and configured clearances for every allowed "

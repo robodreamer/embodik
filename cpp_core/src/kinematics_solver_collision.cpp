@@ -452,6 +452,55 @@ KinematicsSolver::evaluate_collision_debug(const Eigen::VectorXd &current_q) {
 #endif
 }
 
+CollisionPairFloor KinematicsSolver::collision_pair_floor_snapshot(
+    const std::string &geometry_a, const std::string &geometry_b) const {
+  const auto key = canonical_pair_key(geometry_a, geometry_b);
+  double minimum_distance = collision_constraint_->min_distance;
+  const auto override_iterator = per_pair_min_distance_overrides_.find(key);
+  if (override_iterator != per_pair_min_distance_overrides_.end()) {
+    minimum_distance = override_iterator->second;
+  }
+  std::optional<double> persistent_floor;
+  if (non_worsening_collision_floor_enabled_) {
+    const auto floor = collision_pair_distance_floor_.find(key);
+    if (floor != collision_pair_distance_floor_.end())
+      persistent_floor = std::min(floor->second, minimum_distance);
+  }
+  const auto anchor = collision_trajectory_floors_.find(key);
+  if (anchor != collision_trajectory_floors_.end()) persistent_floor = anchor->second;
+  return {geometry_a, geometry_b, minimum_distance, persistent_floor};
+}
+
+std::optional<std::vector<CollisionPairFloor>>
+KinematicsSolver::get_collision_pair_floors() const {
+#ifdef PINOCCHIO_WITH_HPP_FCL
+  if (!robot_->has_collision_geometry() || !collision_constraint_.has_value() ||
+      !collision_constraint_->enabled) {
+    return std::nullopt;
+  }
+  const auto *model = static_cast<const RobotModel &>(*robot_).collision_model();
+  const auto *data = robot_->collision_data();
+  if (model == nullptr || data == nullptr) return std::nullopt;
+  std::vector<CollisionPairFloor> records;
+  const auto &pairs = model->collisionPairs;
+  records.reserve(pairs.size());
+  for (std::size_t i = 0; i < pairs.size(); ++i) {
+    if ((!data->activeCollisionPairs.empty() && !data->activeCollisionPairs[i]) ||
+        (!collision_allowed_pair_mask_.empty() && !collision_allowed_pair_mask_[i])) {
+      continue;
+    }
+    const auto &pair = pairs[i];
+    records.push_back(collision_pair_floor_snapshot(
+        model->geometryObjects[pair.first].name,
+        model->geometryObjects[pair.second].name));
+  }
+  if (records.empty()) return std::nullopt;
+  return records;
+#else
+  return std::nullopt;
+#endif
+}
+
 std::optional<std::vector<CollisionPairDistance>>
 KinematicsSolver::evaluate_collision_pair_distances(const Eigen::VectorXd &q) {
   if (q.size() != robot_->nq() || !q.allFinite()) {
@@ -502,23 +551,9 @@ KinematicsSolver::evaluate_collision_pair_distances(const Eigen::VectorXd &q) {
       throw std::runtime_error("Nonfinite collision pair distance for " +
                                geometry_a + " / " + geometry_b);
     }
-    double minimum_distance = collision_constraint_->min_distance;
-    const auto override_iterator = per_pair_min_distance_overrides_.find(
-        canonical_pair_key(geometry_a, geometry_b));
-    if (override_iterator != per_pair_min_distance_overrides_.end()) {
-      minimum_distance = override_iterator->second;
-    }
-    std::optional<double> persistent_floor;
-    if (non_worsening_collision_floor_enabled_) {
-      const auto floor = collision_pair_distance_floor_.find(
-          canonical_pair_key(geometry_a, geometry_b));
-      if (floor != collision_pair_distance_floor_.end())
-        persistent_floor = std::min(floor->second, minimum_distance);
-    }
-    const auto anchor = collision_trajectory_floors_.find(
-        canonical_pair_key(geometry_a, geometry_b));
-    if (anchor != collision_trajectory_floors_.end()) persistent_floor = anchor->second;
-    records.push_back({geometry_a, geometry_b, distance, minimum_distance, persistent_floor});
+    const auto floor = collision_pair_floor_snapshot(geometry_a, geometry_b);
+    records.push_back({geometry_a, geometry_b, distance, floor.minimum_distance,
+                       floor.persistent_floor_m});
   }
   if (records.empty()) {
     return std::nullopt;

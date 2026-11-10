@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `KinematicsSolver.get_collision_pair_floors()` reads live collision clearance
+  metadata without forward kinematics or distance queries. It preserves the
+  distance observer's pair ordering and floor semantics; it is not a collision
+  safety check.
+
 ### Fixed
 
 - The opt-in CPU direct MIN_ERROR acceleration route now accepts zero and

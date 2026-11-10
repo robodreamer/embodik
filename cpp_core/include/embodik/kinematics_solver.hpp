@@ -1307,6 +1307,16 @@ public:
   evaluate_collision_pair_distances(const Eigen::VectorXd &q);
 
   /**
+   * @brief Live clearance metadata for all allowed active collision pairs.
+   *
+   * Preserves pair order and floor semantics of evaluate_collision_pair_distances,
+   * without FK, distance queries, floor initialization or solver-state mutation.
+   * This does not validate geometry or certify collision safety. Returns nullopt
+   * when geometry, enabled policy, or active pairs are absent.
+   */
+  std::optional<std::vector<CollisionPairFloor>> get_collision_pair_floors() const;
+
+  /**
    * @brief Evaluate the scalar collision distance used by post-step safety
    * checks.
    *
@@ -1999,6 +2009,8 @@ private:
   bool non_worsening_collision_floor_enabled_ = false;  // opt-in (changes recovery semantics)
   double collision_structural_floor_ = 0.005;  // 5 mm penetration-prevention floor
   std::unordered_map<std::string, double> collision_pair_distance_floor_;
+  CollisionPairFloor collision_pair_floor_snapshot(
+      const std::string &geometry_a, const std::string &geometry_b) const;
   std::unordered_map<std::string, double> collision_trajectory_floors_;
   double collision_trajectory_floor_tolerance_ = 1e-9;
   double trajectory_recovery_target(const std::string &pair_key,

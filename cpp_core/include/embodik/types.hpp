@@ -296,6 +296,14 @@ struct CollisionGeometryPair {
   std::string geometry_b;
 };
 
+/** @brief Live clearance metadata, without a geometric distance query. */
+struct CollisionPairFloor {
+  std::string geometry_a;
+  std::string geometry_b;
+  double minimum_distance = 0.0;
+  std::optional<double> persistent_floor_m;
+};
+
 /** @brief Fresh signed distance and configured clearance for one active pair. */
 struct CollisionPairDistance {
   std::string geometry_a;

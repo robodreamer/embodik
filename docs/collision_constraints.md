@@ -308,6 +308,18 @@ geometry, a disabled collision policy, or no active allowed pairs returns
 `None`; invalid configurations or nonfinite distances raise an error. It does
 not limit evaluation to the constraint row budget or a cached closest pair.
 
+For a clearance-policy snapshot without geometric evaluation, use
+`solver.get_collision_pair_floors()`. It returns read-only `CollisionPairFloor`
+records in the same active/allowed pair order, with `geometry_a`, `geometry_b`,
+`minimum_distance`, and `persistent_floor_m`. Values are read fresh on each call;
+the getter performs no forward kinematics, distance queries, floor initialization,
+or solver-state mutation. Missing geometry, disabled policy, or an empty active
+catalog returns `None`. A trajectory-floor anchor takes precedence over the
+ordinary persistent floor, as in the distance observer.
+
+This metadata query is useful for detecting policy changes. It does not detect
+invalid geometric distances or replace collision validation at a configuration.
+
 When checking a command modified after solving, compare complete previous and
 candidate pair snapshots. Require each pair's configured margin; for a pair
 already inside its margin, require nonworsening clearance relative to that
