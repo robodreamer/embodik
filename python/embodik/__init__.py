@@ -1,5 +1,7 @@
 """embodiK: High-performance inverse kinematics with Pinocchio and Viser visualization."""
 
+from typing import Any
+
 # Version information (prefer installed package metadata)
 try:
     from importlib.metadata import PackageNotFoundError, version
@@ -158,6 +160,17 @@ def get_solver_status_hint(status, status_message: str | None = None) -> str:
     if status_message:
         return f"{base} Details: {status_message}"
     return base
+
+
+def __getattr__(name: str) -> Any:
+    """Load backend discovery only when explicitly requested."""
+    if name == "backends":
+        import importlib
+
+        module = importlib.import_module(".backends", __name__)
+        globals()[name] = module
+        return module
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 __all__ = [
