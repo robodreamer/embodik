@@ -351,11 +351,18 @@ next-box checks. This selects one certified command; it does not expose a full
 feasible acceleration interval. This
 preserves the supplied position and velocity. The command must stop outward
 motion within the control interval, respect position endpoints and rate limits,
-and leave a usable next-state box. Stopping vertices are checked against a
+and satisfy this solve's local next-box check. Stopping vertices are checked against a
 local position arithmetic budget, including the configured braking policy;
 this permits tiny numerical excursions, not exact real-number containment.
 All coupled constraints and nonlinear acceptance checks still apply. Larger
 outward motion and states without a valid braking command remain rejected.
+
+Per-step success is not a guarantee that the next call admits a continuation or
+complete stop. Coupled constraints and finite-arithmetic boundary transitions
+can still reject a later call, including a fail-closed boundary-continuation
+limitation under investigation. Carry the actual returned state and handle
+failure explicitly; sustained-saturation and far-target return recovery are not
+qualified by this release. See the [release scope](release_scope.md).
 
 For successful solves without generalized acceleration allocation, a small
 numerical acceleration residual can be projected into the original state box.

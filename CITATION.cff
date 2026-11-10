@@ -10,7 +10,7 @@ repository-code: https://github.com/robodreamer/embodik
 url: https://robodreamer.github.io/embodik/
 license: Apache-2.0
 version: 0.24.0
-date-released: 2026-10-26
+date-released: 2026-11-10
 keywords:
   - inverse kinematics
   - robotics

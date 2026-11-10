@@ -83,6 +83,7 @@ markdown_extensions:
 
 nav:
   - Home: index.md
+  - 0.24.0 Release Scope: release_scope.md
   - Get Started:
     - Installation: installation.md
     - Quickstart: quickstart.md

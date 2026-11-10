@@ -1,5 +1,16 @@
 # Solver robustness and recovery
 
+## 0.24.0 release status
+
+The criteria below remain development and qualification goals. The foundation
+release covers the documented numerical APIs and default velocity-API regression
+scope; it does not claim every robot/controller profile meets these goals.
+Experimental acceleration and GPU paths retain their documented limits.
+Sustained-saturation recovery, complete goal-preserving stopping, interactive
+fluidity and hard real-time behavior remain unqualified without profile-specific
+evidence. Numerical regression results do not substitute for visual usability
+review or hardware qualification. See the [release scope](release_scope.md).
+
 ## Behavioral quality goals
 
 A person commanding Cartesian motion should experience prompt, continuous,

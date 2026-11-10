@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.24.0] - 2026-11-10
+
+Reusable CPU optimization interfaces, constrained IK reliability fixes, and
+diagnostics that distinguish solver status from actual robot behavior.
+Standalone optimization and opt-in acceleration/GPU paths retain their documented
+experimental status. Backend discovery currently exposes native math only;
+sustained saturation recovery and complete stopping are not guaranteed by this
+release.
+
+### Compatibility
+
+- Native C++ interfaces and public structure layouts have changed. Rebuild
+  the core library, Python bindings, and native applications together against
+  matching headers; do not mix binaries from earlier releases.
+
 ### Added
 
 - Lazy `embodik.backends` discovery and native numerical handles expose runtime
@@ -18,43 +33,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   metadata without forward kinematics or distance queries. It preserves the
   distance observer's pair ordering and floor semantics; it is not a collision
   safety check.
-
-### Fixed
-
-- The opt-in CPU direct MIN_ERROR acceleration route now accepts zero and
-  subthreshold references when hard constraints require nonzero motion.
-  Previously these references incorrectly skipped the requested quadratic
-  optimization. Default and legacy routes retain their existing dispatch.
-
-- Opt-in CPU acceleration collision refinement selects a strongest normalized
-  violating time sample for the first failed pair instead of always using its
-  earliest failure. It retains one cut per refinement, the existing retry
-  budget and complete sampled collision validation.
-
-- CPU velocity and acceleration collision-row selection no longer refills an
-  underfilled candidate list with historical pairs culled at the current state.
-  This prevents stale distances and nearest points from creating spurious
-  constraints. Current near-floor rows and physical validation remain intact.
-
-- Collision distance queries reject finite results that contradict a sound
-  separation bound for disjoint geometry. The existing cold-query retry
-  recovers full distance and closest-point evidence without relaxing floors.
-
-## [0.24.0] - 2026-10-26
-
-Reusable CPU optimization interfaces, constrained IK reliability fixes, and
-diagnostics that distinguish solver status from actual robot behavior.
-Standalone optimization and newly introduced backends retain their documented
-experimental status; sustained saturation recovery and complete stopping are
-not guaranteed by this release.
-
-### Compatibility
-
-- Native C++ interfaces and public structure layouts have changed. Rebuild
-  the core library, Python bindings, and native applications together against
-  matching headers; do not mix binaries from earlier releases.
-
-### Added
 
 - CPU `initialize_collision_recovery_floors(q_start)` initializes unseeded
   recovery floors from startup signed distances capped by active pair margins,
@@ -132,6 +110,25 @@ not guaranteed by this release.
   without changing constraints, constraint or satisfaction tolerances, or recovery budgets.
 
 ### Fixed
+
+- The opt-in CPU direct MIN_ERROR acceleration route now accepts zero and
+  subthreshold references when hard constraints require nonzero motion.
+  Previously these references incorrectly skipped the requested quadratic
+  optimization. Default and legacy routes retain their existing dispatch.
+
+- Opt-in CPU acceleration collision refinement selects a strongest normalized
+  violating time sample for the first failed pair instead of always using its
+  earliest failure. It retains one cut per refinement, the existing retry
+  budget and complete sampled collision validation.
+
+- CPU velocity and acceleration collision-row selection no longer refills an
+  underfilled candidate list with historical pairs culled at the current state.
+  This prevents stale distances and nearest points from creating spurious
+  constraints. Current near-floor rows and physical validation remain intact.
+
+- Collision distance queries reject finite results that contradict a sound
+  separation bound for disjoint geometry. The existing cold-query retry
+  recovers full distance and closest-point evidence without relaxing floors.
 
 - Generalized hierarchical solves calibrate projected active-constraint rank
   against the original row scale. A constraint already fixed by a higher task
