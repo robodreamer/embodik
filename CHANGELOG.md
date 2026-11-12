@@ -7,13 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.23.3] - 2026-11-12
+
+This patch adds official Rainbow RB-Y1 fixed-base adapters and keeps Linux
+wheels building on Eigen 3.3. The unqualified `rby1` preset follows the latest
+verified official A model. The previous `robot_descriptions` bimanual profile
+remains available as `rby1-legacy`.
+
 ### Added
 
 - Official Rainbow RB-Y1 A v1.2 and M v1.3 model adapters, pinned to SDK v0.10.1,
   with cached assets, ready configurations and basic/collision/bimanual example
   presets. `rby1` aliases the latest verified official A model; the old bimanual
-  profile is explicitly named `rby1-legacy`. Fixed-base IK retains 20 torso/arm DOFs; wheel, head and finger joints
-  are locked. SDK capsules are preserved as equivalent standard URDF primitives.
+  profile is explicitly named `rby1-legacy`. Fixed-base IK retains 20 torso/arm
+  DOFs; wheel, head and finger joints are locked. SDK capsules are preserved as
+  equivalent standard URDF primitives.
 - `RobotVisualizer` accepts an explicit `urdf_path` for its ViserUrdf backend so
   custom or adapted models can use the same description for solving and display.
 
