@@ -4,11 +4,12 @@
 demo for ROBOTIS AI Worker FFW models and RB-Y1. It uses the public
 `ROBOTIS-GIT/ai_worker` repository for AI Worker visual URDF assets, bundled
 reduced collision assets for AI Worker collision-aware IK, and
-the pinned official Rainbow SDK v0.10.1 for RB-Y1 A v1.2 (`--robot rby1a`)
+the pinned official Rainbow SDK v0.10.1 for RB-Y1 A v1.2 (`--robot rby1` or `--robot rby1a`)
 and M v1.3 (`--robot rby1m`). See the [model setup and scope](basic_ik.md#rainbow-rb-y1-models).
 
-The existing `--robot rby1` profile and the video below use the legacy
-`robot_descriptions` assets. Select `rby1a`/`rby1m` for the updated SDK models.
+The `rby1` name now selects the latest verified official A description. Use
+`--robot rby1-legacy` to reproduce the older `robot_descriptions` profile shown
+in the video below. `rby1a` and `rby1m` explicitly select the official A/M models.
 Their import and small-motion checks do not establish complete collision-drag or
 recovery qualification for the changed geometry.
 
@@ -53,7 +54,7 @@ copied examples:
 
 ```bash
 python 06_bimanual_whole_body_ik.py --variant bg2
-python 06_bimanual_whole_body_ik.py --robot rby1a
+python 06_bimanual_whole_body_ik.py --robot rby1
 python 06_bimanual_whole_body_ik.py --robot rby1m
 ```
 

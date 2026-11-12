@@ -11,7 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Official Rainbow RB-Y1 A v1.2 and M v1.3 model adapters, pinned to SDK v0.10.1,
   with cached assets, ready configurations and basic/collision/bimanual example
-  presets. Fixed-base IK retains 20 torso/arm DOFs; wheel, head and finger joints
+  presets. `rby1` aliases the latest verified official A model; the old bimanual
+  profile is explicitly named `rby1-legacy`. Fixed-base IK retains 20 torso/arm DOFs; wheel, head and finger joints
   are locked. SDK capsules are preserved as equivalent standard URDF primitives.
 - `RobotVisualizer` accepts an explicit `urdf_path` for its ViserUrdf backend so
   custom or adapted models can use the same description for solving and display.

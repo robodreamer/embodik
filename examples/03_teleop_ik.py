@@ -126,7 +126,7 @@ def main() -> None:
 
     server = viser.ViserServer(port=args.port)
     server.scene.add_grid("/ground", width=2, height=2)
-    if cfg.key in ("rby1a", "rby1m"):
+    if cfg.key in ("rby1", "rby1a", "rby1m"):
         from yourdfpy import URDF
 
         urdf = URDF.load(str(cfg.urdf_path))

@@ -20,12 +20,12 @@ interactive workflows.
 
 ## Rainbow RB-Y1 models
 
-The `rby1a` (A v1.2) and `rby1m` (M v1.3) presets use the official
+The `rby1` alias and `rby1a` preset select A v1.2; `rby1m` selects M v1.3. They use the official
 [Rainbow SDK v0.10.1](https://github.com/RainbowRobotics/rby1-sdk/releases/tag/v0.10.1)
 assets. Both expose 20 torso/arm DOFs and start in a bent-elbow ready pose.
 
 ```bash
-pixi run python examples/01_basic_ik_simple.py --robot rby1a
+pixi run python examples/01_basic_ik_simple.py --robot rby1
 pixi run python examples/01_basic_ik_simple.py --robot rby1m
 ```
 

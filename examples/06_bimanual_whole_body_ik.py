@@ -63,9 +63,9 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--robot",
-        choices=("ai-worker", "rby1", "rby1a", "rby1m"),
+        choices=("ai-worker", "rby1", "rby1a", "rby1m", "rby1-legacy"),
         default="ai-worker",
-        help="Robot model family to load. 'ai-worker' uses the ROBOTIS FFW assets; 'rby1' keeps the legacy description; 'rby1a'/'rby1m' load official SDK A/M models.",
+        help="Robot model family to load. 'ai-worker' uses the ROBOTIS FFW assets; 'rby1'/'rby1a' use the latest verified SDK A model; 'rby1m' uses M; 'rby1-legacy' uses robot_descriptions.",
     )
     parser.add_argument("--variant", choices=("sg2", "bg2"), default="sg2")
     parser.add_argument("--port", type=int, default=DEFAULT_VISER_PORT)
@@ -108,8 +108,8 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _resolve_rby1_urdf_path(variant: str | None = None) -> Path:
-    if variant is not None:
+def _resolve_rby1_urdf_path(variant: str = "a") -> Path:
+    if variant != "legacy":
         from embodik.models.rby1 import resolve_rby1_urdf
 
         return resolve_rby1_urdf(variant)
@@ -327,11 +327,13 @@ def _prepare_rby1_collision_urdf(urdf_path: Path) -> Path:
 
 def main() -> None:
     args = parse_args()
-    if args.robot in ("rby1", "rby1a", "rby1m"):
+    if args.robot in ("rby1", "rby1a", "rby1m", "rby1-legacy"):
         base_urdf_path = (
             Path(args.urdf).expanduser().resolve()
             if args.urdf
-            else _resolve_rby1_urdf_path({"rby1": None, "rby1a": "a", "rby1m": "m"}[args.robot])
+            else _resolve_rby1_urdf_path(
+                {"rby1": "a", "rby1a": "a", "rby1m": "m", "rby1-legacy": "legacy"}[args.robot]
+            )
         )
         urdf_path = _prepare_rby1_tip_frame_urdf(base_urdf_path)
         collision_urdf_path = (
@@ -339,7 +341,7 @@ def main() -> None:
             if args.collision_urdf
             else (
                 _prepare_rby1_collision_urdf(urdf_path)
-                if args.urdf or args.robot == "rby1"
+                if args.urdf or args.robot == "rby1-legacy"
                 else urdf_path
             )
         )

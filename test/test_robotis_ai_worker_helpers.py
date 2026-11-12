@@ -139,7 +139,7 @@ def test_resolve_ai_worker_torso_marker_z_bounds_from_lift_joint() -> None:
 def _load_reduced_rby1_visual_robot():
     _require_rby1_description()
     mod = _load_bimanual_example_module()
-    source_urdf = mod._resolve_rby1_urdf_path()
+    source_urdf = mod._resolve_rby1_urdf_path("legacy")
     visual_urdf = mod._prepare_rby1_tip_frame_urdf(source_urdf)
     full_robot = embodik.RobotModel(str(visual_urdf), floating_base=False)
     ik_joint_names = default_common_bimanual_ik_joint_names(full_robot.get_joint_names())
@@ -445,10 +445,10 @@ def test_support_polygon_gate_detects_initial_com_outside_rby1_triangle() -> Non
     assert not _contains_point_in_polygon(poly, np.array([-0.009, -0.009]))
 
 
-def test_rby1_generated_collision_urdf_has_bounded_curated_pairs() -> None:
+def test_legacy_rby1_generated_collision_urdf_has_bounded_curated_pairs() -> None:
     _require_rby1_description()
     mod = _load_bimanual_example_module()
-    source_urdf = mod._resolve_rby1_urdf_path()
+    source_urdf = mod._resolve_rby1_urdf_path("legacy")
     visual_urdf = mod._prepare_rby1_tip_frame_urdf(source_urdf)
     collision_urdf = mod._prepare_rby1_collision_urdf(visual_urdf)
 
@@ -491,10 +491,10 @@ def test_rby1_generated_collision_urdf_has_bounded_curated_pairs() -> None:
     assert ("link_left_arm_6", "link_torso_5") in included_link_pairs
 
 
-def test_rby1_generated_collision_constraint_configures_and_evaluates() -> None:
+def test_legacy_rby1_generated_collision_constraint_configures_and_evaluates() -> None:
     _require_rby1_description()
     mod = _load_bimanual_example_module()
-    source_urdf = mod._resolve_rby1_urdf_path()
+    source_urdf = mod._resolve_rby1_urdf_path("legacy")
     visual_urdf = mod._prepare_rby1_tip_frame_urdf(source_urdf)
     collision_urdf = mod._prepare_rby1_collision_urdf(visual_urdf)
 
@@ -522,7 +522,7 @@ def test_rby1_generated_collision_constraint_configures_and_evaluates() -> None:
     assert np.isfinite(float(debug.distance))
 
 
-def test_rby1_auto_pose_layout_keeps_bimanual_case_productive() -> None:
+def test_legacy_rby1_auto_pose_layout_keeps_bimanual_case_productive() -> None:
     offset = np.array([-0.18, 0.12, 0.03], dtype=float)
 
     merged_statuses, merged_layouts, merged_errors, merged_moved = (
@@ -554,10 +554,10 @@ def test_rby1_auto_pose_layout_keeps_bimanual_case_productive() -> None:
     assert auto_errors[-1] <= merged_errors[-1] + 0.02
 
 
-def test_rby1_collision_push_release_uses_hardening_policy_without_stall_lock() -> None:
+def test_legacy_rby1_collision_push_release_uses_hardening_policy_without_stall_lock() -> None:
     _require_rby1_description()
     mod = _load_bimanual_example_module()
-    source_urdf = mod._resolve_rby1_urdf_path()
+    source_urdf = mod._resolve_rby1_urdf_path("legacy")
     visual_urdf = mod._prepare_rby1_tip_frame_urdf(source_urdf)
     collision_urdf = mod._prepare_rby1_collision_urdf(visual_urdf)
 
@@ -706,7 +706,7 @@ def test_rby1_collision_push_release_uses_hardening_policy_without_stall_lock() 
     assert float(solver.evaluate_collision_debug(q).distance) > min_distance_m
 
 
-def test_rby1_repeated_collision_entry_release_uses_solver_owned_recovery() -> None:
+def test_legacy_rby1_repeated_collision_entry_release_uses_solver_owned_recovery() -> None:
     """Repeated push/release cycles should stay bounded without app-side escape bursts.
 
     This intentionally exercises the raw solver integration path used by the
@@ -715,7 +715,7 @@ def test_rby1_repeated_collision_entry_release_uses_solver_owned_recovery() -> N
     """
     _require_rby1_description()
     mod = _load_bimanual_example_module()
-    source_urdf = mod._resolve_rby1_urdf_path()
+    source_urdf = mod._resolve_rby1_urdf_path("legacy")
     visual_urdf = mod._prepare_rby1_tip_frame_urdf(source_urdf)
     collision_urdf = mod._prepare_rby1_collision_urdf(visual_urdf)
 
@@ -873,11 +873,11 @@ def test_rby1_repeated_collision_entry_release_uses_solver_owned_recovery() -> N
     assert float(solver.evaluate_collision_debug(q).distance) > min_distance_m
 
 
-def test_rby1_compact_dual_target_drag_stays_productive_near_collision() -> None:
+def test_legacy_rby1_compact_dual_target_drag_stays_productive_near_collision() -> None:
     """Both active targets near the torso should not collapse into zero motion."""
     _require_rby1_description()
     mod = _load_bimanual_example_module()
-    source_urdf = mod._resolve_rby1_urdf_path()
+    source_urdf = mod._resolve_rby1_urdf_path("legacy")
     visual_urdf = mod._prepare_rby1_tip_frame_urdf(source_urdf)
     collision_urdf = mod._prepare_rby1_collision_urdf(visual_urdf)
 

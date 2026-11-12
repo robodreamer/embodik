@@ -6,7 +6,7 @@ Robot configurations are defined in `robot_presets.yaml`, which can be shared ac
 
 ## Rainbow RB-Y1
 
-Built-in `rby1a` and `rby1m` presets resolve the official SDK v0.10.1 A v1.2 and
+Built-in `rby1` (alias of `rby1a`) and `rby1m` presets resolve the official SDK v0.10.1 A v1.2 and
 M v1.3 descriptions. They use a fixed-base, 20-DOF torso/arm adapter and a ready
 pose. Wheels, head and gripper fingers stay fixed. The first use downloads and
 caches meshes; set `EMBODIK_RBY1_ROOT` for an offline SDK checkout. See

@@ -100,6 +100,37 @@ def test_wrong_cached_sdk_commit_fails_without_fetch(tmp_path, monkeypatch):
         resolve_rby1_urdf()
 
 
+def test_rby1_preset_aliases_latest_verified_a():
+    from examples.utils.robot_models import get_robot_preset
+
+    alias = get_robot_preset("rby1")
+    explicit = get_robot_preset("rby1a")
+    assert alias["rby1_variant"] == explicit["rby1_variant"] == "a"
+    assert alias["display_name"] == explicit["display_name"]
+    assert get_robot_preset("rby1m")["rby1_variant"] == "m"
+
+
+def test_bimanual_default_resolver_uses_official_a(monkeypatch, tmp_path):
+    import importlib.util
+
+    import embodik.models.rby1 as adapter
+
+    script = Path(__file__).resolve().parents[1] / "examples/06_bimanual_whole_body_ik.py"
+    spec = importlib.util.spec_from_file_location("rby1_alias_example", script)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    calls = []
+
+    def resolve(variant):
+        calls.append(variant)
+        return tmp_path / f"{variant}.urdf"
+
+    monkeypatch.setattr(adapter, "resolve_rby1_urdf", resolve)
+    assert module._resolve_rby1_urdf_path() == tmp_path / "a.urdf"
+    assert module._resolve_rby1_urdf_path("m") == tmp_path / "m.urdf"
+    assert calls == ["a", "m"]
+
+
 @pytest.mark.parametrize("variant", sorted(MODEL_PATHS))
 def test_official_assets_load_track_and_keep_collision_geometry(variant, monkeypatch):
     root = os.environ.get("EMBODIK_RBY1_TEST_ROOT")
@@ -111,6 +142,8 @@ def test_official_assets_load_track_and_keep_collision_geometry(variant, monkeyp
 
     config = resolve_robot_configuration("rby1" + variant)
     assert config["urdf_path"] == path
+    if variant == "a":
+        assert resolve_robot_configuration("rby1")["urdf_path"] == path
     model = eik.RobotModel(str(path), floating_base=False)
     assert model.nq == model.nv == 20
     assert model.has_collision_geometry()
