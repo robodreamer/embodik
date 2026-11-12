@@ -4,7 +4,13 @@
 demo for ROBOTIS AI Worker FFW models and RB-Y1. It uses the public
 `ROBOTIS-GIT/ai_worker` repository for AI Worker visual URDF assets, bundled
 reduced collision assets for AI Worker collision-aware IK, and
-`robot_descriptions.rby1_description` when launched with `--robot rby1`.
+the pinned official Rainbow SDK v0.10.1 for RB-Y1 A v1.2 (`--robot rby1a`)
+and M v1.3 (`--robot rby1m`). See the [model setup and scope](basic_ik.md#rainbow-rb-y1-models).
+
+The existing `--robot rby1` profile and the video below use the legacy
+`robot_descriptions` assets. Select `rby1a`/`rby1m` for the updated SDK models.
+Their import and small-motion checks do not establish complete collision-drag or
+recovery qualification for the changed geometry.
 
 <video autoplay muted loop playsinline controls width="100%" src="../../assets/media/rby1_collision_free_ik.mp4"></video>
 
@@ -14,7 +20,7 @@ reduced collision assets for AI Worker collision-aware IK, and
 - Viser visualization throughout via `ViserServer` + `ViserUrdf`
 - Model-aware posture bias controls layered underneath the IK tasks
 - Passive-joint locking so wheel/drive joints stay quiet during arm teleoperation
-- Support for AI Worker `sg2` / `bg2` and RB-Y1 via `--robot rby1`
+- Support for AI Worker `sg2` / `bg2` and official RB-Y1 A/M descriptions
 - Optional Seer/xvisio controller input through the same IK target path
 - Collision debug controls, centroidal support visualization, and adaptive gain tuning
 
@@ -47,7 +53,8 @@ copied examples:
 
 ```bash
 python 06_bimanual_whole_body_ik.py --variant bg2
-python 06_bimanual_whole_body_ik.py --robot rby1
+python 06_bimanual_whole_body_ik.py --robot rby1a
+python 06_bimanual_whole_body_ik.py --robot rby1m
 ```
 
 The app opens at `http://localhost:8080` by default. Use `--port` when running

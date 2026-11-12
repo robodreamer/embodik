@@ -19,7 +19,6 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import pinocchio as pin
 import viser
-from embodik.gpu.wbc import GpuWbcMultiFrameSolver
 from example_helpers.ik_common import (
     COLLISION_DEBUG_LOG_PERIOD_S,
     COLLISION_TUNING_OPTIONS,
@@ -45,6 +44,7 @@ from viser.extras import ViserUrdf
 
 import embodik
 from embodik import Rt, q2r, r2q
+from embodik.gpu.wbc import GpuWbcMultiFrameSolver
 
 # -----------------------------------------------------------------------------
 # Default numeric constants
@@ -180,6 +180,11 @@ def resolve_robot_configuration(robot_key: str) -> RobotConfig:
                 f"Expected at: {urdf_path_str} (relative to examples/ directory)"
             )
 
+    if urdf_path is None and "rby1_variant" in preset:
+        from embodik.models.rby1 import resolve_rby1_urdf
+
+        urdf_path = resolve_rby1_urdf(preset["rby1_variant"])
+
     # Priority 2: Use robot_descriptions package
     if urdf_path is None:
         urdf_import = preset.get("urdf_import")
@@ -232,7 +237,7 @@ def resolve_robot_configuration(robot_key: str) -> RobotConfig:
     joint_labels = preset.get("joint_labels", [])
 
     # If not specified, try to extract from robot model
-    if not joint_names or not joint_labels:
+    if not joint_names or not joint_labels or "rby1_variant" in preset:
         ensure_ros_package_path(urdf_path)
         temp_robot = embodik.RobotModel(str(urdf_path), floating_base=False)
         if not joint_names:
@@ -253,6 +258,11 @@ def resolve_robot_configuration(robot_key: str) -> RobotConfig:
 
     # Handle default configuration - ensure it matches the number of arm joints
     default_config = np.array(preset.get("default_configuration", []), dtype=float)
+
+    if "rby1_variant" in preset:
+        from embodik.models.rby1 import ready_configuration
+
+        default_config = ready_configuration(temp_robot)
 
     # For panda with gripper, default_configuration should only have arm joints (7)
     # Handle gripper joints separately if robot has more DOF than default_configuration
@@ -968,12 +978,9 @@ def run_gui(cfg: RobotConfig, args: argparse.Namespace) -> None:
             floating_base=False,
         )
         gpu_posture_indices = tuple(
-            int(gpu_robot.get_joint_velocity_index(name))
-            for name in cfg.joint_names
+            int(gpu_robot.get_joint_velocity_index(name)) for name in cfg.joint_names
         )
-        gpu_pairs = gpu_collision_include_pairs(
-            gpu_robot, backend._collision_exclusions
-        )
+        gpu_pairs = gpu_collision_include_pairs(gpu_robot, backend._collision_exclusions)
         gpu_wbc_solver = GpuWbcMultiFrameSolver(
             args.gpu_wbc_manifest,
             cfg.urdf_path,
@@ -1004,15 +1011,18 @@ def run_gui(cfg: RobotConfig, args: argparse.Namespace) -> None:
         visible_target_pose = backend.get_pose()
         gpu_tcp_pose = backend.robot.get_frame_pose(gpu_wbc_solver.frames[0])
         gpu_target_offset = visible_target_pose.inverse() * gpu_tcp_pose
-        warmup_ms = gpu_wbc_solver.warm_up(
-            q_current, (visible_target_pose * gpu_target_offset,)
-        )
+        warmup_ms = gpu_wbc_solver.warm_up(q_current, (visible_target_pose * gpu_target_offset,))
         print(
             f"[GPU WBC] Ready on {gpu_wbc_solver.device_label}; "
             f"one-time warm-up took {warmup_ms:.1f} ms."
         )
 
-    urdf = load_robot_description(cfg.description_name)
+    if "rby1_variant" in ROBOT_PRESETS[cfg.key]:
+        from yourdfpy import URDF
+
+        urdf = URDF.load(str(cfg.urdf_path))
+    else:
+        urdf = load_robot_description(cfg.description_name)
     server = viser.ViserServer(port=args.port)
     server.scene.add_grid("/ground", width=2, height=2)
     urdf_vis = ViserUrdf(server, urdf, root_node_name="/robot")
@@ -1508,9 +1518,7 @@ def run_gui(cfg: RobotConfig, args: argparse.Namespace) -> None:
     @self_collision_checkbox.on_update
     def _(_evt) -> None:
         if gpu_backend_selected() and gpu_wbc_solver is not None:
-            gpu_wbc_solver.configure_runtime(
-                collision_enabled=bool(self_collision_checkbox.value)
-            )
+            gpu_wbc_solver.configure_runtime(collision_enabled=bool(self_collision_checkbox.value))
             gpu_wbc_solver.reset_state()
         elif hasattr(backend, "enable_self_collision"):
             if hasattr(backend, "set_collision_tuning_mode"):
@@ -1627,29 +1635,18 @@ def run_gui(cfg: RobotConfig, args: argparse.Namespace) -> None:
                 if gpu_runtime_fault is None:
                     try:
                         gpu_posture_weights = tuple(
-                            1.0 if checkbox.value else 0.0
-                            for checkbox in nullspace_checkboxes
+                            1.0 if checkbox.value else 0.0 for checkbox in nullspace_checkboxes
                         )
                         gpu_wbc_solver.configure_runtime(
                             iterations=int(iterations_slider.value),
                             frame_position_gains=(float(pos_gain.value),),
                             frame_orientation_gains=(float(rot_gain.value),),
                             adaptive_dt=bool(adaptive_dt_checkbox.value),
-                            adaptive_dt_max_scale=float(
-                                adaptive_dt_max_scale_slider.value
-                            ),
-                            adaptive_dt_reference_distance=float(
-                                adaptive_dt_ref_dist_slider.value
-                            ),
-                            acceleration_limits_enabled=bool(
-                                accel_limit_checkbox.value
-                            ),
-                            max_joint_acceleration_rad_s2=float(
-                                accel_limit_slider.value
-                            ),
-                            collision_enabled=bool(
-                                self_collision_checkbox.value
-                            ),
+                            adaptive_dt_max_scale=float(adaptive_dt_max_scale_slider.value),
+                            adaptive_dt_reference_distance=float(adaptive_dt_ref_dist_slider.value),
+                            acceleration_limits_enabled=bool(accel_limit_checkbox.value),
+                            max_joint_acceleration_rad_s2=float(accel_limit_slider.value),
+                            collision_enabled=bool(self_collision_checkbox.value),
                             posture_target_configuration=tuple(nullspace_bias),
                             posture_weights=gpu_posture_weights,
                             posture_gain=(
@@ -1662,8 +1659,7 @@ def run_gui(cfg: RobotConfig, args: argparse.Namespace) -> None:
                             q_current,
                             (target_pose * gpu_target_offset,),
                             include_collision_debug=bool(
-                                collision_debug_checkbox.value
-                                and self_collision_checkbox.value
+                                collision_debug_checkbox.value and self_collision_checkbox.value
                             ),
                         )
                     except Exception as exc:  # Fail closed: hold; never invoke CPU implicitly.
@@ -1685,9 +1681,7 @@ def run_gui(cfg: RobotConfig, args: argparse.Namespace) -> None:
                         )
                         collision_text = "collision=unsupported"
                         if gpu_result.minimum_collision_distance_m is not None:
-                            active_text = (
-                                "active" if gpu_result.collision_active else "clear"
-                            )
+                            active_text = "active" if gpu_result.collision_active else "clear"
                             collision_text = (
                                 f"dmin={gpu_result.minimum_collision_distance_m*1e3:.1f} mm "
                                 f"({active_text})"

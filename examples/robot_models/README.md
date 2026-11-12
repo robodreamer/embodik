@@ -4,6 +4,15 @@ This directory contains robot model configurations that can be used with the emb
 
 Robot configurations are defined in `robot_presets.yaml`, which can be shared across multiple scripts.
 
+## Rainbow RB-Y1
+
+Built-in `rby1a` and `rby1m` presets resolve the official SDK v0.10.1 A v1.2 and
+M v1.3 descriptions. They use a fixed-base, 20-DOF torso/arm adapter and a ready
+pose. Wheels, head and gripper fingers stay fixed. The first use downloads and
+caches meshes; set `EMBODIK_RBY1_ROOT` for an offline SDK checkout. See
+[the model guide](../../docs/examples/basic_ik.md#rainbow-rb-y1-models) for
+normalization details, supported scope and launch commands.
+
 ## Quick Start
 
 Robot models can be loaded from two sources:

@@ -34,14 +34,14 @@ from example_helpers.ik_common import (
     configure_solver_runtime_policy,
     quiet_websocket_handshake_logs,
 )
-from embodik.gpu.wbc import (
-    GpuWbcMultiFrameSolver,
-    derive_frame_active_joint_names,
-)
 from utils.robot_models import load_robot_presets, resolve_robot_configuration
 
 import embodik
 from embodik import Rt, create_robot_visualizer, q2r, r2q
+from embodik.gpu.wbc import (
+    GpuWbcMultiFrameSolver,
+    derive_frame_active_joint_names,
+)
 
 quiet_websocket_handshake_logs()
 
@@ -472,6 +472,7 @@ def main(args: argparse.Namespace) -> None:
         robot_model=robot,
         backend=args.visualizer,
         description_name=str(preset.get("description_name", "")),
+        urdf_path=config["urdf_path"] if "rby1_variant" in preset else None,
         port=args.port,
         open_browser=True,
     )

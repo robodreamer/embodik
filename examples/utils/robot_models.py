@@ -4,11 +4,12 @@ This module provides functions to load robot model configurations from
 robot_presets.yaml, which can be shared across multiple examples.
 """
 
-from pathlib import Path
-from typing import Dict, Any
-import numpy as np
 import logging
 import os
+from pathlib import Path
+from typing import Any, Dict
+
+import numpy as np
 
 # Get the robot_models directory
 # Use resolve() to ensure we get absolute paths and handle symlinks correctly
@@ -45,6 +46,20 @@ _BUILTIN_PRESETS: Dict[str, Dict[str, Any]] = {
         "default_offset": np.array([0.05, 0.0, 0.0]),
         "collision_exclusions": "auto",
         "collision_exclusion_overrides": [],
+    },
+    "rby1a": {
+        "rby1_variant": "a",
+        "target_link": "ee_right",
+        "display_name": "Rainbow RB-Y1 A v1.2",
+        "default_offset": np.array([0.03, 0.0, 0.0]),
+        "collision_exclusions": "auto",
+    },
+    "rby1m": {
+        "rby1_variant": "m",
+        "target_link": "ee_right",
+        "display_name": "Rainbow RB-Y1 M v1.3",
+        "default_offset": np.array([0.03, 0.0, 0.0]),
+        "collision_exclusions": "auto",
     },
 }
 
@@ -93,12 +108,12 @@ def load_robot_presets() -> Dict[str, Dict[str, Any]]:
 
     # Convert numeric lists to numpy arrays
     for robot_key, config in presets.items():
-        if 'default_configuration' in config:
-            config['default_configuration'] = np.array(config['default_configuration'])
-        if 'extra_gripper_default' in config:
-            config['extra_gripper_default'] = np.array(config['extra_gripper_default'])
-        if 'default_offset' in config:
-            config['default_offset'] = np.array(config['default_offset'])
+        if "default_configuration" in config:
+            config["default_configuration"] = np.array(config["default_configuration"])
+        if "extra_gripper_default" in config:
+            config["extra_gripper_default"] = np.array(config["extra_gripper_default"])
+        if "default_offset" in config:
+            config["default_offset"] = np.array(config["default_offset"])
 
     return presets
 
@@ -120,10 +135,7 @@ def get_robot_preset(robot_key: str) -> Dict[str, Any]:
 
     if robot_key not in presets:
         available = sorted(presets.keys())
-        raise KeyError(
-            f"Robot preset '{robot_key}' not found. "
-            f"Available options: {available}"
-        )
+        raise KeyError(f"Robot preset '{robot_key}' not found. " f"Available options: {available}")
 
     return presets[robot_key]
 
@@ -206,15 +218,14 @@ def resolve_robot_configuration(robot_key: str) -> Dict[str, Any]:
     try:
         import embodik
     except ImportError:
-        raise ImportError(
-            "embodik package is required. Install it with: pip install -e ."
-        )
+        raise ImportError("embodik package is required. Install it with: pip install -e .")
 
     # Check if C++ extension is available
-    if not hasattr(embodik, 'RobotModel'):
-        cpp_available = getattr(embodik, '_cpp_extension_available', False)
+    if not hasattr(embodik, "RobotModel"):
+        cpp_available = getattr(embodik, "_cpp_extension_available", False)
         if not cpp_available:
             import sys
+
             cpp_err = getattr(embodik, "_cpp_extension_error", None)
             raise ImportError(
                 "embodik C++ extension is not available. RobotModel cannot be used.\n\n"
@@ -267,6 +278,11 @@ def resolve_robot_configuration(robot_key: str) -> Dict[str, Any]:
             )
         logger.info(f"Loading robot model from local file: {urdf_path}")
 
+    if urdf_path is None and "rby1_variant" in preset:
+        from embodik.models.rby1 import resolve_rby1_urdf
+
+        urdf_path = resolve_rby1_urdf(preset["rby1_variant"])
+
     # Priority 2: Use robot_descriptions package
     if urdf_path is None:
         urdf_import = preset.get("urdf_import")
@@ -313,6 +329,11 @@ def resolve_robot_configuration(robot_key: str) -> Dict[str, Any]:
     q_default = preset.get("default_configuration", np.zeros(robot.nq))
     if isinstance(q_default, list):
         q_default = np.array(q_default)
+
+    if "rby1_variant" in preset:
+        from embodik.models.rby1 import ready_configuration
+
+        q_default = ready_configuration(robot)
 
     # Handle gripper joints for panda (if robot has 9 DOF)
     if robot_key == "panda" and robot.nq == 9:

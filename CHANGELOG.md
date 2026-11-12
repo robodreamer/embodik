@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Official Rainbow RB-Y1 A v1.2 and M v1.3 model adapters, pinned to SDK v0.10.1,
+  with cached assets, ready configurations and basic/collision/bimanual example
+  presets. Fixed-base IK retains 20 torso/arm DOFs; wheel, head and finger joints
+  are locked. SDK capsules are preserved as equivalent standard URDF primitives.
+- `RobotVisualizer` accepts an explicit `urdf_path` for its ViserUrdf backend so
+  custom or adapted models can use the same description for solving and display.
+
 ### Fixed
 
 - SVD factor checks no longer call `info()` on Eigen 3.3. The manylinux wheel

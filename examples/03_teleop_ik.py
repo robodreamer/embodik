@@ -32,11 +32,7 @@ for _path in (_PYTHON_DIR, _EXAMPLES_DIR):
 
 import numpy as np
 import viser
-from embodik import r2q
 from example_helpers.ik_common import DEFAULT_VISER_PORT, quiet_websocket_handshake_logs
-from embodik.gpu.wbc import (
-    GpuWbcMultiFrameSolver,
-)
 from example_helpers.seer_teleop import (
     DEFAULT_TELEOP_SCALE_FACTOR,
     SeerController,
@@ -48,6 +44,11 @@ from example_helpers.teleop_ik_backend import TeleopIKBackend
 from robot_descriptions.loaders.yourdfpy import load_robot_description
 from utils.robot_models import load_robot_presets
 from viser.extras import ViserUrdf
+
+from embodik import r2q
+from embodik.gpu.wbc import (
+    GpuWbcMultiFrameSolver,
+)
 
 quiet_websocket_handshake_logs()
 
@@ -125,7 +126,12 @@ def main() -> None:
 
     server = viser.ViserServer(port=args.port)
     server.scene.add_grid("/ground", width=2, height=2)
-    urdf = load_robot_description(cfg.description_name)
+    if cfg.key in ("rby1a", "rby1m"):
+        from yourdfpy import URDF
+
+        urdf = URDF.load(str(cfg.urdf_path))
+    else:
+        urdf = load_robot_description(cfg.description_name)
     urdf_vis = ViserUrdf(server, urdf, root_node_name="/robot")
 
     actuated_names = list(getattr(urdf_vis._urdf, "actuated_joint_names", []))

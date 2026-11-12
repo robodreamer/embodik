@@ -63,9 +63,9 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--robot",
-        choices=("ai-worker", "rby1"),
+        choices=("ai-worker", "rby1", "rby1a", "rby1m"),
         default="ai-worker",
-        help="Robot model family to load. 'ai-worker' uses the ROBOTIS FFW assets; 'rby1' uses robot_descriptions.rby1_description.",
+        help="Robot model family to load. 'ai-worker' uses the ROBOTIS FFW assets; 'rby1' keeps the legacy description; 'rby1a'/'rby1m' load official SDK A/M models.",
     )
     parser.add_argument("--variant", choices=("sg2", "bg2"), default="sg2")
     parser.add_argument("--port", type=int, default=DEFAULT_VISER_PORT)
@@ -108,13 +108,17 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _resolve_rby1_urdf_path() -> Path:
+def _resolve_rby1_urdf_path(variant: str | None = None) -> Path:
+    if variant is not None:
+        from embodik.models.rby1 import resolve_rby1_urdf
+
+        return resolve_rby1_urdf(variant)
+    # Preserve the existing robot_descriptions-based profile and its QA fixtures.
     try:
         from robot_descriptions.rby1_description import URDF_PATH
     except ImportError as exc:
         raise RuntimeError(
-            "RB-Y1 support requires robot_descriptions with rby1_description. "
-            "Install the optional robot_descriptions package or run through the Pixi environment."
+            "Legacy RB-Y1 needs robot_descriptions; use --robot rby1a for the official SDK model."
         ) from exc
     return Path(URDF_PATH).expanduser().resolve()
 
@@ -323,18 +327,28 @@ def _prepare_rby1_collision_urdf(urdf_path: Path) -> Path:
 
 def main() -> None:
     args = parse_args()
-    if args.robot == "rby1":
+    if args.robot in ("rby1", "rby1a", "rby1m"):
         base_urdf_path = (
-            Path(args.urdf).expanduser().resolve() if args.urdf else _resolve_rby1_urdf_path()
+            Path(args.urdf).expanduser().resolve()
+            if args.urdf
+            else _resolve_rby1_urdf_path({"rby1": None, "rby1a": "a", "rby1m": "m"}[args.robot])
         )
         urdf_path = _prepare_rby1_tip_frame_urdf(base_urdf_path)
         collision_urdf_path = (
             _prepare_rby1_tip_frame_urdf(Path(args.collision_urdf).expanduser().resolve())
             if args.collision_urdf
-            else _prepare_rby1_collision_urdf(urdf_path)
+            else (
+                _prepare_rby1_collision_urdf(urdf_path)
+                if args.urdf or args.robot == "rby1"
+                else urdf_path
+            )
         )
         variant_for_app = "rby1"
-        common_app.COMMON_BIMANUAL_SUPPORT_CONTACT_FRAMES = ("wheel_l", "wheel_r", "base")
+        common_app.COMMON_BIMANUAL_SUPPORT_CONTACT_FRAMES = (
+            ("wheel_fl_link", "wheel_fr_link", "wheel_rl_link", "wheel_rr_link")
+            if args.robot == "rby1m"
+            else ("wheel_l", "wheel_r", "base")
+        )
     else:
         urdf_path, collision_urdf_path = resolve_public_ai_worker_urdf_paths(
             variant=args.variant,
