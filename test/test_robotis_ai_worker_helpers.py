@@ -20,6 +20,7 @@ from examples.example_helpers.common_bimanual_model_utils import (
 from examples.example_helpers.common_bimanual_teleop_app import (
     DEFAULT_RBY1_SEED,
     _apply_named_joint_seed,
+    _auto_ik_toggle_should_retarget,
     _collision_object_to_link_name,
     _configure_acceleration_limit_constraint,
     _configure_collision_constraint,
@@ -29,7 +30,6 @@ from examples.example_helpers.common_bimanual_teleop_app import (
     _default_seed_for_joint_names,
     _generate_common_bimanual_collision_include_pairs,
     _generate_consecutive_collision_exclusions,
-    _auto_ik_toggle_should_retarget,
     _posture_control_joint_names,
     _posture_slider_joint_names,
     _resolve_torso_marker_frame,
