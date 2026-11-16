@@ -20,13 +20,13 @@ interactive workflows.
 
 ## Rainbow RB-Y1 models
 
-The `rby1` alias and `rby1a` preset select A v1.2; `rby1m` selects M v1.3. They use the official
+The `rby1` alias and `rby1m` preset select M v1.3; `rby1a` selects A v1.2. They use the official
 [Rainbow SDK v0.10.1](https://github.com/RainbowRobotics/rby1-sdk/releases/tag/v0.10.1)
 assets. Both expose 20 torso/arm DOFs and start in a bent-elbow ready pose.
 
 ```bash
 pixi run python examples/01_basic_ik_simple.py --robot rby1
-pixi run python examples/01_basic_ik_simple.py --robot rby1m
+pixi run python examples/01_basic_ik_simple.py --robot rby1a
 ```
 
 Assets are cached on first use under `~/.cache/embodik/rby1-sdk/` (Git and
@@ -52,7 +52,7 @@ For direct loading:
 import embodik as eik
 from embodik.models.rby1 import ready_configuration, resolve_rby1_urdf
 
-robot = eik.RobotModel(str(resolve_rby1_urdf("a")), floating_base=False)
+robot = eik.RobotModel(str(resolve_rby1_urdf()), floating_base=False)
 q = ready_configuration(robot)
 robot.update_configuration(q)
 ```

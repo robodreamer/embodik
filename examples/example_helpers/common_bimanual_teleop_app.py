@@ -747,6 +747,28 @@ def _posture_control_joint_names(joint_names: list[str]) -> list[str]:
     return [name for name in POSTURE_JOINT_CANDIDATES if name in available]
 
 
+def _auto_ik_toggle_should_retarget(enabled: bool, was_enabled: bool) -> bool:
+    """Return whether an Auto IK Solve edge should copy the measured EE pose.
+
+    Checking or unchecking the box captures the end-effector pose at that
+    moment, so the next solve starts from where the arms are.
+    """
+    return bool(enabled) != bool(was_enabled)
+
+
+def _posture_slider_joint_names(
+    posture_names: list[str], manual_joint_names: list[str]
+) -> list[str]:
+    """Return posture sliders that are not already manual joint sliders.
+
+    Manual mode applies posture sliders after the joint sliders and then copies
+    the result back. A second slider for the same joint restores the old value
+    and the joint slider snaps back.
+    """
+    manual = set(manual_joint_names)
+    return [name for name in posture_names if name not in manual]
+
+
 def _joint_label(joint_name: str) -> str:
     if joint_name == "lift_joint":
         return "Lift Joint"
@@ -2413,10 +2435,18 @@ def main() -> None:
             "Show Capture Point and ZMP", initial_value=False
         )
 
+    manual_joint_names = [
+        name
+        for name in joint_names
+        if name in allowed_joint_names and not name.startswith("gripper_")
+    ]
+    posture_slider_names = _posture_slider_joint_names(
+        posture_control_joint_names, manual_joint_names
+    )
     posture_sliders = []
     with server.gui.add_folder("Whole-Body Posture"):
-        if posture_control_joint_names:
-            for joint_name in posture_control_joint_names:
+        if posture_slider_names:
+            for joint_name in posture_slider_names:
                 lo_raw, hi_raw = _joint_limits(joint_name, -1.0, 1.0)
                 if joint_name == "lift_joint":
                     lo = min(lo_raw + LIFT_LIMIT_MARGIN, hi_raw)
@@ -2436,18 +2466,13 @@ def main() -> None:
                         ),
                     )
                 )
-        else:
+        elif not posture_control_joint_names:
             server.gui.add_text(
                 "Posture Controls", initial_value="No posture joints in reduced model"
             )
         snap_targets = server.gui.add_button("Snap Targets to Current Tools")
         reset_pose = server.gui.add_button("Reset Robot + Targets")
 
-    manual_joint_names = [
-        name
-        for name in joint_names
-        if name in allowed_joint_names and not name.startswith("gripper_")
-    ]
     joint_sliders = []
     with server.gui.add_folder("Joint Configuration", expand_by_default=False):
         for joint_name in manual_joint_names:
@@ -2910,11 +2935,13 @@ def main() -> None:
 
     def _apply_manual_joint_configuration(q_seed: np.ndarray) -> np.ndarray:
         q_manual = np.asarray(q_seed, dtype=float).copy()
-        for joint_name, slider in joint_sliders:
+        for joint_name, slider in posture_sliders:
             idx = joint_name_to_cfg.get(joint_name)
             if idx is not None and idx < q_manual.size:
                 q_manual[idx] = float(slider.value)
-        for joint_name, slider in posture_sliders:
+        # Joint Configuration is the manual control. It wins when a posture
+        # slider still exists for the same joint.
+        for joint_name, slider in joint_sliders:
             idx = joint_name_to_cfg.get(joint_name)
             if idx is not None and idx < q_manual.size:
                 q_manual[idx] = float(slider.value)
@@ -3080,6 +3107,7 @@ def main() -> None:
     _sync_targets_from_robot()
     _update_centroidal_visualization(q, current_dq, current_dq)
     prev_manual_state = False
+    prev_auto_ik_solve = bool(auto_ik_solve.value)
     prev_torso_marker_on = False
     # Held-arm protection state: remember last frame's EE target poses so the
     # solve loop can tell which gizmo the user is actively dragging.
@@ -3147,6 +3175,13 @@ def main() -> None:
 
     while True:
         q_prev = np.asarray(q, dtype=float).copy()
+        if _auto_ik_toggle_should_retarget(bool(auto_ik_solve.value), prev_auto_ik_solve):
+            # q is the configuration currently on the robot, including manual
+            # joint edits made while Auto IK was off.
+            _sync_targets_from_robot()
+            prev_right_target_pose = None
+            prev_left_target_pose = None
+        prev_auto_ik_solve = bool(auto_ik_solve.value)
         gpu_result = None
         _configure_acceleration_limits_if_needed()
 

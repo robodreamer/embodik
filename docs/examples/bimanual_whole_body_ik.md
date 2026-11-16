@@ -4,14 +4,18 @@
 demo for ROBOTIS AI Worker FFW models and RB-Y1. It uses the public
 `ROBOTIS-GIT/ai_worker` repository for AI Worker visual URDF assets, bundled
 reduced collision assets for AI Worker collision-aware IK, and
-the pinned official Rainbow SDK v0.10.1 for RB-Y1 A v1.2 (`--robot rby1` or `--robot rby1a`)
-and M v1.3 (`--robot rby1m`). See the [model setup and scope](basic_ik.md#rainbow-rb-y1-models).
+the pinned official Rainbow SDK v0.10.1 for RB-Y1 M v1.3 (`--robot rby1` or `--robot rby1m`)
+and A v1.2 (`--robot rby1a`). See the [model setup and scope](basic_ik.md#rainbow-rb-y1-models).
 
-The `rby1` name now selects the latest verified official A description. Use
+The `rby1` name selects official M v1.3. Use `--robot rby1a` for A v1.2, and
 `--robot rby1-legacy` to reproduce the older `robot_descriptions` profile shown
 in the video below. `rby1a` and `rby1m` explicitly select the official A/M models.
-Their import and small-motion checks do not establish complete collision-drag or
-recovery qualification for the changed geometry.
+RB-Y1 descriptions open on visual geometry, and the view dropdown still offers
+collision geometry. Joint Configuration is the manual control for joints that
+also belong to the whole-body posture set. Checking or unchecking Auto IK Solve
+copies the current end-effector pose into the arm targets. Import and
+small-motion checks do not establish complete collision-drag or recovery
+qualification for the changed geometry.
 
 <video autoplay muted loop playsinline controls width="100%" src="../../assets/media/rby1_collision_free_ik.mp4"></video>
 

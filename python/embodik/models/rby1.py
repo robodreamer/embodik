@@ -206,8 +206,8 @@ def prepare_rby1_ik_urdf(source: Path) -> Path:
     return output
 
 
-def resolve_rby1_urdf(variant: str = "a", root: str | Path | None = None) -> Path:
-    """Resolve A v1.2 or M v1.3 from SDK v0.10.1, then prepare fixed-base IK.
+def resolve_rby1_urdf(variant: str = "m", root: str | Path | None = None) -> Path:
+    """Resolve M v1.3 by default, or A v1.2, from SDK v0.10.1 and prepare fixed-base IK.
 
     ``root`` or EMBODIK_RBY1_ROOT supplies an offline SDK checkout. Otherwise,
     clone the pinned official release into EMBODIK_RBY1_CACHE on first use.

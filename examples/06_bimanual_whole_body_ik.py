@@ -65,7 +65,7 @@ def parse_args() -> argparse.Namespace:
         "--robot",
         choices=("ai-worker", "rby1", "rby1a", "rby1m", "rby1-legacy"),
         default="ai-worker",
-        help="Robot model family to load. 'ai-worker' uses the ROBOTIS FFW assets; 'rby1'/'rby1a' use the latest verified SDK A model; 'rby1m' uses M; 'rby1-legacy' uses robot_descriptions.",
+        help="Robot model family to load. 'ai-worker' uses the ROBOTIS FFW assets; 'rby1'/'rby1m' use official SDK M v1.3; 'rby1a' uses A v1.2; 'rby1-legacy' uses robot_descriptions.",
     )
     parser.add_argument("--variant", choices=("sg2", "bg2"), default="sg2")
     parser.add_argument("--port", type=int, default=DEFAULT_VISER_PORT)
@@ -108,7 +108,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _resolve_rby1_urdf_path(variant: str = "a") -> Path:
+def _resolve_rby1_urdf_path(variant: str = "m") -> Path:
     if variant != "legacy":
         from embodik.models.rby1 import resolve_rby1_urdf
 
@@ -328,12 +328,13 @@ def _prepare_rby1_collision_urdf(urdf_path: Path) -> Path:
 def main() -> None:
     args = parse_args()
     if args.robot in ("rby1", "rby1a", "rby1m", "rby1-legacy"):
+        variant_key = {"rby1": "m", "rby1a": "a", "rby1m": "m", "rby1-legacy": "legacy"}[
+            args.robot
+        ]
         base_urdf_path = (
             Path(args.urdf).expanduser().resolve()
             if args.urdf
-            else _resolve_rby1_urdf_path(
-                {"rby1": "a", "rby1a": "a", "rby1m": "m", "rby1-legacy": "legacy"}[args.robot]
-            )
+            else _resolve_rby1_urdf_path(variant_key)
         )
         urdf_path = _prepare_rby1_tip_frame_urdf(base_urdf_path)
         collision_urdf_path = (
@@ -348,7 +349,7 @@ def main() -> None:
         variant_for_app = "rby1"
         common_app.COMMON_BIMANUAL_SUPPORT_CONTACT_FRAMES = (
             ("wheel_fl_link", "wheel_fr_link", "wheel_rl_link", "wheel_rr_link")
-            if args.robot == "rby1m"
+            if variant_key == "m"
             else ("wheel_l", "wheel_r", "base")
         )
     else:
@@ -376,6 +377,10 @@ def main() -> None:
         gpu_wbc_manifest=args.gpu_wbc_manifest,
         gpu_wbc_cache_dir=args.gpu_wbc_cache_dir,
     )
+    # Official A/M descriptions keep visual meshes and collision primitives in
+    # one URDF. The shared app would otherwise open that file on collision.
+    if args.robot in ("rby1", "rby1a", "rby1m", "rby1-legacy"):
+        common_app.COMMON_BIMANUAL_DEFAULT_GEOMETRY_VIEW = "Visual"
     common_app.COMMON_BIMANUAL_ENABLE_SEER_TELEOP = True
     common_app.COMMON_BIMANUAL_SEER_CONTROLLER_PORT = args.controller_port
     common_app.main()

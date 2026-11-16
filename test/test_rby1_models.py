@@ -100,17 +100,17 @@ def test_wrong_cached_sdk_commit_fails_without_fetch(tmp_path, monkeypatch):
         resolve_rby1_urdf()
 
 
-def test_rby1_preset_aliases_latest_verified_a():
+def test_rby1_preset_aliases_official_m():
     from examples.utils.robot_models import get_robot_preset
 
     alias = get_robot_preset("rby1")
-    explicit = get_robot_preset("rby1a")
-    assert alias["rby1_variant"] == explicit["rby1_variant"] == "a"
+    explicit = get_robot_preset("rby1m")
+    assert alias["rby1_variant"] == explicit["rby1_variant"] == "m"
     assert alias["display_name"] == explicit["display_name"]
-    assert get_robot_preset("rby1m")["rby1_variant"] == "m"
+    assert get_robot_preset("rby1a")["rby1_variant"] == "a"
 
 
-def test_bimanual_default_resolver_uses_official_a(monkeypatch, tmp_path):
+def test_bimanual_default_resolver_uses_official_m(monkeypatch, tmp_path):
     import importlib.util
 
     import embodik.models.rby1 as adapter
@@ -126,9 +126,9 @@ def test_bimanual_default_resolver_uses_official_a(monkeypatch, tmp_path):
         return tmp_path / f"{variant}.urdf"
 
     monkeypatch.setattr(adapter, "resolve_rby1_urdf", resolve)
-    assert module._resolve_rby1_urdf_path() == tmp_path / "a.urdf"
-    assert module._resolve_rby1_urdf_path("m") == tmp_path / "m.urdf"
-    assert calls == ["a", "m"]
+    assert module._resolve_rby1_urdf_path() == tmp_path / "m.urdf"
+    assert module._resolve_rby1_urdf_path("a") == tmp_path / "a.urdf"
+    assert calls == ["m", "a"]
 
 
 @pytest.mark.parametrize("variant", sorted(MODEL_PATHS))
@@ -142,7 +142,7 @@ def test_official_assets_load_track_and_keep_collision_geometry(variant, monkeyp
 
     config = resolve_robot_configuration("rby1" + variant)
     assert config["urdf_path"] == path
-    if variant == "a":
+    if variant == "m":
         assert resolve_robot_configuration("rby1")["urdf_path"] == path
     model = eik.RobotModel(str(path), floating_base=False)
     assert model.nq == model.nv == 20

@@ -29,7 +29,9 @@ from examples.example_helpers.common_bimanual_teleop_app import (
     _default_seed_for_joint_names,
     _generate_common_bimanual_collision_include_pairs,
     _generate_consecutive_collision_exclusions,
+    _auto_ik_toggle_should_retarget,
     _posture_control_joint_names,
+    _posture_slider_joint_names,
     _resolve_torso_marker_frame,
     _resolve_torso_marker_z_bounds,
 )
@@ -330,6 +332,20 @@ def test_posture_controls_are_model_aware() -> None:
     assert _posture_control_joint_names(["torso_0", "torso_2", "left_arm_0", "right_arm_0"]) == [
         "torso_0",
         "torso_2",
+    ]
+
+
+def test_auto_ik_toggle_retargets_when_checked_or_unchecked() -> None:
+    assert _auto_ik_toggle_should_retarget(True, False)
+    assert _auto_ik_toggle_should_retarget(False, True)
+    assert not _auto_ik_toggle_should_retarget(True, True)
+    assert not _auto_ik_toggle_should_retarget(False, False)
+
+
+def test_posture_sliders_skip_joints_already_in_manual_control() -> None:
+    manual = ["torso_0", "torso_1", "left_arm_0"]
+    assert _posture_slider_joint_names(["torso_0", "torso_1", "lift_joint"], manual) == [
+        "lift_joint"
     ]
 
 

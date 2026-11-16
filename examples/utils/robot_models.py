@@ -64,8 +64,8 @@ _BUILTIN_PRESETS: Dict[str, Dict[str, Any]] = {
 }
 
 
-# The unqualified name follows the latest verified official A preset.
-_BUILTIN_PRESETS["rby1"] = dict(_BUILTIN_PRESETS["rby1a"])
+# The unqualified name follows official M v1.3, the current roll-wrist model.
+_BUILTIN_PRESETS["rby1"] = dict(_BUILTIN_PRESETS["rby1m"])
 
 
 def load_robot_presets() -> Dict[str, Dict[str, Any]]:
