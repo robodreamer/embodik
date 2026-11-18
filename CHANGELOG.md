@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.24.0] - 2026-11-10
+## [0.24.0] - 2026-11-18
 
 Reusable CPU optimization interfaces, constrained IK reliability fixes, and
 diagnostics that distinguish solver status from actual robot behavior.
@@ -358,6 +358,35 @@ release.
 
 - SVD factor checks no longer call `info()` on Eigen 3.3. The manylinux wheel
   image ships that version, which exposes singular values but not `SVD::info()`.
+
+## [0.23.3] - 2026-11-18
+
+This patch adds official Rainbow RB-Y1 fixed-base adapters and keeps Linux
+wheels building on Eigen 3.3. The unqualified `rby1` preset follows official
+M v1.3. The previous `robot_descriptions` bimanual profile remains available
+as `rby1-legacy`.
+
+### Added
+
+- Official Rainbow RB-Y1 A v1.2 and M v1.3 model adapters, pinned to SDK v0.10.1,
+  with cached assets, ready configurations and basic/collision/bimanual example
+  presets. `rby1` aliases official M v1.3; `rby1a` selects A v1.2. The old bimanual
+  profile is explicitly named `rby1-legacy`. Fixed-base IK retains 20 torso/arm
+  DOFs; wheel, head and finger joints are locked. SDK capsules are preserved as
+  equivalent standard URDF primitives.
+- `RobotVisualizer` accepts an explicit `urdf_path` for its ViserUrdf backend so
+  custom or adapted models can use the same description for solving and display.
+
+### Fixed
+
+- SVD factor checks no longer call `info()` on Eigen 3.3. The manylinux wheel
+  image ships that version, which exposes singular values but not `SVD::info()`.
+- The bimanual example opens official and legacy RB-Y1 descriptions on visual
+  geometry. Collision and both-geometry views stay available in the dropdown.
+- Whole-body posture sliders no longer duplicate joints that already have a
+  manual joint slider, and manual joint control wins for those joints.
+- Checking or unchecking Auto IK Solve copies the current end-effector pose
+  into the arm targets.
 
 ## [0.23.2] - 2026-10-16
 
