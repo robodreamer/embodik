@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.23.3] - 2026-11-16
+## [0.23.3] - 2026-11-18
 
 This patch adds official Rainbow RB-Y1 fixed-base adapters and keeps Linux
 wheels building on Eigen 3.3. The unqualified `rby1` preset follows official
