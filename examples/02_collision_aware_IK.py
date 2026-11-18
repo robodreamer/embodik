@@ -262,7 +262,24 @@ def resolve_robot_configuration(robot_key: str) -> RobotConfig:
     if "rby1_variant" in preset:
         from embodik.models.rby1 import ready_configuration
 
+        from example_helpers.common_bimanual_teleop_app import (
+            _generate_common_bimanual_collision_include_pairs,
+            _generate_consecutive_collision_exclusions,
+        )
+
         default_config = ready_configuration(temp_robot)
+        consecutive = _generate_consecutive_collision_exclusions(temp_robot, urdf_path)
+        curated_pairs = set(
+            _generate_common_bimanual_collision_include_pairs(
+                temp_robot, urdf_path, consecutive + collision_exclusions
+            )
+        )
+        if not curated_pairs:
+            raise ValueError(f"No curated RB-Y1 collision pairs found in {urdf_path}")
+        # Both single-arm examples already apply the exclusions from this configuration.
+        collision_exclusions = [
+            pair for pair in temp_robot.get_collision_pair_names() if pair not in curated_pairs
+        ]
 
     # For panda with gripper, default_configuration should only have arm joints (7)
     # Handle gripper joints separately if robot has more DOF than default_configuration
