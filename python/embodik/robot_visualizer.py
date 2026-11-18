@@ -49,12 +49,14 @@ class RobotVisualizer:
         host: str = "localhost",
         package_root: Optional[str] = None,
         load_collisions: bool = False,
+        urdf_path: Optional[str | Path] = None,
     ):
         self.robot_model = robot_model
         self.backend = backend
         self.port = port
         self.host = host
         self.load_collisions = load_collisions
+        self.urdf_path = Path(urdf_path) if urdf_path is not None else None
 
         # Initialize backend-specific components
         self._pinocchio_visualizer = None
@@ -115,7 +117,7 @@ class RobotVisualizer:
             # Try to infer from robot model or preset
             description_name = self._infer_description_name()
 
-        if description_name is None:
+        if description_name is None and self.urdf_path is None:
             raise ValueError(
                 "description_name is required for ViserUrdf backend. "
                 "Either provide it explicitly or ensure robot_presets.yaml has 'description_name'."
@@ -128,7 +130,12 @@ class RobotVisualizer:
 
         # Load URDF with colors preserved
         try:
-            urdf = load_robot_description(description_name)
+            if self.urdf_path is not None:
+                from yourdfpy import URDF
+
+                urdf = URDF.load(str(self.urdf_path))
+            else:
+                urdf = load_robot_description(description_name)
             self._urdf_vis = ViserUrdf(self.server, urdf, root_node_name="/robot")
 
             # Set up joint configuration mapping (optimized for performance)
@@ -276,6 +283,7 @@ def create_robot_visualizer(
     host: str = "localhost",
     package_root: Optional[str] = None,
     load_collisions: bool = False,
+    urdf_path: Optional[str | Path] = None,
 ) -> RobotVisualizer:
     """Create a robot visualizer with the specified backend.
 
@@ -285,6 +293,7 @@ def create_robot_visualizer(
         robot_model: embodik RobotModel instance
         backend: Visualization backend ("pinocchio" or "viserurdf")
         description_name: Robot description name for ViserUrdf backend
+        urdf_path: Explicit local description for ViserUrdf, overriding description_name
         port: Port for Viser web server
         open_browser: Whether to automatically open browser
         host: Host for Viser server
@@ -302,4 +311,5 @@ def create_robot_visualizer(
         host=host,
         package_root=package_root,
         load_collisions=load_collisions,
+        urdf_path=urdf_path,
     )

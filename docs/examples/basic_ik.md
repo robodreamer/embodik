@@ -18,6 +18,45 @@ Detailed tuning panels, joint sliders, diagnostics, and limit-scaling controls
 are kept out of this minimal example. Use the other public examples for richer
 interactive workflows.
 
+## Rainbow RB-Y1 models
+
+The `rby1` alias and `rby1m` preset select M v1.3; `rby1a` selects A v1.2. They use the official
+[Rainbow SDK v0.10.1](https://github.com/RainbowRobotics/rby1-sdk/releases/tag/v0.10.1)
+assets. Both expose 20 torso/arm DOFs and start in a bent-elbow ready pose.
+
+```bash
+pixi run python examples/01_basic_ik_simple.py --robot rby1
+pixi run python examples/01_basic_ik_simple.py --robot rby1a
+```
+
+Assets are cached on first use under `~/.cache/embodik/rby1-sdk/` (Git and
+network access required; the meshes occupy several hundred MB). For offline use,
+set `EMBODIK_RBY1_ROOT` to a local SDK checkout. `EMBODIK_RBY1_CACHE` overrides
+the cache location. The resolved release is pinned for reproducibility; it does
+not silently follow future SDK changes.
+
+The adapter generates an IK-specific URDF without editing the SDK files:
+
+- Wheels, head and fingers are fixed; torso and both seven-joint arms remain active.
+- SDK capsules become equivalent cylinders plus endpoint spheres, retaining their
+  collision volume with standard URDF primitives. Visual meshes and inertias remain.
+- Missing meshes cause an error. The viewer uses the same generated URDF as IK.
+
+This supports fixed-base torso/arm IK. SDK mobile-base dynamics, collision-type
+masks, contact control and hardware execution are outside this adapter's scope.
+Existing experimental acceleration/GPU limitations still apply.
+
+For direct loading:
+
+```python
+import embodik as eik
+from embodik.models.rby1 import ready_configuration, resolve_rby1_urdf
+
+robot = eik.RobotModel(str(resolve_rby1_urdf()), floating_base=False)
+q = ready_configuration(robot)
+robot.update_configuration(q)
+```
+
 ## API Walkthrough
 
 The public script uses the current registered-task API:
