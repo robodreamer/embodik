@@ -62,7 +62,7 @@ jobs:
   macos-arm64:
     name: macOS arm64 full tests (Python ${{ inputs.macos_python_version }})
     if: ${{ inputs.run_macos }}
-    runs-on: macos-14
+    runs-on: macos-15
 
     steps:
       - name: Checkout code
