@@ -626,7 +626,7 @@ Failures before backend assembly produce no snapshot.
 options.record_linear_problems = True
 result = solver.solve(q, dq, dt, options)
 for problem in result.linear_problems:
-    replay = eik.replay_acceleration_linear_problem(problem)
+    replay = embodik.replay_acceleration_linear_problem(problem)
     print(problem.diagnostics.termination_reason, replay.status)
 ```
 

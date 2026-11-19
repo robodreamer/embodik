@@ -301,7 +301,7 @@ inline bool RecoverZeroScaleTask(
   if (recovered_scale <= seed_scale + tolerance ||
       ComputeMaxLinearConstraintViolation(coefficients, lower, upper, candidate) > 1e-8 ||
       (jacobian * candidate + bias - recovered_scale * target).norm() >
-          1e-8 * std::max(1.0, target.norm()) ||
+          1e-8 * std::max({1.0, bias.norm(), recovered_scale * target.norm()}) ||
       (protected_tasks * (candidate - seed)).norm() > 1e-8) return false;
   *velocity = candidate;
   *scale = recovered_scale;

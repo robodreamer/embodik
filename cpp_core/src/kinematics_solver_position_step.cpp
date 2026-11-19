@@ -160,11 +160,15 @@ bool KinematicsSolver::refine_position_step_collision_candidate(
   const auto entry_hard = position_step_hard_constraints_
       ? std::optional<PositionStepHardConstraints>(*position_step_hard_constraints_)
       : std::nullopt;
+  const auto entry_linear_rows = linear_velocity_constraints_;
   ScopedPositionStepValueRestore restore_rows(linear_velocity_constraints_);
   ScopedPositionStepValueRestore restore_refinement(runtime_config_.refine_partial_scale);
   runtime_config_.refine_partial_scale = true;
   Eigen::VectorXd proposed = candidate;
   for (int retry = 0; retry < 4; ++retry) {
+    // Each proposal is linearized at its own pose. Earlier rows are a floor
+    // model for a rejected configuration.
+    linear_velocity_constraints_ = entry_linear_rows;
     robot_->update_configuration(proposed);
     const auto rows = compute_collision_constraint(horizon);
     if (!rows || rows->jacobian.rows() == 0 || !rows->jacobian.allFinite()) break;

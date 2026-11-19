@@ -176,9 +176,11 @@ On other Linux distributions, install equivalent C++ build, CMake, Ninja,
 Eigen3, and URDFDOM packages manually, then run the one-shot script with
 `--skip-apt`.
 
-Native builds require Eigen 3.4 or newer within Eigen 3.x. Isolated source builds
-and wheel builds install pinned Eigen 3.4.0 headers through `cmeel-eigen`, matching
-the development baseline. These headers are build dependencies only.
+Native builds require Eigen 3.4 or newer within Eigen 3.x. Isolated Linux
+source builds and Linux wheel builds install pinned Eigen 3.4.0 headers through
+`cmeel-eigen`, matching the development baseline. macOS wheels set `Eigen3_DIR`
+to Homebrew `eigen@3`, which is Eigen 3.4.x, so that build does not use the
+`cmeel-eigen` prefix. These headers are build dependencies only.
 
 ## Manual macOS Source Build
 

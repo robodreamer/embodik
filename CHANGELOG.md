@@ -154,9 +154,9 @@ release.
   control stays below active hand tasks. This is a task-priority policy, not a
   hard pose constraint or a guarantee of target acquisition.
 
-- Native builds require Eigen 3.4, matching the development baseline. Source
-  and wheel builds install pinned Eigen headers instead of silently selecting
-  older headers from the build image.
+- Native builds require Eigen 3.4, matching the development baseline. Isolated
+  Linux source builds and Linux wheel builds install pinned Eigen 3.4.0 headers.
+  macOS wheels use Homebrew `eigen@3` through `Eigen3_DIR`.
 
 - Acceleration collision refinement uses the same cold, precise distance and
   nearest-point policy as floor and sample queries, preventing optimistic local
@@ -355,9 +355,6 @@ release.
   fraction by at least half after rejection. Near-one backtracking fractions no
   longer consume every retry on essentially the same rejected nonlinear step;
   the retry cap and final constraint checks are unchanged.
-
-- SVD factor checks no longer call `info()` on Eigen 3.3. The manylinux wheel
-  image ships that version, which exposes singular values but not `SVD::info()`.
 
 ## [0.23.3] - 2026-11-18
 

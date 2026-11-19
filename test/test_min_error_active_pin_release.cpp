@@ -701,6 +701,26 @@ TEST(AffineRayFeasibleSeed, ValidOriginalSeedRetainsTheEstablishedSearch) {
   EXPECT_DOUBLE_EQ(repaired(0), original(0));
 }
 
+TEST(RecoverZeroScaleTask, LargeBiasFeasibleRayKeepsTheVerifiedScale) {
+  const Eigen::MatrixXd jacobian = Eigen::MatrixXd::Identity(1, 1);
+  const Eigen::MatrixXd protected_tasks(0, 1);
+  const Eigen::VectorXd target = Eigen::VectorXd::Ones(1);
+  const Eigen::VectorXd bias = Eigen::VectorXd::Constant(1, 1.0e6);
+  const Eigen::VectorXd seed = Eigen::VectorXd::Constant(1, -1.0e6);
+  const Eigen::MatrixXd coefficients = Eigen::MatrixXd::Identity(1, 1);
+  const Eigen::VectorXd lower = Eigen::VectorXd::Constant(1, -1.0e6 - 2.0);
+  const Eigen::VectorXd upper = Eigen::VectorXd::Constant(1, -1.0e6 + 2.0);
+  Eigen::VectorXd velocity = Eigen::VectorXd::Constant(1, 99.0);
+  double scale = -1.0;
+  ASSERT_TRUE(embodik::detail::RecoverZeroScaleTask(
+      jacobian, target, bias, protected_tasks, coefficients, lower, upper, seed,
+      &velocity, &scale));
+  EXPECT_GT(scale, 0.0);
+  EXPECT_LE((jacobian * velocity + bias - scale * target).norm(),
+            1e-8 * std::max({1.0, bias.norm(), scale * target.norm()}));
+  EXPECT_LE((velocity - seed).cwiseAbs().maxCoeff(), 2.0 + 1e-8);
+}
+
 TEST(AffineRayFeasibleSeed, ValidPhaseOneSeedRetainsTheEstablishedSearch) {
   const Eigen::MatrixXd J = Eigen::MatrixXd::Identity(1, 1), prefix(0, 1);
   const Eigen::VectorXd target = Eigen::VectorXd::Ones(1), empty(0);
