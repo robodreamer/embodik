@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.24.0] - 2026-11-18
+## [0.24.0] - 2026-11-20
 
 Reusable CPU optimization interfaces, constrained IK reliability fixes, and
 diagnostics that distinguish solver status from actual robot behavior.
