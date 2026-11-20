@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(embodik VERSION 0.23.3)
+project(embodik VERSION 0.24.0)
 
 # Python is used to auto-discover Pinocchio (PyPI `pin`) CMake config during sdist builds.
 find_package(Python REQUIRED COMPONENTS Interpreter)
@@ -91,8 +91,9 @@ else()
 endif()
 
 # Find dependencies
-find_package(Eigen3 3.3 REQUIRED NO_MODULE)
+find_package(Eigen3 3.4 REQUIRED NO_MODULE)
 message(STATUS "EmbodiK: using Eigen3_DIR='${Eigen3_DIR}'")
+message(STATUS "EmbodiK: Eigen header version '${EIGEN3_VERSION_STRING}'")
 
 find_package(pinocchio REQUIRED)
 message(STATUS "EmbodiK: using pinocchio_DIR='${pinocchio_DIR}'")
@@ -119,6 +120,7 @@ add_library(embodik_core SHARED
     cpp_core/src/acceleration_braking_witness.cpp
     cpp_core/src/acceleration_geometric_constraint_policy.cpp
     cpp_core/src/acceleration_scalar_geometric_constraint.cpp
+    cpp_core/src/acceleration_affine_state_constraint.cpp
     cpp_core/src/support_polygon_geometry.cpp
     cpp_core/src/acceleration_com_support_polygon_constraint.cpp
     cpp_core/src/acceleration_capture_point_constraint.cpp
@@ -126,6 +128,7 @@ add_library(embodik_core SHARED
     cpp_core/src/acceleration_fixed_frame_pose_constraint.cpp
     cpp_core/src/acceleration_relative_pose_constraint.cpp
     cpp_core/src/acceleration_tight_point_constraint.cpp
+    cpp_core/src/optimization.cpp
     cpp_core/src/acceleration_solver.cpp
     cpp_core/src/acceleration_solver_fixed_base.cpp
     cpp_core/src/acceleration_solver_velocity_collision.cpp

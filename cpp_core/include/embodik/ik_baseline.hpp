@@ -17,6 +17,7 @@
 #pragma once
 
 #include "types.hpp"
+#include "control_solver_kernel.hpp"
 
 #include <chrono>
 #include <cmath>
@@ -85,19 +86,32 @@ inline void ComputeGeneralizedInverse(
   result_matrix->noalias() = orthogonal_decomp.pseudoInverse();
 }
 
-inline double ComputeMaxLinearConstraintViolation(
-    const Eigen::MatrixXd &constraint_coefficients,
-    const Eigen::VectorXd &min_bounds, const Eigen::VectorXd &max_bounds,
-    const Eigen::VectorXd &candidate) {
-  double max_violation = 0.0;
-  for (Eigen::Index row = 0; row < constraint_coefficients.rows(); ++row) {
-    const double value = constraint_coefficients.row(row).dot(candidate);
-    max_violation =
-        std::max(max_violation, min_bounds(row) - value);
-    max_violation =
-        std::max(max_violation, value - max_bounds(row));
+
+// A projected active row may contain only cancellation roundoff after its
+// direction was completed by a higher task. A purely relative cutoff would
+// invert that noise as a new direction and corrupt the protected task image.
+// Calibrate its absolute rank floor to the original row scale. Keep every
+// original hard row in the final feasibility check; this is only an inverse
+// rank decision, never constraint softening.
+inline void ComputeProjectedConstraintInverse(
+    const Eigen::MatrixXd &original, const Eigen::MatrixXd &projected,
+    double relative_tolerance, Eigen::MatrixXd *inverse,
+    bool relative_rank_only) {
+  if (relative_rank_only) {
+    ComputeGeneralizedInverse(projected, relative_tolerance, inverse);
+    return;
   }
-  return std::max(0.0, max_violation);
+  Eigen::CompleteOrthogonalDecomposition<Eigen::MatrixXd> decomposition;
+  decomposition.setThreshold(relative_tolerance);
+  decomposition.compute(projected);
+  const double reference = original.rows() ? original.rowwise().norm().maxCoeff() : 0.;
+  const double pivot = decomposition.maxPivot();
+  const double absolute_floor = relative_tolerance * reference;
+  if (pivot > 0. && absolute_floor > relative_tolerance * pivot) {
+    decomposition.setThreshold(absolute_floor / pivot);
+    decomposition.compute(projected);
+  }
+  inverse->noalias() = decomposition.pseudoInverse();
 }
 
 // The owning solver validates shapes and finite original inputs first. This
@@ -152,36 +166,6 @@ inline bool CanRetainBestEffortLowerTaskCheckpoint(
   }
   return true;
 }
-
-inline void NormalizeLinearConstraintRows(
-    const Eigen::MatrixXd &constraint_coefficients,
-    const Eigen::VectorXd &min_bounds, const Eigen::VectorXd &max_bounds,
-    Eigen::MatrixXd *normalized_coefficients,
-    Eigen::VectorXd *normalized_min_bounds,
-    Eigen::VectorXd *normalized_max_bounds) {
-  *normalized_coefficients = constraint_coefficients;
-  *normalized_min_bounds = min_bounds;
-  *normalized_max_bounds = max_bounds;
-  if (min_bounds.size() != constraint_coefficients.rows() ||
-      max_bounds.size() != constraint_coefficients.rows()) {
-    return;
-  }
-  for (Eigen::Index row = 0; row < constraint_coefficients.rows(); ++row) {
-    const double row_norm = constraint_coefficients.row(row).stableNorm();
-    if (row_norm == 0.0 || !std::isfinite(row_norm)) {
-      continue;
-    }
-    normalized_coefficients->row(row) /= row_norm;
-    (*normalized_min_bounds)(row) /= row_norm;
-    (*normalized_max_bounds)(row) /= row_norm;
-  }
-}
-
-enum class HardConstraintFeasibilityStatus {
-  kFeasible,
-  kProvenInfeasible,
-  kUnknown,
-};
 
 /**
  * Recover a SCALE task from a feasible witness at seed_scale. Unlike
@@ -289,7 +273,22 @@ inline bool RecoverZeroScaleTask(
         blocker = row;
       }
     }
-    if (blocker < 0 || !std::isfinite(distance)) return false;
+    if (blocker < 0 || !std::isfinite(distance)) {
+      // Near a vertex the projected direction can exceed the stationarity
+      // threshold while every row slope falls below the blocker threshold.
+      // Retain strictly verified positive progress instead of discarding the
+      // incumbent. This terminates a numerical search, not an optimality proof.
+      const double alpha = std::clamp(point(n), 0.0, 1.0);
+      const Eigen::VectorXd checkpoint = point.head(n);
+      if (alpha <= seed_scale + tolerance || !checkpoint.allFinite() ||
+          ComputeMaxLinearConstraintViolation(
+              coefficients, lower, upper, checkpoint) > tolerance ||
+          (jacobian * checkpoint + bias - alpha * target).norm() >
+              tolerance * std::max({1.0, bias.norm(), alpha * target.norm()}) ||
+          (protected_tasks * (checkpoint - seed)).norm() > tolerance)
+        return false;
+      break;
+    }
     point += distance * direction;
     if (!point.allFinite() ||
         (inequalities * point - bounds).maxCoeff() > 1e-8 ||
@@ -302,7 +301,7 @@ inline bool RecoverZeroScaleTask(
   if (recovered_scale <= seed_scale + tolerance ||
       ComputeMaxLinearConstraintViolation(coefficients, lower, upper, candidate) > 1e-8 ||
       (jacobian * candidate + bias - recovered_scale * target).norm() >
-          1e-8 * std::max(1.0, target.norm()) ||
+          1e-8 * std::max({1.0, bias.norm(), recovered_scale * target.norm()}) ||
       (protected_tasks * (candidate - seed)).norm() > 1e-8) return false;
   *velocity = candidate;
   *scale = recovered_scale;
@@ -312,6 +311,69 @@ inline bool RecoverZeroScaleTask(
 enum class HierarchicalLinearSolverPolicy {
   kGeneralizedEsns,
   kLegacyVelocity,
+};
+
+// Internal, opt-in numerical observations. These owned records are not public
+// solver results, policy inputs, execution certificates or a stable API.
+struct NumericalObjectiveStage {
+  size_t objective_index = 0;
+  TaskSolveMode requested_mode = TaskSolveMode::kScale;
+  TaskSolveMode effective_mode = TaskSolveMode::kScale;
+  bool legacy = false;
+  bool completed_normally = false;
+  Eigen::MatrixXd matrix, original_rows, prefix_rows;
+  Eigen::VectorXd target, bias, original_lower, original_upper, prefix_images;
+  // Exit fields observe the outer checkpoint, not a possibly different
+  // SolverResult returned by an early recovery branch. Only a normal boundary
+  // has complete stage-local exit data; these records never authorize replay.
+  Eigen::VectorXd entry_velocity, exit_velocity;
+  Eigen::MatrixXd entry_projector, exit_projector, first_damped_inverse;
+  Eigen::MatrixXd last_constrained_projector, last_damped_inverse;
+  Eigen::VectorXd exit_active_lower, exit_active_upper;
+  RegularizedInverseConfig inverse_config;
+  SolverStatus entry_status = SolverStatus::kInvalidInput;
+  SolverStatus exit_status = SolverStatus::kInvalidInput;
+  double entry_raw_violation = 0.0, exit_raw_violation = 0.0;
+  double scale = 0.0;
+};
+
+struct NumericalLeastSquaresBand {
+  size_t objective_index = 0;
+  Eigen::MatrixXd matrix, rows;
+  Eigen::VectorXd target, lower, upper, caller_seed, candidate;
+  VelocitySolverConfig config;
+  double ridge = 0.0;
+  bool caller_seed_present = false;
+  bool allow_checkpoint = false;
+  bool success = false;
+  unsigned int iterations = 0;
+  std::string reason;
+};
+
+struct NumericalBandTrace {
+  std::vector<NumericalObjectiveStage> stages;
+  std::vector<NumericalLeastSquaresBand> least_squares;
+};
+
+// Snapshot the outer solver state even when an existing branch returns early.
+// Stage-local matrices are explicitly copied at the normal terminal boundary;
+// completed_normally=false distinguishes an early return from such a boundary.
+struct NumericalStageScope {
+  NumericalBandTrace *trace;
+  size_t index;
+  const Eigen::VectorXd &velocity;
+  const Eigen::MatrixXd &projector;
+  const SolverStatus &status;
+  ~NumericalStageScope() {
+    if (!trace) return;
+    auto &record = trace->stages[index];
+    record.exit_velocity = velocity;
+    record.exit_projector = projector;
+    record.exit_status = status;
+    record.exit_raw_violation = ComputeMaxLinearConstraintViolation(
+        record.original_rows, record.original_lower, record.original_upper,
+        velocity);
+  }
 };
 
 struct HierarchicalLinearSolverExecutionOptions {
@@ -336,526 +398,9 @@ struct HierarchicalLinearSolverExecutionOptions {
   // Synchronous recursive retries may reuse the original Phase-I witness.
   // Always revalidate against the current immutable rows before accepting it.
   const Eigen::VectorXd *initial_hard_constraint_witness = nullptr;
+  LinearSolveDiagnostics *diagnostics = nullptr;
+  NumericalBandTrace *numerical_trace = nullptr;
 };
-
-// Select a wrong active pin only when the computed motion is numerical drift
-// in the Phase-I objective nullspace. This changes the search, never acceptance.
-inline Eigen::Index FindObjectiveNullPhasePinToRelease(
-    const Eigen::MatrixXd &hessian, const Eigen::VectorXd &gradient,
-    const Eigen::MatrixXd &active_matrix, const Eigen::VectorXd &direction,
-    const Eigen::VectorXd &multipliers, double tolerance,
-    double direction_tolerance, double kkt_tolerance) {
-  if (multipliers.size() == 0 || !direction.allFinite() ||
-      !multipliers.allFinite() ||
-      !(direction.norm() > direction_tolerance)) return -1;
-  const Eigen::VectorXd objective_direction = hessian * direction;
-  const Eigen::VectorXd stationarity =
-      gradient + active_matrix.transpose() * multipliers;
-  if (!objective_direction.allFinite() || !stationarity.allFinite() ||
-      !(objective_direction.norm() <= direction_tolerance) ||
-      !(stationarity.norm() <= kkt_tolerance)) return -1;
-  Eigen::Index remove_position = -1;
-  if (multipliers.minCoeff(&remove_position) < -10.0 * tolerance)
-    return remove_position;
-  return -1;
-}
-
-/**
- * @brief Search for a feasible witness for linear interval constraints.
- *
- * The witness distinguishes a feasible hard set from provable infeasibility;
- * it does not optimize the hierarchy. A caller may seed a constrained search
- * only after including and validating all required task equalities and prefix
- * images. A hard-set witness alone cannot replace that task solution.
- */
-inline HardConstraintFeasibilityStatus FindHardConstraintFeasibleWitnessImpl(
-    const Eigen::MatrixXd &constraint_coefficients,
-    const Eigen::VectorXd &min_bounds, const Eigen::VectorXd &max_bounds,
-    const VelocitySolverConfig &solver_config, Eigen::VectorXd *result,
-    bool allow_objective_null_pin_release) {
-  const Eigen::Index num_dof = constraint_coefficients.cols();
-  const Eigen::Index num_constraints = constraint_coefficients.rows();
-  const double tolerance = std::max(1e-12, solver_config.epsilon);
-
-  Eigen::VectorXd candidate = Eigen::VectorXd::Zero(num_dof);
-  if (ComputeMaxLinearConstraintViolation(constraint_coefficients, min_bounds,
-                                          max_bounds, candidate) <= tolerance) {
-    *result = std::move(candidate);
-    return HardConstraintFeasibilityStatus::kFeasible;
-  }
-
-  // Scalar rows give an inexpensive infeasibility certificate even when
-  // dependent active rows prevent Phase I from producing a dual witness.
-  Eigen::VectorXd scalar_lower = Eigen::VectorXd::Constant(
-      num_dof, -std::numeric_limits<double>::infinity());
-  Eigen::VectorXd scalar_upper = Eigen::VectorXd::Constant(
-      num_dof, std::numeric_limits<double>::infinity());
-  for (Eigen::Index row = 0; row < num_constraints; ++row) {
-    Eigen::Index coordinate = -1;
-    bool scalar_row = true;
-    for (Eigen::Index col = 0; col < num_dof; ++col) {
-      if (constraint_coefficients(row, col) == 0.0) continue;
-      if (coordinate >= 0) {
-        scalar_row = false;
-        break;
-      }
-      coordinate = col;
-    }
-    if (!scalar_row || coordinate < 0) continue;
-    const double coefficient = constraint_coefficients(row, coordinate);
-    if (!std::isfinite(coefficient) || !std::isfinite(min_bounds(row)) ||
-        !std::isfinite(max_bounds(row))) continue;
-    const double first = (min_bounds(row) - tolerance) / coefficient;
-    const double second = (max_bounds(row) + tolerance) / coefficient;
-    if (!std::isfinite(first) || !std::isfinite(second)) continue;
-    scalar_lower(coordinate) =
-        std::max(scalar_lower(coordinate), std::min(first, second));
-    scalar_upper(coordinate) =
-        std::min(scalar_upper(coordinate), std::max(first, second));
-    if (scalar_lower(coordinate) > scalar_upper(coordinate)) {
-      return HardConstraintFeasibilityStatus::kProvenInfeasible;
-    }
-  }
-
-  // Phase I minimizes the nonnegative maximum normalized violation t:
-  //   min 0.5 t^2
-  //   s.t. lower_i <= C_i u + t, C_i u - t <= upper_i, t >= 0.
-  // A witness alone does not establish any task objective. Callers that use it
-  // as an optimization seed must separately audit their original hard rows,
-  // affine task equations, and protected task images.
-  std::vector<Eigen::RowVectorXd> inequality_rows;
-  std::vector<double> inequality_bounds;
-  inequality_rows.reserve(static_cast<size_t>(2 * num_constraints + 1));
-  inequality_bounds.reserve(static_cast<size_t>(2 * num_constraints + 1));
-
-  for (Eigen::Index row = 0; row < num_constraints; ++row) {
-    const double row_norm = constraint_coefficients.row(row).norm();
-    if (row_norm == 0.0) {
-      if (0.0 < min_bounds(row) - tolerance ||
-          0.0 > max_bounds(row) + tolerance) {
-        return HardConstraintFeasibilityStatus::kProvenInfeasible;
-      }
-      continue;
-    }
-
-    const Eigen::RowVectorXd normalized_row =
-        constraint_coefficients.row(row) / row_norm;
-    const double normalized_lower = min_bounds(row) / row_norm;
-    const double normalized_upper = max_bounds(row) / row_norm;
-    if (!normalized_row.allFinite() || std::isnan(normalized_lower) ||
-        std::isnan(normalized_upper) ||
-        normalized_lower == std::numeric_limits<double>::infinity() ||
-        normalized_upper == -std::numeric_limits<double>::infinity()) {
-      return HardConstraintFeasibilityStatus::kUnknown;
-    }
-
-    Eigen::RowVectorXd upper_row(num_dof + 1);
-    upper_row.head(num_dof) = normalized_row;
-    upper_row(num_dof) = -1.0;
-    if (std::isfinite(normalized_upper)) {
-      inequality_rows.push_back(std::move(upper_row));
-      inequality_bounds.push_back(normalized_upper);
-    }
-
-    Eigen::RowVectorXd lower_row(num_dof + 1);
-    lower_row.head(num_dof) = -normalized_row;
-    lower_row(num_dof) = -1.0;
-    if (std::isfinite(normalized_lower)) {
-      inequality_rows.push_back(std::move(lower_row));
-      inequality_bounds.push_back(-normalized_lower);
-    }
-  }
-
-  Eigen::RowVectorXd nonnegative_slack_row =
-      Eigen::RowVectorXd::Zero(num_dof + 1);
-  nonnegative_slack_row(num_dof) = -1.0;
-  inequality_rows.push_back(std::move(nonnegative_slack_row));
-  inequality_bounds.push_back(0.0);
-
-  const Eigen::Index num_inequalities =
-      static_cast<Eigen::Index>(inequality_rows.size());
-  Eigen::MatrixXd inequalities(num_inequalities, num_dof + 1);
-  Eigen::VectorXd bounds(num_inequalities);
-  for (Eigen::Index row = 0; row < num_inequalities; ++row) {
-    inequalities.row(row) = inequality_rows[static_cast<size_t>(row)];
-    bounds(row) = inequality_bounds[static_cast<size_t>(row)];
-  }
-
-  Eigen::VectorXd phase_point = Eigen::VectorXd::Zero(num_dof + 1);
-  double initial_slack = 0.0;
-  for (Eigen::Index row = 0; row < num_inequalities - 1; ++row) {
-    initial_slack = std::max(initial_slack, -bounds(row));
-  }
-  if (!std::isfinite(initial_slack)) {
-    return HardConstraintFeasibilityStatus::kUnknown;
-  }
-  const double strict_feasibility_margin = 10.0 * tolerance;
-  if (initial_slack >
-      std::numeric_limits<double>::max() - strict_feasibility_margin) {
-    return HardConstraintFeasibilityStatus::kUnknown;
-  }
-  phase_point(num_dof) = initial_slack + strict_feasibility_margin;
-
-  std::vector<Eigen::Index> active;
-  active.reserve(static_cast<size_t>(num_dof + 1));
-  auto add_independent_active_row = [&](Eigen::Index row) {
-    if (std::find(active.begin(), active.end(), row) != active.end()) {
-      return false;
-    }
-    Eigen::MatrixXd candidate_active(active.size() + 1, num_dof + 1);
-    for (size_t index = 0; index < active.size(); ++index) {
-      candidate_active.row(static_cast<Eigen::Index>(index)) =
-          inequalities.row(active[index]);
-    }
-    candidate_active.row(static_cast<Eigen::Index>(active.size())) =
-        inequalities.row(row);
-    Eigen::ColPivHouseholderQR<Eigen::MatrixXd> rank_analysis(
-        candidate_active);
-    rank_analysis.setThreshold(tolerance);
-    if (rank_analysis.rank() <= static_cast<Eigen::Index>(active.size())) {
-      return false;
-    }
-    active.push_back(row);
-    return true;
-  };
-  const Eigen::VectorXd initial_margins =
-      bounds - inequalities * phase_point;
-  for (Eigen::Index row = 0; row < num_inequalities; ++row) {
-    // Active directions preserve the current row value. A strictly interior
-    // row must not become an equality with its initial slack still attached.
-    const double touching_tolerance =
-        64.0 * std::numeric_limits<double>::epsilon() *
-        std::max({1.0, std::abs(bounds(row)),
-                  std::abs(inequalities.row(row).dot(phase_point))});
-    if (initial_margins(row) <= touching_tolerance) {
-      (void)add_independent_active_row(row);
-    }
-  }
-
-  Eigen::MatrixXd hessian = Eigen::MatrixXd::Zero(num_dof + 1, num_dof + 1);
-  hessian(num_dof, num_dof) = 1.0;
-  const unsigned int configured_iterations =
-      std::max<unsigned int>(
-          64U, static_cast<unsigned int>(
-                   4 * (num_inequalities + num_dof + 1)));
-  const unsigned int max_iterations =
-      std::min<unsigned int>(2048U, configured_iterations);
-
-  for (unsigned int iteration = 0; iteration < max_iterations; ++iteration) {
-    Eigen::MatrixXd active_matrix(active.size(), num_dof + 1);
-    for (size_t index = 0; index < active.size(); ++index) {
-      active_matrix.row(static_cast<Eigen::Index>(index)) =
-          inequalities.row(active[index]);
-    }
-
-    const Eigen::VectorXd gradient = hessian * phase_point;
-    Eigen::MatrixXd kkt(num_dof + 1 + active_matrix.rows(),
-                        num_dof + 1 + active_matrix.rows());
-    kkt.setZero();
-    kkt.topLeftCorner(num_dof + 1, num_dof + 1) = hessian;
-    if (active_matrix.rows() > 0) {
-      kkt.topRightCorner(num_dof + 1, active_matrix.rows()) =
-          active_matrix.transpose();
-      kkt.bottomLeftCorner(active_matrix.rows(), num_dof + 1) =
-          active_matrix;
-    }
-
-    Eigen::VectorXd rhs = Eigen::VectorXd::Zero(kkt.rows());
-    rhs.head(num_dof + 1) = -gradient;
-    Eigen::VectorXd kkt_solution;
-    if (active_matrix.rows() == num_dof + 1) {
-      // Active rows are independent by construction. A square active matrix
-      // therefore pins every phase variable: its only tangent direction is
-      // zero. Solving the indefinite KKT system can introduce a tiny spurious
-      // direction here and repeatedly miss the stationary-point branch.
-      kkt_solution = Eigen::VectorXd::Zero(kkt.rows());
-      kkt_solution.tail(active_matrix.rows()) =
-          active_matrix.transpose().colPivHouseholderQr().solve(-gradient);
-    } else {
-      kkt_solution = kkt.completeOrthogonalDecomposition().solve(rhs);
-    }
-    if (!kkt_solution.allFinite()) {
-      return HardConstraintFeasibilityStatus::kUnknown;
-    }
-    const double kkt_tolerance =
-        100.0 * tolerance * std::max(1.0, rhs.norm());
-    if ((kkt * kkt_solution - rhs).norm() > kkt_tolerance) {
-      return HardConstraintFeasibilityStatus::kUnknown;
-    }
-
-    const Eigen::VectorXd direction = kkt_solution.head(num_dof + 1);
-    const Eigen::VectorXd multipliers =
-        kkt_solution.tail(active_matrix.rows());
-    const double direction_tolerance =
-        tolerance * std::max(1.0, phase_point.norm());
-    if (allow_objective_null_pin_release) {
-      const Eigen::Index remove_position = FindObjectiveNullPhasePinToRelease(
-          hessian, gradient, active_matrix, direction, multipliers,
-          tolerance, direction_tolerance, kkt_tolerance);
-      if (remove_position >= 0) {
-        active.erase(active.begin() + remove_position);
-        continue;
-      }
-    }
-    if (direction.norm() <= direction_tolerance) {
-      Eigen::Index remove_position = -1;
-      double minimum_multiplier = 0.0;
-      if (multipliers.size() > 0) {
-        minimum_multiplier = multipliers.minCoeff(&remove_position);
-      }
-      if (remove_position >= 0 && minimum_multiplier < -10.0 * tolerance) {
-        active.erase(active.begin() + remove_position);
-        continue;
-      }
-
-      const double max_phase_violation =
-          (inequalities * phase_point - bounds).maxCoeff();
-      if (max_phase_violation > 10.0 * tolerance) {
-        return HardConstraintFeasibilityStatus::kUnknown;
-      }
-      const double optimal_slack = std::max(0.0, phase_point(num_dof));
-      if (optimal_slack <= 10.0 * tolerance) {
-        const Eigen::VectorXd original_inequality_values =
-            inequalities.topRows(num_inequalities - 1).leftCols(num_dof) *
-            phase_point.head(num_dof);
-        const double original_normalized_violation =
-            (original_inequality_values -
-             bounds.head(num_inequalities - 1))
-                .maxCoeff();
-        if (original_normalized_violation <= 100.0 * tolerance) {
-          *result = phase_point.head(num_dof);
-          return HardConstraintFeasibilityStatus::kFeasible;
-        }
-        return HardConstraintFeasibilityStatus::kUnknown;
-      }
-
-      Eigen::VectorXd dual = Eigen::VectorXd::Zero(num_inequalities);
-      for (size_t index = 0; index < active.size(); ++index) {
-        dual(active[index]) = multipliers(static_cast<Eigen::Index>(index));
-      }
-      if (dual.minCoeff() < -10.0 * tolerance) {
-        return HardConstraintFeasibilityStatus::kUnknown;
-      }
-      const Eigen::MatrixXd original_inequalities =
-          inequalities.topRows(num_inequalities - 1).leftCols(num_dof);
-      const Eigen::VectorXd original_bounds =
-          bounds.head(num_inequalities - 1);
-      std::vector<Eigen::Index> certificate_rows;
-      certificate_rows.reserve(active.size());
-      for (Eigen::Index row : active) {
-        if (row < num_inequalities - 1) {
-          certificate_rows.push_back(row);
-        }
-      }
-      const Eigen::Index certificate_size =
-          static_cast<Eigen::Index>(certificate_rows.size());
-      if (certificate_size != num_dof + 1) {
-        return HardConstraintFeasibilityStatus::kUnknown;
-      }
-
-      Eigen::MatrixXd certificate_system(num_dof + 1, certificate_size);
-      for (Eigen::Index column = 0; column < certificate_size; ++column) {
-        certificate_system.col(column).head(num_dof) =
-            original_inequalities.row(
-                certificate_rows[static_cast<size_t>(column)])
-                .transpose();
-        certificate_system(num_dof, column) = 1.0;
-      }
-      Eigen::JacobiSVD<Eigen::MatrixXd> certificate_svd(certificate_system);
-      const Eigen::VectorXd singular_values = certificate_svd.singularValues();
-      if (singular_values.size() == 0 ||
-          singular_values(singular_values.size() - 1) <= 0.0) {
-        return HardConstraintFeasibilityStatus::kUnknown;
-      }
-      const double certificate_condition =
-          singular_values(0) /
-          singular_values(singular_values.size() - 1);
-      const double max_certificate_condition =
-          1.0 / std::sqrt(std::numeric_limits<double>::epsilon());
-      if (!std::isfinite(certificate_condition) ||
-          certificate_condition > max_certificate_condition) {
-        return HardConstraintFeasibilityStatus::kUnknown;
-      }
-
-      const size_t system_size = static_cast<size_t>(num_dof + 1);
-      std::vector<std::vector<long double>> augmented_system(
-          system_size, std::vector<long double>(system_size + 1, 0.0L));
-      for (size_t row = 0; row < system_size; ++row) {
-        for (size_t column = 0; column < system_size; ++column) {
-          augmented_system[row][column] = static_cast<long double>(
-              certificate_system(static_cast<Eigen::Index>(row),
-                                 static_cast<Eigen::Index>(column)));
-        }
-      }
-      augmented_system[system_size - 1][system_size] = 1.0L;
-
-      for (size_t pivot_column = 0; pivot_column < system_size;
-           ++pivot_column) {
-        size_t pivot_row = pivot_column;
-        long double pivot_magnitude =
-            std::abs(augmented_system[pivot_row][pivot_column]);
-        for (size_t row = pivot_column + 1; row < system_size; ++row) {
-          const long double candidate_magnitude =
-              std::abs(augmented_system[row][pivot_column]);
-          if (candidate_magnitude > pivot_magnitude) {
-            pivot_magnitude = candidate_magnitude;
-            pivot_row = row;
-          }
-        }
-        if (pivot_magnitude == 0.0L) {
-          return HardConstraintFeasibilityStatus::kUnknown;
-        }
-        if (pivot_row != pivot_column) {
-          std::swap(augmented_system[pivot_row],
-                    augmented_system[pivot_column]);
-        }
-        for (size_t row = pivot_column + 1; row < system_size; ++row) {
-          const long double factor =
-              augmented_system[row][pivot_column] /
-              augmented_system[pivot_column][pivot_column];
-          for (size_t column = pivot_column; column <= system_size; ++column) {
-            augmented_system[row][column] -=
-                factor * augmented_system[pivot_column][column];
-          }
-        }
-      }
-
-      std::vector<long double> refined_dual(system_size, 0.0L);
-      for (size_t reverse_index = system_size; reverse_index-- > 0;) {
-        long double rhs_value = augmented_system[reverse_index][system_size];
-        for (size_t column = reverse_index + 1; column < system_size;
-             ++column) {
-          rhs_value -= augmented_system[reverse_index][column] *
-                       refined_dual[column];
-        }
-        refined_dual[reverse_index] =
-            rhs_value /
-            augmented_system[reverse_index][reverse_index];
-      }
-
-      const long double refinement_tolerance =
-          64.0L * std::numeric_limits<long double>::epsilon() *
-          static_cast<long double>(certificate_condition);
-      for (long double &value : refined_dual) {
-        if (value < -refinement_tolerance) {
-          return HardConstraintFeasibilityStatus::kUnknown;
-        }
-        if (value < 0.0L) {
-          value = 0.0L;
-        }
-      }
-
-      bool stationarity_is_resolved = true;
-      for (Eigen::Index column = 0; column < num_dof; ++column) {
-        long double stationarity = 0.0L;
-        long double absolute_sum = 0.0L;
-        for (size_t index = 0; index < system_size; ++index) {
-          const long double term = static_cast<long double>(
-                                       original_inequalities(
-                                           certificate_rows[index], column)) *
-                                   refined_dual[index];
-          stationarity += term;
-          absolute_sum += std::abs(term);
-        }
-        const long double stationarity_tolerance =
-            64.0L * std::numeric_limits<long double>::epsilon() *
-            static_cast<long double>(certificate_condition) *
-            std::max(1.0L, absolute_sum);
-        if (std::abs(stationarity) > stationarity_tolerance) {
-          stationarity_is_resolved = false;
-          break;
-        }
-      }
-
-      long double certificate_value = 0.0L;
-      long double certificate_absolute_sum = 0.0L;
-      for (size_t index = 0; index < system_size; ++index) {
-        const long double term =
-            static_cast<long double>(
-                original_bounds(certificate_rows[index])) *
-            refined_dual[index];
-        certificate_value += term;
-        certificate_absolute_sum += std::abs(term);
-      }
-      const long double negativity_margin =
-          100.0L * static_cast<long double>(tolerance) *
-          std::max(1.0L, certificate_absolute_sum);
-      const bool certificate_valid =
-          stationarity_is_resolved &&
-          certificate_value < -negativity_margin;
-      return certificate_valid
-                 ? HardConstraintFeasibilityStatus::kProvenInfeasible
-                 : HardConstraintFeasibilityStatus::kUnknown;
-    }
-
-    double step = 1.0;
-    Eigen::Index blocking_row = -1;
-    for (Eigen::Index row = 0; row < num_inequalities; ++row) {
-      if (std::find(active.begin(), active.end(), row) != active.end()) {
-        continue;
-      }
-      const double directional_change = inequalities.row(row).dot(direction);
-      if (directional_change <= tolerance) {
-        continue;
-      }
-      const double margin =
-          bounds(row) - inequalities.row(row).dot(phase_point);
-      const double candidate_step =
-          std::clamp(margin / directional_change, 0.0, 1.0);
-      if (candidate_step < step) {
-        step = candidate_step;
-        blocking_row = row;
-      }
-    }
-
-    phase_point.noalias() += step * direction;
-    if (phase_point(num_dof) < 0.0 &&
-        phase_point(num_dof) >= -10.0 * tolerance) {
-      phase_point(num_dof) = 0.0;
-    }
-    if (!phase_point.allFinite()) {
-      return HardConstraintFeasibilityStatus::kUnknown;
-    }
-    if (blocking_row >= 0 && step < 1.0 - tolerance) {
-      if (!add_independent_active_row(blocking_row)) {
-        return HardConstraintFeasibilityStatus::kUnknown;
-      }
-    }
-  }
-
-  return HardConstraintFeasibilityStatus::kUnknown;
-}
-
-// Preserve every original feasible witness and infeasibility result. Only an
-// unresolved search may retry with objective-null pin release, and only an
-// independently audited original-row witness may replace UNKNOWN.
-inline HardConstraintFeasibilityStatus FindHardConstraintFeasibleWitness(
-    const Eigen::MatrixXd &constraint_coefficients,
-    const Eigen::VectorXd &min_bounds, const Eigen::VectorXd &max_bounds,
-    const VelocitySolverConfig &solver_config, Eigen::VectorXd *result) {
-  const auto original_status = FindHardConstraintFeasibleWitnessImpl(
-      constraint_coefficients, min_bounds, max_bounds, solver_config, result,
-      false);
-  if (original_status != HardConstraintFeasibilityStatus::kUnknown)
-    return original_status;
-  // An unresolved caller without output storage must not enter promotion.
-  if (result == nullptr) return original_status;
-
-  Eigen::VectorXd retry_witness;
-  const auto retry_status = FindHardConstraintFeasibleWitnessImpl(
-      constraint_coefficients, min_bounds, max_bounds, solver_config,
-      &retry_witness, true);
-  const double tolerance = std::max(1e-12, solver_config.epsilon);
-  if (retry_status != HardConstraintFeasibilityStatus::kFeasible ||
-      retry_witness.size() != constraint_coefficients.cols() ||
-      !retry_witness.allFinite() ||
-      !(constraint_coefficients * retry_witness).allFinite() ||
-      ComputeMaxLinearConstraintViolation(constraint_coefficients, min_bounds,
-                                          max_bounds, retry_witness) > tolerance)
-    return original_status;
-  *result = std::move(retry_witness);
-  return HardConstraintFeasibilityStatus::kFeasible;
-}
 
 // Obtain an affine-ray seed only when the original seed does not already meet
 // the recovery contract. Prefix values belong to the trusted objective-entry
@@ -976,173 +521,6 @@ inline bool RecoverScaleTaskWithFeasibleRaySeed(
   return true;
 }
 
-// Recover a failed equality-set search from a feasible primal point.
-// Successful legacy results do not enter this path.
-inline bool RecoverFeasibleWeightedQuadratic(
-    const Eigen::MatrixXd &H, const Eigen::VectorXd &g,
-    const Eigen::MatrixXd &C, const Eigen::VectorXd &lower,
-    const Eigen::VectorXd &upper, const VelocitySolverConfig &config,
-    Eigen::VectorXd *solution, unsigned int *iterations_out,
-    const Eigen::VectorXd *initial_solution = nullptr,
-    bool allow_certified_checkpoint = false) {
-  *iterations_out = 0;
-  if (!H.allFinite() || !g.allFinite() || !C.allFinite()) return false;
-  Eigen::VectorXd v;
-  if (initial_solution != nullptr) {
-    if (initial_solution->size() != H.rows() ||
-        !initial_solution->allFinite() ||
-        ComputeMaxLinearConstraintViolation(C, lower, upper, *initial_solution) >
-            config.epsilon) return false;
-    v = *initial_solution;
-  } else if (FindHardConstraintFeasibleWitness(C, lower, upper, config, &v) !=
-             HardConstraintFeasibilityStatus::kFeasible) {
-    return false;
-  }
-  const Eigen::Index nv = H.rows();
-  std::vector<Eigen::RowVectorXd> inequality_rows, equality_rows;
-  std::vector<double> bounds;
-  auto append_inequality = [&](const Eigen::RowVectorXd &row, double bound) {
-    const double norm = row.norm();
-    if (norm == 0.0) return bound >= -config.epsilon;
-    inequality_rows.push_back(row / norm);
-    bounds.push_back(bound / norm);
-    return true;
-  };
-  for (Eigen::Index row = 0; row < C.rows(); ++row) {
-    if (std::isfinite(lower[row]) && std::isfinite(upper[row]) &&
-        lower[row] == upper[row]) {
-      if (C.row(row).norm() > 0.0)
-        equality_rows.push_back(C.row(row) / C.row(row).norm());
-      continue;
-    }
-    if (std::isfinite(upper[row]) &&
-        !append_inequality(C.row(row), upper[row])) return false;
-    if (std::isfinite(lower[row]) &&
-        !append_inequality(-C.row(row), -lower[row])) return false;
-  }
-  Eigen::MatrixXd E(equality_rows.size(), nv);
-  for (size_t row = 0; row < equality_rows.size(); ++row) E.row(row) = equality_rows[row];
-  if (E.rows() > 0) {
-    Eigen::JacobiSVD<Eigen::MatrixXd> svd(E, Eigen::ComputeThinU);
-    svd.setThreshold(1e-12);
-    E = (svd.matrixU().leftCols(svd.rank()).transpose() * E).eval();
-    for (Eigen::Index row = 0; row < E.rows(); ++row) E.row(row).normalize();
-  }
-  std::vector<size_t> active;
-  std::optional<Eigen::VectorXd> certified_checkpoint;
-  unsigned int attempted_iterations = 0;
-  auto return_validated_checkpoint = [&]() {
-    if (!certified_checkpoint ||
-        !certified_checkpoint->allFinite() ||
-        !(C * *certified_checkpoint).allFinite() ||
-        ComputeMaxLinearConstraintViolation(C, lower, upper,
-                                            *certified_checkpoint) > config.epsilon)
-      return false;
-    *solution = *certified_checkpoint;
-    *iterations_out = attempted_iterations;
-    return true;
-  };
-  const size_t limit = std::max<size_t>(config.iteration_limit,
-                                      4 * inequality_rows.size() + 40);
-  for (size_t iteration = 0; iteration < limit; ++iteration) {
-    attempted_iterations = static_cast<unsigned int>(iteration + 1);
-    *iterations_out = attempted_iterations;
-    if (ComputeMaxLinearConstraintViolation(C, lower, upper, v) > config.epsilon)
-      return return_validated_checkpoint();
-    Eigen::MatrixXd basis(E.rows() + active.size(), nv);
-    basis.topRows(E.rows()) = E;
-    for (size_t row = 0; row < active.size(); ++row)
-      basis.row(E.rows() + row) = inequality_rows[active[row]];
-    Eigen::MatrixXd free = Eigen::MatrixXd::Identity(nv, nv);
-    if (basis.rows() > 0) {
-      Eigen::JacobiSVD<Eigen::MatrixXd> svd(basis, Eigen::ComputeFullV);
-      svd.setThreshold(1e-12);
-      free = svd.matrixV().rightCols(nv - svd.rank());
-    }
-    const Eigen::VectorXd gradient = H * v - g;
-    Eigen::VectorXd direction = Eigen::VectorXd::Zero(nv);
-    if (free.cols() > 0) {
-      const Eigen::MatrixXd reduced_H = free.transpose() * H * free;
-      direction = -free * reduced_H.ldlt().solve(free.transpose() * gradient);
-    }
-    if (!direction.allFinite()) return return_validated_checkpoint();
-    if (allow_certified_checkpoint) {
-      // The caller explicitly permits a roundoff certificate in its already
-      // failed numerical recovery. Other recovery paths retain
-      // their original search and task-null tie semantics.
-      const Eigen::VectorXd reduced_gradient = free.transpose() * gradient;
-      const Eigen::VectorXd reduced_direction = free.transpose() * direction;
-      const double predicted_decrease =
-          -0.5 * reduced_gradient.dot(reduced_direction);
-      const double state_scale = std::max(1.0, v.norm());
-      const double model_scale = std::max(
-          H.norm() * state_scale * state_scale, g.norm() * state_scale);
-      const double decrease_tolerance =
-          64.0 * std::numeric_limits<double>::epsilon() * model_scale;
-      if (std::isfinite(predicted_decrease) && predicted_decrease >= 0.0 &&
-          std::isfinite(decrease_tolerance) &&
-          predicted_decrease <= decrease_tolerance) {
-        Eigen::VectorXd checkpoint_lambda = Eigen::VectorXd::Zero(basis.rows());
-        if (basis.rows() > 0)
-          checkpoint_lambda = basis.transpose().completeOrthogonalDecomposition().solve(-gradient);
-        const double checkpoint_minimum = active.empty() ? 0.0
-            : checkpoint_lambda.tail(active.size()).minCoeff();
-        const double checkpoint_stationarity =
-            (gradient + basis.transpose() * checkpoint_lambda).norm();
-        bool checkpoint_active_tight = true;
-        for (const size_t row : active) {
-          if (std::abs(inequality_rows[row].dot(v) - bounds[row]) > config.epsilon) {
-            checkpoint_active_tight = false;
-            break;
-          }
-        }
-        if (checkpoint_active_tight && checkpoint_lambda.allFinite() &&
-            gradient.allFinite() && std::isfinite(gradient.norm()) &&
-            std::isfinite(checkpoint_stationarity) &&
-            checkpoint_minimum >= -std::max(1e-10, config.epsilon) &&
-            checkpoint_stationarity <= std::max(1e-8, 10.0 * config.epsilon) *
-                                           std::max(1.0, gradient.norm())) {
-          certified_checkpoint = v;
-          return return_validated_checkpoint();
-        }
-      }
-    }
-    if (direction.norm() <= 1e-9) {
-      Eigen::VectorXd lambda = Eigen::VectorXd::Zero(basis.rows());
-      if (basis.rows() > 0)
-        lambda = basis.transpose().completeOrthogonalDecomposition().solve(-gradient);
-      if (!lambda.allFinite()) return return_validated_checkpoint();
-      Eigen::Index remove = -1;
-      const double minimum = active.empty() ? 0.0 : lambda.tail(active.size()).minCoeff(&remove);
-      // A negative inequality multiplier can release a trial pin even when an
-      // ill-conditioned working set prevents a stationarity certificate.
-      // This continues the bounded feasible search; it does not certify success.
-      if (minimum < -std::max(1e-10, config.epsilon)) {
-        active.erase(active.begin() + remove);
-        continue;
-      }
-      if ((gradient + basis.transpose() * lambda).norm() >
-          std::max(1e-8, 10.0 * config.epsilon) * std::max(1.0, gradient.norm()))
-        return return_validated_checkpoint();
-      *solution = std::move(v);
-      *iterations_out = static_cast<unsigned int>(iteration + 1);
-      return true;
-    }
-    double step = 1.0;
-    size_t blocker = inequality_rows.size();
-    for (size_t row = 0; row < inequality_rows.size(); ++row) {
-      if (std::find(active.begin(), active.end(), row) != active.end()) continue;
-      const double rate = inequality_rows[row].dot(direction);
-      if (rate <= 1e-12) continue;
-      const double candidate = std::max(0.0, (bounds[row] - inequality_rows[row].dot(v)) / rate);
-      if (candidate < step) { step = candidate; blocker = row; }
-    }
-    v.noalias() += step * direction;
-    if (blocker < inequality_rows.size()) active.push_back(blocker);
-  }
-  return return_validated_checkpoint();
-}
-
 template <typename Decomposition>
 inline bool HasUsableSvdFactors(const Decomposition &decomposition) {
   // Eigen 3.3, used by the manylinux wheel image, has no SVD::info().
@@ -1228,7 +606,7 @@ inline Eigen::MatrixXd ComputeRegularizedInverse(
   const bool exact_mode =
       regularization_config.regularization_factor == 0.0;
   const unsigned int svd_options =
-      enable_condition_aware_svd_fallback && (is_tall || exact_mode)
+      exact_mode || (enable_condition_aware_svd_fallback && is_tall)
           ? (Eigen::ComputeThinU | Eigen::ComputeThinV)
           : Eigen::ComputeFullU;
   const Eigen::BDCSVD<MatrixDouble> svd_decomp(input_matrix, svd_options);
@@ -1300,7 +678,10 @@ inline Eigen::MatrixXd ComputeRegularizedInverse(
         (1.0 - (sigma_values.array() / eps).min(1.0).square());
     per_sv_damping = per_sv_damping.max(0.0);
 
-    if (enable_condition_aware_svd_fallback && exact_mode) {
+    // Zero damping requests a rank-aware inverse in both policies. A Gram
+    // inverse can be finite but incorrect after nullspace projection; filter
+    // singular directions before they can corrupt a lower-priority solve.
+    if (exact_mode) {
       Eigen::VectorXd filtered_inverse =
           Eigen::VectorXd::Zero(sigma_values.size());
       for (Eigen::Index index = 0; index < sigma_values.size(); ++index) {
@@ -1736,6 +1117,9 @@ inline SolverResult solveHierarchicalLinearSystemEigen(
 
   // Verify objective dimension compatibility
   for (size_t obj_idx = 0; obj_idx < num_objectives; ++obj_idx) {
+    if (objective_matrices[obj_idx].rows() == 0)
+      return fail(SolverStatus::kEmptyProblem,
+                  "objective matrices must contain at least one row");
     if (objective_matrices[obj_idx].cols() != degrees_of_freedom ||
         objective_matrices[obj_idx].rows() !=
             scalable_objective_targets[obj_idx].rows()) {
@@ -1766,9 +1150,41 @@ inline SolverResult solveHierarchicalLinearSystemEigen(
     std::vector<bool> prefix_fallbacks;
   };
   std::optional<MinErrorSuffixEntry> min_error_suffix_entry;
-  std::vector<Eigen::VectorXd> completed_objective_images;
-  if (!preserve_legacy_velocity_behavior)
-    completed_objective_images.resize(num_objectives);
+  const bool all_explicit_min_error =
+      objective_configs.size() == num_objectives &&
+      std::all_of(objective_configs.begin(), objective_configs.end(),
+                  [](const ObjectiveSolveConfig &objective) {
+                    return objective.solve_mode == TaskSolveMode::kMinError;
+                  });
+  std::vector<Eigen::VectorXd> completed_objective_images(num_objectives);
+  size_t repaired_prefix_size = 0;
+  Eigen::VectorXd repaired_prefix_witness;
+  // A later projector is an execution device, not a certificate that weak
+  // achieved directions survived. Check the frozen images again at publication,
+  // including candidates returned by the existing terminal recovery dispatch.
+  const auto preserves_repaired_prefix = [&](const Eigen::VectorXd &candidate) {
+    if (repaired_prefix_size == 0) return true;
+    if (!candidate.allFinite()) return false;
+    const double tolerance = std::min(1e-10, objective_equality_tolerance);
+    for (size_t prior = 0; prior < repaired_prefix_size; ++prior) {
+      const auto &image = completed_objective_images[prior];
+      if (image.size() != objective_matrices[prior].rows() || !image.allFinite() ||
+          !std::isfinite(image.norm())) return false;
+      const Eigen::VectorXd residual = objective_matrices[prior] * candidate - image;
+      if (!residual.allFinite() || !std::isfinite(residual.norm()) ||
+          residual.norm() > tolerance * std::max(1.0, image.norm()) ||
+          (residual.size() && residual.cwiseAbs().maxCoeff() > solver_config.epsilon))
+        return false;
+    }
+    return true;
+  };
+  const auto recovered_prefix_is_valid = [&](const SolverResult &result) {
+    if (repaired_prefix_size == 0) return true;
+    if (result.solution.size() != static_cast<size_t>(degrees_of_freedom)) return false;
+    return preserves_repaired_prefix(Eigen::Map<const Eigen::VectorXd>(
+        result.solution.data(), result.solution.size()));
+  };
+
 
   auto can_retain_lower_task_checkpoint = [&](
       const Eigen::VectorXd &checkpoint,
@@ -1783,12 +1199,114 @@ inline SolverResult solveHierarchicalLinearSystemEigen(
             solver_config.epsilon, objective_equality_tolerance);
   };
 
+  // These numerical building blocks are shared by direct/retry MIN_ERROR and
+  // completed-prefix suffix solves. Eligibility, seeds, tolerances, certificate
+  // permissions and best-effort policy remain at their existing call sites.
+  const auto min_error_target = [&](size_t index) -> Eigen::VectorXd {
+    if (preserve_legacy_velocity_behavior)
+      return scalable_objective_targets[index];
+    return scalable_objective_targets[index] - affine_objective_biases[index];
+  };
+
+  const auto solve_min_error_band = [&](
+      size_t index, const Eigen::MatrixXd &coefficients,
+      const Eigen::VectorXd &lower, const Eigen::VectorXd &upper,
+      const VelocitySolverConfig &config, const Eigen::VectorXd *seed,
+      bool allow_certified_checkpoint, Eigen::VectorXd *candidate,
+      unsigned int *iterations, std::string *failure_reason = nullptr) {
+    const auto &matrix = objective_matrices[index];
+    const Eigen::VectorXd target = min_error_target(index);
+    Eigen::MatrixXd hessian = matrix.transpose() * matrix;
+    const Eigen::VectorXd gradient_target = matrix.transpose() * target;
+    const double diagonal_scale = hessian.diagonal().cwiseAbs().maxCoeff();
+    // Preserve the existing scale-relative task-null tie-break in both paths.
+    const double ridge = 1e-12 * (diagonal_scale > 0.0 ? diagonal_scale : 1.0);
+    hessian.diagonal().array() += ridge;
+    const detail::LeastSquaresQuadratic least_squares{matrix, target, ridge};
+    detail::NumericalLeastSquaresBand *record = nullptr;
+    if (execution_options.numerical_trace) {
+      auto &records = execution_options.numerical_trace->least_squares;
+      records.emplace_back();
+      record = &records.back();
+      record->objective_index = index;
+      record->matrix = matrix;
+      record->target = target;
+      record->ridge = ridge;
+      record->rows = coefficients;
+      record->lower = lower;
+      record->upper = upper;
+      record->config = config;
+      record->caller_seed_present = seed != nullptr;
+      if (seed) record->caller_seed = *seed;
+      record->allow_checkpoint = allow_certified_checkpoint;
+    }
+    std::string observed_reason;
+    std::string *reason = failure_reason ? failure_reason
+        : record ? &observed_reason : nullptr;
+    const bool success = detail::RecoverFeasibleWeightedQuadratic(
+        hessian, gradient_target, coefficients, lower, upper, config,
+        candidate, iterations, seed, allow_certified_checkpoint,
+        reason, &least_squares);
+    if (record) {
+      record->success = success;
+      record->iterations = *iterations;
+      record->reason = *reason;
+      if (success) record->candidate = *candidate;
+    }
+    return success;
+  };
+
+  const auto append_min_error_image = [&](
+      size_t index, const Eigen::VectorXd &image, Eigen::MatrixXd &coefficients,
+      Eigen::VectorXd &lower, Eigen::VectorXd &upper) {
+    const auto &matrix = objective_matrices[index];
+    const Eigen::Index old_rows = coefficients.rows();
+    coefficients.conservativeResize(old_rows + matrix.rows(), degrees_of_freedom);
+    coefficients.bottomRows(matrix.rows()) = matrix;
+    lower.conservativeResize(old_rows + matrix.rows());
+    upper.conservativeResize(old_rows + matrix.rows());
+    lower.tail(matrix.rows()) = image;
+    upper.tail(matrix.rows()) = image;
+  };
+
+  const auto make_min_error_result = [&](
+      const Eigen::VectorXd &recovered, unsigned int iterations,
+      const std::vector<double> &prefix_scales,
+      const std::vector<TaskSolveMode> &prefix_modes,
+      const std::vector<bool> &prefix_fallbacks,
+      std::optional<size_t> first_unoptimized) {
+    SolverResult out{};
+    out.solution.assign(recovered.data(), recovered.data() + recovered.size());
+    out.status = SolverStatus::kSuccess;
+    out.computation_time_ms = get_elapsed_ms();
+    out.iterations = iterations;
+    out.task_scales = prefix_scales;
+    out.task_modes_effective = prefix_modes;
+    out.task_used_fallback = prefix_fallbacks;
+    out.task_scales.resize(num_objectives, -1.0);
+    out.task_modes_effective.resize(num_objectives, TaskSolveMode::kMinError);
+    out.task_used_fallback.resize(num_objectives, false);
+    if (first_unoptimized) {
+      for (size_t index = *first_unoptimized; index < num_objectives; ++index)
+        out.task_used_fallback[index] = true;
+    }
+    for (size_t index = 0; index < num_objectives; ++index)
+      out.task_errors.push_back(
+          (objective_matrices[index] * recovered - min_error_target(index)).norm());
+    out.final_error = out.task_errors.front();
+    return out;
+  };
+
   // Recover only an explicitly minimum-error suffix. Its completed prefix has
   // already produced a feasible command and is protected as exact task images;
   // SCALE objectives retain their affine rays and achieved scales.
-  auto retry_invalid_min_error_suffix = [&]() -> std::optional<SolverResult> {
+  auto solve_min_error_suffix = [&]() -> std::optional<SolverResult> {
     if (!min_error_suffix_entry) return std::nullopt;
     const auto &entry = *min_error_suffix_entry;
+    const double hard_tolerance = preserve_legacy_velocity_behavior
+        ? std::min(1e-10, solver_config.epsilon) : solver_config.epsilon;
+    const double prefix_tolerance = preserve_legacy_velocity_behavior
+        ? std::min(1e-10, objective_equality_tolerance) : objective_equality_tolerance;
     Eigen::Index prefix_rows = 0;
     for (size_t index = 0; index < entry.first_objective; ++index)
       prefix_rows += objective_matrices[index].rows();
@@ -1810,25 +1328,19 @@ inline SolverResult solveHierarchicalLinearSystemEigen(
     Eigen::VectorXd recovered = entry.velocity;
     if (detail::ComputeMaxLinearConstraintViolation(
             recovery_C, recovery_lower, recovery_upper, recovered) >
-        solver_config.epsilon) return std::nullopt;
+        hard_tolerance) return std::nullopt;
+    auto recovery_config = solver_config;
+    recovery_config.epsilon = hard_tolerance;
     unsigned int iterations = 0;
     std::vector<Eigen::VectorXd> achieved_suffix;
     std::optional<size_t> first_unoptimized;
     for (size_t index = entry.first_objective; index < num_objectives; ++index) {
       const auto &matrix = objective_matrices[index];
-      const Eigen::VectorXd target =
-          scalable_objective_targets[index] - affine_objective_biases[index];
-      Eigen::MatrixXd hessian = matrix.transpose() * matrix;
-      const double diagonal_scale = hessian.diagonal().cwiseAbs().maxCoeff();
-      // Match the existing numerical MIN_ERROR recovery's null-space tie-break.
-      hessian.diagonal().array() +=
-          1e-12 * (diagonal_scale > 0.0 ? diagonal_scale : 1.0);
       Eigen::VectorXd candidate;
       unsigned int task_iterations = 0;
-      if (!detail::RecoverFeasibleWeightedQuadratic(
-              hessian, matrix.transpose() * target, recovery_C, recovery_lower,
-              recovery_upper, solver_config, &candidate, &task_iterations,
-              &recovered, true)) {
+      if (!solve_min_error_band(
+              index, recovery_C, recovery_lower, recovery_upper, recovery_config,
+              &recovered, true, &candidate, &task_iterations)) {
         std::vector<Eigen::VectorXd> completed_images = entry.prefix_targets;
         completed_images.insert(completed_images.end(), achieved_suffix.begin(),
                                 achieved_suffix.end());
@@ -1842,53 +1354,32 @@ inline SolverResult solveHierarchicalLinearSystemEigen(
       iterations += task_iterations;
       achieved_suffix.push_back(matrix * recovered);
       if (index + 1 < num_objectives) {
-        const auto old_rows = recovery_C.rows();
-        recovery_C.conservativeResize(old_rows + matrix.rows(), degrees_of_freedom);
-        recovery_C.bottomRows(matrix.rows()) = matrix;
-        recovery_lower.conservativeResize(old_rows + matrix.rows());
-        recovery_upper.conservativeResize(old_rows + matrix.rows());
-        recovery_lower.tail(matrix.rows()) = achieved_suffix.back();
-        recovery_upper.tail(matrix.rows()) = achieved_suffix.back();
+        append_min_error_image(index, achieved_suffix.back(), recovery_C,
+                               recovery_lower, recovery_upper);
       }
     }
     if (!recovered.allFinite() || detail::ComputeMaxLinearConstraintViolation(
             recovery_C, recovery_lower, recovery_upper, recovered) >
-        solver_config.epsilon) return std::nullopt;
+        hard_tolerance) return std::nullopt;
     const size_t protected_count = first_unoptimized.value_or(num_objectives - 1);
     for (size_t index = 0; index < protected_count; ++index) {
       const Eigen::VectorXd &image = index < entry.first_objective
           ? entry.prefix_targets[index]
           : achieved_suffix[index - entry.first_objective];
       if ((objective_matrices[index] * recovered - image).norm() >
-          objective_equality_tolerance * std::max(1.0, image.norm()))
+          prefix_tolerance * std::max(1.0, image.norm()))
         return std::nullopt;
     }
-    SolverResult out{};
-    out.solution.assign(recovered.data(), recovered.data() + recovered.size());
-    out.status = SolverStatus::kSuccess;
-    out.computation_time_ms = get_elapsed_ms();
-    out.iterations = iterations;
-    out.task_scales = entry.prefix_scales;
-    out.task_modes_effective = entry.prefix_modes;
-    out.task_used_fallback = entry.prefix_fallbacks;
-    out.task_scales.resize(num_objectives, -1.0);
-    out.task_modes_effective.resize(num_objectives, TaskSolveMode::kMinError);
-    out.task_used_fallback.resize(num_objectives, false);
-    if (first_unoptimized) {
-      for (size_t index = *first_unoptimized; index < num_objectives; ++index)
-        out.task_used_fallback[index] = true;
-    }
+    SolverResult out = make_min_error_result(
+        recovered, iterations, entry.prefix_scales, entry.prefix_modes,
+        entry.prefix_fallbacks, first_unoptimized);
     double condition = 1.0;
     for (size_t index = 0; index < num_objectives; ++index) {
-      const Eigen::VectorXd target =
-          scalable_objective_targets[index] - affine_objective_biases[index];
-      out.task_errors.push_back((objective_matrices[index] * recovered - target).norm());
       double task_condition = 1.0;
       (void)linalg::ComputeRegularizedInverse(solver_config.regularization_config,
           objective_matrices[index], &task_condition, true);
       condition = std::max(condition, task_condition);
     }
-    out.final_error = out.task_errors.front();
     out.condition_number = condition;
     // Rank-deficient tasks can legitimately report infinite conditioning.
     // The retained finite command and every protected image/hard row were
@@ -1896,6 +1387,7 @@ inline SolverResult solveHierarchicalLinearSystemEigen(
     out.status_message = first_unoptimized
         ? "best-effort lower-task numerical recovery; trailing objectives not optimized"
         : "hard-constrained trailing minimum-error numerical recovery";
+    if (!recovered_prefix_is_valid(out)) return std::nullopt;
     return out;
   };
 
@@ -1905,15 +1397,18 @@ inline SolverResult solveHierarchicalLinearSystemEigen(
   // exact achieved-image rows retain each earlier objective's hierarchy.
   Eigen::VectorXd hard_constraint_witness;
   bool full_hard_constraint_witness_available = false;
+  const auto full_hard_witness_is_valid = [&]() {
+    return full_hard_constraint_witness_available &&
+        hard_constraint_witness.size() == degrees_of_freedom &&
+        hard_constraint_witness.allFinite() &&
+        (constraint_coefficients * hard_constraint_witness).allFinite() &&
+        detail::ComputeMaxLinearConstraintViolation(
+            constraint_coefficients, min_bounds, max_bounds,
+            hard_constraint_witness) <= solver_config.epsilon;
+  };
   auto retry_invalid_min_error = [&](const Eigen::VectorXd &failed_velocity,
                                      bool direct_primal = false)
       -> std::optional<SolverResult> {
-    const bool all_explicit_min_error =
-        objective_configs.size() == num_objectives &&
-        std::all_of(objective_configs.begin(), objective_configs.end(),
-                    [](const ObjectiveSolveConfig &objective) {
-                      return objective.solve_mode == TaskSolveMode::kMinError;
-                    });
     const bool has_relaxable_rows = enhanced_mode &&
         (softening_factors.array() > 1.0).any();
     // A satisfied primary hold must not suppress recovery for a moving lower
@@ -1928,22 +1423,22 @@ inline SolverResult solveHierarchicalLinearSystemEigen(
     }
     if (has_relaxable_rows ||
         !all_explicit_min_error || !failed_velocity.allFinite() ||
-        !has_nonzero_target ||
+        // A zero MIN_ERROR reference still requires optimization when hard
+        // rows exclude zero. Honor the explicit canonical direct request;
+        // retain the existing stationary guard for legacy and late retries.
+        (!has_nonzero_target &&
+         !(direct_primal && !preserve_legacy_velocity_behavior)) ||
         (!direct_primal && detail::ComputeMaxLinearConstraintViolation(
             constraint_coefficients, min_bounds, max_bounds, failed_velocity) <=
             solver_config.epsilon)) {
+      if (direct_primal && execution_options.diagnostics)
+        execution_options.diagnostics->direct_min_error_message = "direct eligibility conditions not satisfied";
       return std::nullopt;
     }
     if (direct_primal &&
         (preserve_legacy_velocity_behavior ||
          !execution_options.prefer_direct_min_error_qp ||
-         !full_hard_constraint_witness_available ||
-         hard_constraint_witness.size() != degrees_of_freedom ||
-         !hard_constraint_witness.allFinite() ||
-         !(constraint_coefficients * hard_constraint_witness).allFinite() ||
-         detail::ComputeMaxLinearConstraintViolation(
-             constraint_coefficients, min_bounds, max_bounds,
-             hard_constraint_witness) > solver_config.epsilon)) {
+         !full_hard_witness_is_valid())) {
       return std::nullopt;
     }
     if (preserve_legacy_velocity_behavior) {
@@ -1956,7 +1451,8 @@ inline SolverResult solveHierarchicalLinearSystemEigen(
           scalable_objective_targets, zero_biases, objective_matrices,
           constraint_coefficients, min_bounds, max_bounds, solver_config,
           objective_configs, nullptr);
-      if (constrained.status == SolverStatus::kSuccess) {
+      if (constrained.status == SolverStatus::kSuccess &&
+          recovered_prefix_is_valid(constrained)) {
         constrained.computation_time_ms = get_elapsed_ms();
         return constrained;
       }
@@ -1972,24 +1468,20 @@ inline SolverResult solveHierarchicalLinearSystemEigen(
     double recovery_condition = 1.0;
     for (size_t index = 0; index < num_objectives; ++index) {
       const auto &matrix = objective_matrices[index];
-      const Eigen::VectorXd target = preserve_legacy_velocity_behavior
-          ? scalable_objective_targets[index]
-          : scalable_objective_targets[index] - affine_objective_biases[index];
-      Eigen::MatrixXd hessian = matrix.transpose() * matrix;
-      const Eigen::VectorXd gradient_target = matrix.transpose() * target;
-      // A tiny scale-relative ridge resolves task-null ties without applying
-      // the advisor's larger epsilon-squared preference to task directions.
-      const double diagonal_scale = hessian.diagonal().cwiseAbs().maxCoeff();
-      hessian.diagonal().array() +=
-          1e-12 * (diagonal_scale > 0.0 ? diagonal_scale : 1.0);
       unsigned int iterations = 0;
       Eigen::VectorXd candidate;
-      if (!detail::RecoverFeasibleWeightedQuadratic(
-              hessian, gradient_target, recovery_C, recovery_lower,
-              recovery_upper, solver_config, &candidate, &iterations,
-              index == 0 ? (direct_primal ? &hard_constraint_witness : nullptr)
+      if (!solve_min_error_band(
+              index, recovery_C, recovery_lower, recovery_upper, solver_config,
+              index == 0 ? (full_hard_witness_is_valid()
+                                ? &hard_constraint_witness : nullptr)
                          : &recovered,
-              !direct_primal)) {
+              !direct_primal, &candidate, &iterations,
+              direct_primal && execution_options.diagnostics
+                  ? &execution_options.diagnostics->direct_min_error_message : nullptr)) {
+        if (direct_primal && execution_options.diagnostics)
+          execution_options.diagnostics->direct_min_error_message =
+              "quadratic helper failed at objective " + std::to_string(index) + ": " +
+              execution_options.diagnostics->direct_min_error_message;
         if (direct_primal ||
             !can_retain_lower_task_checkpoint(recovered, achieved_images, index))
           return std::nullopt;
@@ -2006,14 +1498,8 @@ inline SolverResult solveHierarchicalLinearSystemEigen(
       recovery_condition = std::max(recovery_condition, condition);
       achieved_images.push_back(matrix * recovered);
       if (index + 1 < num_objectives) {
-        const Eigen::Index old_rows = recovery_C.rows();
-        recovery_C.conservativeResize(old_rows + matrix.rows(),
-                                      degrees_of_freedom);
-        recovery_C.bottomRows(matrix.rows()) = matrix;
-        recovery_lower.conservativeResize(old_rows + matrix.rows());
-        recovery_upper.conservativeResize(old_rows + matrix.rows());
-        recovery_lower.tail(matrix.rows()) = achieved_images.back();
-        recovery_upper.tail(matrix.rows()) = achieved_images.back();
+        append_min_error_image(index, achieved_images.back(), recovery_C,
+                               recovery_lower, recovery_upper);
       }
     }
     if (direct_primal &&
@@ -2028,25 +1514,8 @@ inline SolverResult solveHierarchicalLinearSystemEigen(
           objective_equality_tolerance *
               std::max(1.0, achieved_images[index].norm())) return std::nullopt;
     }
-    SolverResult out{};
-    out.solution.assign(recovered.data(), recovered.data() + recovered.size());
-    out.status = SolverStatus::kSuccess;
-    out.computation_time_ms = get_elapsed_ms();
-    out.iterations = recovery_iterations;
-    out.task_scales.assign(num_objectives, -1.0);
-    out.task_modes_effective.assign(num_objectives, TaskSolveMode::kMinError);
-    out.task_used_fallback.assign(num_objectives, false);
-    if (first_unoptimized) {
-      for (size_t index = *first_unoptimized; index < num_objectives; ++index)
-        out.task_used_fallback[index] = true;
-    }
-    for (size_t index = 0; index < num_objectives; ++index) {
-      const Eigen::VectorXd target = preserve_legacy_velocity_behavior
-          ? scalable_objective_targets[index]
-          : scalable_objective_targets[index] - affine_objective_biases[index];
-      out.task_errors.push_back((objective_matrices[index] * recovered - target).norm());
-    }
-    out.final_error = out.task_errors.front();
+    SolverResult out = make_min_error_result(
+        recovered, recovery_iterations, {}, {}, {}, first_unoptimized);
     if (direct_primal &&
         !std::all_of(out.task_errors.begin(), out.task_errors.end(),
                      [](double value) { return std::isfinite(value); }))
@@ -2059,6 +1528,7 @@ inline SolverResult solveHierarchicalLinearSystemEigen(
     out.condition_number = recovery_condition;
     // Conditioning is diagnostic; rank deficiency does not invalidate the
     // independently checked best-effort command or its protected images.
+    if (!recovered_prefix_is_valid(out)) return std::nullopt;
     return out;
   };
 
@@ -2122,7 +1592,11 @@ inline SolverResult solveHierarchicalLinearSystemEigen(
     }
   }
   const bool run_hard_constraint_phase_one =
-      !execution_options.hard_constraints_prevalidated_feasible &&
+      // Prevalidation proves feasibility but does not supply the concrete
+      // witness required by the requested feasible-primal MIN_ERROR route.
+      // Obtain that witness instead of silently bypassing the requested route.
+      (!execution_options.hard_constraints_prevalidated_feasible ||
+       (execution_options.prefer_direct_min_error_qp && all_explicit_min_error)) &&
       !immutable_constraint_rows.empty();
   Eigen::MatrixXd phase_one_coefficients(immutable_constraint_rows.size(),
                                          degrees_of_freedom);
@@ -2155,6 +1629,17 @@ inline SolverResult solveHierarchicalLinearSystemEigen(
                 phase_one_coefficients, phase_one_min_bounds,
                 phase_one_max_bounds, solver_config, &hard_constraint_witness)
           : detail::HardConstraintFeasibilityStatus::kUnknown;
+  if (execution_options.diagnostics) {
+    auto &diagnostics = *execution_options.diagnostics;
+    diagnostics.phase_one_status = !run_hard_constraint_phase_one ? "not_run" :
+        hard_constraint_feasibility == detail::HardConstraintFeasibilityStatus::kFeasible
+            ? "feasible" :
+        hard_constraint_feasibility == detail::HardConstraintFeasibilityStatus::kProvenInfeasible
+            ? "proven_infeasible" : "unknown";
+    if (run_hard_constraint_phase_one &&
+        hard_constraint_feasibility == detail::HardConstraintFeasibilityStatus::kFeasible)
+      diagnostics.phase_one_witness = hard_constraint_witness;
+  }
   full_hard_constraint_witness_available =
       !preserve_legacy_velocity_behavior && run_hard_constraint_phase_one &&
       immutable_constraint_rows.size() == static_cast<size_t>(total_constraints) &&
@@ -2177,8 +1662,20 @@ inline SolverResult solveHierarchicalLinearSystemEigen(
 
   if (execution_options.prefer_direct_min_error_qp &&
       full_hard_constraint_witness_available) {
-    if (auto direct = retry_invalid_min_error(hard_constraint_witness, true))
+    if (execution_options.diagnostics)
+      execution_options.diagnostics->direct_min_error_attempted = true;
+    if (auto direct = retry_invalid_min_error(hard_constraint_witness, true)) {
+      if (execution_options.diagnostics) {
+        execution_options.diagnostics->direct_min_error_succeeded = true;
+        execution_options.diagnostics->direct_min_error_message = direct->status_message;
+        execution_options.diagnostics->termination_reason = "direct_min_error_success";
+      }
       return *direct;
+    }
+    if (execution_options.diagnostics &&
+        execution_options.diagnostics->direct_min_error_message.empty())
+      execution_options.diagnostics->direct_min_error_message =
+          "direct helper did not return a certified result; ordinary search continued";
   }
 
   // Track worst-case condition number across all tasks.
@@ -2322,9 +1819,11 @@ inline SolverResult solveHierarchicalLinearSystemEigen(
   Eigen::VectorXd final_check_min_bounds = min_bounds;
   Eigen::VectorXd final_check_max_bounds = max_bounds;
 
+  size_t entered_objectives = 0;
   // Process objectives hierarchically with constraint enforcement
   for (auto objective_index = 0U; objective_index < num_objectives;
        ++objective_index) {
+    entered_objectives = objective_index + 1;
     const ObjectiveSolveConfig objective_config =
         (objective_index < objective_configs.size())
             ? objective_configs[objective_index]
@@ -2409,7 +1908,48 @@ inline SolverResult solveHierarchicalLinearSystemEigen(
     // Store current state for iterative refinement
     auto previous_null_space = null_space_projector;
     previous_velocity = velocity_solution;
-    if (!preserve_legacy_velocity_behavior && !min_error_suffix_entry &&
+    std::optional<size_t> numerical_stage_index;
+    if (execution_options.numerical_trace) {
+      auto &stages = execution_options.numerical_trace->stages;
+      numerical_stage_index = stages.size();
+      stages.emplace_back();
+      auto &record = stages.back();
+      record.objective_index = objective_index;
+      record.requested_mode = objective_config.solve_mode;
+      record.effective_mode = objective_config.solve_mode;
+      record.legacy = preserve_legacy_velocity_behavior;
+      record.matrix = current_jacobian;
+      record.target = current_target;
+      record.bias = preserve_legacy_velocity_behavior
+          ? Eigen::VectorXd::Zero(current_target.size()).eval()
+          : affine_objective_biases[objective_index];
+      record.original_rows = constraint_coefficients;
+      record.original_lower = min_bounds;
+      record.original_upper = max_bounds;
+      record.entry_velocity = previous_velocity;
+      record.entry_projector = previous_null_space;
+      record.inverse_config = solver_config.regularization_config;
+      record.entry_status = solver_status;
+      record.entry_raw_violation = detail::ComputeMaxLinearConstraintViolation(
+          constraint_coefficients, min_bounds, max_bounds, previous_velocity);
+      Eigen::Index prefix_rows = 0;
+      for (size_t prior = 0; prior < objective_index; ++prior)
+        prefix_rows += objective_matrices[prior].rows();
+      record.prefix_rows.resize(prefix_rows, degrees_of_freedom);
+      Eigen::Index offset = 0;
+      for (size_t prior = 0; prior < objective_index; ++prior) {
+        record.prefix_rows.middleRows(offset, objective_matrices[prior].rows()) =
+            objective_matrices[prior];
+        offset += objective_matrices[prior].rows();
+      }
+      record.prefix_images = record.prefix_rows * previous_velocity;
+    }
+    detail::NumericalStageScope numerical_stage_scope{
+        execution_options.numerical_trace, numerical_stage_index.value_or(0),
+        velocity_solution, null_space_projector, solver_status};
+    if ((!preserve_legacy_velocity_behavior || solver_config.refine_partial_scale ||
+         solver_config.regularization_config.regularization_factor == 0.0) &&
+        !min_error_suffix_entry &&
         solver_status == SolverStatus::kSuccess && objective_index > 0 &&
         objective_configs.size() == num_objectives &&
         objective_is_min_error &&
@@ -2428,7 +1968,20 @@ inline SolverResult solveHierarchicalLinearSystemEigen(
       for (size_t index = 0; index < objective_index; ++index) {
         const double scale = objective_scaling_factors(index);
         Eigen::VectorXd image;
-        if (objective_effective_modes[index] == TaskSolveMode::kScale &&
+        if (preserve_legacy_velocity_behavior) {
+          // Legacy lower SCALE bands are projected preferences. Preserve their
+          // actual achieved images, not an incompatible raw homogeneous ray.
+          // The primary SCALE image must itself be certified before admission.
+          image = objective_matrices[index] * previous_velocity;
+          if (index == 0 && objective_effective_modes[index] == TaskSolveMode::kScale &&
+              (!std::isfinite(scale) || scale < 0.0 || scale > 1.0 ||
+               (image - scale * scalable_objective_targets[index]).norm() >
+                   std::min(1e-10, objective_equality_tolerance) *
+                       std::max(1.0, std::abs(scale) * scalable_objective_targets[index].norm()))) {
+            prefix_valid = false;
+            break;
+          }
+        } else if (objective_effective_modes[index] == TaskSolveMode::kScale &&
             std::isfinite(scale) && scale >= 0.0 && scale <= 1.0) {
           image = scale * scalable_objective_targets[index] -
                   affine_objective_biases[index];
@@ -2461,7 +2014,25 @@ inline SolverResult solveHierarchicalLinearSystemEigen(
         entry.prefix_modes.push_back(objective_effective_modes[index]);
         entry.prefix_fallbacks.push_back(objective_used_fallback[index]);
       }
-      if (prefix_valid) min_error_suffix_entry = std::move(entry);
+      if (prefix_valid && (!preserve_legacy_velocity_behavior ||
+          detail::ComputeMaxLinearConstraintViolation(
+              constraint_coefficients, min_bounds, max_bounds, previous_velocity) <=
+                  std::min(1e-10, solver_config.epsilon))) {
+        min_error_suffix_entry = std::move(entry);
+        if (preserve_legacy_velocity_behavior &&
+            solver_config.regularization_config.regularization_factor == 0.0) {
+          // Optimize a pure MIN_ERROR suffix directly from its feasible
+          // prefix. Saturation-loop success alone does not certify the
+          // constrained least-squares optimum near dependent task rows.
+          if (auto optimized = solve_min_error_suffix()) {
+            optimized->status_message =
+                "hard-constrained trailing minimum-error solve";
+            return *optimized;
+          }
+          return fail(SolverStatus::kNumericalError,
+                      "could not optimize the protected minimum-error suffix");
+        }
+      }
     }
 
     // Initialize iteration state for current objective
@@ -2475,6 +2046,7 @@ inline SolverResult solveHierarchicalLinearSystemEigen(
     bool has_feasible_scale_snapshot = false;
     bool attempted_bound_release = false;
     bool attempted_partial_scale_refinement = false;
+    bool attempted_invalid_ray_repair = false;
     auto best_constraint_selection = saturated_constraint_selector;
     best_saturated_values = saturated_values;
     Eigen::MatrixXd optimal_constrained_projector = Eigen::MatrixXd::Zero(
@@ -2500,7 +2072,42 @@ inline SolverResult solveHierarchicalLinearSystemEigen(
                                           objective_residual_at_previous
                                                   .template lpNorm<1>() <
                                               solver_config.precision_threshold;
+    std::optional<Eigen::MatrixXd> certified_prefix_projector;
+    const auto completed_task_kernel = [&]() -> const Eigen::MatrixXd & {
+        if (!certified_prefix_projector) {
+          Eigen::Index rows = 0;
+          for (size_t prior = 0; prior <= objective_index; ++prior)
+            rows += objective_matrices[prior].rows();
+          Eigen::MatrixXd prefix(rows, degrees_of_freedom);
+          Eigen::Index offset = 0;
+          for (size_t prior = 0; prior <= objective_index; ++prior) {
+            prefix.middleRows(offset, objective_matrices[prior].rows()) =
+                objective_matrices[prior];
+            offset += objective_matrices[prior].rows();
+          }
+          // Task acceptance accuracy is not a numerical rank threshold. A
+          // weak but achieved direction still belongs to the protected prefix.
+          // Form an orthogonal kernel directly, without a potentially large
+          // pseudoinverse or coefficient-wise truncation of its projector.
+          if (rows == 0) {
+            certified_prefix_projector = Eigen::MatrixXd::Identity(
+                degrees_of_freedom, degrees_of_freedom);
+          } else {
+            Eigen::JacobiSVD<Eigen::MatrixXd> rank(prefix, Eigen::ComputeFullV);
+            rank.setThreshold(std::numeric_limits<double>::epsilon() *
+                std::max<Eigen::Index>(1, std::max(prefix.rows(), prefix.cols())));
+            const Eigen::MatrixXd free = rank.matrixV().rightCols(
+                degrees_of_freedom - rank.rank());
+            certified_prefix_projector = free * free.transpose();
+          }
+        }
+      return *certified_prefix_projector;
+    };
     auto protect_achieved_objective = [&]() {
+      if (solver_config.refine_partial_scale) {
+        null_space_projector = completed_task_kernel();
+        return;
+      }
       detail::ComputeGeneralizedInverse(
           current_jacobian * previous_null_space, solver_config.epsilon,
           &inverse_objective_jacobian_projected);
@@ -2547,6 +2154,9 @@ inline SolverResult solveHierarchicalLinearSystemEigen(
         compute_current_objective_inverse(
             solver_config.regularization_config, constrained_projector,
             &task_condition_number);
+    if (numerical_stage_index)
+      execution_options.numerical_trace->stages[*numerical_stage_index]
+          .first_damped_inverse = damped_inverse_projected_jacobian;
     worst_condition_number =
         std::max(worst_condition_number, task_condition_number);
     Eigen::MatrixXd jacobian_velocity_product =
@@ -2567,9 +2177,9 @@ inline SolverResult solveHierarchicalLinearSystemEigen(
           saturated_constraint_matrix * previous_velocity;
     }
 
-    auto try_bound_release = [&](bool refine_partial = false) {
-      bool &attempted = refine_partial ? attempted_partial_scale_refinement
-                                       : attempted_bound_release;
+    auto try_bound_release = [&](bool refine_partial = false, bool repair_invalid_ray = false) {
+      bool &attempted = repair_invalid_ray ? attempted_invalid_ray_repair
+          : refine_partial ? attempted_partial_scale_refinement : attempted_bound_release;
       if (attempted) return false;
       attempted = true;
       Eigen::Index protected_rows = 0;
@@ -2587,14 +2197,79 @@ inline SolverResult solveHierarchicalLinearSystemEigen(
                                       : affine_objective_biases[objective_index];
       const Eigen::VectorXd seed = refine_partial ? velocity_solution : previous_velocity;
       const double seed_scale = refine_partial ? velocity_scale : 0.0;
+      const auto homogeneous_legacy_ray_supported = [&]() {
+        if (!preserve_legacy_velocity_behavior || objective_index == 0) return true;
+        // Legacy lower bands optimize a projected preference. Their inherited
+        // primary image is not part of a raw homogeneous lower-task ray.
+        Eigen::MatrixXd equations(protected_rows + target_dimension, degrees_of_freedom);
+        equations.topRows(protected_rows) = protected_tasks;
+        equations.bottomRows(target_dimension) = current_jacobian;
+        // Separate the inherited prefix from a free lower-task direction.
+        // A mandatory hard-row seed may have a nonzero lower image even when
+        // the tasks themselves are decoupled; Phase I must still handle that.
+        Eigen::MatrixXd rhs = Eigen::MatrixXd::Zero(equations.rows(), 2);
+        rhs.col(0).head(protected_rows) = protected_tasks * previous_velocity;
+        rhs.col(1).tail(target_dimension) = current_target;
+        Eigen::ColPivHouseholderQR<Eigen::MatrixXd> range(equations);
+        range.setThreshold(std::numeric_limits<double>::epsilon() *
+            std::max<Eigen::Index>(1, std::max(equations.rows(), equations.cols())));
+        const Eigen::MatrixXd witnesses = range.solve(rhs);
+        return witnesses.allFinite() &&
+            (equations * witnesses - rhs).norm() <= 1e-10 * std::max(1.0, rhs.norm());
+      };
       bool recovered = false;
-      if (preserve_legacy_velocity_behavior || refine_partial) {
+      if (repair_invalid_ray) {
+        if (!homogeneous_legacy_ray_supported()) return false;
+        // A reported full scale is not a feasible incumbent when damping has
+        // moved its actual image off the ray. Explicit refinement may replace
+        // that uncertified command with any verified positive ray, protecting
+        // actual task-entry images and original hard rows. The entry need not
+        // be hard-feasible: mandatory inward rows can exclude zero. Phase I
+        // must construct a new witness satisfying both the rows and images.
+        if (!previous_velocity.allFinite()) return false;
+        const Eigen::VectorXd protected_values = protected_tasks * previous_velocity;
+        recovered = detail::RecoverScaleTaskWithFeasibleRaySeed(
+            current_jacobian, current_target, bias, protected_tasks,
+            protected_values, constraint_coefficients, min_bounds, max_bounds,
+            previous_velocity, solver_config, &velocity_solution, &velocity_scale, 0.0);
+      } else if (preserve_legacy_velocity_behavior || refine_partial) {
         // A certified positive-scale refinement keeps its original search;
         // a new Phase-I seed must not replace that known scale snapshot.
         recovered = detail::RecoverZeroScaleTask(
             current_jacobian, current_target, bias, protected_tasks,
             constraint_coefficients, min_bounds, max_bounds,
             seed, &velocity_solution, &velocity_scale, seed_scale);
+        // Damping can leave a partial legacy command off its reported SCALE
+        // ray. Such a vector is not a valid refinement seed. For explicit
+        // refinement, construct a new certified ray from the feasible task-entry
+        // witness instead, protecting its actual earlier objective images.
+        if (!recovered && refine_partial && preserve_legacy_velocity_behavior &&
+            previous_velocity.allFinite() &&
+            detail::ComputeMaxLinearConstraintViolation(
+                constraint_coefficients, min_bounds, max_bounds,
+                previous_velocity) <= 1e-10 &&
+            (current_jacobian * seed + bias - seed_scale * current_target).norm() >
+                1e-10 * std::max({1.0, bias.norm(),
+                                  seed_scale * current_target.norm()}) &&
+            homogeneous_legacy_ray_supported()) {
+          Eigen::VectorXd candidate;
+          double candidate_scale = 0.0;
+          const Eigen::VectorXd protected_values = protected_tasks * previous_velocity;
+          if (detail::RecoverScaleTaskWithFeasibleRaySeed(
+                  current_jacobian, current_target, bias, protected_tasks,
+                  protected_values, constraint_coefficients, min_bounds,
+                  max_bounds, previous_velocity, solver_config, &candidate,
+                  &candidate_scale, 0.0) &&
+              candidate_scale > seed_scale + 1e-10 && candidate.allFinite() &&
+              detail::ComputeMaxLinearConstraintViolation(
+                  constraint_coefficients, min_bounds, max_bounds, candidate) <= 1e-10 &&
+              (protected_tasks * candidate - protected_values).norm() <=
+                  1e-10 * std::max(1.0, protected_values.norm())) {
+            velocity_solution = std::move(candidate);
+            velocity_scale = candidate_scale;
+            recovered = true;
+          }
+        }
       } else {
         if (objective_index > 0) {
           // Only the objective-entry command can define protected images.
@@ -2633,12 +2308,16 @@ inline SolverResult solveHierarchicalLinearSystemEigen(
                                        degrees_of_freedom);
         achieved_tasks.topRows(protected_rows) = protected_tasks;
         achieved_tasks.bottomRows(target_dimension) = current_jacobian;
-        detail::ComputeGeneralizedInverse(
-            achieved_tasks, solver_config.epsilon,
-            &inverse_objective_jacobian_projected);
-        null_space_projector =
-            Eigen::MatrixXd::Identity(degrees_of_freedom, degrees_of_freedom) -
-            inverse_objective_jacobian_projected * achieved_tasks;
+        if (solver_config.refine_partial_scale) {
+          protect_achieved_objective();
+        } else {
+          detail::ComputeGeneralizedInverse(
+              achieved_tasks, solver_config.epsilon,
+              &inverse_objective_jacobian_projected);
+          null_space_projector =
+              Eigen::MatrixXd::Identity(degrees_of_freedom, degrees_of_freedom) -
+              inverse_objective_jacobian_projected * achieved_tasks;
+        }
         return true;
       }
       return false;
@@ -2649,9 +2328,10 @@ inline SolverResult solveHierarchicalLinearSystemEigen(
       constraints_violated = false;
 
       // Compute augmented projection operator
-      detail::ComputeGeneralizedInverse(
-          saturated_constraints_on_previous_space, active_constraint_rank_tolerance,
-          &inverse_saturated_constraints_projected);
+      detail::ComputeProjectedConstraintInverse(
+          saturated_constraint_matrix, saturated_constraints_on_previous_space,
+          active_constraint_rank_tolerance, &inverse_saturated_constraints_projected,
+          preserve_legacy_velocity_behavior || objective_index == 0);
       augmented_projector.noalias() =
           (Eigen::MatrixXd::Identity(damped_inverse_projected_jacobian.rows(),
                                      current_jacobian.cols()) -
@@ -2725,6 +2405,8 @@ inline SolverResult solveHierarchicalLinearSystemEigen(
         } else if (contribution_magnitude > solver_config.magnitude_limit) {
           velocity_scale = 0.0;
           solver_status = SolverStatus::kNumericalError;
+          if (execution_options.diagnostics)
+            execution_options.diagnostics->termination_reason = "contribution_magnitude_limit";
         } else if (preserve_legacy_velocity_behavior) {
           min_margin = *active_min_bounds - unscaled_contribution;
           max_margin = *active_max_bounds - unscaled_contribution;
@@ -2979,9 +2661,10 @@ inline SolverResult solveHierarchicalLinearSystemEigen(
           saturated_constraints_on_previous_space.noalias() =
               saturated_constraint_matrix * previous_null_space;
 
-          detail::ComputeGeneralizedInverse(
-              saturated_constraints_on_previous_space, active_constraint_rank_tolerance,
-              &inverse_saturated_constraints_projected);
+          detail::ComputeProjectedConstraintInverse(
+          saturated_constraint_matrix, saturated_constraints_on_previous_space,
+          active_constraint_rank_tolerance, &inverse_saturated_constraints_projected,
+          preserve_legacy_velocity_behavior || objective_index == 0);
           constrained_projector.noalias() =
               previous_null_space - inverse_saturated_constraints_projected *
                                         saturated_constraints_on_previous_space;
@@ -3076,10 +2759,10 @@ inline SolverResult solveHierarchicalLinearSystemEigen(
                     saturated_constraint_selector * constraint_coefficients;
                 saturated_constraints_on_previous_space.noalias() =
                     saturated_constraint_matrix * previous_null_space;
-                detail::ComputeGeneralizedInverse(
-                    saturated_constraints_on_previous_space,
-                    active_constraint_rank_tolerance,
-                    &inverse_saturated_constraints_projected);
+                detail::ComputeProjectedConstraintInverse(
+          saturated_constraint_matrix, saturated_constraints_on_previous_space,
+          active_constraint_rank_tolerance, &inverse_saturated_constraints_projected,
+          preserve_legacy_velocity_behavior || objective_index == 0);
                 constrained_projector.noalias() =
                     previous_null_space -
                     inverse_saturated_constraints_projected *
@@ -3170,16 +2853,10 @@ inline SolverResult solveHierarchicalLinearSystemEigen(
                 saturated_values = best_saturated_values;
                 constrained_projector = optimal_constrained_projector;
                 augmented_projector = best_augmented_projector;
-              } else if (constraint_violations.any() &&
-                         !made_saturation_progress) {
-                // MIN_ERROR active-set can stall if no new rows can be
-                // saturated. Prefer a direct constrained least-squares step
-                // with the current saturated set to preserve progress.
-                velocity_scale = 1.0;
-                rebuild_current_augmented_projector = true;
               } else {
-                // No feasible snapshot yet, but active-set still evolving:
-                // solve constrained least-squares with current saturated set.
+                // Without a feasible snapshot, solve constrained least squares
+                // with the current saturated set, whether saturation stalled
+                // or is still evolving.
                 velocity_scale = 1.0;
                 rebuild_current_augmented_projector = true;
               }
@@ -3227,10 +2904,10 @@ inline SolverResult solveHierarchicalLinearSystemEigen(
             if (rebuild_current_augmented_projector) {
               saturated_constraints_on_previous_space.noalias() =
                   saturated_constraint_matrix * previous_null_space;
-              detail::ComputeGeneralizedInverse(
-                  saturated_constraints_on_previous_space,
-                  active_constraint_rank_tolerance,
-                  &inverse_saturated_constraints_projected);
+              detail::ComputeProjectedConstraintInverse(
+          saturated_constraint_matrix, saturated_constraints_on_previous_space,
+          active_constraint_rank_tolerance, &inverse_saturated_constraints_projected,
+          preserve_legacy_velocity_behavior || objective_index == 0);
               double augmented_cond = 1.0;
               const Eigen::MatrixXd final_task_inverse =
                   compute_projected_objective_inverse(
@@ -3276,68 +2953,40 @@ inline SolverResult solveHierarchicalLinearSystemEigen(
             constraints_violated = false;
           }
         }
-
-        // Maximum iteration safeguard - typically indicates numerical issues
-        if (iteration_counter == solver_config.iteration_limit) {
-          if (auto recovered = retry_invalid_min_error_suffix()) return *recovered;
-          if (velocity_solution.allFinite()) {
-            if (auto recovered = retry_invalid_min_error(
-                    Eigen::VectorXd::Zero(degrees_of_freedom))) {
-              return *recovered;
-            }
-          }
-          solver_status = SolverStatus::kNumericalError;
-          std::vector<double> zero_solution(
-              static_cast<size_t>(degrees_of_freedom), 0.0);
-          std::vector<double> zero_scales(static_cast<size_t>(num_objectives),
-                                          0.0);
-          return SolverResult{
-              std::move(zero_solution),
-              solver_status,
-              std::chrono::duration_cast<std::chrono::microseconds>(
-                  std::chrono::high_resolution_clock::now() - t0)
-                      .count() /
-                  1000.0,
-              iteration_counter,
-              0.0,
-              std::move(zero_scales),
-              {},
-              {},
-              {},
-              "iteration limit reached"};
-        }
       } else {
         velocity_scale = 0.0;
         velocity_solution = previous_velocity;
         constraints_violated = false;
-        if (iteration_counter == solver_config.iteration_limit) {
-          if (auto recovered = retry_invalid_min_error_suffix()) return *recovered;
-          if (velocity_solution.allFinite()) {
-            if (auto recovered = retry_invalid_min_error(
-                    Eigen::VectorXd::Zero(degrees_of_freedom))) {
-              return *recovered;
-            }
+      }
+
+      // Both saturation outcomes share the same terminal recovery contract.
+      if (iteration_counter == solver_config.iteration_limit) {
+        if (auto recovered = solve_min_error_suffix()) return *recovered;
+        if (velocity_solution.allFinite()) {
+          if (auto recovered = retry_invalid_min_error(
+                  Eigen::VectorXd::Zero(degrees_of_freedom))) {
+            return *recovered;
           }
-          solver_status = SolverStatus::kNumericalError;
-          std::vector<double> zero_solution(
-              static_cast<size_t>(degrees_of_freedom), 0.0);
-          std::vector<double> zero_scales(static_cast<size_t>(num_objectives),
-                                          0.0);
-          return SolverResult{
-              std::move(zero_solution),
-              solver_status,
-              std::chrono::duration_cast<std::chrono::microseconds>(
-                  std::chrono::high_resolution_clock::now() - t0)
-                      .count() /
-                  1000.0,
-              iteration_counter,
-              0.0,
-              std::move(zero_scales),
-              {},
-              {},
-              {},
-              "iteration limit reached"};
         }
+        solver_status = SolverStatus::kNumericalError;
+        std::vector<double> zero_solution(
+            static_cast<size_t>(degrees_of_freedom), 0.0);
+        std::vector<double> zero_scales(static_cast<size_t>(num_objectives),
+                                        0.0);
+        return SolverResult{
+            std::move(zero_solution),
+            solver_status,
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::high_resolution_clock::now() - t0)
+                    .count() /
+                1000.0,
+            iteration_counter,
+            0.0,
+            std::move(zero_scales),
+            {},
+            {},
+            {},
+            "iteration limit reached"};
       }
 
       ++iteration_counter;
@@ -3382,10 +3031,149 @@ inline SolverResult solveHierarchicalLinearSystemEigen(
              velocity_scale < 1.0 - solver_config.epsilon)
       try_bound_release(true);
 
-    if (!preserve_legacy_velocity_behavior && objective_is_min_error) {
-      completed_objective_images[objective_index] =
-          objective_matrices[objective_index] * velocity_solution;
+    if (preserve_legacy_velocity_behavior && solver_config.refine_partial_scale &&
+        !objective_is_min_error && velocity_solution.allFinite() &&
+        current_target.norm() > solver_config.precision_threshold &&
+        (current_jacobian * velocity_solution - velocity_scale * current_target).norm() >
+            1e-10 * std::max(1.0, velocity_scale * current_target.norm())) {
+      try_bound_release(false, true);
     }
+
+    // A MIN_ERROR stage may finish its saturation search with an invalid trial
+    // command. Do not commit that command and ask a lower-priority task to fix
+    // it. One constrained solve can realize the intended minimum error from a
+    // feasible entry, preserving the actual completed task images explicitly.
+    // Successful legacy commands retain their original damped construction.
+    const bool relaxable_stage_rows = enhanced_mode &&
+        (softening_factors.array() > 1.0).any();
+    const bool invalid_stage_command = objective_is_min_error && !relaxable_stage_rows &&
+        !all_explicit_min_error && !min_error_suffix_entry &&
+        (!velocity_solution.allFinite() ||
+         !(constraint_coefficients * velocity_solution).allFinite() ||
+         detail::ComputeMaxLinearConstraintViolation(
+             constraint_coefficients, min_bounds, max_bounds, velocity_solution) >
+                 solver_config.epsilon);
+    if (invalid_stage_command) {
+      const double prefix_tolerance = std::min(1e-10, objective_equality_tolerance);
+      bool repaired = false;
+      const bool entry_feasible = previous_velocity.allFinite() &&
+          (constraint_coefficients * previous_velocity).allFinite() &&
+          detail::ComputeMaxLinearConstraintViolation(
+              constraint_coefficients, min_bounds, max_bounds,
+              previous_velocity) <= solver_config.epsilon;
+      const Eigen::VectorXd *repair_seed =
+          entry_feasible ? &previous_velocity : nullptr;
+      // Mandatory hard rows can exclude the primary's zero entry. A certified
+      // full Phase-I witness may seed the existing MIN_ERROR optimization at
+      // priority zero; it is never returned in place of an optimized result.
+      // Later priorities still require their feasible, protected task entry.
+      if (!repair_seed && objective_index == 0 && full_hard_witness_is_valid()) {
+        repair_seed = &hard_constraint_witness;
+      }
+      if (repair_seed) {
+        Eigen::MatrixXd repair_rows = constraint_coefficients;
+        Eigen::VectorXd repair_lower = min_bounds, repair_upper = max_bounds;
+        std::vector<Eigen::VectorXd> prefix_images;
+        bool prefix_valid = true;
+        for (size_t prior = 0; prior < objective_index; ++prior) {
+          const auto &matrix = objective_matrices[prior];
+          Eigen::VectorXd image = matrix * previous_velocity;
+          const auto mode = objective_effective_modes[prior];
+          const double scale = objective_scaling_factors[prior];
+          if (!image.allFinite() || !std::isfinite(scale)) {
+            prefix_valid = false;
+            break;
+          }
+          if (mode == TaskSolveMode::kScale && scale >= 0.0 && scale <= 1.0) {
+            if (!preserve_legacy_velocity_behavior || prior == 0) {
+              const Eigen::VectorXd rhs = scale * scalable_objective_targets[prior] -
+                  (preserve_legacy_velocity_behavior
+                       ? Eigen::VectorXd::Zero(image.size()).eval()
+                       : affine_objective_biases[prior]);
+              const Eigen::VectorXd residual = image - rhs;
+              if (!rhs.allFinite() || !residual.allFinite() ||
+                  !std::isfinite(rhs.norm()) || !std::isfinite(residual.norm()) ||
+                  residual.norm() > prefix_tolerance * std::max(1.0, rhs.norm())) {
+                prefix_valid = false;
+                break;
+              }
+            }
+            // A legacy lower SCALE band is a projected preference. Its actual
+            // achieved image, rather than a new homogeneous ray, is protected.
+          } else if (mode != TaskSolveMode::kMinError || scale != -1.0) {
+            prefix_valid = false;
+            break;
+          }
+          {
+            if (completed_objective_images[prior].size() != image.size()) {
+              prefix_valid = false;
+              break;
+            }
+            const Eigen::VectorXd residual = image - completed_objective_images[prior];
+            const double image_norm = completed_objective_images[prior].norm();
+            if (!completed_objective_images[prior].allFinite() ||
+                !residual.allFinite() || !std::isfinite(image_norm) ||
+                !std::isfinite(residual.norm()) ||
+                residual.norm() > prefix_tolerance * std::max(1.0, image_norm)) {
+              prefix_valid = false;
+              break;
+            }
+            image = completed_objective_images[prior];
+          }
+          prefix_images.push_back(image);
+          append_min_error_image(prior, image, repair_rows, repair_lower,
+                                 repair_upper);
+        }
+        if (prefix_valid) {
+          auto repair_config = solver_config;
+          if (objective_index > 0)
+            repair_config.epsilon = std::min(solver_config.epsilon, prefix_tolerance);
+          Eigen::VectorXd candidate;
+          unsigned int repair_iterations = 0;
+          if (solve_min_error_band(objective_index, repair_rows, repair_lower,
+                  repair_upper, repair_config, repair_seed, false,
+                  &candidate, &repair_iterations) && candidate.allFinite() &&
+              (constraint_coefficients * candidate).allFinite() &&
+              detail::ComputeMaxLinearConstraintViolation(
+                  constraint_coefficients, min_bounds, max_bounds, candidate) <=
+                      solver_config.epsilon) {
+            repaired = true;
+            for (size_t prior = 0; prior < prefix_images.size(); ++prior) {
+              const Eigen::VectorXd residual =
+                  objective_matrices[prior] * candidate - prefix_images[prior];
+              if (!residual.allFinite() || residual.norm() >
+                      prefix_tolerance * std::max(1.0, prefix_images[prior].norm()) ||
+                  (residual.size() && residual.cwiseAbs().maxCoeff() > solver_config.epsilon)) {
+                repaired = false;
+                break;
+              }
+            }
+            if (repaired && !completed_task_kernel().allFinite()) repaired = false;
+            if (repaired) {
+              velocity_solution = std::move(candidate);
+              null_space_projector = completed_task_kernel();
+              constrained_projector = null_space_projector;
+              saturated_constraint_selector.setZero();
+              saturated_constraint_matrix.setZero();
+              saturated_values.setZero();
+              repaired_prefix_size = objective_index + 1;
+              repaired_prefix_witness = velocity_solution;
+            }
+          }
+        }
+      }
+      if (!repaired) {
+        // Preserve the existing terminal all-MIN_ERROR/suffix dispatch; only
+        // prevent lower-priority stages from inheriting this invalid command.
+        solver_status = SolverStatus::kNumericalError;
+        final_check_min_bounds = min_bounds;
+        final_check_max_bounds = max_bounds;
+        break;
+      }
+    }
+
+    completed_objective_images[objective_index] =
+        objective_matrices[objective_index] * velocity_solution;
     objective_scaling_factors[objective_index] =
         objective_is_min_error ? -1.0 : velocity_scale;
     objective_effective_modes[objective_index] =
@@ -3397,6 +3185,16 @@ inline SolverResult solveHierarchicalLinearSystemEigen(
     } else {
       final_check_min_bounds = min_bounds;
       final_check_max_bounds = max_bounds;
+    }
+    if (numerical_stage_index) {
+      auto &record = execution_options.numerical_trace->stages[*numerical_stage_index];
+      record.completed_normally = true;
+      record.effective_mode = objective_effective_modes[objective_index];
+      record.scale = objective_scaling_factors[objective_index];
+      record.last_constrained_projector = constrained_projector;
+      record.last_damped_inverse = damped_inverse_projected_jacobian;
+      record.exit_active_lower = final_check_min_bounds;
+      record.exit_active_upper = final_check_max_bounds;
     }
   }
 
@@ -3461,6 +3259,8 @@ inline SolverResult solveHierarchicalLinearSystemEigen(
   }
   if (final_bound_failure) {
     solver_status = SolverStatus::kNumericalError;
+    if (execution_options.diagnostics)
+      execution_options.diagnostics->termination_reason = "final_hard_bound_failure";
   }
 
   if (final_bound_failure) {
@@ -3468,8 +3268,25 @@ inline SolverResult solveHierarchicalLinearSystemEigen(
       return *recovered;
     }
   }
-  if (final_bound_failure || !velocity_solution.allFinite()) {
-    if (auto recovered = retry_invalid_min_error_suffix()) return *recovered;
+  bool legacy_suffix_certificate_failed = false;
+  if (preserve_legacy_velocity_behavior && min_error_suffix_entry) {
+    const auto &entry = *min_error_suffix_entry;
+    const double prefix_tolerance = std::min(1e-10, objective_equality_tolerance);
+    legacy_suffix_certificate_failed = detail::ComputeMaxLinearConstraintViolation(
+        constraint_coefficients, final_check_min_bounds, final_check_max_bounds,
+        velocity_solution) > std::min(1e-10, solver_config.epsilon);
+    for (size_t prior = 0; prior < entry.first_objective; ++prior) {
+      legacy_suffix_certificate_failed = legacy_suffix_certificate_failed ||
+          (objective_matrices[prior] * velocity_solution - entry.prefix_targets[prior]).norm() >
+              prefix_tolerance * std::max(1.0, entry.prefix_targets[prior].norm());
+    }
+  }
+  if (final_bound_failure || !velocity_solution.allFinite() ||
+      legacy_suffix_certificate_failed) {
+    if (auto recovered = solve_min_error_suffix()) {
+      return *recovered;
+    }
+    if (legacy_suffix_certificate_failed) solver_status = SolverStatus::kNumericalError;
   }
 
   bool unsupported_legacy_primary = false;
@@ -3567,12 +3384,19 @@ inline SolverResult solveHierarchicalLinearSystemEigen(
     }
   }
   if (solver_status == SolverStatus::kNoProgress) {
-    if (auto recovered = retry_invalid_min_error_suffix()) return *recovered;
+    if (auto recovered = solve_min_error_suffix()) {
+      return *recovered;
+    }
   }
+
+  const bool repaired_prefix_failure = !preserves_repaired_prefix(velocity_solution);
+  if (repaired_prefix_failure) solver_status = SolverStatus::kNumericalError;
 
   bool generated_nonfinite_solver_state = false;
   if (!objective_scaling_factors.allFinite() || !velocity_solution.allFinite()) {
     generated_nonfinite_solver_state = true;
+    if (execution_options.diagnostics)
+      execution_options.diagnostics->termination_reason = "nonfinite_solver_state";
     solver_status = SolverStatus::kNumericalError;
     objective_scaling_factors.setZero();
     velocity_solution.setZero();
@@ -3615,6 +3439,10 @@ inline SolverResult solveHierarchicalLinearSystemEigen(
   if (solver_status == SolverStatus::kNumericalError) {
     status_message = generated_nonfinite_solver_state
                          ? "non-finite values generated in solver state"
+                         : repaired_prefix_failure
+                         ? "repaired minimum-error prefix failed protected-image validation"
+                         : legacy_suffix_certificate_failed
+                         ? "trailing minimum-error solve failed protected-image or hard-row validation"
                          : "numerical constraint violation beyond epsilon after solve";
   } else if (solver_status == SolverStatus::kNoProgress) {
     status_message = "no feasible scale satisfies the task equality";
@@ -3634,7 +3462,8 @@ inline SolverResult solveHierarchicalLinearSystemEigen(
       (final_bound_failure && !generated_nonfinite_solver_state &&
        solver_status == SolverStatus::kNumericalError)) {
     for (size_t index = 0; index < objective_configs.size() &&
-                           index < applied_scales.size(); ++index) {
+                           index < applied_scales.size() &&
+                           index < entered_objectives; ++index) {
       const auto &objective_config = objective_configs[index];
       // A rank-deficient objective can retain a positive trial scale while its
       // exact task ray is unrealizable. Retry only that failed equality when
@@ -3667,11 +3496,71 @@ inline SolverResult solveHierarchicalLinearSystemEigen(
           retry_execution_options.initial_hard_constraint_witness =
               &hard_constraint_witness;
         }
+        Eigen::MatrixXd retry_rows;
+        Eigen::VectorXd retry_lower, retry_upper, retry_softening;
+        const Eigen::MatrixXd *rows = &constraint_coefficients;
+        const Eigen::VectorXd *lower = &min_bounds, *upper = &max_bounds;
+        const Eigen::VectorXd *softening = max_constraint_softening_factors;
+        const bool protect_repaired_prefix = !preserve_legacy_velocity_behavior &&
+            repaired_prefix_size > 0 && index >= repaired_prefix_size;
+        if (protect_repaired_prefix) {
+          // An authorized lower-task retry must not recompute a repaired
+          // prefix's image. Carry its exact equalities and feasible checkpoint
+          // into the existing retry instead of relying on another optimizer
+          // to reproduce that image to working precision.
+          if (repaired_prefix_witness.size() != degrees_of_freedom ||
+              !preserves_repaired_prefix(repaired_prefix_witness) ||
+              !(constraint_coefficients * repaired_prefix_witness).allFinite() ||
+              detail::ComputeMaxLinearConstraintViolation(
+                  constraint_coefficients, min_bounds, max_bounds,
+                  repaired_prefix_witness) > solver_config.epsilon) continue;
+          retry_rows = constraint_coefficients;
+          retry_lower = min_bounds;
+          retry_upper = max_bounds;
+          for (size_t prior = 0; prior < repaired_prefix_size; ++prior)
+            append_min_error_image(prior, completed_objective_images[prior],
+                                   retry_rows, retry_lower, retry_upper);
+          if (!(retry_rows * repaired_prefix_witness).allFinite() ||
+              detail::ComputeMaxLinearConstraintViolation(
+                  retry_rows, retry_lower, retry_upper,
+                  repaired_prefix_witness) > solver_config.epsilon) continue;
+          Eigen::MatrixXd normalized_rows;
+          Eigen::VectorXd normalized_lower, normalized_upper;
+          detail::NormalizeLinearConstraintRows(
+              retry_rows, retry_lower, retry_upper,
+              &normalized_rows, &normalized_lower, &normalized_upper);
+          retry_rows = std::move(normalized_rows);
+          retry_lower = std::move(normalized_lower);
+          retry_upper = std::move(normalized_upper);
+          rows = &retry_rows;
+          lower = &retry_lower;
+          upper = &retry_upper;
+          retry_execution_options.initial_hard_constraint_witness =
+              &repaired_prefix_witness;
+          retry_execution_options.hard_constraints_prevalidated_feasible = false;
+          if (max_constraint_softening_factors) {
+            retry_softening = Eigen::VectorXd::Ones(retry_rows.rows());
+            retry_softening.head(max_constraint_softening_factors->size()) =
+                *max_constraint_softening_factors;
+            softening = &retry_softening;
+          }
+        }
         SolverResult retry = solveHierarchicalLinearSystemEigen(
             scalable_objective_targets, affine_objective_biases,
-            objective_matrices, constraint_coefficients, min_bounds, max_bounds,
-            solver_config, retry_configs, max_constraint_softening_factors,
+            objective_matrices, *rows, *lower, *upper,
+            solver_config, retry_configs, softening,
             retry_execution_options);
+        if (protect_repaired_prefix && retry.status == SolverStatus::kSuccess) {
+          if (retry.solution.size() != static_cast<size_t>(degrees_of_freedom)) continue;
+          const Eigen::Map<const Eigen::VectorXd> candidate(
+              retry.solution.data(), retry.solution.size());
+          // Normalized retry rows never replace the original raw-row gate.
+          if (!candidate.allFinite() ||
+              !(constraint_coefficients * candidate).allFinite() ||
+              detail::ComputeMaxLinearConstraintViolation(
+                  constraint_coefficients, min_bounds, max_bounds,
+                  candidate) > solver_config.epsilon) continue;
+        }
         if (retry.task_used_fallback.size() > index) {
           retry.task_used_fallback[index] = true;
           for (size_t prior = 0; prior < objective_used_fallback.size() &&
@@ -3681,7 +3570,7 @@ inline SolverResult solveHierarchicalLinearSystemEigen(
           }
         }
         retry.computation_time_ms += elapsed_milliseconds;
-        return retry;
+        if (recovered_prefix_is_valid(retry)) return retry;
       }
     }
   }
@@ -3691,7 +3580,7 @@ inline SolverResult solveHierarchicalLinearSystemEigen(
       solver_status,
       elapsed_milliseconds,
       static_cast<unsigned int>(
-          num_objectives), // number of objectives processed
+          entered_objectives), // number of objectives processed
       0.0,                 // error metric computed externally if required
       std::move(applied_scales),
       std::move(objective_errors),
@@ -3716,7 +3605,9 @@ inline SolverResult SolveGeneralizedHierarchicalLinearSystemEigen(
     bool constraint_rows_pre_normalized = false,
     bool hard_constraints_prevalidated_feasible = false,
     bool allow_best_effort_lower_tasks = false,
-    bool prefer_direct_min_error_qp = false) {
+    bool prefer_direct_min_error_qp = false,
+    LinearSolveDiagnostics *diagnostics = nullptr) {
+  if (diagnostics) *diagnostics = {};
   Eigen::MatrixXd normalized_coefficients_storage;
   Eigen::VectorXd normalized_min_bounds_storage;
   Eigen::VectorXd normalized_max_bounds_storage;
@@ -3732,7 +3623,7 @@ inline SolverResult SolveGeneralizedHierarchicalLinearSystemEigen(
     normalized_min_bounds = &normalized_min_bounds_storage;
     normalized_max_bounds = &normalized_max_bounds_storage;
   }
-  return solveHierarchicalLinearSystemEigen(
+  auto result = solveHierarchicalLinearSystemEigen(
       scalable_objective_targets, affine_objective_biases, objective_matrices,
       *normalized_coefficients, *normalized_min_bounds, *normalized_max_bounds,
       solver_config, objective_configs, max_constraint_softening_factors,
@@ -3743,7 +3634,17 @@ inline SolverResult SolveGeneralizedHierarchicalLinearSystemEigen(
           nullptr,
           true,
           allow_best_effort_lower_tasks,
-          prefer_direct_min_error_qp});
+          prefer_direct_min_error_qp, nullptr, diagnostics});
+  if (diagnostics) {
+    if (result.status == SolverStatus::kSuccess) {
+      if (diagnostics->termination_reason != "direct_min_error_success")
+        diagnostics->termination_reason = diagnostics->termination_reason.empty()
+            ? "success" : "recovered_success";
+    } else if (diagnostics->termination_reason.empty()) {
+      diagnostics->termination_reason = result.status_message;
+    }
+  }
+  return result;
 }
 
 } // namespace detail

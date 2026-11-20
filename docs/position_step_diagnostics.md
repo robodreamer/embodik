@@ -36,3 +36,18 @@ These are candidate records. A later guard may backtrack or reject the
 configuration, so the last record need not equal `result.q_solution`. Task
 scales are local to each velocity solve and do not certify final pose tracking.
 The records do not include every retry or continuous swept-path safety.
+
+
+## Native call timing
+
+`result.computation_time_ms` measures the complete native `solve_position_step()`
+call: admission checks, inner iterations, recovery trials and final validation.
+Both overloads use the same scope, including early failures. Nested retries are
+included once in the outer elapsed time. Python argument conversion, trace-file
+I/O, rendering and application work are outside this metric; measure the control
+loop separately for those costs.
+
+Earlier versions copied the last velocity solve's time into this field, so
+historical values can undercount multi-step or recovery calls. Rebaseline timing
+comparisons across this correction; the accounting change does not establish a
+runtime improvement.

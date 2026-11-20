@@ -19,6 +19,9 @@ struct ComSupportPolygonConstraintResult {
   std::string message;
   // Only true for a finite nonlinear path acceleration-limit violation.
   bool path_acceleration_violation = false;
+  // Only a current edge in the supported epsilon band (or inside) rejected
+  // at the predicted boundary; the outside recovery policy is unchanged.
+  int predicted_boundary_outward_edge = -1;
 
   bool satisfied() const { return status == SolverStatus::kSuccess; }
 };
@@ -37,6 +40,8 @@ struct PreparedComSupportPolygonConstraint {
 struct ComSupportPolygonPreparationResult
     : ComSupportPolygonConstraintResult {
   std::optional<PreparedComSupportPolygonConstraint> prepared;
+  StateBoxFailure state_box_failure = StateBoxFailure::kNone;
+  Eigen::Index state_box_failure_row = -1;
 };
 
 bool is_structurally_fixed_support_frame(const RobotModel &robot,
@@ -68,6 +73,13 @@ linearize_com_support_polygon_path_acceleration(
     const RobotModel &robot, const Eigen::VectorXd &q,
     const Eigen::VectorXd &dq, const Eigen::VectorXd &candidate_acceleration,
     double dt, AffineAccelerationConstraint *refinement);
+
+ComSupportPolygonConstraintResult
+linearize_com_support_polygon_endpoint_rate(
+    const PreparedComSupportPolygonConstraint &prepared,
+    const RobotModel &robot, const Eigen::VectorXd &q,
+    const Eigen::VectorXd &dq, const Eigen::VectorXd &candidate_acceleration,
+    double dt, int edge, AffineAccelerationConstraint *refinement);
 
 ComSupportPolygonConstraintResult
 validate_com_support_polygon_constraint_acceptance(

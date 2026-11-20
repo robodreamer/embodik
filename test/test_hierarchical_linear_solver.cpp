@@ -107,6 +107,128 @@ SolverResult solve_canonical(
 }
 
 TEST(HierarchicalLinearSolverTest,
+     AuthorizedLowerFallbackPreservesRepairedPrimaryImage) {
+  // A strong constant residual must not erase the already attained weak row
+  // when a later task needs its explicitly authorized minimum-error fallback.
+  const Eigen::MatrixXd primary = matrix({{10000000, 10000000, 0, 0},
+                                           {1, 4, 0, 0}});
+  const Eigen::VectorXd primary_target = vector({-100000000, 12});
+  const Eigen::MatrixXd secondary = matrix({{0, 0, 1, 1}});
+  const Eigen::MatrixXd constraints = matrix({{1, 0, 0, 0},
+                                             {0, 1, 0, 0},
+                                             {0, 0, 1, 0},
+                                             {0, 0, 0, 1},
+                                             {1, 1, 0, 0}});
+  const Eigen::VectorXd lower = vector({1, 0, 1, 1, 5});
+  const Eigen::VectorXd upper = vector({3, 3, 3, 3, 6});
+  Eigen::MatrixXd normalized;
+  Eigen::VectorXd normalized_lower, normalized_upper;
+  detail::NormalizeLinearConstraintRows(constraints, lower, upper, &normalized,
+                                       &normalized_lower, &normalized_upper);
+  ObjectiveSolveConfig first, second;
+  first.solve_mode = TaskSolveMode::kMinError;
+  first.allow_min_error_fallback = false;
+  second.priority = 1;
+  second.solve_mode = TaskSolveMode::kScale;
+  second.allow_min_error_fallback = true;
+  detail::HierarchicalLinearSolverExecutionOptions options;
+  options.objective_equality_tolerance = 1e-8;
+  const Eigen::VectorXd hard_softening = Eigen::VectorXd::Ones(lower.size());
+  for (const bool explicit_hard_softening : {false, true}) {
+    SCOPED_TRACE(explicit_hard_softening);
+    const Eigen::VectorXd *softening =
+        explicit_hard_softening ? &hard_softening : nullptr;
+    const auto reference = solveHierarchicalLinearSystemEigen(
+        {primary_target, vector({0})}, {vector({0, 0}), vector({0})},
+        {primary, Eigen::MatrixXd::Zero(1, 4)}, normalized, normalized_lower,
+        normalized_upper, exact_config(), {first, second}, softening, options);
+    ASSERT_EQ(reference.status, SolverStatus::kSuccess) << reference.status_message;
+    const Eigen::VectorXd reference_image = primary * solution_vector(reference);
+    for (const bool allow_fallback : {false, true}) {
+      SCOPED_TRACE(allow_fallback);
+      second.allow_min_error_fallback = allow_fallback;
+      const auto result = solveHierarchicalLinearSystemEigen(
+          {primary_target, vector({-3})}, {vector({0, 0}), vector({0})},
+          {primary, secondary}, normalized, normalized_lower, normalized_upper,
+          exact_config(), {first, second}, softening, options);
+      if (!allow_fallback) {
+        EXPECT_EQ(result.status, SolverStatus::kNoProgress);
+        EXPECT_EQ(result.task_used_fallback, std::vector<bool>({false, false}));
+        continue;
+      }
+      ASSERT_EQ(result.status, SolverStatus::kSuccess) << result.status_message;
+      const Eigen::VectorXd command = solution_vector(result);
+      ASSERT_EQ(command.size(), 4);
+      EXPECT_LE(detail::ComputeMaxLinearConstraintViolation(
+                    constraints, lower, upper, command), 1e-10);
+      EXPECT_LE((primary * command - reference_image).cwiseAbs().maxCoeff(), 1e-10);
+      EXPECT_NEAR(command(2), 1.0, 1e-10);
+      EXPECT_NEAR(command(3), 1.0, 1e-10);
+      EXPECT_EQ(result.task_modes_effective,
+                std::vector<TaskSolveMode>({TaskSolveMode::kMinError,
+                                            TaskSolveMode::kMinError}));
+      EXPECT_EQ(result.task_used_fallback, std::vector<bool>({false, true}));
+    }
+  }
+}
+
+TEST(HierarchicalLinearSolverTest,
+     DirectZeroReferenceMinErrorHonorsMandatoryCoupledMotion) {
+  // Zero reference asks for minimum motion, not a zero command: the immutable
+  // equality requires x+y=1. The lower identity objective selects (1/2,1/2)
+  // without changing the primary image. Include subthreshold references and
+  // affine cancellation, as stopping controllers can produce either.
+  const auto constraints = matrix({{1, 0}, {0, 1}, {1, 1}});
+  ObjectiveSolveConfig primary, secondary;
+  primary.solve_mode = secondary.solve_mode = TaskSolveMode::kMinError;
+  secondary.priority = 1;
+  for (double reference : {0.0, 1e-17, 2.0}) {
+    SCOPED_TRACE(reference);
+    const double bias = reference == 2.0 ? reference : 0.0;
+    LinearSolveDiagnostics diagnostics;
+    const auto result = detail::SolveGeneralizedHierarchicalLinearSystemEigen(
+        {vector({reference}), vector({reference, reference})},
+        {vector({bias}), vector({bias, bias})},
+        {matrix({{1, 1}}), Eigen::Matrix2d::Identity()},
+        constraints, vector({-2, -2, 1}), vector({2, 2, 1}), exact_config(),
+        {primary, secondary}, nullptr, 1e-8, false, false, false, true,
+        &diagnostics);
+    ASSERT_EQ(result.status, SolverStatus::kSuccess) << result.status_message;
+    EXPECT_TRUE(diagnostics.direct_min_error_succeeded)
+        << diagnostics.direct_min_error_message;
+    expect_double_vectors_near(result.solution, {0.5, 0.5});
+    EXPECT_LE(detail::ComputeMaxLinearConstraintViolation(
+                  constraints, vector({-2, -2, 1}), vector({2, 2, 1}),
+                  solution_vector(result)), exact_config().epsilon);
+    EXPECT_NEAR((constraints * solution_vector(result))(2), 1.0, 1e-10);
+  }
+}
+
+TEST(HierarchicalLinearSolverTest,
+     PrevalidatedBoxStillRunsRequestedDirectMinError) {
+  ObjectiveSolveConfig objective;
+  objective.solve_mode = TaskSolveMode::kMinError;
+  for (bool prevalidated : {false, true}) {
+    LinearSolveDiagnostics diagnostics;
+    const auto result = detail::SolveGeneralizedHierarchicalLinearSystemEigen(
+        {vector({4.0, -1.0}), vector({1.0, -1.0})},
+        {vector({0.0, 0.0}), vector({0.0, 0.0})},
+        {matrix({{1.0, 2.0}, {2.0, 1.0}}), Eigen::Matrix2d::Identity()},
+        Eigen::Matrix2d::Identity(), vector({-1.0, -1.0}),
+        vector({1.0, 1.0}), exact_config(), {objective, objective}, nullptr,
+        1e-8, true, prevalidated, false, true, &diagnostics);
+    ASSERT_EQ(result.status, SolverStatus::kSuccess) << result.status_message;
+    EXPECT_TRUE(diagnostics.direct_min_error_attempted);
+    EXPECT_TRUE(diagnostics.direct_min_error_succeeded)
+        << diagnostics.direct_min_error_message;
+    EXPECT_EQ(diagnostics.termination_reason, "direct_min_error_success");
+    // The primary optimum is on x1=1; its tangential derivative gives x0=-0.4.
+    // A lower objective must preserve this unique primary image.
+    expect_double_vectors_near(result.solution, {-0.4, 1.0});
+  }
+}
+
+TEST(HierarchicalLinearSolverTest,
      RevalidatedPhaseOneWitnessPreservesMixedPriorityFallback) {
   const Eigen::MatrixXd constraints = Eigen::Matrix2d::Identity();
   const Eigen::VectorXd lower = vector({0.1, -0.5});
@@ -186,6 +308,76 @@ TEST(HierarchicalLinearSolverTest,
   const auto original = run();
   execution.initial_hard_constraint_witness = &witness;
   expect_results_equal_except_timing(run(), original);
+}
+
+SolverResult solve_mandatory_primary_motion(
+    TaskSolveMode primary_mode, bool allow_fallback, double primary_target,
+    LinearSolveDiagnostics *diagnostics = nullptr) {
+  ObjectiveSolveConfig primary;
+  primary.solve_mode = primary_mode;
+  primary.allow_min_error_fallback = allow_fallback;
+  ObjectiveSolveConfig secondary;
+  secondary.priority = 1;
+  secondary.solve_mode = TaskSolveMode::kScale;
+  // The feasible triangle excludes zero and makes x >= 2 mandatory. Trial
+  // saturation can pin x=1 before x+y=5, conflicting with the later y<=3 pin.
+  return detail::SolveGeneralizedHierarchicalLinearSystemEigen(
+      {vector({primary_target}), vector({3.0})},
+      {vector({0.0}), vector({0.0})},
+      {matrix({{1.0, 0.0}}), matrix({{0.0, 1.0}})},
+      matrix({{1.0, 0.0}, {0.0, 1.0}, {1.0, 1.0}}),
+      vector({1.0, 0.0, 5.0}), vector({3.0, 3.0, 6.0}), exact_config(),
+      {primary, secondary}, nullptr, kTolerance, false, false, false, false,
+      diagnostics);
+}
+
+TEST(HierarchicalLinearSolverTest,
+     InfeasiblePrimaryEntryUsesPhaseOneOnlyAsMinErrorOptimizationSeed) {
+  LinearSolveDiagnostics diagnostics;
+  const auto result = solve_mandatory_primary_motion(
+      TaskSolveMode::kMinError, false, -10.0, &diagnostics);
+  ASSERT_EQ(result.status, SolverStatus::kSuccess) << result.status_message;
+  ASSERT_EQ(diagnostics.phase_one_status, "feasible");
+  ASSERT_EQ(diagnostics.phase_one_witness.size(), 2);
+  // Minimizing (x+10)^2 over the triangle has the unique optimum (2,3).
+  // Phase I instead supplies a feasible point, not this task optimum.
+  expect_double_vectors_near(result.solution, {2.0, 3.0});
+  EXPECT_GT((solution_vector(result) - diagnostics.phase_one_witness).norm(), 0.1);
+  EXPECT_GT(std::abs(diagnostics.phase_one_witness(0) + 10.0),
+            std::abs(solution_vector(result)(0) + 10.0));
+  EXPECT_EQ(result.task_modes_effective,
+            (std::vector<TaskSolveMode>{TaskSolveMode::kMinError,
+                                        TaskSolveMode::kScale}));
+  EXPECT_EQ(result.task_used_fallback, (std::vector<bool>{false, false}));
+  EXPECT_NEAR(result.task_errors[0], 12.0, kTolerance);
+}
+
+TEST(HierarchicalLinearSolverTest,
+     MandatoryPrimaryMotionStillRequiresScaleFallbackAuthorization) {
+  // x=alpha*(-10), alpha in [0,1], cannot satisfy the mandatory x>=2.
+  const auto strict = solve_mandatory_primary_motion(
+      TaskSolveMode::kScale, false, -10.0);
+  EXPECT_NE(strict.status, SolverStatus::kSuccess);
+  const auto authorized = solve_mandatory_primary_motion(
+      TaskSolveMode::kScale, true, -10.0);
+  ASSERT_EQ(authorized.status, SolverStatus::kSuccess)
+      << authorized.status_message;
+  expect_double_vectors_near(authorized.solution, {2.0, 3.0});
+  EXPECT_EQ(authorized.task_modes_effective.front(), TaskSolveMode::kMinError);
+  EXPECT_EQ(authorized.task_used_fallback, (std::vector<bool>{true, false}));
+}
+
+TEST(HierarchicalLinearSolverTest,
+     FeasibleScaleRayKeepsItsOriginalContractWithMandatoryMotion) {
+  const auto result = solve_mandatory_primary_motion(
+      TaskSolveMode::kScale, false, 3.0);
+  ASSERT_EQ(result.status, SolverStatus::kSuccess) << result.status_message;
+  expect_double_vectors_near(result.solution, {3.0, 3.0});
+  expect_double_vectors_near(result.task_scales, {1.0, 1.0});
+  EXPECT_EQ(result.task_modes_effective,
+            (std::vector<TaskSolveMode>{TaskSolveMode::kScale,
+                                        TaskSolveMode::kScale}));
+  EXPECT_EQ(result.task_used_fallback, (std::vector<bool>{false, false}));
 }
 
 TEST(HierarchicalLinearSolverTest,
@@ -1171,6 +1363,119 @@ TEST(HierarchicalLinearSolverTest,
     EXPECT_NE(result.status, SolverStatus::kSuccess);
     EXPECT_FALSE(result.task_used_fallback[0]);
   }
+}
+
+TEST(HierarchicalLinearSolverTest,
+     InheritedActiveRowCannotChangeCompletedMinimumErrorImage) {
+  // The mandatory sum excludes the primary's zero ray. After its authorized
+  // MIN_ERROR fallback fixes that sum, it must not be inverted as a new
+  // constraint direction in either lower objective.
+  const auto primary = matrix({{1.0, 2.0, 3.0}});
+  const auto secondary = matrix({{1.0, 0.0, 0.0}});
+  const auto constraints = matrix({{1.0, 0.0, 0.0}, {0.0, 1.0, 0.0},
+                                   {0.0, 0.0, 1.0}, {1.0, 2.0, 3.0}});
+  std::vector<ObjectiveSolveConfig> policies(3);
+  for (size_t i = 0; i < policies.size(); ++i) {
+    policies[i].priority = static_cast<int>(i);
+    policies[i].solve_mode = i < 2 ? TaskSolveMode::kScale
+                                  : TaskSolveMode::kMinError;
+    policies[i].allow_min_error_fallback = i < 2;
+  }
+  for (double floor : {0.3, 1.0, 2.0}) {
+    SCOPED_TRACE(floor);
+    const auto lower = vector({-3.0, -3.0, -3.0, floor});
+    const auto upper = vector({3.0, 3.0, 3.0, 20.0});
+    const auto result = solve_canonical(
+        {vector({0.0}), vector({0.5}), vector({-1.0, -1.0, -1.0})},
+        {vector({0.0}), vector({0.0}), vector({0.0, 0.0, 0.0})},
+        {primary, secondary, Eigen::MatrixXd::Identity(3, 3)},
+        constraints, lower, upper, policies);
+    ASSERT_EQ(result.status, SolverStatus::kSuccess) << result.status_message;
+    const auto x = solution_vector(result);
+    EXPECT_NEAR((primary * x)(0), floor, 1e-10);
+    EXPECT_NEAR(x(0), 0.5, 1e-10);
+    EXPECT_LE(detail::ComputeMaxLinearConstraintViolation(
+                  constraints, lower, upper, x), 1e-10);
+    ASSERT_EQ(result.task_modes_effective.size(), 3U);
+    EXPECT_EQ(result.task_modes_effective[0], TaskSolveMode::kMinError);
+    EXPECT_TRUE(result.task_used_fallback[0]);
+    EXPECT_EQ(result.task_modes_effective[1], TaskSolveMode::kScale);
+    EXPECT_DOUBLE_EQ(result.task_scales[1], 1.0);
+  }
+}
+
+TEST(HierarchicalLinearSolverTest,
+     ProjectedConstraintRankRejectsCancellationAtOriginalRowScale) {
+  const auto original = matrix({{1.0, 2.0, 3.0}});
+  const Eigen::MatrixXd residual = 1e-16 * original;
+  Eigen::MatrixXd inverse, legacy, expected_legacy;
+  detail::ComputeProjectedConstraintInverse(
+      original, residual, 1e-10, &inverse, false);
+  EXPECT_TRUE(inverse.allFinite());
+  EXPECT_TRUE(inverse.isZero(0.0));
+  detail::ComputeGeneralizedInverse(residual, 1e-10, &expected_legacy);
+  detail::ComputeProjectedConstraintInverse(
+      original, residual, 1e-10, &legacy, true);
+  EXPECT_TRUE((legacy.array() == expected_legacy.array()).all());
+}
+
+TEST(HierarchicalLinearSolverTest,
+     ProjectedConstraintRankRetainsWeakDirectionsAndRowScaling) {
+  for (double row_scale : {1e-6, 1.0, 1e6}) {
+    for (double independent : {1e-6, 1e-9}) {
+      SCOPED_TRACE(row_scale);
+      SCOPED_TRACE(independent);
+      const Eigen::MatrixXd original =
+          row_scale * matrix({{1.0, independent, 0.0}});
+      const Eigen::MatrixXd projected =
+          row_scale * matrix({{0.0, independent, 0.0}});
+      Eigen::MatrixXd inverse, old_inverse;
+      detail::ComputeGeneralizedInverse(projected, 1e-10, &old_inverse);
+      detail::ComputeProjectedConstraintInverse(
+          original, projected, 1e-10, &inverse, false);
+      EXPECT_TRUE((inverse.array() == old_inverse.array()).all());
+      EXPECT_NEAR((projected * inverse)(0, 0), 1.0, 1e-14);
+    }
+    const Eigen::MatrixXd original = row_scale * matrix({{1.0, 2.0, 3.0}});
+    const Eigen::MatrixXd projected = 1e-16 * original;
+    Eigen::MatrixXd inverse;
+    detail::ComputeProjectedConstraintInverse(
+        original, projected, 1e-10, &inverse, false);
+    EXPECT_TRUE(inverse.isZero(0.0));
+  }
+}
+
+TEST(HierarchicalLinearSolverTest,
+     ProjectedConstraintRankAcceptsMatchingUnnormalizedRows) {
+  const auto original = matrix({{1e-3, 2e-3, 3e-3}, {0.0, 0.0, 1e3}});
+  const auto projected = matrix({{1e-19, 2e-19, 3e-19}, {0.0, 0.0, 1e3}});
+  Eigen::MatrixXd inverse;
+  detail::ComputeProjectedConstraintInverse(
+      original, projected, 1e-10, &inverse, false);
+  ASSERT_EQ(inverse.rows(), 3);
+  ASSERT_EQ(inverse.cols(), 2);
+  EXPECT_TRUE(inverse.allFinite());
+  EXPECT_NEAR(inverse.col(0).norm(), 0.0, 1e-20);
+  EXPECT_NEAR(inverse(2, 1), 1e-3, 1e-16);
+  EXPECT_NEAR((projected * inverse)(1, 1), 1.0, 1e-14);
+}
+
+TEST(HierarchicalLinearSolverTest,
+     ProjectedConstraintRankHandlesDependentRowsAndNoRemainingSpace) {
+  const auto original = matrix({{1.0, 1.0, 0.0}, {2.0, 1.0, 0.0}});
+  const auto projected = matrix({{1e-16, 1.0, 0.0}, {2e-16, 1.0, 0.0}});
+  Eigen::MatrixXd inverse;
+  detail::ComputeProjectedConstraintInverse(
+      original, projected, 1e-10, &inverse, false);
+  EXPECT_TRUE(inverse.allFinite());
+  EXPECT_NEAR(inverse(0, 0), 0.0, 1e-14);
+  EXPECT_NEAR(inverse(0, 1), 0.0, 1e-14);
+  EXPECT_NEAR(inverse(1, 0), 0.5, 1e-14);
+  EXPECT_NEAR(inverse(1, 1), 0.5, 1e-14);
+  detail::ComputeProjectedConstraintInverse(
+      original, Eigen::MatrixXd::Zero(2, 3), 1e-10, &inverse, false);
+  EXPECT_TRUE(inverse.allFinite());
+  EXPECT_TRUE(inverse.isZero(0.0));
 }
 
 } // namespace

@@ -38,6 +38,76 @@ Unsupported scope fails explicitly. This includes floating bases, dynamic
 contact forces, friction cones, wheel rolling/steering constraints, general
 native collision geometry, and ROS 2 controller or wheelbase integration.
 
+## Prescribed acceleration validation
+
+`validate_candidate(q, dq, dt, ddq, options)` checks a caller-supplied physical
+joint acceleration through the same hard-row preparation, integration and
+nonlinear acceptance used by `solve()`. It skips command optimization and never
+polishes, refines or replaces `ddq`. Success returns that unchanged acceleration,
+`q_solution` and `joint_velocities_next`. A rejected candidate has empty motion
+outputs; it does not prove that every other command is infeasible.
+The normalized hard-row certificate and each physical constraint family's
+acceptance tolerances match those used by `solve()`.
+
+```python
+options = embodik.AccelerationSolveOptions()
+options.acceleration_limits_override = np.full(robot.nv, 10.0)
+result = solver.validate_candidate(q, dq, 0.01, proposed_ddq, options)
+if result.status == embodik.SolverStatus.SUCCESS:
+    q_next = result.q_solution
+    dq_next = result.joint_velocities_next
+```
+
+The result is a command-feasibility check, not an optimum or task-achievement
+report: task diagnostics, scales and backend problem traces are empty, and
+`final_error` and `condition_number` are NaN. `backend_computation_time_ms` is
+zero. Total native timing includes preparation
+and acceptance. Geometric support checks may still perform numerical
+feasibility searches. Registered tasks are still prepared when needed by hard
+task bounds, but their objectives are not optimized.
+
+The initial API rejects nominal-position envelopes, generalized allocation and
+nonzero stored elastic deltas or capacities. It leaves persistent elasticity
+unchanged. Optimization preferences do not authorize candidate modification.
+
+`validate_candidate_with_velocity_collision(provider, q, dq, dt, ddq, options,
+lift_options)` additionally retains the original velocity-collision rows and
+sampled checks. Its collision refinement budget must be zero. All existing
+unsupported-family guards apply. This retains sampled collision validation;
+it does not establish safety between samples, complete stopping or recovery.
+To validate a prescribed multi-step rollout, use each original control interval
+and its actual incoming velocity, then validate its terminal rest command.
+
+For prescribed commands, setting
+`lift_options.candidate_validation = embodik.CollisionCandidateValidation.PHYSICAL_SAMPLES`
+omits only the adapter's internal frozen collision construction rows. This
+allows a curved, floor-safe interval ending at rest even when its incoming
+distance Jacobian predicts a floor violation. All caller affine and frozen
+rows, joint limits, acceleration limits, CoM checks, and the configured collision
+samples remain active. The default `FROZEN_ROWS` retains the existing behavior;
+`solve_with_velocity_collision()` rejects `PHYSICAL_SAMPLES`.
+
+This mode requires zero collision repulsion deadband and initially satisfied
+effective floors at the existing `1e-8` sample tolerance. It validates sampled
+geometry rather than the legacy recovery controller. It changes neither the
+number of samples nor their floor tolerance. Complete stopping admission
+remains the application's responsibility; the result still does not certify
+the continuous path between samples.
+
+Explicit-state acceleration collision row construction uses isolated precise
+distance queries for pair ranking and nearest-point Jacobians. These queries
+do not inherit warm GJK guesses from earlier configurations or debug calls.
+Ordinary velocity-solver queries retain their existing behavior. Physical
+clearance checks and numerical acceptance tolerances are unchanged.
+Sampled acceleration collision validation also uses cold, precise queries,
+matching explicit pair-distance evaluation rather than inheriting coarse GJK
+guesses from earlier samples.
+An invalid numerical distance, including the collision library's finite failure
+sentinels, receives one fresh query initialized from the shapes' local bounding
+box centers. Precision settings remain unchanged. The retry computes a signed
+geometry distance; it does not substitute a bounding-volume distance. An
+unresolved query failure remains an error and cannot become a collision floor.
+
 ## Inequality Constraint Parity
 
 The acceleration surface represents velocity inequalities on
@@ -83,6 +153,10 @@ When an authorized fallback has already selected `MIN_ERROR`, a numerical
 hard-bound rejection can retry that effective policy from the original
 problem. This does not authorize fallback for other tasks or soften hard rows;
 task diagnostics retain the fallback flag.
+If a higher-priority numerical repair has already completed, a lower-task retry
+carries its achieved images as exact equality constraints. The verified feasible
+checkpoint seeds the existing optimizer; it is not returned as a substitute for
+optimization. Original hard bounds and completed-image tolerances still apply.
 An almost-zero Cartesian task error does not suppress this retry when the
 candidate violates hard bounds; tracking accuracy alone is not feasibility.
 
@@ -130,6 +204,55 @@ the effective nominal bounds, and each side's expansion capacity. Post-solve
 expansion and decay run only after a successful native solve. This band is
 solver adaptation, not accepted physical history.
 
+## Affine State Envelopes
+
+For fixed-base additive scalar joints, `AffineStateConstraint` expresses
+`y = C @ q + offset`. Its position bounds, symmetric rate/acceleration ceilings
+and declared braking magnitudes use the same envelope builder as geometric
+constraints. This supports coupled joint facets without projecting a solved
+command back onto a position bound.
+
+```python
+import numpy as np
+import embodik
+
+envelope = embodik.AffineStateConstraint()
+envelope.source_id = "coupled-joints"
+# For a two-coordinate model: -0.5 <= q[0] + q[1] + 0.25 <= 0.5.
+envelope.coefficient_matrix = np.array([[1.0, 1.0]])
+envelope.offset = np.array([0.25])
+envelope.lower_bounds = np.array([-0.5])
+envelope.upper_bounds = np.array([0.5])
+policy = embodik.GeometricConstraintAccelerationPolicy()
+policy.rate_limits = np.array([1.0])
+policy.acceleration_limits = np.array([10.0])
+policy.lower_braking_accelerations = np.array([2.0])
+policy.upper_braking_accelerations = np.array([2.0])
+envelope.policy = policy
+options = embodik.AccelerationSolveOptions()
+options.affine_state_constraints = [envelope]
+```
+
+Every policy vector must match the number of rows. Matrices and offsets are
+frozen for one call; state-dependent coefficients require a different model.
+The adapter validates endpoints and every interior quadratic position extremum,
+then checks next-state viability and joint acceleration support. Outside states
+are rejected. Braking support is required toward a moving coordinate's active
+boundary when its remaining margin is within stopping distance plus one
+control horizon's maximum outward travel. This is re-evaluated at the actual
+integrated endpoint.
+A stationary coordinate does not require acceleration further into a limit.
+Per-axis braking support is not a certificate of a complete
+jointly feasible stopping trajectory, especially with other hard constraints.
+Native collision certification and the sampled velocity-collision adapter
+explicitly reject this family until their stopping integration is qualified.
+
+These are caller-supplied acceleration constraints. Rows configured through
+`KinematicsSolver.set_linear_position_constraints()` remain velocity/position-step
+constraints and are not automatically imported into acceleration solves. The
+velocity-collision adapter rejects both those provider rows and explicit affine
+state envelopes while their combined stopping integration remains unsupported.
+
 ## Compatible Joint Box
 
 Every solve starts from one combined state box. Position, velocity, and
@@ -160,8 +283,15 @@ error quality or reduce inverse operations; latency depends on the objective
 structure and quadratic iterations. An unsuccessful direct attempt returns to
 the established search.
 It does not bypass original SCALE/ELASTIC attempts or authorize new fallbacks.
-State-box-only solves that skip the full feasibility search retain their
-existing route. Physical and nonlinear acceptance checks still apply.
+For an all-`MIN_ERROR` hierarchy, this preference also obtains a concrete
+feasibility witness when the joint box was already prevalidated. This lets
+state-box-only solves use the requested direct route. Physical and nonlinear
+acceptance checks still apply.
+
+Zero or subthreshold references are valid for this explicit direct route.
+They request minimum task error or motion subject to the hard constraints;
+they do not force a zero command when the hard set requires motion. This also
+applies when scalable targets and affine biases cancel.
 
 When the combined box requires braking, zero acceleration is outside the hard
 set. The default `allow_state_box_task_fallback = True` makes the resulting
@@ -221,11 +351,18 @@ next-box checks. This selects one certified command; it does not expose a full
 feasible acceleration interval. This
 preserves the supplied position and velocity. The command must stop outward
 motion within the control interval, respect position endpoints and rate limits,
-and leave a usable next-state box. Stopping vertices are checked against a
+and satisfy this solve's local next-box check. Stopping vertices are checked against a
 local position arithmetic budget, including the configured braking policy;
 this permits tiny numerical excursions, not exact real-number containment.
 All coupled constraints and nonlinear acceptance checks still apply. Larger
 outward motion and states without a valid braking command remain rejected.
+
+Per-step success is not a guarantee that the next call admits a continuation or
+complete stop. Coupled constraints and finite-arithmetic boundary transitions
+can still reject a later call, including a fail-closed boundary-continuation
+limitation under investigation. Carry the actual returned state and handle
+failure explicitly; sustained-saturation and far-target return recovery are not
+qualified by this release. See the [release scope](release_scope.md).
 
 For successful solves without generalized acceleration allocation, a small
 numerical acceleration residual can be projected into the original state box.
@@ -255,6 +392,17 @@ The corrected command must pass all existing acceptance checks. These local rows
 do not establish global nonlinear optimality or continuous collision safety.
 Accumulated local rows can exclude a feasible nonlinear solution, so failure
 to complete refinement is not a proof of physical infeasibility.
+
+Joint-limit braking and CoM acceleration bounds can also become jointly
+infeasible after an accepted step, even while the CoM is well inside its support
+polygon. Per-joint braking viability and sampled CoM validation do not establish
+feasibility of their intersection at the next control step. Returning a Cartesian
+target cannot resolve an infeasible hard set at an unchanged configuration and
+velocity. Applications that require continuous recovery must retain a stopping
+policy validated against all active constraints; the current solver does not
+provide that guarantee. Do not interpret a rejected step as zero physical
+velocity or reset velocity history to conceal the conflict.
+
 For tight-frame pose constraints, translation and rotation state-bound and endpoint braking
 violations can also trigger bounded corrective solves. The local model includes
 both the endpoint configuration and velocity derivatives. Each correction
@@ -295,6 +443,13 @@ reference.proportional_gain = kp
 reference.derivative_gain = kd
 solver.set_task_reference("ee_position", reference)
 ```
+
+The proportional term also multiplies `task.weight`; measured-rate damping
+does not. For a static posture target with unit joint weights, the requested acceleration is
+`kp * task.weight * (q_target - q) - kd * dq`. `PostureTask` defaults to
+weight `0.1`, so set `posture.weight = 1.0` explicitly when the desired law is
+`kp * (q_target - q) - kd * dq`. A smaller weight with unchanged damping can
+produce a slow, overdamped response even when the numerical solve is fast.
 
 Each call takes explicit `q` and `dq`. Keep them synchronized with the measured
 or actually applied state when switching controllers or rejecting a result.
@@ -339,10 +494,32 @@ candidate-subset and approximate row reuse. Current-state geometry broadphase
 culling remains available. This avoids missing a newly active pair during
 explicit-state solves or hypothetical stopping rollouts; a successful solve
 does not certify that a complete future stopping trajectory exists.
+If fewer current candidates remain than the row budget, the list stays
+underfilled. Historical pairs culled by the current query do not supply rows
+using old distances or nearest points. Mandatory current near-floor rows still
+remain active even when they exceed the nominal row budget.
 The lifted rows constrain `dq_next = dq + dt * ddq`. Every allowed pair at
 every requested constant-acceleration sample is accounted for in canonical
 order. A conservative enclosing-sphere lower bound may prove a pair safe;
 ambiguous geometry falls back to the exact collision backend.
+
+With provider acceleration limits enabled, this explicit-state path constructs
+its braking proxy for the endpoint of the current constant-acceleration interval.
+For frozen distance rate `r`, endpoint rate `w`, physical-floor slack `s` and
+estimated separating acceleration `A`, it budgets
+`w*w/(2*A) <= s + dt*(r+w)/2` for closing motion. This uses physical-floor slack
+in the braking proxy. Outside any explicitly configured repulsion deadband,
+the satisfied-floor row also budgets the integrated interval:
+`w >= -r - 2*s/dt`. Positive physical clearance remains usable inside the
+legacy velocity-command construction reserve. Explicit deadbands and
+violated-floor recovery rules remain unchanged. Ordinary velocity commands
+retain their construction reserve and separate command-delay braking policy.
+
+This is a local construction policy, not a nonlinear braking certificate.
+Changing nearest features, distance curvature and simultaneously available
+multi-pair acceleration are not established by this frozen model. Original
+sampled geometry acceptance still applies, and applications requiring complete
+stopping must independently admit a stopping continuation.
 
 This path is fail-closed but sampled. A successful result reports
 `collision_endpoint_validated = True` and
@@ -368,6 +545,9 @@ result = solver.solve_with_velocity_collision(collision_solver, q, dq, dt, optio
 
 Each correction adds a hard linearized distance row at the failed sample and a
 hard acceleration trust box. Earlier correction rows always remain hard.
+Its distance and nearest-point derivatives use the same cold, precise query
+policy as collision floors and sampled acceptance. Original floors and the
+acceptance tolerance remain unchanged.
 If a corrective solve fails numerically, makes no progress, or reports
 infeasibility, the wrapper
 may remove only its internally appended trust boxes and retry over the original
@@ -387,7 +567,15 @@ Budget exhaustion retains `COLLISION_VIOLATED` with cleared outputs.
 `collision_refinement_iterations` counts extra full solves, including a
 retry after internal trust removal, and is separate from
 `nonlinear_refinement_iterations`, which counts CoM and tight-frame translation corrections across these
-attempts. `collision_refinement_exact_queries` and its kinematics/geometry
+attempts. With multiple validation samples, refinement selects one materially
+violating time sample of the first failed pair by its normalized affine-cut
+violation in acceleration coordinates, including the configured clearance
+reserve. Passing samples add no cut; exact score ties keep the earlier time.
+The generated row source identifies the selected sample. All original sampled
+collision checks still decide acceptance. This selection does not guarantee
+recovery within the bounded budget.
+
+`collision_refinement_exact_queries` and its kinematics/geometry
 counters report extra local-model work, separately from sampled-validation
 counters. Validation counters accumulate across attempts. Inner phase timings
 sum the inner solves; total time also includes row lifting, validation, and local
@@ -406,6 +594,53 @@ braking authority, the integrated path, and predicted-state viability.
 While native certification is configured, only joint state boxes, generalized
 allocation, and soft tasks may be combined with it. Other hard families are
 rejected until they provide the same predicted-state certificate contract.
+
+## Redundant minimum-error objectives
+
+Constrained MIN_ERROR solves preserve the task residual factors for QR steps
+and gradient evaluation. This avoids squaring their condition number in normal
+equations, which can cause false numerical stalls in redundant task directions.
+The scale-relative numerical ridge, priorities, hard constraints and acceptance
+checks remain unchanged. This improves linear numerical solving; it does not
+guarantee global nonlinear recovery or stopping feasibility.
+
+When a higher-priority task already fixes an active constraint, projecting that
+constraint into the remaining motion space can leave only cancellation
+roundoff. Generalized hierarchical solves use the original constraint-row scale
+as a floor for the inverse's numerical rank decision, rather than magnifying
+that residual into a new motion direction. The original hard row and completed
+task images still require validation. This numerical correction preserves the
+SCALE ray, fallback permissions and physical tolerances.
+
+## Recording a backend problem
+
+Set `options.record_linear_problems = True` to retain
+`result.linear_problems`. Each `AccelerationLinearProblemTrace` owns the exact
+backend targets, affine biases, objective matrices/configuration, hard rows and
+bounds, state, timestep, remaining refinement budget and raw backend result.
+Constraint row source IDs identify local refinement rows. Snapshots are ordered
+from the outer call to the deepest nonlinear refinement, including failed calls.
+Failures before backend assembly produce no snapshot.
+
+```python
+options.record_linear_problems = True
+result = solver.solve(q, dq, dt, options)
+for problem in result.linear_problems:
+    replay = embodik.replay_acceleration_linear_problem(problem)
+    print(problem.diagnostics.termination_reason, replay.status)
+```
+
+Recording is disabled by default and adds matrix copies when enabled. It changes
+no solver policy or acceptance tolerance. Phase I status/witness and preferred
+MIN_ERROR QP attempt/success diagnostics distinguish an unsuccessful preferred
+attempt from its subsequent ordinary search. A generic helper refusal may not
+identify an internal active-set exit; it is not a proof of infeasibility.
+
+Replay covers only the linear backend in its recorded coordinates. With
+allocation enabled, these are allocation coordinates rather than physical joint
+accelerations. Neither a successful replay nor a recorded intermediate solution
+certifies integration, collision clearance, CoM acceptance or stopping safety.
+Never execute a trace as a robot command.
 
 ## Build And ABI Notes
 

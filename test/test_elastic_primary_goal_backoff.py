@@ -129,3 +129,28 @@ def test_primary_backoff_cannot_scale_origin_excluding_hard_row(tmp_path, direct
     for candidate in result.velocity_candidates:
         assert candidate.solver_velocity[1] == pytest.approx(direction * 4.0, abs=1e-8)
     assert result.status != eik.SolverStatus.SUCCESS
+
+
+@pytest.mark.parametrize("direction", [-1.0, 1.0])
+def test_explicit_pose_budget_is_honored_by_physical_ray_preference(tmp_path, direction):
+    from scipy.spatial.transform import Rotation
+
+    robot, solver, task, options, target = make_curved_solver(tmp_path, direction)
+    target[:3, :3] = Rotation.from_rotvec([0.0, 0.0, direction * 0.1]).as_matrix()
+    request = eik.TaskTarget("move", target, 1.0, 1.0)
+    request.priority_position_tolerance = 0.1
+    options.per_target_priority_budgets = True
+    result = solver.solve_position_step(np.zeros(robot.nq), [request], options)
+    assert result.status == eik.SolverStatus.SUCCESS, result.status_message
+    # The full bounded ray rotates4rad and stays inside the explicit10cm zone.
+    # A hidden strict-per-block guard must not unnecessarily halve its rate.
+    assert result.task_scales[0] >= 0.49
+    robot.update_configuration(np.asarray(result.q_solution))
+    pose = robot.get_frame_pose("tool")
+    assert np.linalg.norm(target[:3, 3] - pose.translation) <= 0.1 + 1e-9
+    assert (
+        np.linalg.norm(Rotation.from_matrix(target[:3, :3].T @ pose.rotation).as_rotvec()) < 0.051
+    )
+    lower, upper = robot.get_joint_limits()
+    assert np.all(result.q_solution >= lower) and np.all(result.q_solution <= upper)
+    assert np.all(np.abs(result.q_solution) / solver.dt <= robot.get_velocity_limits() + 1e-10)

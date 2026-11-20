@@ -1,5 +1,7 @@
 """embodiK: High-performance inverse kinematics with Pinocchio and Viser visualization."""
 
+from typing import Any
+
 # Version information (prefer installed package metadata)
 try:
     from importlib.metadata import PackageNotFoundError, version
@@ -160,10 +162,25 @@ def get_solver_status_hint(status, status_message: str | None = None) -> str:
     return base
 
 
+def __getattr__(name: str) -> Any:
+    """Load backend discovery only when explicitly requested."""
+    if name == "backends":
+        import importlib
+
+        module = importlib.import_module(".backends", __name__)
+        globals()[name] = module
+        return module
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
 __all__ = [
     # C++ classes (when available)
     "RobotModel",
     "KinematicsSolver",
+    "solve_ls",
+    "solve_qp",
+    "SolveStatus",
+    "SolveResult",
     "AccelerationSolver",
     "FrameTask",
     "PostureTask",
@@ -174,6 +191,9 @@ __all__ = [
     "VelocitySolverConfig",
     "VelocitySolverResult",
     "AccelerationSolverResult",
+    "AccelerationLinearProblemTrace",
+    "LinearSolveDiagnostics",
+    "replay_acceleration_linear_problem",
     "AccelerationSolverCapabilities",
     "AccelerationSolveOptions",
     "AccelerationTaskReference",
@@ -181,6 +201,7 @@ __all__ = [
     "AccelerationAllocationDiagnostics",
     "AccelerationAnalyticCollisionPairDiagnostics",
     "AffineAccelerationConstraint",
+    "AffineStateConstraint",
     "FrozenNextVelocityConstraint",
     "TaskAccelerationBounds",
     "GeneralizedAccelerationAllocation",
@@ -194,6 +215,7 @@ __all__ = [
     "RelativePoseAccelerationConstraint",
     "TorsoPoseBoundAccelerationConstraint",
     "VelocityCollisionLiftOptions",
+    "CollisionCandidateValidation",
     "CollisionConstraintAccelerationPolicy",
     "CollisionGeometryPair",
     "CollisionPairMinimumDistance",

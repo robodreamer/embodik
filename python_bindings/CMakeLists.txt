@@ -21,6 +21,7 @@ nanobind_add_module(_embodik_impl
     LTO
     NOMINSIZE
     src/bindings.cpp
+    src/optimization_bindings.cpp
     src/robot_model_bindings.cpp
     src/tasks_bindings.cpp
     src/kinematics_solver_bindings.cpp

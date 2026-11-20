@@ -147,12 +147,14 @@ class MultiFramePoseSolveConfig:
             raise ValueError("fi_scalar_type must be float64 or float32")
         if self.velocity_solver not in {
             "fi_pesns",
+            "warp_polytope",
             "torch_srinv",
             "warp_srinv",
             "cusolver_srinv",
         }:
             raise ValueError(
-                "velocity_solver must be fi_pesns, torch_srinv, warp_srinv, " "or cusolver_srinv"
+                "velocity_solver must be fi_pesns, torch_srinv, warp_srinv, "
+                "or cusolver_srinv or warp_polytope"
             )
         if self.velocity_solver == "torch_srinv" and self.standalone_cuda_graph_enabled:
             raise ValueError("torch_srinv does not support standalone CUDA Graph capture")
@@ -1708,6 +1710,133 @@ class DeviceResidentMultiFramePoseSolver:
                 options=compile_options,
             )
 
+        self._linear_position_matrix = torch.empty(
+            (0, self.velocity_dim), dtype=torch.float64, device=self.device
+        )
+        self._linear_position_lower = torch.empty(0, dtype=torch.float64, device=self.device)
+        self._linear_position_upper = torch.empty_like(self._linear_position_lower)
+        self._polytope = None
+        if self.config.velocity_solver == "warp_polytope":
+            self._validate_polytope_execution()
+            self._make_polytope_solver()
+
+    def _validate_polytope_execution(self) -> None:
+        if self.robot_spec.floating_base or self.configuration_dim != self.velocity_dim:
+            raise ValueError("warp_polytope requires fixed-base additive scalar coordinates")
+        spans = zip(
+            self.robot_spec.joint_velocity_indices,
+            self.robot_spec.joint_velocity_sizes,
+            self.robot_spec.joint_configuration_sizes,
+        )
+        scalar = {v for v, vs, qs in spans if vs == 1 and qs == 1}
+        if any(v not in scalar for v in self.robot_spec.active_velocity_indices):
+            raise ValueError("warp_polytope requires additive scalar active joints")
+        if (
+            self.config.collision_enabled
+            or self.centroidal_enabled
+            or self.com_constraint_enabled
+            or self.capture_point_constraint_enabled
+            or self.velocity_zmp_constraint_enabled
+            or self.torso_constraint_enabled
+            or self.secondary_task_enabled
+            or any(self.frame_contact_constraints)
+            or self.config.max_joint_acceleration_rad_s2 is not None
+        ):
+            raise ValueError(
+                "warp_polytope does not yet support collision, centroidal/CoM, torso, secondary, contact, or acceleration constraints"
+            )
+
+    def _make_polytope_solver(self, row_count: int | None = None):
+        from .warp_polytope import WarpPolytopeScale
+        from .warp_reduced_polytope import WarpReducedPolytopeScale
+
+        implementation = (
+            WarpReducedPolytopeScale if self.task_rows <= self.velocity_dim else WarpPolytopeScale
+        )
+        candidate = implementation(
+            self.task_rows,
+            self.velocity_dim,
+            (self.get_linear_position_constraint_rows() if row_count is None else row_count),
+            batch=self.batch_size,
+            device=str(self.device),
+        )
+
+        if row_count is None:
+            self._polytope = candidate
+        return candidate
+
+    def get_linear_position_constraint_rows(self) -> int:
+        return self._linear_position_matrix.shape[0]
+
+    def set_linear_position_constraints(self, matrix, lower, upper) -> None:
+        if self.config.velocity_solver != "warp_polytope":
+            raise ValueError("GPU linear position rows require solver_backend='warp_polytope'")
+        self._validate_polytope_execution()
+        torch = self.torch
+        if torch.cuda.is_current_stream_capturing():
+            raise RuntimeError("configure linear position rows outside CUDA graph capture")
+        C, lo, hi = [
+            torch.as_tensor(v, dtype=torch.float64, device=self.device).clone().contiguous()
+            for v in (matrix, lower, upper)
+        ]
+        if (
+            C.ndim != 2
+            or C.shape[1] != self.velocity_dim
+            or lo.shape != (C.shape[0],)
+            or hi.shape != lo.shape
+        ):
+            raise ValueError(
+                "linear position rows require C[rows, active_dofs] and matching bounds"
+            )
+        if not bool(
+            torch.isfinite(C).all() & torch.isfinite(lo).all() & torch.isfinite(hi).all()
+        ) or bool((lo > hi).any()):
+            raise ValueError("linear position rows require finite ordered bounds")
+        candidate = self._make_polytope_solver(C.shape[0])
+        (
+            self._linear_position_matrix,
+            self._linear_position_lower,
+            self._linear_position_upper,
+        ) = (C, lo, hi)
+        self._polytope = candidate
+        self._graph = None
+        self._graph_inputs = None
+        self._graph_result = None
+
+    def _polytope_bounds(self, q, effective_dt, lower, upper) -> None:
+        torch = self.torch
+        C = self._linear_position_matrix
+        value = q.to(torch.float64) @ C.T
+        # Keep original constraints authoritative after float32 integration.
+        # A conservative inset covers rounding of changing coordinates; locked
+        # coordinates contribute no integration uncertainty.
+        changing = ((lower != 0) | (upper != 0)).to(torch.float64)
+        magnitude = (
+            1
+            + q.to(torch.float64).abs()
+            + effective_dt[:, None].to(torch.float64)
+            * torch.maximum(lower.abs(), upper.abs()).to(torch.float64)
+        ) * changing
+        reserve = 8 * torch.finfo(torch.float32).eps * (magnitude @ C.abs().T)
+        original_low = torch.minimum(value, self._linear_position_lower)
+        original_high = torch.maximum(value, self._linear_position_upper)
+        low, high = original_low + reserve, original_high - reserve
+        has_room = low <= high
+        low = torch.where(has_room, low, original_low)
+        high = torch.where(has_room, high, original_high)
+        self._linear_row_lower = (low - value) / effective_dt[:, None].to(torch.float64)
+        self._linear_row_upper = (high - value) / effective_dt[:, None].to(torch.float64)
+        self._linear_seed_lower = torch.minimum(value, self._linear_position_lower)
+        self._linear_seed_upper = torch.maximum(value, self._linear_position_upper)
+
+    def _linear_candidate_valid(self, candidate):
+        image = candidate.to(self.torch.float64) @ self._linear_position_matrix.T
+        return (
+            self.torch.isfinite(image).all(-1)
+            & (image >= self._linear_seed_lower - 1e-9).all(-1)
+            & (image <= self._linear_seed_upper + 1e-9).all(-1)
+        )
+
     def _validate_layout(
         self,
         q: Any,
@@ -2043,6 +2172,21 @@ class DeviceResidentMultiFramePoseSolver:
         return primary
 
     def _native_velocity(self, twist: Any, jacobian: Any, lower: Any, upper: Any):
+        if getattr(self, "_polytope", None) is not None:
+            torch = self.torch
+            rows = self._linear_position_matrix[None].expand(self.batch_size, -1, -1).contiguous()
+            velocity, _, status = self._polytope.solve(
+                jacobian.to(torch.float64),
+                twist.to(torch.float64),
+                rows,
+                lower.to(torch.float64),
+                upper.to(torch.float64),
+                self._linear_row_lower,
+                self._linear_row_upper,
+            )
+            self._linear_position_ok &= status == 0
+            self._linear_numeric_ok &= (status == 0) | (status == 2)
+            return velocity.to(torch.float32)
         if getattr(self, "_cusolver_srinv", None) is not None:
             torch = self.torch
             matrix = jacobian
@@ -2131,7 +2275,7 @@ class DeviceResidentMultiFramePoseSolver:
         return self._compiled_native_velocity(twist, jacobian, lower, upper)
 
     def _collision_lower_bound(self, distance: Any) -> Any:
-        """Apply EmbodiK's continuous velocity-damper recovery policy."""
+        """Apply the collision velocity damper and violated-clearance recovery."""
 
         torch = self.torch
         minimum = self.config.collision_min_distance_m
@@ -2141,7 +2285,7 @@ class DeviceResidentMultiFramePoseSolver:
         within_deadband = (distance >= minimum) & ~outside
         nonpenetrating_violation = (distance >= 0.0) & (distance < minimum)
         penetrating = distance < 0.0
-        lower = torch.where(outside, desired, torch.zeros_like(distance))
+        lower = torch.where(outside, torch.clamp_max(desired, 0.0), torch.zeros_like(distance))
         lower = torch.where(within_deadband, torch.zeros_like(lower), lower)
         recovery = torch.clamp_min(desired * self.config.collision_recovery_scale, 0.0)
         recovery = torch.clamp_max(
@@ -2257,6 +2401,8 @@ class DeviceResidentMultiFramePoseSolver:
         reset_mask: Any | None = None,
         valid_mask: Any | None = None,
     ) -> MultiFramePoseBatchResult:
+        if getattr(self, "_polytope", None) is not None:
+            self._validate_polytope_execution()
         self._validate_layout(
             q_start, target, previous_velocity, current_velocity, reset_mask, valid_mask
         )
@@ -2323,7 +2469,11 @@ class DeviceResidentMultiFramePoseSolver:
             import warp as wp
 
             graph = torch.cuda.CUDAGraph()
-            if self.config.velocity_solver in {"warp_srinv", "cusolver_srinv"}:
+            if self.config.velocity_solver in {
+                "warp_srinv",
+                "cusolver_srinv",
+                "warp_polytope",
+            }:
                 # Newton's child graphs and the Warp kernels can be recorded
                 # directly by Torch. Warp 1.17 cannot reliably register this
                 # mixed Torch/Newton parent capture as an external capture.
@@ -2381,9 +2531,14 @@ class DeviceResidentMultiFramePoseSolver:
                 static_valid,
             )
             self._graph_result = graph_result
-        static_q, static_target, static_previous, static_current, static_reset, static_valid = (
-            self._graph_inputs
-        )
+        (
+            static_q,
+            static_target,
+            static_previous,
+            static_current,
+            static_reset,
+            static_valid,
+        ) = self._graph_inputs
         static_q.copy_(q_start)
         static_target.copy_(target)
         (
@@ -3494,7 +3649,10 @@ class DeviceResidentMultiFramePoseSolver:
             weight = torch.zeros((self.batch_size, 3), dtype=torch.float64, device=self.device)
             weight[:, 2] = self.com.total_mass * torch.abs(self._zmp_settings[1])
             dt = torch.full(
-                (self.batch_size,), self.config.dt, dtype=torch.float64, device=self.device
+                (self.batch_size,),
+                self.config.dt,
+                dtype=torch.float64,
+                device=self.device,
             )
             zmp_rows, zmp_lower, zmp_upper = _velocity_zmp_constraint_rows_trusted(
                 self._zmp_a,
@@ -3550,7 +3708,12 @@ class DeviceResidentMultiFramePoseSolver:
         if contact_projector is not None:
             # Preserve fixed contact tangent directions in the recovery correction.
             rows = rows @ contact_projector.to(torch.float64)
-        self._com_step_rows, self._com_step_lower, self._com_step_upper, self._com_step_active = (
+        (
+            self._com_step_rows,
+            self._com_step_lower,
+            self._com_step_upper,
+            self._com_step_active,
+        ) = (
             rows,
             row_lower,
             row_upper,
@@ -4109,6 +4272,11 @@ class DeviceResidentMultiFramePoseSolver:
             dtype=torch.float32,
             device=self.device,
         )
+        if getattr(self, "_polytope", None) is not None:
+            self._linear_position_ok = torch.ones(
+                self.batch_size, dtype=torch.bool, device=self.device
+            )
+            self._linear_numeric_ok = torch.ones_like(self._linear_position_ok)
         for _ in range(self.config.iterations):
             full_pose, full_jacobian = self.kinematics._evaluate_trusted(q)
             centroidal_state = (
@@ -4171,9 +4339,12 @@ class DeviceResidentMultiFramePoseSolver:
             )
             effective_dt = self.config.dt * adaptive_scale
             lower, upper = self._bounds(q, q_start, previous, effective_dt)
+            if getattr(self, "_polytope", None) is not None:
+                self._polytope_bounds(q, effective_dt, lower, upper)
             primary_jacobian = jacobian
             if (
-                not self.secondary_task_enabled
+                self._polytope is None
+                and not self.secondary_task_enabled
                 and not self.torso_constraint_enabled
                 and not self.com_constraint_enabled
                 and not self.centroidal_enabled
@@ -4378,6 +4549,9 @@ class DeviceResidentMultiFramePoseSolver:
                 capture_constraint_feasible &= com_feasible & com_candidate_valid
             if self.velocity_zmp_constraint_enabled:
                 velocity_zmp_constraint_feasible &= com_feasible & com_candidate_valid
+            if getattr(self, "_polytope", None) is not None:
+                self._linear_position_ok &= self._linear_candidate_valid(candidate)
+                spectral_solve_ok &= self._linear_numeric_ok
             if not collision_active_for_solve:
                 accepted = (
                     contact_configuration_valid
@@ -4386,6 +4560,8 @@ class DeviceResidentMultiFramePoseSolver:
                     & com_feasible
                     & com_candidate_valid
                 )
+                if getattr(self, "_polytope", None) is not None:
+                    accepted &= self._linear_position_ok
                 q = torch.where(accepted[:, None], candidate, q)
                 accepted_velocity = torch.where(accepted[:, None], velocity, accepted_velocity)
                 torso_constraint_feasible &= accepted
@@ -4656,6 +4832,14 @@ class DeviceResidentMultiFramePoseSolver:
             collision_clear_state_certified,
             collision_step_accepted,
         )
+        if getattr(self, "_polytope", None) is not None:
+            publish &= self._linear_position_ok
+            safe_q = torch.where(self._linear_position_ok[:, None], safe_q, q_hold)
+            safe_velocity = torch.where(
+                self._linear_position_ok[:, None],
+                safe_velocity,
+                torch.zeros_like(safe_velocity),
+            )
         publish = publish & participate
         collision_diagnostic_publish = collision_diagnostic_publish & participate
         safe_q = torch.where(participate[:, None], safe_q, q_hold)

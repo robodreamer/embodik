@@ -142,9 +142,12 @@ Seer controller ports and the mjviser policy flags.
 
 ## 🧰 Core Capabilities
 
+See the [0.24.0 release scope](docs/release_scope.md) for supported contracts,
+experimental APIs and unqualified recovery and real-time behavior.
+
 - ⚙️ C++ IK core with Nanobind Python bindings.
 - 🎯 Hierarchical velocity IK tasks for frames, posture, CoM, and dual-arm coordination.
-- 🧮 Fixed-base acceleration eSNS with compatible position, velocity, acceleration, effort, contact-kinematics, and geometry constraints.
+- 🧮 Experimental, opt-in fixed-base acceleration eSNS with compatible position, velocity, acceleration, effort, contact-kinematics, and geometry constraints.
 - 🛡️ Joint-limit, self-collision, and CoM support-polygon constraints.
 - 📈 Solver diagnostics for timing, task scaling, and Jacobian condition-number logging.
 - 🧭 Lie-group-aware configuration operations for floating-base, quaternion, and continuous joints.

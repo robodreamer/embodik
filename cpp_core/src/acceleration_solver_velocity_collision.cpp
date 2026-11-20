@@ -1,4 +1,6 @@
 #include "acceleration_solver_internal.hpp"
+#include "acceleration_collision_refinement.hpp"
+#include "collision_distance_query.hpp"
 
 #include <pinocchio/algorithm/geometry.hpp>
 #include <pinocchio/algorithm/jacobian.hpp>
@@ -86,12 +88,17 @@ bool scalar_revolute_prismatic_model(const RobotModel &robot) {
 }
 #endif
 
-bool make_sample_distance_cut(
+} // namespace
+
+namespace detail {
+static bool make_sample_distance_cut_with_distance(
     const RobotModel &robot,
     const detail::VelocityCollisionSampleValidationResult &validation,
     const Eigen::VectorXd &sample_q, const Eigen::VectorXd &anchor_ddq,
     double sample_time, double reserve, AffineAccelerationConstraint *cut,
-    VelocityCollisionLiftDiagnostics *diagnostics) {
+    VelocityCollisionLiftDiagnostics *diagnostics, double *queried_distance) {
+  if (queried_distance)
+    *queried_distance = std::numeric_limits<double>::quiet_NaN();
 #ifdef PINOCCHIO_WITH_HPP_FCL
   if (!scalar_revolute_prismatic_model(robot) ||
       !std::isfinite(sample_time) || sample_time <= 0.0 ||
@@ -126,10 +133,13 @@ bool make_sample_distance_cut(
   pinocchio::updateGeometryPlacements(robot.model(), data, *geometry,
                                     geometry_data);
   ++diagnostics->refinement_geometry_updates;
-  pinocchio::computeDistance(*geometry, geometry_data, pair_index);
+  compute_policy_collision_distance(*geometry, geometry_data, pair_index, true);
   ++diagnostics->refinement_exact_queries;
   const auto &distance = geometry_data.distanceResults[pair_index];
   const double value = distance.min_distance;
+  // A passing sample needs no gradient. Expose its queried distance even when
+  // a local cut cannot be constructed, without admitting a failing sample.
+  if (queried_distance && std::isfinite(value)) *queried_distance = value;
   const Eigen::Vector3d point_a = distance.nearest_points[0].cast<double>();
   const Eigen::Vector3d point_b = distance.nearest_points[1].cast<double>();
   const Eigen::Vector3d delta = point_a - point_b;
@@ -183,10 +193,25 @@ bool make_sample_distance_cut(
   (void)reserve;
   (void)cut;
   (void)diagnostics;
+  (void)queried_distance;
   return false;
 #endif
 }
 
+bool make_sample_distance_cut(
+    const RobotModel &robot,
+    const VelocityCollisionSampleValidationResult &validation,
+    const Eigen::VectorXd &sample_q, const Eigen::VectorXd &anchor_ddq,
+    double sample_time, double reserve, AffineAccelerationConstraint *cut,
+    VelocityCollisionLiftDiagnostics *diagnostics) {
+  return make_sample_distance_cut_with_distance(
+      robot, validation, sample_q, anchor_ddq, sample_time, reserve, cut,
+      diagnostics, nullptr);
+}
+
+} // namespace detail
+
+namespace {
 // Include every family checked by the solver's common source-ID registry.
 std::string collision_refinement_source_id(
     const AccelerationSolveOptions &options, const std::string &stem) {
@@ -222,8 +247,32 @@ AccelerationSolverResult AccelerationSolver::solve_with_velocity_collision(
     const Eigen::VectorXd &dq, double dt,
     const AccelerationSolveOptions &options,
     const VelocityCollisionLiftOptions &lift_options) {
+  return solve_with_velocity_collision_impl(collision_solver, q, dq, dt, options,
+                                            lift_options, nullptr);
+}
+
+AccelerationSolverResult
+AccelerationSolver::validate_candidate_with_velocity_collision(
+    KinematicsSolver &collision_solver, const Eigen::VectorXd &q,
+    const Eigen::VectorXd &dq, double dt, const Eigen::VectorXd &ddq,
+    const AccelerationSolveOptions &options,
+    const VelocityCollisionLiftOptions &lift_options) {
+  return solve_with_velocity_collision_impl(collision_solver, q, dq, dt, options,
+                                            lift_options, &ddq);
+}
+
+AccelerationSolverResult AccelerationSolver::solve_with_velocity_collision_impl(
+    KinematicsSolver &collision_solver, const Eigen::VectorXd &q,
+    const Eigen::VectorXd &dq, double dt,
+    const AccelerationSolveOptions &options,
+    const VelocityCollisionLiftOptions &lift_options,
+    const Eigen::VectorXd *candidate) {
   const auto start = std::chrono::steady_clock::now();
-  const auto finish = [&start](AccelerationSolverResult result) {
+  const auto finish = [&start, candidate](AccelerationSolverResult result) {
+    if (candidate) {
+      result.final_error = std::numeric_limits<double>::quiet_NaN();
+      result.condition_number = std::numeric_limits<double>::quiet_NaN();
+    }
     const auto end = std::chrono::steady_clock::now();
     result.computation_time_ms =
         std::chrono::duration<double, std::milli>(end - start).count();
@@ -231,6 +280,28 @@ AccelerationSolverResult AccelerationSolver::solve_with_velocity_collision(
   };
 
   VelocityCollisionLiftDiagnostics diagnostics;
+  const bool physical_samples =
+      lift_options.candidate_validation ==
+      CollisionCandidateValidation::kPhysicalSamples;
+  if (lift_options.candidate_validation !=
+          CollisionCandidateValidation::kFrozenRows &&
+      !physical_samples) {
+    return finish(velocity_collision_lift_failure(
+        SolverStatus::kInvalidInput, "unknown collision candidate validation policy",
+        diagnostics));
+  }
+  if (physical_samples && !candidate) {
+    return finish(velocity_collision_lift_failure(
+        SolverStatus::kInvalidInput,
+        "physical-sample collision validation requires a prescribed candidate",
+        diagnostics));
+  }
+  if (candidate && lift_options.max_refinement_iterations != 0) {
+    return finish(velocity_collision_lift_failure(
+        SolverStatus::kInvalidInput,
+        "prescribed acceleration validation requires zero collision refinement budget",
+        diagnostics));
+  }
   if (lift_options.validation_substeps < 1 ||
       lift_options.validation_substeps > 1024) {
     return finish(velocity_collision_lift_failure(
@@ -256,6 +327,19 @@ AccelerationSolverResult AccelerationSolver::solve_with_velocity_collision(
         "same RobotModel",
         diagnostics));
   }
+  if (collision_solver.get_linear_position_constraint_rows() > 0 ||
+      !options.affine_state_constraints.empty()) {
+    return finish(velocity_collision_lift_failure(
+        SolverStatus::kInvalidInput,
+        "velocity collision lift does not certify coupled position-row stopping",
+        diagnostics));
+  }
+  if (collision_solver.has_collision_trajectory_floor_anchor()) {
+    return finish(velocity_collision_lift_failure(
+        SolverStatus::kInvalidInput,
+        "velocity collision lift does not certify original-floor stopping",
+        diagnostics));
+  }
   if (q.size() != robot_->nq() || dq.size() != robot_->nv()) {
     return finish(velocity_collision_lift_failure(
         SolverStatus::kShapeMismatch, "q and dq must match robot nq/nv",
@@ -265,6 +349,16 @@ AccelerationSolverResult AccelerationSolver::solve_with_velocity_collision(
     return finish(velocity_collision_lift_failure(
         SolverStatus::kNonFiniteInput, "q, dq, and dt must be finite",
         diagnostics));
+  }
+  if (candidate && candidate->size() != robot_->nv()) {
+    return finish(velocity_collision_lift_failure(
+        SolverStatus::kShapeMismatch,
+        "candidate acceleration must match robot nv", diagnostics));
+  }
+  if (candidate && !candidate->allFinite()) {
+    return finish(velocity_collision_lift_failure(
+        SolverStatus::kNonFiniteInput,
+        "candidate acceleration must be finite", diagnostics));
   }
   if (dt <= 0.0) {
     return finish(velocity_collision_lift_failure(
@@ -292,7 +386,16 @@ AccelerationSolverResult AccelerationSolver::solve_with_velocity_collision(
 
   std::optional<detail::VelocityCollisionConstraintLinearization> linearization;
   try {
-    linearization = collision_provider.linearize(dt);
+    if (physical_samples) {
+      if (const auto error =
+              collision_provider.physical_candidate_ineligibility(q);
+          error.has_value()) {
+        return finish(velocity_collision_lift_failure(
+            SolverStatus::kInvalidInput, *error, diagnostics));
+      }
+    } else {
+      linearization = collision_provider.linearize(dt);
+    }
   } catch (const std::invalid_argument &error) {
     return finish(velocity_collision_lift_failure(
         SolverStatus::kInvalidInput,
@@ -306,9 +409,11 @@ AccelerationSolverResult AccelerationSolver::solve_with_velocity_collision(
             error.what(),
         diagnostics));
   }
-  const auto row_accounting = collision_provider.accounting_snapshot();
-  diagnostics.pairs_considered = row_accounting.pairs_considered;
-  diagnostics.row_exact_queries = row_accounting.exact_distance_queries;
+  if (!physical_samples) {
+    const auto row_accounting = collision_provider.accounting_snapshot();
+    diagnostics.pairs_considered = row_accounting.pairs_considered;
+    diagnostics.row_exact_queries = row_accounting.exact_distance_queries;
+  }
   AccelerationSolveOptions lifted_options = options;
   if (linearization.has_value()) {
     if (linearization->coefficient_matrix.rows() == 0 ||
@@ -419,7 +524,8 @@ AccelerationSolverResult AccelerationSolver::solve_with_velocity_collision(
   };
 
   while (true) {
-    auto result = solve(q, dq, dt, lifted_options);
+    auto result = candidate ? validate_candidate(q, dq, dt, *candidate, lifted_options)
+                            : solve(q, dq, dt, lifted_options);
     accumulated_preprocessing_ms += result.preprocessing_time_ms;
     accumulated_backend_ms += result.backend_computation_time_ms;
     accumulated_postprocessing_ms += result.postprocessing_time_ms;
@@ -541,18 +647,46 @@ AccelerationSolverResult AccelerationSolver::solve_with_velocity_collision(
       return reject();
     }
 
-    const double sample_time =
-        dt * static_cast<double>(validation.failed_sample_index) /
-        static_cast<double>(lift_options.validation_substeps);
     AffineAccelerationConstraint cut;
+    std::size_t selected_sample = 0;
     try {
-      if (!make_sample_distance_cut(
-              *robot_, validation,
-              validation_samples[validation.failed_sample_index - 1],
-              result.joint_accelerations, sample_time,
-              lift_options.refinement_clearance_reserve, &cut, &diagnostics)) {
-        return reject();
+      // Earlier samples already passed the original validator. For this same
+      // pair, select one strongest acceleration-space separating row among
+      // the remaining materially failing samples, rather than the first time.
+      // The validator's original non-worsening tolerance remains unchanged.
+      const double sample_tolerance =
+          collision_solver.has_collision_trajectory_floor_anchor() ? 0.0 : 1e-8;
+      double greatest_violation = -1.0;
+      for (std::size_t index = validation.failed_sample_index - 1;
+           index < validation_samples.size(); ++index) {
+        const double sample_time = dt * static_cast<double>(index + 1) /
+                                   lift_options.validation_substeps;
+        AffineAccelerationConstraint candidate_cut;
+        double distance = std::numeric_limits<double>::quiet_NaN();
+        const bool constructed = detail::make_sample_distance_cut_with_distance(
+            *robot_, validation, validation_samples[index],
+            result.joint_accelerations, sample_time,
+            lift_options.refinement_clearance_reserve, &candidate_cut,
+            &diagnostics, &distance);
+        if (!std::isfinite(distance)) return reject();
+        if (distance >= validation.failed_required_distance - sample_tolerance)
+          continue;
+        if (!constructed) return reject();
+        const double norm = candidate_cut.coefficient_matrix.row(0).norm();
+        if (!std::isfinite(norm) || norm <= 0.0) return reject();
+        const double violation =
+            (candidate_cut.lower_bounds(0) - candidate_cut.affine_bias(0) -
+             candidate_cut.coefficient_matrix.row(0).dot(
+                 result.joint_accelerations)) / norm;
+        if (!std::isfinite(violation)) return reject();
+        // Strict comparison keeps the earliest sample for exact score ties.
+        if (violation > greatest_violation) {
+          greatest_violation = violation;
+          selected_sample = index + 1;
+          cut = std::move(candidate_cut);
+        }
       }
+      if (selected_sample == 0) return reject();
     } catch (const std::exception &) {
       // Unsupported geometry or failed local differentiation never grants
       // acceptance and never changes the existing rejection classification.
@@ -566,7 +700,8 @@ AccelerationSolverResult AccelerationSolver::solve_with_velocity_collision(
       return reject();
     }
     cut.source_id = collision_refinement_source_id(
-        lifted_options, "__collision_sample_refinement");
+        lifted_options, "__collision_sample_refinement_sample_" +
+                            std::to_string(selected_sample));
     lifted_options.affine_constraints.push_back(std::move(cut));
     AffineAccelerationConstraint trust;
     trust.source_id = collision_refinement_source_id(

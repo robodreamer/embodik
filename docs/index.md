@@ -26,13 +26,16 @@ stay focused on targets and visualization.
 </div>
 <div class="embodik-principle">
   <img src="assets/brand/principles/brand-reliable-safe.png" alt="">
-  <div><strong>Reliable &amp; Safe</strong><span>Respect limits, collision constraints, CoM support, and contact feasibility.</span></div>
+  <div><strong>Constraint-Aware</strong><span>Apply declared joint, collision, CoM, and supported kinematic-contact constraints.</span></div>
 </div>
 <div class="embodik-principle">
   <img src="assets/brand/principles/brand-scalable.png" alt="">
   <div><strong>Scalable</strong><span>Use the same solver surface for demos, stress tests, and policy rollout.</span></div>
 </div>
 </div>
+
+See the [0.24.0 release scope](release_scope.md) for functional support,
+experimental APIs and the limits of recovery and real-time claims.
 
 ## GPU WBC: 1,024 Independent Worlds
 

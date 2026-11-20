@@ -71,6 +71,14 @@ python 06_bimanual_whole_body_ik.py --port 8090
 
 ## Teleop Controls
 
+With **Hold non-dragged arm** enabled, a single-hand command gives the other
+hand higher task priority until both hands settle. Releasing the drag preserves
+that priority while tracking continues. Moving the other hand transfers the
+role; moving both hands together, changing control modes, torso input or reset
+clears it. Shared torso control remains below active hand tasks. This option
+uses task priorities; it does not impose a hard pose constraint or guarantee
+that a target is reachable.
+
 The browser transform controls are always available. When the teleop optional
 dependencies are installed and a Seer/xvisio controller is connected, the same
 left/right target poses can be driven from the controller panel:

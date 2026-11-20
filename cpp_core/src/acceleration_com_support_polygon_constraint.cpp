@@ -42,6 +42,11 @@ bool outside_policy_is_valid(ComSupportPolygonOutsidePolicy policy) {
   return false;
 }
 
+bool within_boundary_domain(
+    double value, const ComSupportPolygonAccelerationPolicy &policy) {
+  return value <= policy.boundary_epsilon;
+}
+
 double comparison_tolerance(double lhs, double rhs) {
   return std::max(kConstraintTolerance,
                   1e-12 * (1.0 + std::max(std::abs(lhs), std::abs(rhs))));
@@ -224,7 +229,7 @@ ComSupportPolygonPreparationResult prepare_from_differential(
     row.upper_braking_acceleration =
         constraint.policy.braking_acceleration;
 
-    const bool outside = value > constraint.policy.boundary_epsilon;
+    const bool outside = !within_boundary_domain(value, constraint.policy);
     if (outside) {
       if (constraint.policy.outside_policy ==
           ComSupportPolygonOutsidePolicy::kReject) {
@@ -276,6 +281,8 @@ ComSupportPolygonPreparationResult prepare_from_differential(
   if (state_box.status != SolverStatus::kSuccess) {
     result.status = state_box.status;
     result.message = context + ": " + state_box.message;
+    result.state_box_failure = state_box.failure;
+    result.state_box_failure_row = state_box.failure_row;
     return result;
   }
 
@@ -746,6 +753,91 @@ linearize_com_support_polygon_path_acceleration(
 }
 
 ComSupportPolygonConstraintResult
+linearize_com_support_polygon_endpoint_rate(
+    const PreparedComSupportPolygonConstraint &prepared,
+    const RobotModel &robot, const Eigen::VectorXd &q,
+    const Eigen::VectorXd &dq, const Eigen::VectorXd &candidate_acceleration,
+    double dt, int edge, AffineAccelerationConstraint *refinement) {
+  if (refinement == nullptr || q.size() != robot.nq() ||
+      dq.size() != robot.nv() || candidate_acceleration.size() != robot.nv() ||
+      !q.allFinite() || !dq.allFinite() || !candidate_acceleration.allFinite() ||
+      !std::isfinite(dt) || dt <= 0.0 || edge < 0 ||
+      edge >= prepared.current_values.size() ||
+      !prepared.current_values.allFinite() ||
+      !std::isfinite(prepared.specification.policy.boundary_epsilon) ||
+      prepared.specification.policy.boundary_epsilon < 0.0 ||
+      !within_boundary_domain(prepared.current_values(edge),
+                              prepared.specification.policy) ||
+      edge >= prepared.geometry.halfspace_normals.rows()) {
+    return failure(SolverStatus::kInvalidInput,
+                   "CoM endpoint-rate refinement input is invalid");
+  }
+  pinocchio::Data scratch(robot.model());
+  try {
+    const auto evaluate = [&](const Eigen::VectorXd &acceleration) {
+      const Eigen::VectorXd next_q = robot.integrate(
+          q, dt * dq + 0.5 * dt * dt * acceleration);
+      const Eigen::VectorXd next_dq = dq + dt * acceleration;
+      const auto differential = evaluate_com_in_frame_differential_at_state(
+          robot, scratch, prepared.specification.definition.frame_name,
+          next_q, next_dq);
+      const auto valid = validate_com_differential(
+          differential, next_dq, robot.nv(), "CoM endpoint-rate refinement");
+      if (!valid.satisfied()) {
+        throw std::runtime_error(valid.message);
+      }
+      return project_com_differential(prepared.geometry, differential);
+    };
+    const auto endpoint = evaluate(candidate_acceleration);
+    const double value = endpoint.values(edge);
+    const double rate = endpoint.rates(edge);
+    if (!std::isfinite(value) || !std::isfinite(rate) || value < 0.0 ||
+        value > prepared.specification.policy.boundary_epsilon || rate <= 0.0) {
+      return failure(SolverStatus::kInvalidInput,
+                     "CoM endpoint-rate refinement has no boundary violation");
+    }
+    Eigen::RowVectorXd gradient(robot.nv());
+    for (Eigen::Index joint = 0; joint < robot.nv(); ++joint) {
+      const double step = std::cbrt(std::numeric_limits<double>::epsilon()) *
+                          std::max(1.0, std::abs(candidate_acceleration(joint)));
+      Eigen::VectorXd plus = candidate_acceleration;
+      Eigen::VectorXd minus = candidate_acceleration;
+      plus(joint) += step;
+      minus(joint) -= step;
+      const double separation = plus(joint) - minus(joint);
+      if (!(separation > 0.0) || !std::isfinite(separation)) {
+        throw std::runtime_error("CoM endpoint-rate perturbation is invalid");
+      }
+      // Refresh both q_next and dq_next. A frozen endpoint Jacobian omits
+      // the geometric contribution to the rate derivative.
+      const double plus_rate = evaluate(plus).rates(edge);
+      const double minus_rate = evaluate(minus).rates(edge);
+      gradient(joint) = (plus_rate - minus_rate) / separation;
+    }
+    const double bias = rate - gradient.dot(candidate_acceleration);
+    if (!gradient.allFinite() || !std::isfinite(gradient.stableNorm()) ||
+        gradient.stableNorm() == 0.0 ||
+        !std::isfinite(bias)) {
+      return failure(SolverStatus::kNumericalError,
+                     "CoM endpoint-rate derivative is flat or non-finite");
+    }
+    // This conservative local row proposes an inward endpoint rate. It is
+    // not a certificate: every original nonlinear acceptance check repeats.
+    refinement->coefficient_matrix = gradient;
+    refinement->affine_bias = Eigen::VectorXd::Constant(1, bias);
+    refinement->lower_bounds = Eigen::VectorXd::Zero(1);
+    refinement->upper_bounds = Eigen::VectorXd::Zero(1);
+    refinement->lower_bound_active = {false};
+    refinement->upper_bound_active = {true};
+    return {};
+  } catch (const std::exception &error) {
+    return failure(SolverStatus::kNumericalError,
+                   std::string("CoM endpoint-rate refinement failed: ") +
+                       error.what());
+  }
+}
+
+ComSupportPolygonConstraintResult
 validate_com_support_polygon_constraint_acceptance(
     const PreparedComSupportPolygonConstraint &prepared,
     const RobotModel &robot, const Eigen::VectorXd &q,
@@ -815,9 +907,18 @@ validate_com_support_polygon_constraint_acceptance(
       dq_next, dt, next_joint_acceleration_lower,
       next_joint_acceleration_upper, &accepted_acceleration);
   if (!predicted.satisfied()) {
-    return failure(SolverStatus::kNumericalError,
-                   "accepted CoM support-polygon predicted support failed: " +
-                       predicted.message);
+    auto result = failure(
+        SolverStatus::kNumericalError,
+        "accepted CoM support-polygon predicted support failed: " +
+            predicted.message);
+    const auto edge = predicted.state_box_failure_row;
+    if (predicted.state_box_failure == StateBoxFailure::kOutwardRateAtBoundary &&
+        edge >= 0 && edge < prepared.current_values.size() &&
+        within_boundary_domain(prepared.current_values(edge),
+                               prepared.specification.policy)) {
+      result.predicted_boundary_outward_edge = static_cast<int>(edge);
+    }
+    return result;
   }
   return {};
 }

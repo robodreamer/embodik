@@ -735,6 +735,8 @@ LinearizedStateBoxResult prepare_linearized_state_box(
         shape_state_box_row(input.rows[static_cast<std::size_t>(row)], dt);
     if (shaped.status != SolverStatus::kSuccess) {
       result.status = shaped.status;
+      result.failure = shaped.failure;
+      result.failure_row = row;
       result.message = "linearized state-box '" + input.source_id + "' row " +
                        std::to_string(row) + ": " + shaped.message;
       return result;

@@ -14,6 +14,7 @@ ACCELERATION_EXPORTS = [
     "AccelerationAllocationDiagnostics",
     "AccelerationAnalyticCollisionPairDiagnostics",
     "AffineAccelerationConstraint",
+    "AffineStateConstraint",
     "FrozenNextVelocityConstraint",
     "TaskAccelerationBounds",
     "GeneralizedAccelerationAllocation",

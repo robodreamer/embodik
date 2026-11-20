@@ -1,5 +1,16 @@
 # Solver robustness and recovery
 
+## 0.24.0 release status
+
+The criteria below remain development and qualification goals. The foundation
+release covers the documented numerical APIs and default velocity-API regression
+scope; it does not claim every robot/controller profile meets these goals.
+Experimental acceleration and GPU paths retain their documented limits.
+Sustained-saturation recovery, complete goal-preserving stopping, interactive
+fluidity and hard real-time behavior remain unqualified without profile-specific
+evidence. Numerical regression results do not substitute for visual usability
+review or hardware qualification. See the [release scope](release_scope.md).
+
 ## Behavioral quality goals
 
 A person commanding Cartesian motion should experience prompt, continuous,
@@ -318,6 +329,33 @@ It starts from the existing feasible realization and keeps it if refinement
 does not produce a verified improvement. This option does not alter
 `KinematicsSolver` defaults or select a nonlinear recovery trajectory.
 
+Legacy lower bands retain their projected-preference semantics. Raw ray
+certification applies to the primary band, or to a prefix-compatible lower band
+with no forced inherited task image; it does not replace a valid projected lower
+preference with a different homogeneous ray.
+
+With CPU refinement enabled, hierarchy protection uses an orthogonal kernel of the
+complete achieved prefix and a machine-relative rank threshold. A coarse task
+acceptance tolerance must not discard a weak direction already achieved by an
+earlier task. Redundant rows do not consume extra directions. Lower tasks
+preserve the actual accepted prefix image, including its existing numerical
+residual; this does not assert that the earlier solution had zero error.
+
+Independently of refinement, zero-row objective matrices return `EMPTY_PROBLEM`.
+A zero-valued Jacobian with a positive row count remains a valid zero-rank task.
+
+For eligible CPU legacy commands whose damped partial result is not on its reported
+ray, explicit refinement may construct a new ray-consistent feasible seed from
+the task-entry images. Its constructed witness must satisfy all original
+hard rows and preserve earlier achieved task images. Valid ray incumbents require a certified larger scale
+to be replaced. An off-ray result, including one reported as full scale, may
+be replaced by any verified positive ray: its reported scale is not a feasible
+lower bound. Failed repair retains the existing result and does not prove
+infeasibility. If a tiny numerical search direction has no detectable blocking
+row, refinement can retain a strictly revalidated positive checkpoint instead
+of discarding progress. That checkpoint does not certify optimality. The
+ordinary default-off path is unchanged.
+
 The internal GPU `WarpBoundRelease` adapter has the same constructor option.
 Its refinement requires a feasible, ray-consistent moving seed; full-scale,
 non-ray and invalid-input worlds retain their existing handling. A rounded
@@ -326,7 +364,10 @@ scale; the option does not promise optimum scale for every input. This is an
 experimental optimization option: active-set refinement can cost substantially
 more than the ordinary moving-world exit. Measure it on the intended batch
 before enabling it in a control loop. It is not an automatic free-space or
-contact recovery policy.
+contact recovery policy. A numerical no-blocker exit in its optimization phase
+can retain positive progress only after stricter ray and bound revalidation.
+Its feasibility phase still rejects uncertified candidates; CUDA graph replay
+uses the same acceptance rules.
 
 Final native constraint validation applies even when task scales sum to zero
 or include the `MIN_ERROR` sentinel of `-1`. These values do not certify hard
@@ -364,7 +405,31 @@ tasks. A checkpoint must satisfy every original hard row and preserve each
 SCALE affine ray and each earlier MIN_ERROR task's completed image before it
 can seed recovery of a trailing MIN_ERROR suffix. Recovery retains those
 images and scales rather than demoting the directional tasks. Nonfinite or
-changed prefix images do not qualify; the legacy velocity path is unchanged.
+changed prefix images do not qualify. With `refine_partial_scale=True`, legacy
+velocity execution also permits recovery of an explicitly MIN_ERROR suffix.
+The checkpoint must satisfy the original hard rows, and its primary SCALE
+image must satisfy the original directional ray. Recovery protects actual
+achieved prefix images, including legacy lower SCALE projected preferences,
+and optimizes every trailing MIN_ERROR objective in priority order under the
+same constraints. It does not demote SCALE tasks, omit trailing objectives, or
+enable policy fallback. Protected-image and hard-row validation also applies
+when the original numerical loop reports success. This suffix policy leaves
+unrefined legacy execution unchanged.
+
+In a mixed hierarchy, an intermediate `MIN_ERROR` saturation trial can violate
+hard rows even though its entry command is feasible. Before a later task runs,
+one constrained minimum-error solve can repair that stage under the original
+hard bounds and all previously committed task images. Successful damped stages
+retain their existing result. The repair preserves task modes and fallback
+permissions, clears trial saturation pins, and rechecks protected images before
+publishing any later command. An invalid prefix or failed repair follows the
+existing numerical failure and recovery handling; it does not authorize an
+unentered lower task's fallback.
+All-`MIN_ERROR` problems and already protected trailing `MIN_ERROR` suffixes
+retain their existing whole-problem or suffix recovery. Relaxable rows do not
+enter this original-bound repair. The legacy final `iterations` field counts
+entered objectives; helper working-set iterations are separate diagnostics.
+
 In the generalized solver, explicit fallback also covers an unsatisfied SCALE
 equality whose trial scale remains positive, for example when part of the
 requested task lies outside the Jacobian's range. Only the objective with the
@@ -713,6 +778,36 @@ contact projection, and linear inequalities.
 
 ## Runtime policy (`SolverRuntimeConfig`)
 
+### Bounded recovery inside satisfied pose zones
+
+For fixed-base additive scalar models, enabling both
+`SolverRuntimeConfig.weighted_fallback_enabled` and
+`PositionStepOptions.per_target_priority_budgets` allows a rejected or unchanged
+Cartesian MIN_ERROR step to retry the first unsatisfied priority. Earlier tasks
+stay inside their position/orientation zones rather than imposing exact soft
+task images during the trial. Their task activity, modes and priorities are
+restored. Posture preferences do not prevent this trial from exploring a
+different realization. Strict Cartesian SCALE requests retain their mode.
+
+Use `TaskTarget.priority_position_tolerance` and
+`priority_orientation_tolerance` to declare zones. An unset protected block
+retains the existing implicit satisfaction budget (2 mm or 2 mrad), not an
+unbounded allowance. Separate numerical no-progress thresholds do not define
+these physical zones.
+
+The native retry remains bounded. With an explicit original collision-floor
+anchor, an unaccepted linear proposal may reach outer collision-curvature and
+pose-budget correction before acceptance. Every published position command
+still undergoes fresh anchored-floor validation, coupled configuration checks
+and finite pose-budget admission. Near an earlier pose-zone boundary, a
+single-step retry can also check bounded fractions of native proposals before
+adding further correction rows. Each fraction must improve the unsatisfied
+priority and satisfy the original hard velocity rows, including mandatory
+nonzero bounds, and nonlinear endpoint guards. This adds no new QP solves.
+Standalone velocity collision checks are unchanged. These retries do not support acceleration-history, contact or hard
+velocity centroidal execution. They are local recovery, not a complete planner:
+one useful command does not guarantee continued progress or target convergence.
+
 ### Experimental normalized pose recovery
 
 `normalized_pose_recovery_enabled` is an opt-in development policy, disabled
@@ -798,8 +893,28 @@ solver.configure_runtime(cfg)
 | `joint_limit_non_worsening_enabled` | off | Inside `joint_limit_non_worsening_margin`, prevents finite scalar joint-limit slack from decreasing while retaining inward and tangent motion |
 | `weighted_advisor_enabled` | off | Computes weighted candidate every step for diagnostics without changing authoritative output |
 
-Prioritized SNS remains authoritative on **success**. Fallback and layout switches happen at
+Prioritized SNS remains authoritative for accepted commands. Fallback and layout switches happen at
 **solve boundaries** — the solver does not silently rewrite your registered task list mid-tick.
+
+For CPU multi-target Cartesian `MIN_ERROR` requests, a successful linear
+backend can still produce a command rejected by finite pose or collision
+checks. With `weighted_fallback_enabled`, one bounded weighted retry can run
+from the incoming configuration after such rejection. It requires active
+non-posture tasks to be Cartesian `MIN_ERROR` tasks and actual commanded
+primary-error reduction. The retry retains the original endpoint guards,
+targets, joint limits, and caller permissions. It excludes acceleration-limited,
+contact, active velocity-centroidal execution, and intentional continuity holds.
+Finite priority-validation rejection is eligible even when it reports a hold;
+an intentional continuity hold remains protected. Failed attempts restore
+mutable recovery state.
+
+As with other weighted fallback, soft priority residuals may trade against each
+other; hard constraints remain authoritative. A weighted trial can seed finite
+correction rows whose final valid realization comes from the nominal backend.
+Admission uses validated status and actual task progress, without requiring a
+particular final backend label. `weighted_fallback_used` and recovery stage
+describe that final realization. Registered task modes are retained. Strict
+SCALE requests do not acquire a new implicit conversion.
 
 ### Auto task layout
 
@@ -956,8 +1071,8 @@ pose target and solve policy remain unchanged. Productive windows continue even 
 joint steps reverse direction, as can happen while an automatic layout or redundant whole-body
 solve makes useful net progress. A window that moves without enough merit reduction, or repeatedly
 reverses without strong net progress, activates a hold at the last accepted configuration. The
-minimum absolute benefit scales with the number of calls in the window, so a longer policy dwell
-cannot hide the same low-rate drift. Aggregate progress also cannot excuse repeatedly worsening
+progress requirement combines net merit reduction per accumulated configuration motion with
+absolute and numerical benefit floors. Aggregate progress also cannot excuse repeatedly worsening
 the currently worst commanded target. This prevents persistent null-space motion, target trading,
 and limit cycles after a far or constrained target has exhausted useful progress.
 
@@ -998,6 +1113,14 @@ Requiring machine-precision improvement of an already satisfied block would reje
 coupled motion with small nonlinear residuals. This permits recovery
 after active constraint rows change or measured state moves away from a limit. Historical
 oscillation alone does not veto this fresh progress; collision and priority checks still apply.
+
+Stationary commands use the same windowed nonlinear-progress requirement for
+both automatic pose-based identity and explicit source revisions. Small positive
+error reductions alone need not keep an inefficient stationary trajectory active;
+the existing bounded recovery can run when that window is unproductive. This
+changes the automatic policy's previous separate progress requirement. Command
+identity still determines when monitoring resets and whether the hold is reversible;
+no constraint, satisfaction tolerance or recovery budget is relaxed.
 
 When an adapter re-expresses one source command into changing world-frame poses, set
 `PositionStepOptions.continuity_command_revision` to a non-negative caller-owned revision. Keep
@@ -1154,6 +1277,22 @@ window. Numerical fallback modes, constraint feasibility, and collision safety
 remain separate decisions: a continuity state alone is not a safety certificate
 or proof that an unreachable command can be tracked.
 
+## Undamped projected tasks
+
+With zero singularity-robust damping (`regularization_factor=0` in the numerical
+configuration), both native hierarchical policies use an SVD inverse with a
+singular-value cutoff at the configured regularization epsilon. This preserves
+supported directions when a projected lower-priority task loses rank. A singular
+Gram matrix must not turn a feasible primary command into nonfinite output.
+The damped legacy inversion policy is unchanged.
+
+An undamped legacy solve with a feasible completed prefix and an exclusively
+MIN_ERROR suffix solves that suffix with the constrained quadratic solver.
+Each completed task image becomes an equality for the next task. A successful
+saturation loop alone is insufficient to establish the least-squares optimum
+when task rows are nearly dependent. Failure to optimize the suffix is reported
+as a numerical failure; it is not silently labeled an optimized result.
+
 ## Diagnostics worth logging
 
 `VelocitySolverResult` / `PositionIKResult` expose solver state for UI and tests:
@@ -1168,6 +1307,276 @@ or proof that an unreachable command can be tracked.
 | `stall_escape_count` | Jacobian escape nudges out of penetration |
 
 Use these in Viser panels and regression tests instead of guessing from motion alone.
+
+### Opt-in hierarchical problem snapshots
+
+For CPU velocity and position-step diagnosis, enable recording explicitly:
+
+```python
+solver.enable_problem_tracing(True)
+result = solver.solve_position_step(q, targets, options)
+trace = solver.get_last_problem_trace()
+for problem in trace.velocity_problems:
+    replay = embodik.replay_velocity_problem(problem)
+    # replay.solution is in backend coordinates. Convert to physical velocity:
+    dq = problem.backend_column_scale * replay.solution
+solver.enable_problem_tracing(False)
+```
+
+Recording is off by default. Each public request replaces the previous trace;
+position-step requests retain their nominal backend calls, including retries.
+The getter returns an owned snapshot. Disabling recording releases the retained
+trace. Recording copies matrices and configurations and is intended for
+diagnosis, not latency measurements with recording disabled.
+
+Each velocity problem contains the actual hierarchical goals, Jacobians,
+bounds, softening factors, objective policies, numerical configuration and
+backend variable mapping. `replay_velocity_problem()` runs that nominal
+hierarchical backend, preserving its policy and ordering. It does not replay
+later adapter recovery, contact projection, integration or collision acceptance.
+`backend_solution`/`backend_status` and `returned_velocity`/`returned_status`
+describe these different stages; a backend success is not a physical acceptance
+certificate. Constraint residuals must be interpreted in the recorded backend
+coordinates.
+
+`constraint_row_families` identifies the assembly source of each matrix row,
+such as `joint_velocity`, `joint_position`, `collision`, `com`,
+`priority_budget`, or `linear`. The labels follow matrix row order and remain
+unchanged by backend column scaling. They describe provenance, not permission
+to relax a constraint: a family may contain mandatory bounds or several
+configured policies. The initial joint velocity block can also incorporate
+locks, integration bounds and acceleration restrictions.
+
+For multi-target position stepping, `priority_candidates` records proposed
+configurations, per-task position/orientation merits, task names/priorities and
+the accepted backtracking fraction. The trace also records the final returned
+configuration, status and hold flag. Geometry snapshots and continuous swept
+collision validation remain separate from linear backend replay.
+
+`continuity_decisions` records each continuity guard's actual seed/candidate,
+merits, commanded blocks, prior window sample/reversal counts and whether it
+was already holding. Its `held` flag and `reason` identify the guard decision;
+later safety checks can still reject a candidate. These records diagnose
+stateful decisions and do not constitute a complete solver-state replay.
+
+`escape_candidates` records each return from the common physical escape validator,
+including calls inside rejected nested recovery attempts. It owns the actual
+step, escape and command origins, proposed displacement and integration horizon.
+`candidate_q` is present only when `candidate_constructed` is true, after
+integration and any joint-limit projection. `accepted` describes this validator
+only; later task-budget, merit or publication checks can still reject it.
+`first_rejection_family` is empty on acceptance; otherwise it identifies the
+first failed check: `invalid_context`, `nonfinite`, `coupled_position`, `locks`,
+`hard_rows`, `corridor`, `outer_rate_corridor`, `max_configuration_step_norm`,
+`collision` or `com`. Checks retain their original short-circuit order, so a
+record does not enumerate every violated constraint. `nominal_problem_count`
+is the number of nominal problems observed at entry, not a stable problem ID
+or a mapping to the candidate's originating solve. These records share the
+outer request's trace lifetime and survive speculative-state rollback.
+
+### Individual target merit budgets
+
+Same-priority targets retain aggregate position/orientation merit protection by
+default. For independent hand budgets in a multi-target CPU position step:
+
+```python
+options.per_target_priority_budgets = True
+right_target.priority_orientation_tolerance = 0.002  # radians
+left_target.priority_orientation_tolerance = 0.01
+result = solver.solve_position_step(q, [right_target, left_target], options)
+```
+
+Each explicitly configured positive position/orientation tolerance is protected
+independently, including targets without a lower-priority task. The solver adds
+local physical velocity rows and checks finite integrated candidates against
+each original target. An initially exceeded budget permits recovery without
+further worsening; it does not demand an instantaneous error correction.
+Numerical slack is attached to the configured budget rather than accumulated
+on successive calls. Masks and zero gains retain their commanded-block meaning.
+
+Budgets and the policy flag may change between calls without resetting targets.
+A smaller budget cannot make an infeasible direction achievable; a hold remains
+possible. These are local position-step protections, not global path planning,
+contact guarantees or an API for the separate `AccelerationSolver`.
+
+For fixed-base additive scalar joints without acceleration, contact or active
+velocity centroidal constraints, explicit budgets also enable bounded
+partial-SCALE refinement during the position step. This lets redundant joints
+support motion instead of accepting an unnecessarily small tangent-row scale.
+The caller's runtime refinement setting is restored afterward.
+
+Executable physical-ray recovery uses the same explicit zones. Its merit
+checks measure error outside each supplied budget, while unbudgeted blocks
+retain their existing protection. A valid bounded ray is not shortened merely
+because finite curvature changes an error inside a permitted zone. The
+position-step nonlinear checks and original physical constraints still apply.
+
+For ordinary velocity position steps, `primary_allow_min_error_fallback=True`
+also permits one guarded MIN_ERROR retry when final validation rejects a
+nominal command and leaves a hold or rejects it for collision clearance. This
+also applies if nominal backend diagnostics already report MIN_ERROR: an
+explicit primary-mode retry rebuilds the complete adapter, including its
+mode-dependent recovery. It runs only when the incoming command state has not
+advanced. The retry uses the original targets and all command guards; it must
+produce nonzero validated motion to replace the rejected command. Its effective mode and fallback diagnostics identify the
+accepted alternative. This permission does not establish that no global SCALE
+solution exists. Disabling the permission preserves the requested-mode path;
+the separate weighted fallback runtime policy remains an independent control.
+This additional final-rejection retry is not enabled for acceleration-limited
+execution.
+
+`PositionStepOptions.allow_best_effort_posture_retry=True` independently permits
+one transactional recovery trial after a stalled or rejected ordinary velocity command
+which has not advanced the input state. A zero-motion SUCCESS with a collapsed
+valid SCALE objective also qualifies; a MIN_ERROR `-1` sentinel does not. Only
+active posture-only priority bands
+strictly below every commanded target may temporarily use MIN_ERROR. Primary
+MIN_ERROR fallback is suppressed during this trial; the caller's permissions
+are restored afterward. Mixed
+bands, commanded targets, locks and physical constraints retain their contract.
+A successful trial must produce nonzero validated motion. Requested posture
+modes are restored, effective modes/fallback diagnostics identify the accepted
+trial, and rejected trials restore mutable solver state. The default is false;
+acceleration-limited, contact and active velocity-centroidal execution are
+excluded. This permission does not prove global feasibility or convergence.
+Rejected numerical, infeasible, or collision results can retain nonzero
+diagnostic configurations. They have not executed motion: with this permission,
+the retry starts from the original incoming configuration. Accepted moving
+partial commands retain their existing behavior and do not trigger this retry.
+
+When finite kinematic curvature exceeds an explicit budget, physical norm
+gradients form local corrective inequality rows. Position and orientation
+derivatives retain fractional masks and physical columns excluded only from
+soft tasks. Orientation uses the SO(3) log-map differential; disposable central
+FK differences remain available at its branch or for an unsupported derivative.
+Correction attempts share the
+existing eight-retry budget. These rows do not relax the original
+budget or other constraints; every proposal still passes the original nonlinear
+endpoint guard. Temporary rows are restored before returning. Unsupported
+configurations retain the existing interval-backoff behavior.
+
+After repeated misses, individual finite pose-budget correction rows also
+reserve five percent of the configured tolerance in the late half of the
+existing retry budget. This reserve tightens only temporary correction rows; it does not
+inflate the accepted pose zone or alter the original target. Final forward
+kinematics must still satisfy the original budget. The bounded retry count is
+unchanged, and temporary rows are restored after the position step. This can
+avoid repeated boundary misses when a lower posture objective moves through
+noncommuting rotations; it is not a guarantee of recovery in every nonlinear
+configuration.
+
+If a rejected retry does not add a correction, its interval or terminal fraction
+contracts by at least half. Repeating a near-one backtracking fraction cannot
+consume the budget on essentially unchanged proposals. A hold remains possible
+when no candidate passes the unchanged final acceptance checks. These local
+corrections do not certify a continuous swept path.
+
+### Native coupled configuration bounds (CPU)
+
+For fixed-base models containing only additive scalar joints, configure a
+position polytope independently of static velocity rows:
+
+```python
+# Example: constrain the sum and difference of two joint coordinates.
+C = np.array([[1.0, 1.0], [1.0, -1.0]])  # Use nq columns for your model.
+solver.set_linear_position_constraints(C, np.full(2, -0.5), np.full(2, 0.5))
+```
+
+This enforces `lower <= C @ q <= upper`. Each native velocity subproblem
+rebuilds the rows from its current configuration and actual integration
+horizon, including position-step inner iterations, adaptive intervals and
+priority retries. The single-target and multi-target `solve_position_step()`
+paths independently check returned configurations after integration and final
+adapters. Caller-defined linear velocity rows remain separate and unchanged.
+
+An outside seed is not projected or reset: each violated facet permits inward
+or tangential motion without increasing its violation. This policy preserves
+the seed's existing violation until a feasible inward task makes progress; it
+does not guarantee recovery from arbitrary conflicting constraints. For this
+additive configuration space the polytope is convex, so linear interpolation
+between feasible accepted configurations remains inside it. This is not a
+collision swept-path certificate.
+
+Use `get_linear_position_constraint_rows()` to inspect the configured row
+count, and `clear_linear_position_constraints()` to remove them. Inputs are
+copied; invalid shapes, nonfinite coefficients/bounds and inverted bounds are
+rejected. Floating-base and nonscalar configuration manifolds are unsupported.
+Acceleration-limited or contact-projected execution fails explicitly, including
+when enabled after configuring the rows. The separate acceleration solver's
+velocity-collision lift also rejects a provider carrying these rows until their
+stopping feasibility is supported. This API does not establish GPU parity.
+
+### Explicit original collision-floor anchors
+
+These anchors currently support velocity position steps only. The separate
+`AccelerationSolver.solve_with_velocity_collision()` adapter explicitly rejects
+an anchored provider: sampled endpoint clearance does not establish stopping
+feasibility. A rejected acceleration result supplies no executable substitute
+command and must not be interpreted as an instantaneous physical stop.
+
+On fixed-base additive scalar models without acceleration, contacts or active
+velocity centroidal hard constraints, an anchored position step can make up to
+four local correction retries when a finite candidate violates a floor. Rows
+rebuilt at the rejected candidate are recentered at the original command state
+and the original hierarchy is solved again. This can use redundant motion when
+an instantaneous tangent command curves through a clearance boundary. It does
+not lower the floor or replace the final nonlinear checks. Temporary rows and
+runtime settings are restored, and unsuccessful speculative state is discarded.
+The single-target and multi-target position-step APIs share this mechanism.
+Multi-target pose-budget retries repeat the collision correction at their actual
+integration interval and recheck the finite pose budgets afterward. Budget
+refinement can use the remaining attempts within the existing eight-attempt
+retry limit; it does not stop learning curvature after three rejected proposals.
+
+Before changing a strict SCALE objective at an anchored collision boundary,
+the solver tries to satisfy the collision rows in that task's nullspace.
+A colliding minimum-norm realization alone does not prove the Cartesian task
+needs modification. This preliminary trial covers collision rows; the backend
+still enforces every physical row and joint bound on the actual command.
+
+These remain bounded local methods; failure can still produce a rejection,
+and accepted endpoints do not establish continuous swept collision safety.
+
+For velocity-only position stepping, callers may retain the original clearance
+of every configured geometry pair:
+
+```python
+solver.set_collision_trajectory_floor_anchor(q_initial, tolerance=1e-9)
+# Change targets and call solve_position_step() normally.
+# Explicitly end or replace the original-floor contract when appropriate:
+solver.clear_collision_trajectory_floor_anchor()
+```
+
+For each named pair the fixed floor is `min(distance(q_initial), minimum_distance)`.
+It persists across calls and target changes. The configured tolerance is applied
+once to this fixed floor; it is not accumulated per command. The anchor overrides
+ordinary nominal/structural recovery targets, disables implicit stall-handler
+margin relaxation, and remains fixed if nominal margins change. Clear or replace
+the anchor explicitly to select a new contract. Pair-distance queries expose the
+anchored floor in `persistent_floor_m` while it is active.
+
+Fresh pair-distance queries use disposable cold GJK state with a tolerance of
+at most `1e-12`, avoiding query-history-dependent distances at an unchanged
+configuration. Live collision caches remain untouched. This is a numerical
+endpoint check; it is not an exact-distance or swept-path certificate.
+While the anchor is active, internal row construction, candidate backoffs and
+sampled distance checks use the same precise cold query. Distance requests for
+ordinary internal collision solving keep their existing settings. Establishing
+an anchor invalidates prior coarse distance bounds and cached candidate subsets.
+
+Near-floor pairs remain mandatory constraint rows even beyond the nominal row
+budget. Existing bounded backoffs and final fresh all-pair queries check actual
+integrated states. Sample validation uses the anchored floor without adding its
+legacy numerical allowance. A changed pair catalog returns `INVALID_INPUT` until
+the anchor is cleared or replaced. An outside-floor measured seed or rejected
+final candidate returns `COLLISION_VIOLATED`, retaining the input configuration;
+this failure is not a certified executable stop or a tracking success.
+
+This is opt-in. It does not certify a continuous swept path, prevent all holds,
+or guarantee that an endpoint is reachable. Acceleration-limited execution is
+explicitly rejected while an anchor is active: its physical stopping contract
+requires separate qualification. The separate `AccelerationSolver` and GPU
+solvers do not acquire this capability through the CPU API.
 
 ## Batch and parallel workloads
 

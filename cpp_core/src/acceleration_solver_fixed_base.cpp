@@ -1,4 +1,7 @@
 #include "acceleration_solver_internal.hpp"
+#include "acceleration_affine_state_constraint.hpp"
+
+#include <iterator>
 
 namespace embodik {
 using namespace acceleration_solver_internal;
@@ -10,22 +13,51 @@ AccelerationSolver::solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
   // Sampled curvature corrections may need more than four contractions to
   // satisfy the unchanged nonlinear tolerance. Successful candidates still
   // return immediately; keep a finite budget for nonconvergent local models.
-  return solve_impl(q, dq, dt, options, 8);
+  // Tangent refinements can converge linearly at a feasible nonlinear
+  // boundary. Keep the original feasible set and final acceptance checks;
+  // allow one more bounded correction rather than tightening that boundary.
+  return solve_impl(q, dq, dt, options, 9);
+}
+
+AccelerationSolverResult AccelerationSolver::validate_candidate(
+    const Eigen::VectorXd &q, const Eigen::VectorXd &dq, double dt,
+    const Eigen::VectorXd &ddq, const AccelerationSolveOptions &options) {
+  return solve_impl(q, dq, dt, options, 0, &ddq);
 }
 
 AccelerationSolverResult AccelerationSolver::solve_impl(
     const Eigen::VectorXd &q, const Eigen::VectorXd &dq, double dt,
-    const AccelerationSolveOptions &options, int refinement_budget) {
+    const AccelerationSolveOptions &options, int refinement_budget,
+    const Eigen::VectorXd *candidate, bool *local_hard_feasibility_failed) {
+  if (local_hard_feasibility_failed) *local_hard_feasibility_failed = false;
   const auto start = std::chrono::steady_clock::now();
   auto backend_start = start;
   auto backend_end = start;
   bool backend_completed = false;
+  std::optional<AccelerationLinearProblemTrace> linear_problem;
   bool elastic_prepared = false;
   bool elastic_active = false;
+  bool candidate_admission_started = false;
   AccelerationSolveOptions effective_options = options;
   const auto finish = [this, &start, &backend_start, &backend_end,
                        &backend_completed, &elastic_prepared, &elastic_active,
-                       &effective_options](AccelerationSolverResult result) {
+                       &effective_options, &linear_problem, candidate,
+                       &candidate_admission_started](AccelerationSolverResult result) {
+    if (candidate) {
+      result.final_error = std::numeric_limits<double>::quiet_NaN();
+      result.condition_number = std::numeric_limits<double>::quiet_NaN();
+    }
+    if (candidate && candidate_admission_started &&
+        result.status != SolverStatus::kSuccess) {
+      // Failure of one prescribed command is not a certificate about the
+      // original hard set. Preserve specific malformed-input/collision statuses.
+      if (result.status == SolverStatus::kNumericalError ||
+          result.status == SolverStatus::kInfeasible)
+        result.status = SolverStatus::kNoProgress;
+      result.status_message = "prescribed acceleration rejected: " + result.status_message;
+    }
+    if (linear_problem)
+      result.linear_problems.insert(result.linear_problems.begin(), std::move(*linear_problem));
     const auto end = std::chrono::steady_clock::now();
     result.computation_time_ms =
         std::chrono::duration<double, std::milli>(end - start).count();
@@ -65,6 +97,30 @@ AccelerationSolverResult AccelerationSolver::solve_impl(
   if (dt <= 0.0) {
     return finish(failure(SolverStatus::kInvalidInput, "dt must be positive"));
   }
+  if (candidate) {
+    if (candidate->size() != robot_->nv())
+      return finish(failure(SolverStatus::kShapeMismatch,
+                            "candidate acceleration must match robot nv"));
+    if (!candidate->allFinite())
+      return finish(failure(SolverStatus::kNonFiniteInput,
+                            "candidate acceleration must be finite"));
+    if (!std::isfinite(options.elastic_delta_max) || options.elastic_delta_max < 0.0 ||
+        !std::isfinite(options.elastic_expand_rate) || options.elastic_expand_rate < 0.0 ||
+        !std::isfinite(options.elastic_decay_rate) || options.elastic_decay_rate < 0.0 ||
+        options.elastic_decay_rate > 1.0)
+      return finish(failure(SolverStatus::kInvalidInput,
+                            "invalid elastic band parameters"));
+    if (options.nominal_position_lower_bounds ||
+        options.nominal_position_upper_bounds ||
+        options.generalized_acceleration_allocation ||
+        !elastic_band_delta_.isZero(0.0) ||
+        !elastic_capacity_lower_.isZero(0.0) ||
+        !elastic_capacity_upper_.isZero(0.0))
+      return finish(failure(
+          SolverStatus::kInvalidInput,
+          "candidate validation does not support nominal envelopes, allocation, "
+          "or nonzero elastic history"));
+  }
 
   SolverStatus limit_status = SolverStatus::kSuccess;
   std::string limit_message;
@@ -89,14 +145,16 @@ AccelerationSolverResult AccelerationSolver::solve_impl(
         std::string("acceleration kinematics update failed: ") + error.what()));
   }
 
-  std::string elastic_message;
-  const SolverStatus elastic_status =
-      prepare_elastic_bounds(q, dq, accel_limits, options, &effective_options,
-                             &elastic_active, &elastic_message);
-  if (elastic_status != SolverStatus::kSuccess) {
-    return finish(failure(elastic_status, elastic_message));
+  if (!candidate) {
+    std::string elastic_message;
+    const SolverStatus elastic_status =
+        prepare_elastic_bounds(q, dq, accel_limits, options, &effective_options,
+                               &elastic_active, &elastic_message);
+    if (elastic_status != SolverStatus::kSuccess) {
+      return finish(failure(elastic_status, elastic_message));
+    }
+    elastic_prepared = true;
   }
-  elastic_prepared = true;
   const auto state_box = build_joint_state_box(*robot_, q, dq, dt, accel_limits,
                                                effective_options);
   if (state_box.status != SolverStatus::kSuccess) {
@@ -167,12 +225,22 @@ AccelerationSolverResult AccelerationSolver::solve_impl(
     effort_constraint = std::move(prepared_effort);
   }
 
+  std::vector<detail::PreparedAffineStateConstraint> affine_state_constraints;
+  for (const auto &constraint : options.affine_state_constraints) {
+    auto prepared = detail::prepare_affine_state_constraint(
+        constraint, *robot_, q, dq, dt, state_box.lower, state_box.upper);
+    if (!prepared.satisfied())
+      return finish(clear_outputs(failure(prepared.status, prepared.message)));
+    effective_options.affine_constraints.push_back(
+        prepared.prepared->scalar.state_box.physical_constraint);
+    affine_state_constraints.push_back(std::move(*prepared.prepared));
+  }
   std::unordered_set<std::string> constraint_source_ids;
   ConstraintValidation constraint_validation;
-  if (!options.affine_constraints.empty() ||
+  if (!effective_options.affine_constraints.empty() ||
       !options.frozen_next_velocity_constraints.empty()) {
     constraint_validation = validate_acceleration_constraints(
-        options.affine_constraints, options.frozen_next_velocity_constraints,
+        effective_options.affine_constraints, options.frozen_next_velocity_constraints,
         robot_->nv(), &constraint_source_ids);
   }
   if (constraint_validation.status != SolverStatus::kSuccess) {
@@ -348,7 +416,7 @@ AccelerationSolverResult AccelerationSolver::solve_impl(
     return finish(failure(zmp_constraints.status, zmp_constraints.message));
   }
   const bool state_box_task_fallback_applied =
-      options.allow_state_box_task_fallback &&
+      !candidate && options.allow_state_box_task_fallback &&
       zero_excluded_by_bounds(state_box.lower, state_box.upper);
   if (state_box_task_fallback_applied) {
     for (auto &config : objectives.configs) {
@@ -405,10 +473,10 @@ AccelerationSolverResult AccelerationSolver::solve_impl(
     return finish(failure(SolverStatus::kNumericalError,
                           "failed to assemble effort constraints"));
   }
-  if (!options.affine_constraints.empty() &&
+  if (!effective_options.affine_constraints.empty() &&
       !constraints->append_block(make_affine_constraint_block(
-          options.affine_constraints, robot_->nv(),
-          count_constraint_rows(options.affine_constraints)))) {
+          effective_options.affine_constraints, robot_->nv(),
+          count_constraint_rows(effective_options.affine_constraints)))) {
     return finish(failure(
         SolverStatus::kNumericalError,
         "failed to assemble affine acceleration constraints"));
@@ -587,15 +655,110 @@ AccelerationSolverResult AccelerationSolver::solve_impl(
       !allocation.has_value() && state_box_only;
   auto backend_config = acceleration_backend_config();
   backend_config.refine_partial_scale = options.refine_partial_scale;
+  if (!candidate && options.record_linear_problems) {
+    linear_problem.emplace();
+    auto &trace = *linear_problem;
+    trace.q = q;
+    trace.dq = dq;
+    trace.dt = dt;
+    trace.refinement_budget_remaining = refinement_budget;
+    trace.objective_targets = *backend_targets;
+    trace.objective_biases = *backend_biases;
+    trace.objective_matrices = *backend_matrices;
+    trace.objective_configs = objectives.configs;
+    trace.constraint_matrix = *backend_constraint_matrix;
+    trace.lower_bounds = *backend_lower_bounds;
+    trace.upper_bounds = *backend_upper_bounds;
+    trace.solver_config = backend_config;
+    trace.objective_equality_tolerance = kConstraintTolerance;
+    trace.constraint_rows_pre_normalized = prevalidated_state_box_only;
+    trace.hard_constraints_prevalidated_feasible = prevalidated_state_box_only;
+    trace.allow_best_effort_lower_tasks = options.allow_best_effort_lower_tasks;
+    trace.prefer_direct_min_error_qp = options.prefer_direct_min_error_qp;
+    trace.allocation_applied = allocation.has_value();
+    auto rows = [&](Eigen::Index count, const std::string &source) {
+      trace.constraint_row_sources.insert(trace.constraint_row_sources.end(), count, source);
+    };
+    auto affine_rows = [&](const auto &blocks) {
+      for (const auto &block : blocks) rows(block.coefficient_matrix.rows(), block.source_id);
+    };
+    rows(robot_->nv(), "joint_state_box");
+    rows(native_collision_prepared.physical_constraint.coefficient_matrix.rows(), "native_collision");
+    rows(effort_constraint.has_value() ? robot_->nv() : 0, "effort");
+    affine_rows(effective_options.affine_constraints);
+    affine_rows(frozen_transform.transformed_constraints);
+    rows(lock_rows.coefficients.rows(), "joint_locks");
+    affine_rows(task_bound_constraints);
+    affine_rows(centroidal_bounds.constraints);
+    affine_rows(contact_constraints.constraints);
+    affine_rows(tight_point_constraints.constraints);
+    affine_rows(tight_frame_pose_constraints.constraints);
+    affine_rows(torso_pose_bound_constraints.constraints);
+    affine_rows(relative_pose_constraints.constraints);
+    affine_rows(com_support_polygon_constraints.constraints);
+    affine_rows(capture_point_constraints.constraints);
+    affine_rows(zmp_constraints.constraints);
+  }
   backend_start = std::chrono::steady_clock::now();
-  auto backend = detail::SolveGeneralizedHierarchicalLinearSystemEigen(
-      *backend_targets, *backend_biases, *backend_matrices,
-      *backend_constraint_matrix, *backend_lower_bounds, *backend_upper_bounds,
-      backend_config, objectives.configs, nullptr,
-      kConstraintTolerance, prevalidated_state_box_only,
-      prevalidated_state_box_only, options.allow_best_effort_lower_tasks,
-      options.prefer_direct_min_error_qp);
+  SolverResult backend;
+  LinearSolveDiagnostics local_feasibility_diagnostics;
+  auto *backend_diagnostics =
+      linear_problem ? &linear_problem->diagnostics
+                     : local_hard_feasibility_failed
+                           ? &local_feasibility_diagnostics
+                           : nullptr;
+  if (candidate) {
+    candidate_admission_started = true;
+    // Match the backend's normalized certificate without changing ddq. Raw
+    // physical tolerances belong to the shared family validators below;
+    // imposing one absolute tolerance here would change their units contract.
+    const auto &matrix = *backend_constraint_matrix;
+    const auto &lower = *backend_lower_bounds;
+    const auto &upper = *backend_upper_bounds;
+    Eigen::MatrixXd normalized;
+    Eigen::VectorXd normalized_lower, normalized_upper;
+    detail::NormalizeLinearConstraintRows(
+        matrix, lower, upper, &normalized, &normalized_lower, &normalized_upper);
+    for (Eigen::Index row = 0; row < lower.size(); ++row) {
+      if ((std::isfinite(lower(row)) && !std::isfinite(normalized_lower(row))) ||
+          (std::isfinite(upper(row)) && !std::isfinite(normalized_upper(row))))
+        return finish(failure(SolverStatus::kNoProgress,
+                              "candidate hard-row normalization overflowed"));
+    }
+    const Eigen::VectorXd image = matrix * *candidate;
+    const Eigen::VectorXd normalized_image = normalized * *candidate;
+    if (!image.allFinite() || !normalized.allFinite() ||
+        !normalized_image.allFinite() ||
+        normalized_lower.array().isNaN().any() ||
+        normalized_upper.array().isNaN().any() ||
+        detail::ComputeMaxLinearConstraintViolation(
+            normalized, normalized_lower, normalized_upper, *candidate) >
+            backend_config.epsilon)
+      return finish(failure(SolverStatus::kNoProgress,
+                            "prescribed acceleration violates hard rows"));
+    backend.status = SolverStatus::kSuccess;
+    backend.status_message =
+        "prescribed acceleration validated; no command optimization";
+    assign_solution_from_vector(&backend, *candidate);
+  } else {
+    backend = detail::SolveGeneralizedHierarchicalLinearSystemEigen(
+        *backend_targets, *backend_biases, *backend_matrices,
+        *backend_constraint_matrix, *backend_lower_bounds, *backend_upper_bounds,
+        backend_config, objectives.configs, nullptr,
+        kConstraintTolerance, prevalidated_state_box_only,
+        prevalidated_state_box_only, options.allow_best_effort_lower_tasks,
+        options.prefer_direct_min_error_qp,
+        backend_diagnostics);
+  }
+  if (local_hard_feasibility_failed && backend_diagnostics &&
+      backend.status != SolverStatus::kSuccess &&
+      (backend_diagnostics->phase_one_status == "unknown" ||
+       backend_diagnostics->phase_one_status == "proven_infeasible")) {
+    *local_hard_feasibility_failed = true;
+  }
+  if (linear_problem) linear_problem->backend_result = backend;
   backend_end = std::chrono::steady_clock::now();
+  if (candidate) backend_start = backend_end;
   backend_completed = true;
 
   AccelerationSolverResult result;
@@ -647,16 +810,37 @@ AccelerationSolverResult AccelerationSolver::solve_impl(
   // Certify every unallocated correction against the original raw backend
   // vector, including arithmetic-sized box residuals. Canonicalizing first
   // would hide the achieved-image change from this certificate.
-  if (!allocation.has_value()) {
+  if (!candidate && !allocation.has_value()) {
     const Eigen::MatrixXd &physical_matrix =
         state_box_only ? state_box_matrix : constraints->coefficient_matrix();
     const Eigen::VectorXd &physical_lower =
         state_box_only ? state_box.lower : constraints->lower_bounds();
     const Eigen::VectorXd &physical_upper =
         state_box_only ? state_box.upper : constraints->upper_bounds();
+    // Exact coordinate equalities are singleton acceleration bounds too.
+    // Canonicalize only arithmetic-sized residuals using the existing full
+    // hard-row/task-image certificate; never infer sparsity with a tolerance.
+    Eigen::VectorXd polish_lower = state_box.lower;
+    Eigen::VectorXd polish_upper = state_box.upper;
+    for (Eigen::Index row = 0; row < physical_matrix.rows(); ++row) {
+      if (!std::isfinite(physical_lower(row)) ||
+          physical_lower(row) != physical_upper(row)) continue;
+      Eigen::Index coordinate = -1;
+      for (Eigen::Index column = 0; column < physical_matrix.cols(); ++column) {
+        if (physical_matrix(row, column) == 0.0) continue;
+        if (coordinate >= 0) { coordinate = -1; break; }
+        coordinate = column;
+      }
+      if (coordinate < 0) continue;
+      const double value = physical_lower(row) / physical_matrix(row, coordinate);
+      if (!std::isfinite(value) ||
+          (value == 0.0 && physical_lower(row) != 0.0)) continue;
+      polish_lower(coordinate) = std::max(polish_lower(coordinate), value);
+      polish_upper(coordinate) = std::min(polish_upper(coordinate), value);
+    }
     bool polished = false;
     if (!detail::polish_state_box_acceleration(
-            state_box.lower, state_box.upper, physical_matrix, physical_lower,
+            polish_lower, polish_upper, physical_matrix, physical_lower,
             physical_upper, objectives.matrices, kConstraintTolerance,
             backend_config.epsilon, kConstraintTolerance,
             &result.joint_accelerations, &polished)) {
@@ -671,7 +855,7 @@ AccelerationSolverResult AccelerationSolver::solve_impl(
       }
       result.status_message += "physical acceleration box numerically polished";
     }
-  } else {
+  } else if (!candidate) {
     // Allocation retains its existing arithmetic-only postprocessing.
     for (Eigen::Index index = 0; index < robot_->nv(); ++index) {
       result.joint_accelerations(index) =
@@ -706,9 +890,9 @@ AccelerationSolverResult AccelerationSolver::solve_impl(
         SolverStatus::kNumericalError,
         "accepted acceleration violates native collision constraints"));
   }
-  if (!options.affine_constraints.empty() &&
+  if (!effective_options.affine_constraints.empty() &&
       !accepted_affine_constraints_are_satisfied(
-          options.affine_constraints, result.joint_accelerations)) {
+          effective_options.affine_constraints, result.joint_accelerations)) {
     return finish(clear_outputs(failure(
         SolverStatus::kNumericalError,
         "accepted acceleration violates an affine acceleration constraint")));
@@ -859,6 +1043,7 @@ AccelerationSolverResult AccelerationSolver::solve_impl(
         "accepted acceleration produced non-finite next state"));
   }
   const bool has_predicted_geometric_acceptance =
+      !affine_state_constraints.empty() ||
       !tight_point_constraints.prepared_constraints.empty() ||
       !tight_frame_pose_constraints.prepared_constraints.empty() ||
       !torso_pose_bound_constraints.prepared_constraints.empty() ||
@@ -882,18 +1067,58 @@ AccelerationSolverResult AccelerationSolver::solve_impl(
   }
   auto retry_nonlinear_refinement = [&](AffineAccelerationConstraint refinement,
                                         const std::string &source_prefix,
-                                        const std::string &label) {
+                                        const std::string &label,
+                                        std::optional<detail::FixedFramePoseTrustRows>
+                                            frame_trust_rows = std::nullopt) {
     auto refined_options = options;
     refinement.source_id = source_prefix;
     while (constraint_source_ids.count(refinement.source_id) != 0U) {
       refinement.source_id += "_";
     }
+    const std::size_t owned_model_index = refined_options.affine_constraints.size();
     refined_options.affine_constraints.push_back(std::move(refinement));
     const auto retry_start = std::chrono::steady_clock::now();
-    auto refined = solve_impl(q, dq, dt, refined_options, refinement_budget - 1);
+    bool local_feasibility_failed = false;
+    const auto attempt = [&](int remaining_budget) {
+      auto retried = solve_impl(q, dq, dt, refined_options,
+                                remaining_budget - 1, nullptr,
+                                &local_feasibility_failed);
+      ++retried.nonlinear_refinement_iterations;
+      return retried;
+    };
+    auto refined = attempt(refinement_budget);
+    const int remaining_budget =
+        refinement_budget - refined.nonlinear_refinement_iterations;
+    if (frame_trust_rows && frame_trust_rows->count > 0 &&
+        local_feasibility_failed && refined.status != SolverStatus::kSuccess &&
+        refined.nonlinear_refinement_iterations == 1 &&
+        remaining_budget > 0) {
+      // Only this invocation owns these row indices and this appended block.
+      // Keep every local geometric cut and caller row, including matching IDs.
+      detail::remove_fixed_frame_pose_trust_rows(
+          &refined_options.affine_constraints[owned_model_index],
+          *frame_trust_rows);
+      auto previous_attempt = std::move(refined);
+      refined = attempt(remaining_budget);
+      refined.nonlinear_refinement_iterations +=
+          previous_attempt.nonlinear_refinement_iterations;
+      refined.preprocessing_time_ms += previous_attempt.preprocessing_time_ms;
+      refined.backend_computation_time_ms +=
+          previous_attempt.backend_computation_time_ms;
+      refined.postprocessing_time_ms += previous_attempt.postprocessing_time_ms;
+      refined.native_collision_pair_evaluations +=
+          previous_attempt.native_collision_pair_evaluations;
+      refined.linear_problems.insert(
+          refined.linear_problems.begin(),
+          std::make_move_iterator(previous_attempt.linear_problems.begin()),
+          std::make_move_iterator(previous_attempt.linear_problems.end()));
+    }
+    // Do not propagate a descendant's feasibility failure. Its geometric cuts
+    // belong to that deeper attempt and must never be lost by an ancestor retry.
     // Only the deepest finish() updates elasticity, once for the final result.
     // Re-preparation at unchanged q/dq and nominal bounds is idempotent.
-    ++refined.nonlinear_refinement_iterations;
+    if (linear_problem)
+      refined.linear_problems.insert(refined.linear_problems.begin(), std::move(*linear_problem));
     refined.computation_time_ms =
         std::chrono::duration<double, std::milli>(
             std::chrono::steady_clock::now() - start).count();
@@ -912,6 +1137,14 @@ AccelerationSolverResult AccelerationSolver::solve_impl(
     return refined;
   };
   if (has_predicted_geometric_acceptance) {
+    for (const auto &prepared : affine_state_constraints) {
+      const auto acceptance = detail::validate_affine_state_constraint_acceptance(
+          prepared, result.joint_accelerations, dt,
+          result.q_solution, result.joint_velocities_next,
+          predicted_state_box->lower, predicted_state_box->upper);
+      if (!acceptance.satisfied())
+        return finish(clear_outputs(failure(acceptance.status, acceptance.message)));
+    }
     for (const auto &prepared :
          tight_point_constraints.prepared_constraints) {
       const auto acceptance =
@@ -933,13 +1166,15 @@ AccelerationSolverResult AccelerationSolver::solve_impl(
         if (acceptance.violation &&
             acceptance.violation->time > 0.0 && refinement_budget > 0) {
           AffineAccelerationConstraint refinement;
+          detail::FixedFramePoseTrustRows owned_trust_rows;
           const auto linearized =
               detail::linearize_fixed_frame_pose_violations(
                   prepared, *robot_, q, dq, result.joint_accelerations,
-                  dt, *acceptance.violation, &refinement);
+                  dt, *acceptance.violation, &refinement, &owned_trust_rows);
           if (linearized.satisfied()) {
             return retry_nonlinear_refinement(
-                std::move(refinement), "__frame_pose_refinement", "frame pose");
+                std::move(refinement), "__frame_pose_refinement", "frame pose",
+                owned_trust_rows);
           }
         }
         return finish(clear_outputs(
@@ -975,6 +1210,20 @@ AccelerationSolverResult AccelerationSolver::solve_impl(
               prepared, *robot_, q, dq, result.joint_accelerations, dt,
               predicted_state_box->lower, predicted_state_box->upper);
       if (!acceptance.satisfied()) {
+        if (acceptance.predicted_boundary_outward_edge >= 0 &&
+            refinement_budget > 0) {
+          AffineAccelerationConstraint refinement;
+          const auto linearized =
+              detail::linearize_com_support_polygon_endpoint_rate(
+                  prepared, *robot_, q, dq, result.joint_accelerations, dt,
+                  acceptance.predicted_boundary_outward_edge, &refinement);
+          if (!linearized.satisfied()) {
+            return finish(clear_outputs(failure(
+                SolverStatus::kNumericalError, linearized.message)));
+          }
+          return retry_nonlinear_refinement(
+              std::move(refinement), "__com_endpoint_rate_refinement", "CoM");
+        }
         if (acceptance.path_acceleration_violation && refinement_budget > 0) {
           AffineAccelerationConstraint refinement;
           const auto linearized =
@@ -1072,6 +1321,12 @@ AccelerationSolverResult AccelerationSolver::solve_impl(
     }
   }
   attribute_saturation(&result, state_box, result.joint_accelerations);
+
+  // A feasibility check has no optimized task modes, scales, or fallbacks.
+  // Do not update the registered tasks' last-solve diagnostics either.
+  if (candidate) {
+    return finish(std::move(result));
+  }
 
   const auto objective_scales = result.task_scales;
   const auto objective_modes = result.task_modes_effective;

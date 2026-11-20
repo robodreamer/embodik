@@ -4,6 +4,84 @@ enable_testing()
 # Find GTest
 find_package(GTest REQUIRED)
 
+add_executable(test_collision_distance_query test_collision_distance_query.cpp)
+target_include_directories(test_collision_distance_query PRIVATE ${CMAKE_SOURCE_DIR}/cpp_core/src)
+target_link_libraries(test_collision_distance_query pinocchio::pinocchio GTest::gtest_main GTest::gtest)
+add_test(NAME test_collision_distance_query COMMAND test_collision_distance_query)
+
+add_executable(test_collision_acceleration_braking test_collision_acceleration_braking.cpp)
+target_include_directories(test_collision_acceleration_braking PRIVATE ${CMAKE_SOURCE_DIR}/cpp_core/src)
+target_link_libraries(test_collision_acceleration_braking GTest::gtest_main GTest::gtest)
+add_test(NAME test_collision_acceleration_braking COMMAND test_collision_acceleration_braking)
+
+add_executable(test_optimization_scaling test_optimization_scaling.cpp)
+target_link_libraries(test_optimization_scaling embodik_core GTest::gtest_main GTest::gtest)
+add_test(NAME test_optimization_scaling COMMAND test_optimization_scaling)
+
+add_executable(test_optimization_soft_bounds test_optimization_soft_bounds.cpp)
+target_link_libraries(test_optimization_soft_bounds embodik_core GTest::gtest_main GTest::gtest)
+add_test(NAME test_optimization_soft_bounds COMMAND test_optimization_soft_bounds)
+
+add_executable(test_bounded_interval test_bounded_interval.cpp)
+target_include_directories(test_bounded_interval PRIVATE ${CMAKE_SOURCE_DIR}/cpp_core/src)
+target_link_libraries(test_bounded_interval GTest::gtest_main GTest::gtest)
+add_test(NAME test_bounded_interval COMMAND test_bounded_interval)
+
+add_executable(test_phase_one_box_certificate test_phase_one_box_certificate.cpp)
+target_include_directories(test_phase_one_box_certificate PRIVATE ${CMAKE_SOURCE_DIR}/cpp_core/include)
+target_link_libraries(test_phase_one_box_certificate Eigen3::Eigen GTest::gtest_main GTest::gtest)
+add_test(NAME test_phase_one_box_certificate COMMAND test_phase_one_box_certificate)
+
+add_executable(test_interval_scalar_kinematics test_interval_scalar_kinematics.cpp)
+target_include_directories(test_interval_scalar_kinematics PRIVATE ${CMAKE_SOURCE_DIR}/cpp_core/src)
+target_link_libraries(test_interval_scalar_kinematics Eigen3::Eigen GTest::gtest_main GTest::gtest)
+add_test(NAME test_interval_scalar_kinematics COMMAND test_interval_scalar_kinematics)
+
+add_executable(test_interval_scalar_state_containment test_interval_scalar_state_containment.cpp)
+target_include_directories(test_interval_scalar_state_containment PRIVATE ${CMAKE_SOURCE_DIR}/cpp_core/src)
+target_link_libraries(test_interval_scalar_state_containment embodik_core GTest::gtest_main GTest::gtest)
+add_test(NAME test_interval_scalar_state_containment COMMAND test_interval_scalar_state_containment)
+
+add_executable(test_interval_com_containment test_interval_com_containment.cpp)
+target_include_directories(test_interval_com_containment PRIVATE ${CMAKE_SOURCE_DIR}/cpp_core/src)
+target_link_libraries(test_interval_com_containment embodik_core GTest::gtest_main GTest::gtest)
+add_test(NAME test_interval_com_containment COMMAND test_interval_com_containment)
+
+add_executable(test_interval_com_derivatives test_interval_com_derivatives.cpp)
+target_include_directories(test_interval_com_derivatives PRIVATE ${CMAKE_SOURCE_DIR}/cpp_core/src)
+target_link_libraries(test_interval_com_derivatives embodik_core GTest::gtest_main GTest::gtest)
+add_test(NAME test_interval_com_derivatives COMMAND test_interval_com_derivatives)
+
+add_executable(test_interval_protected_pose_containment test_interval_protected_pose_containment.cpp)
+target_include_directories(test_interval_protected_pose_containment PRIVATE ${CMAKE_SOURCE_DIR}/cpp_core/src)
+target_link_libraries(test_interval_protected_pose_containment embodik_core GTest::gtest_main GTest::gtest)
+add_test(NAME test_interval_protected_pose_containment COMMAND test_interval_protected_pose_containment)
+
+add_executable(test_interval_primitive_projection test_interval_primitive_projection.cpp)
+target_include_directories(test_interval_primitive_projection PRIVATE ${CMAKE_SOURCE_DIR}/cpp_core/src)
+target_link_libraries(test_interval_primitive_projection Eigen3::Eigen GTest::gtest_main GTest::gtest)
+add_test(NAME test_interval_primitive_projection COMMAND test_interval_primitive_projection)
+
+add_executable(test_interval_support_gap test_interval_support_gap.cpp)
+target_include_directories(test_interval_support_gap PRIVATE ${CMAKE_SOURCE_DIR}/cpp_core/src)
+target_link_libraries(test_interval_support_gap Eigen3::Eigen GTest::gtest_main GTest::gtest)
+add_test(NAME test_interval_support_gap COMMAND test_interval_support_gap)
+
+add_executable(test_interval_collision_catalog test_interval_collision_catalog.cpp)
+target_include_directories(test_interval_collision_catalog PRIVATE ${CMAKE_SOURCE_DIR}/cpp_core/src)
+target_link_libraries(test_interval_collision_catalog pinocchio::pinocchio GTest::gtest_main GTest::gtest)
+add_test(NAME test_interval_collision_catalog COMMAND test_interval_collision_catalog)
+
+add_executable(test_interval_proof test_interval_proof.cpp)
+target_include_directories(test_interval_proof PRIVATE ${CMAKE_SOURCE_DIR}/cpp_core/src)
+target_link_libraries(test_interval_proof GTest::gtest_main GTest::gtest)
+add_test(NAME test_interval_proof COMMAND test_interval_proof)
+
+add_executable(test_interval_collision_motion test_interval_collision_motion.cpp)
+target_include_directories(test_interval_collision_motion PRIVATE ${CMAKE_SOURCE_DIR}/cpp_core/src)
+target_link_libraries(test_interval_collision_motion pinocchio::pinocchio GTest::gtest_main GTest::gtest)
+add_test(NAME test_interval_collision_motion COMMAND test_interval_collision_motion)
+
 # Test executable
 add_executable(test_robot_model
     test_robot_model.cpp
@@ -50,6 +128,8 @@ add_executable(test_hierarchical_linear_solver
     test_velocity_hard_row_certification.cpp
     test_best_effort_lower_checkpoint.cpp
     test_projected_inverse_cache.cpp
+    test_least_squares_quadratic.cpp
+    test_numerical_band_trace.cpp
 )
 
 target_link_libraries(test_hierarchical_linear_solver
@@ -333,6 +413,7 @@ add_test(NAME test_acceleration_solver_velocity_collision_lift
 
 add_executable(test_acceleration_solver_tight_point
     test_acceleration_solver_tight_point.cpp
+    test_affine_state_acceptance.cpp
 )
 
 target_link_libraries(test_acceleration_solver_tight_point

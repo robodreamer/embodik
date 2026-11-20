@@ -181,6 +181,22 @@ struct GeometricConstraintAccelerationPolicy {
   Eigen::VectorXd upper_braking_accelerations = Eigen::VectorXd::Ones(3);
 };
 
+/** Affine coordinates y=C*q+b on fixed-base additive scalar joints.
+ *
+ * Position, rate and acceleration bounds use the shared state-envelope
+ * machinery. Braking magnitudes describe per-axis one-step viability, not a
+ * certificate of a complete jointly feasible stopping trajectory. Matrices
+ * are frozen for one call; no derivative of C is inferred.
+ */
+struct AffineStateConstraint {
+  std::string source_id;
+  Eigen::MatrixXd coefficient_matrix;
+  Eigen::VectorXd offset;
+  Eigen::VectorXd lower_bounds;
+  Eigen::VectorXd upper_bounds;
+  GeometricConstraintAccelerationPolicy policy;
+};
+
 enum class ComSupportPolygonOutsidePolicy {
   kReject,
   kRecoverNonWorsening,
@@ -339,6 +355,7 @@ struct AccelerationSolveOptions {
       generalized_acceleration_allocation;
   std::optional<EffortConstraintOptions> effort_constraints;
   std::vector<AffineAccelerationConstraint> affine_constraints;
+  std::vector<AffineStateConstraint> affine_state_constraints;
   std::vector<FrozenNextVelocityConstraint> frozen_next_velocity_constraints;
   std::vector<TaskAccelerationBounds> task_acceleration_bounds;
   std::vector<CentroidalMomentumRateObjective>
@@ -367,6 +384,13 @@ struct AccelerationSolveOptions {
   // hierarchy. Original scaling attempts and physical acceptance remain;
   // unsuccessful direct attempts return to the established search.
   bool prefer_direct_min_error_qp = false;
+  /// Copy backend problems for diagnostics; disabled by default. No policy change.
+  bool record_linear_problems = false;
+};
+
+enum class CollisionCandidateValidation {
+  kFrozenRows,
+  kPhysicalSamples,
 };
 
 /**
@@ -385,6 +409,11 @@ struct VelocityCollisionLiftOptions {
   double refinement_trust_radius = 0.5;
   /// Additional distance required by local models, never an acceptance tolerance.
   double refinement_clearance_reserve = 1e-6;
+  /// Prescribed commands only: omit internal construction rows, retaining all
+  /// caller constraints and sampled floors. Requires zero repulsion deadband
+  /// and initially satisfied floors at the existing sampled tolerance.
+  CollisionCandidateValidation candidate_validation =
+      CollisionCandidateValidation::kFrozenRows;
 };
 
 enum class CollisionConstraintOutsidePolicy {
@@ -506,7 +535,32 @@ struct AccelerationAnalyticCollisionPairDiagnostics {
   bool step_certified = false;
 };
 
+/// One exact backend call, before integration/nonlinear acceptance. Allocation
+/// may change backend coordinates; solution is not an executable physical ddq.
+struct AccelerationLinearProblemTrace {
+  Eigen::VectorXd q, dq;
+  double dt = 0.0;
+  int refinement_budget_remaining = 0;
+  std::vector<Eigen::VectorXd> objective_targets, objective_biases;
+  std::vector<Eigen::MatrixXd> objective_matrices;
+  std::vector<ObjectiveSolveConfig> objective_configs;
+  Eigen::MatrixXd constraint_matrix;
+  Eigen::VectorXd lower_bounds, upper_bounds;
+  std::vector<std::string> constraint_row_sources;
+  VelocitySolverConfig solver_config;
+  double objective_equality_tolerance = 0.0;
+  bool constraint_rows_pre_normalized = false;
+  bool hard_constraints_prevalidated_feasible = false;
+  bool allow_best_effort_lower_tasks = false;
+  bool prefer_direct_min_error_qp = false;
+  bool allocation_applied = false;
+  LinearSolveDiagnostics diagnostics;
+  SolverResult backend_result;
+};
+
 struct AccelerationSolverResult : public SolverResult {
+  /// Outer-to-inner backend invocations; empty unless explicitly requested.
+  std::vector<AccelerationLinearProblemTrace> linear_problems;
   /// C++ time before entering the hierarchical backend.
   double preprocessing_time_ms = 0.0;
   /// Time reported by the hierarchical backend itself.
@@ -687,6 +741,19 @@ public:
   solve(const Eigen::VectorXd &q, const Eigen::VectorXd &dq, double dt,
         const AccelerationSolveOptions &options = AccelerationSolveOptions{});
 
+  /** Validate a prescribed physical acceleration without command optimization.
+   * The candidate is never polished, refined, or replaced. Success supplies
+   * its integrated state and physical diagnostics, not task achievement or an
+   * optimum. Task diagnostics/scales and backend traces are empty. Geometric
+   * support checks can still require numerical feasibility searches.
+   * Nominal-position envelopes, allocation, and nonzero elastic history are
+   * initially unsupported. Validation does not update elastic history.
+   */
+  AccelerationSolverResult validate_candidate(
+      const Eigen::VectorXd &q, const Eigen::VectorXd &dq, double dt,
+      const Eigen::VectorXd &ddq,
+      const AccelerationSolveOptions &options = AccelerationSolveOptions{});
+
   /**
    * @brief Reuse a configured velocity solver's collision rows and pair policy.
    *
@@ -702,10 +769,29 @@ public:
       const VelocityCollisionLiftOptions &lift_options =
           VelocityCollisionLiftOptions{});
 
+  /// Same prescribed-command contract, retaining velocity collision rows by
+  /// default. kPhysicalSamples omits only internal construction rows; it checks
+  /// sampled geometry, not recovery-controller behavior or complete stopping.
+  /// Positive collision refinement budgets are rejected.
+  AccelerationSolverResult validate_candidate_with_velocity_collision(
+      KinematicsSolver &collision_solver, const Eigen::VectorXd &q,
+      const Eigen::VectorXd &dq, double dt, const Eigen::VectorXd &ddq,
+      const AccelerationSolveOptions &options = AccelerationSolveOptions{},
+      const VelocityCollisionLiftOptions &lift_options =
+          VelocityCollisionLiftOptions{});
+
 private:
   AccelerationSolverResult solve_impl(
       const Eigen::VectorXd &q, const Eigen::VectorXd &dq, double dt,
-      const AccelerationSolveOptions &options, int refinement_budget);
+      const AccelerationSolveOptions &options, int refinement_budget,
+      const Eigen::VectorXd *candidate = nullptr,
+      bool *local_hard_feasibility_failed = nullptr);
+  AccelerationSolverResult solve_with_velocity_collision_impl(
+      KinematicsSolver &collision_solver, const Eigen::VectorXd &q,
+      const Eigen::VectorXd &dq, double dt,
+      const AccelerationSolveOptions &options,
+      const VelocityCollisionLiftOptions &lift_options,
+      const Eigen::VectorXd *candidate);
   void ensure_unique_task_name(const std::string &name) const;
   SolverStatus
   prepare_elastic_bounds(const Eigen::VectorXd &q, const Eigen::VectorXd &dq,

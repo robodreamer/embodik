@@ -60,6 +60,7 @@ the application to `AccelerationSolver`.
 | `08_spot_full_body_ik_viser.py` | Unsupported | Uses a floating-base whole-body model and velocity-specific recovery policy. |
 | `09_spot_locomanip_mjviser.py` | Unsupported | Couples floating-base IK to wheel/locomotion policy and MuJoCo runtime state. |
 | `collision_hardening_demo.py` | Velocity-only | Demonstrates velocity position-step collision recovery and non-worsening-floor behavior. |
+| `control_optimization.py` | Not applicable | Demonstrates standalone bounded least squares and positive-definite QPs without a robot solver loop. |
 | `example_helpers/common_bimanual_teleop_app.py` | Velocity-only | Internal executable behind the bimanual example; it has the same velocity-specific policy dependencies. |
 | `floating_base_torso_hierarchy.py` | Unsupported | Its subject is floating-base hierarchy behavior. |
 | `gpu_collision_batch.py` | Not applicable | Benchmarks collision-distance queries, not an IK solver loop. |
@@ -81,6 +82,7 @@ bundle, but they are narrower benchmarks or API walkthroughs rather than the
 main demo path.
 
 - [`gpu_collision_batch.py`](gpu_collision_batch.md) — GPU batch collision detection benchmark
+- [`control_optimization.py`](../optimization.md) — Bounded actuator allocation, equality-constrained projection, and weighted affine fitting
 - [`robot_model_example.py`](robot_model_usage.md) — RobotModel API walkthrough (FK/Jacobians/CoM)
 - [`visualization_example.py`](visualization_examples.md) — Visualization and interactive marker usage
 

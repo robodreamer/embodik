@@ -488,6 +488,215 @@ TEST_F(AccelerationSolverComSupportPolygonTest,
       << acceptance.message;
   EXPECT_NE(acceptance.message.find("predicted support"), std::string::npos)
       << acceptance.message;
+  EXPECT_EQ(acceptance.predicted_boundary_outward_edge, -1);
+}
+
+// Fixed analytic fixture: J_x*a cancels at the incoming state, while the
+// complete nonlinear endpoint has an outward rate. No private robot data.
+Eigen::Vector2d endpoint_fixture_q() {
+  return {0.001, std::acos(-1.0) - 0.002};
+}
+
+ComSupportPolygonAccelerationConstraint endpoint_fixture_constraint(
+    double right_face_slack = 1e-9) {
+  const auto q = endpoint_fixture_q();
+  const double x = (2.0 / 3.0) * std::cos(q(0)) +
+                   (1.0 / 6.0) * std::cos(q.sum());
+  auto constraint = polygon_constraint(
+      "endpoint_rate", square(Eigen::Vector2d(x + right_face_slack - 1.0, 0.0), 1.0),
+      0.4, 3.0);
+  constraint.definition.margin = 0.0;
+  constraint.policy.braking_acceleration = 0.1;
+  return constraint;
+}
+
+TEST_F(AccelerationSolverComSupportPolygonTest,
+       NonlinearEndpointRateDerivativeAndAnchorPreserveOwner) {
+  constexpr double dt = 0.01;
+  const Eigen::VectorXd q = endpoint_fixture_q(), dq = vector({0.0, 0.0});
+  const Eigen::VectorXd a = vector({1.0, -5.0});
+  robot_->update_kinematics(q, dq);
+  const auto prepared = detail::prepare_com_support_polygon_constraint(
+      endpoint_fixture_constraint(), *robot_, dt,
+      Eigen::Vector2d::Constant(-15.0), Eigen::Vector2d::Constant(15.0));
+  ASSERT_TRUE(prepared.satisfied()) << prepared.message;
+  const auto &p = *prepared.prepared;
+  const auto acceptance = detail::validate_com_support_polygon_constraint_acceptance(
+      p, *robot_, q, dq, a, dt, Eigen::Vector2d::Constant(-15.0),
+      Eigen::Vector2d::Constant(15.0));
+  ASSERT_EQ(acceptance.predicted_boundary_outward_edge, 1) << acceptance.message;
+  EXPECT_FALSE(acceptance.path_acceleration_violation);
+  EXPECT_LT(p.current_values(1), 0.0);
+
+  const Eigen::Vector2d next_q = q + 0.5 * dt * dt * a;
+  const Eigen::Vector2d next_v = dt * a;
+  const double sum = next_q.sum();
+  Eigen::RowVector2d jacobian;
+  jacobian << -(2.0 / 3.0) * std::sin(next_q(0)) - (1.0 / 6.0) * std::sin(sum),
+              -(1.0 / 6.0) * std::sin(sum);
+  Eigen::Matrix2d hessian;
+  hessian << -(2.0 / 3.0) * std::cos(next_q(0)) - (1.0 / 6.0) * std::cos(sum),
+             -(1.0 / 6.0) * std::cos(sum),
+             -(1.0 / 6.0) * std::cos(sum), -(1.0 / 6.0) * std::cos(sum);
+  const double physical_rate = jacobian.dot(next_v);
+  ASSERT_GT(physical_rate, 1e-7);
+  const Eigen::RowVector2d derivative =
+      dt * jacobian + 0.5 * dt * dt * (hessian * next_v).transpose();
+  ASSERT_GT((derivative - dt * jacobian).norm(), 1e-8);
+  AffineAccelerationConstraint row;
+  ASSERT_TRUE(detail::linearize_com_support_polygon_endpoint_rate(
+      p, *robot_, q, dq, a, dt, 1, &row).satisfied());
+  ASSERT_EQ(row.coefficient_matrix.rows(), 1);
+  EXPECT_TRUE(row.coefficient_matrix.row(0).isApprox(derivative, 1e-6));
+  EXPECT_NEAR(row.coefficient_matrix.row(0).dot(a) + row.affine_bias(0),
+              physical_rate, 1e-16);
+  EXPECT_EQ(row.upper_bounds(0), 0.0);
+  ASSERT_EQ(row.lower_bound_active.size(), 1U);
+  EXPECT_FALSE(row.lower_bound_active[0]);
+  ASSERT_EQ(row.upper_bound_active.size(), 1U);
+  EXPECT_TRUE(row.upper_bound_active[0]);
+  for (const auto direction : {Eigen::Vector2d(0.6, 0.8),
+                                Eigen::Vector2d(-0.8, 0.6)}) {
+    EXPECT_NEAR(row.coefficient_matrix.row(0).dot(direction),
+                derivative.dot(direction), 1e-12);
+  }
+  EXPECT_TRUE(robot_->get_current_configuration().isApprox(q, 0.0));
+  EXPECT_TRUE(robot_->get_current_velocity().isApprox(dq, 0.0));
+  EXPECT_FALSE(detail::linearize_com_support_polygon_endpoint_rate(
+      p, *robot_, q, dq, a, dt, -1, &row).satisfied());
+  EXPECT_FALSE(detail::linearize_com_support_polygon_endpoint_rate(
+      p, *robot_, q, dq, a, dt, 1, nullptr).satisfied());
+  EXPECT_FALSE(detail::linearize_com_support_polygon_endpoint_rate(
+      p, *robot_, q, dq, vector({0.0, 0.0}), dt, 1, &row).satisfied());
+  auto band = p;
+  band.current_values(1) = 1e-9;
+  EXPECT_TRUE(detail::linearize_com_support_polygon_endpoint_rate(
+      band, *robot_, q, dq, a, dt, 1, &row).satisfied());
+  auto boundary = band;
+  boundary.current_values(1) = boundary.specification.policy.boundary_epsilon;
+  EXPECT_TRUE(detail::linearize_com_support_polygon_endpoint_rate(
+      boundary, *robot_, q, dq, a, dt, 1, &row).satisfied());
+  auto zero_epsilon = band;
+  zero_epsilon.specification.policy.boundary_epsilon = 0.0;
+  EXPECT_FALSE(detail::linearize_com_support_polygon_endpoint_rate(
+      zero_epsilon, *robot_, q, dq, a, dt, 1, &row).satisfied());
+  // Values beyond the existing epsilon band still use the outside policy,
+  // and must never be routed into this boundary-rate correction.
+  for (const auto policy : {ComSupportPolygonOutsidePolicy::kReject,
+                            ComSupportPolygonOutsidePolicy::kRecoverNonWorsening}) {
+    auto outside = band;
+    outside.specification.policy.outside_policy = policy;
+    outside.current_values(1) =
+        outside.specification.policy.boundary_epsilon + 1e-9;
+    EXPECT_FALSE(detail::linearize_com_support_polygon_endpoint_rate(
+        outside, *robot_, q, dq, a, dt, 1, &row).satisfied());
+  }
+  auto invalid = band;
+  invalid.specification.policy.boundary_epsilon = -1e-9;
+  EXPECT_FALSE(detail::linearize_com_support_polygon_endpoint_rate(
+      invalid, *robot_, q, dq, a, dt, 1, &row).satisfied());
+  invalid.specification.policy.boundary_epsilon =
+      std::numeric_limits<double>::quiet_NaN();
+  EXPECT_FALSE(detail::linearize_com_support_polygon_endpoint_rate(
+      invalid, *robot_, q, dq, a, dt, 1, &row).satisfied());
+  invalid = band;
+  invalid.current_values(1) = std::numeric_limits<double>::quiet_NaN();
+  EXPECT_FALSE(detail::linearize_com_support_polygon_endpoint_rate(
+      invalid, *robot_, q, dq, a, dt, 1, &row).satisfied());
+}
+
+TEST_F(AccelerationSolverComSupportPolygonTest,
+       EndpointRateRefinementRetainsEveryOriginalAcceptanceGuard) {
+  constexpr double dt = 0.01;
+  const Eigen::VectorXd q = endpoint_fixture_q(), dq = vector({0.0, 0.0});
+  const Eigen::VectorXd a = vector({1.0, -5.0});
+  robot_->update_kinematics(q, dq);
+  AccelerationSolveOptions options;
+  options.acceleration_limits_override = vector({15.0, 15.0});
+  options.com_support_polygon_constraints = {endpoint_fixture_constraint()};
+  options.record_linear_problems = true;
+  AccelerationSolver solver(robot_);
+  auto task = solver.add_posture_task("posture");
+  task->setSolveMode(TaskSolveMode::kMinError);
+  AccelerationTaskReference reference;
+  reference.proportional_gain = reference.derivative_gain = 0.0;
+  reference.desired_acceleration = a;
+  solver.set_task_reference("posture", reference);
+  // Prescribed validation has zero refinement budget and cannot change a.
+  const auto rejected = solver.validate_candidate(q, dq, dt, a, options);
+  ASSERT_EQ(rejected.status, SolverStatus::kNoProgress) << rejected.status_message;
+  EXPECT_NE(rejected.status_message.find("outward upper-bound rate"), std::string::npos);
+  EXPECT_EQ(rejected.nonlinear_refinement_iterations, 0);
+  expect_no_motion_outputs(rejected);
+
+  // solve() retains its shared budget of eight; this fixed regression must
+  // succeed within two corrections, independently of collision-lift budgets.
+  const auto corrected = solver.solve(q, dq, dt, options);
+  ASSERT_EQ(corrected.status, SolverStatus::kSuccess) << corrected.status_message;
+  EXPECT_GE(corrected.nonlinear_refinement_iterations, 1);
+  EXPECT_LE(corrected.nonlinear_refinement_iterations, 2);
+  EXPECT_EQ(corrected.linear_problems.size(),
+            static_cast<std::size_t>(corrected.nonlinear_refinement_iterations + 1));
+  const auto validated = solver.validate_candidate(
+      q, dq, dt, corrected.joint_accelerations, options);
+  ASSERT_EQ(validated.status, SolverStatus::kSuccess) << validated.status_message;
+  EXPECT_TRUE(validated.joint_accelerations.isApprox(corrected.joint_accelerations, 0.0));
+  EXPECT_TRUE(validated.q_solution.isApprox(corrected.q_solution, 0.0));
+  EXPECT_TRUE(robot_->get_current_configuration().isApprox(q, 0.0));
+  EXPECT_TRUE(robot_->get_current_velocity().isApprox(dq, 0.0));
+}
+
+TEST_F(AccelerationSolverComSupportPolygonTest,
+       EndpointRateRefinementIncludesCurrentPositiveEpsilonBand) {
+  constexpr double dt = 0.01;
+  const Eigen::VectorXd q = endpoint_fixture_q(), dq = vector({0.0, 0.0});
+  const Eigen::VectorXd a = vector({1.0, -5.0});
+  robot_->update_kinematics(q, dq);
+  const auto constraint = endpoint_fixture_constraint(-1e-9);
+  const auto prepared = detail::prepare_com_support_polygon_constraint(
+      constraint, *robot_, dt, Eigen::Vector2d::Constant(-15.0),
+      Eigen::Vector2d::Constant(15.0));
+  ASSERT_TRUE(prepared.satisfied()) << prepared.message;
+  ASSERT_GT(prepared.prepared->current_values(1), 0.0);
+  ASSERT_LT(prepared.prepared->current_values(1),
+            constraint.policy.boundary_epsilon);
+  const auto acceptance = detail::validate_com_support_polygon_constraint_acceptance(
+      *prepared.prepared, *robot_, q, dq, a, dt,
+      Eigen::Vector2d::Constant(-15.0), Eigen::Vector2d::Constant(15.0));
+  ASSERT_EQ(acceptance.predicted_boundary_outward_edge, 1) << acceptance.message;
+  EXPECT_FALSE(acceptance.path_acceleration_violation);
+
+  AccelerationSolveOptions options;
+  options.acceleration_limits_override = vector({15.0, 15.0});
+  options.com_support_polygon_constraints = {constraint};
+  options.record_linear_problems = true;
+  AccelerationSolver solver(robot_);
+  auto task = solver.add_posture_task("posture");
+  task->setSolveMode(TaskSolveMode::kMinError);
+  AccelerationTaskReference reference;
+  reference.proportional_gain = reference.derivative_gain = 0.0;
+  reference.desired_acceleration = a;
+  solver.set_task_reference("posture", reference);
+  const auto rejected = solver.validate_candidate(q, dq, dt, a, options);
+  ASSERT_EQ(rejected.status, SolverStatus::kNoProgress) << rejected.status_message;
+  EXPECT_NE(rejected.status_message.find("outward upper-bound rate"), std::string::npos);
+  EXPECT_EQ(rejected.nonlinear_refinement_iterations, 0);
+  expect_no_motion_outputs(rejected);
+
+  const auto corrected = solver.solve(q, dq, dt, options);
+  ASSERT_EQ(corrected.status, SolverStatus::kSuccess) << corrected.status_message;
+  EXPECT_GE(corrected.nonlinear_refinement_iterations, 1);
+  EXPECT_LE(corrected.nonlinear_refinement_iterations, 2);
+  EXPECT_EQ(corrected.linear_problems.size(),
+            static_cast<std::size_t>(corrected.nonlinear_refinement_iterations + 1));
+  const auto validated = solver.validate_candidate(
+      q, dq, dt, corrected.joint_accelerations, options);
+  ASSERT_EQ(validated.status, SolverStatus::kSuccess) << validated.status_message;
+  EXPECT_TRUE(validated.joint_accelerations.isApprox(corrected.joint_accelerations, 0.0));
+  EXPECT_TRUE(validated.q_solution.isApprox(corrected.q_solution, 0.0));
+  EXPECT_TRUE(validated.joint_velocities_next.isApprox(corrected.joint_velocities_next, 0.0));
+  EXPECT_TRUE(robot_->get_current_configuration().isApprox(q, 0.0));
+  EXPECT_TRUE(robot_->get_current_velocity().isApprox(dq, 0.0));
 }
 
 TEST_F(AccelerationSolverComSupportPolygonTest,

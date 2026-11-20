@@ -711,6 +711,22 @@ public:
    */
   double get_collision_min_distance() const;
 
+  /** Anchor each configured pair to min(distance(q), configured minimum).
+   * Floors persist across targets and commands until explicitly cleared or
+   * replaced. Position-step publication checks every anchored pair freshly.
+   * This opt-in policy suppresses implicit collision-margin relaxation.
+   * Acceleration-limited execution requires a separate stopping contract and
+   * is rejected while an anchor is active. */
+  void set_collision_trajectory_floor_anchor(const Eigen::VectorXd &q,
+                                             double tolerance = 1e-9);
+  void clear_collision_trajectory_floor_anchor();
+  bool has_collision_trajectory_floor_anchor() const {
+    return !collision_trajectory_floors_.empty();
+  }
+  double get_collision_trajectory_floor_tolerance() const {
+    return collision_trajectory_floor_tolerance_;
+  }
+
   /**
    * @brief Disable collision avoidance constraints.
    *
@@ -751,8 +767,9 @@ public:
   get_collision_pair_min_distance_overrides() const;
 
   // ---- Tunable collision boundary behaviour --------------------------------
-  /** Width (metres) of the no-braking zone above min_distance.  Default 3 mm.
-   *  Set to 0 to eliminate the discontinuity that causes boundary oscillation. */
+  /** Width (metres) of the explicit no-approach band above the effective
+   *  collision target. Default 0; the construction reserve still limits
+   *  approach near the boundary. Violated clearances retain recovery. */
   void   set_collision_repulsion_deadband(double metres) { collision_repulsion_deadband_ = std::max(0.0, metres); }
   double get_collision_repulsion_deadband() const        { return collision_repulsion_deadband_; }
 
@@ -777,6 +794,23 @@ public:
     }
   }
   bool   get_non_worsening_collision_floor_enabled() const      { return non_worsening_collision_floor_enabled_; }
+
+  /**
+   * @brief Initialize existing recovery floors from one startup configuration.
+   *
+   * For every currently allowed and runtime-active collision pair, stores
+   * min(signed distance at q_start, configured global or active pair minimum).
+   * Requires enabled collision avoidance, enabled non-worsening recovery, and
+   * an empty recovery-floor map. Trajectory anchors and pending pair overrides
+   * are unsupported. Invalid inputs or distance-query failures leave floors
+   * unchanged. Preserves robot q/dq, nominal margins and acceleration policy.
+   *
+   * Call before the first collision solve. This does not change native floating
+   * point acceptance tolerances or certify a continuous collision-free path.
+   * Later explicit policy/catalog changes can clear or change recovery floors;
+   * callers that require a fixed startup contract must freeze that context.
+   */
+  void initialize_collision_recovery_floors(const Eigen::VectorXd &q_start);
 
   /** Minimum penetration-prevention clearance (metres) for pairs first observed
    *  below min_distance. Default 5 mm. */
@@ -1126,6 +1160,17 @@ public:
    */
   void clear_linear_velocity_constraints();
 
+  /** Configure lower <= C*q <= upper on fixed-base additive scalar joints.
+   * Rows are rebuilt from the current q and actual integration horizon.
+   * Outside seeds may move inward or tangentially, never farther outside.
+   * Acceleration-limited and contact-projected execution are not supported.
+   */
+  void set_linear_position_constraints(const Eigen::MatrixXd &C,
+                                       const Eigen::VectorXd &lower_bounds,
+                                       const Eigen::VectorXd &upper_bounds);
+  void clear_linear_position_constraints();
+  int get_linear_position_constraint_rows() const;
+
   /**
    * @brief Number of active user-defined linear velocity constraints.
    */
@@ -1260,6 +1305,16 @@ public:
    */
   std::optional<std::vector<CollisionPairDistance>>
   evaluate_collision_pair_distances(const Eigen::VectorXd &q);
+
+  /**
+   * @brief Live clearance metadata for all allowed active collision pairs.
+   *
+   * Preserves pair order and floor semantics of evaluate_collision_pair_distances,
+   * without FK, distance queries, floor initialization or solver-state mutation.
+   * This does not validate geometry or certify collision safety. Returns nullopt
+   * when geometry, enabled policy, or active pairs are absent.
+   */
+  std::optional<std::vector<CollisionPairFloor>> get_collision_pair_floors() const;
 
   /**
    * @brief Evaluate the scalar collision distance used by post-step safety
@@ -1444,6 +1499,21 @@ private:
     Eigen::VectorXd upper;
   };
   PositionStepHardConstraints *position_step_hard_constraints_ = nullptr;
+  bool problem_tracing_enabled_ = false;
+  SolverProblemTrace last_problem_trace_;
+  void record_position_step_trace(const PositionIKResult &result);
+  bool refine_position_step_collision_candidate(
+      const Eigen::VectorXd &seed, double horizon, Eigen::VectorXd &candidate,
+      VelocitySolverResult &velocity,
+      const std::function<VelocitySolverResult()> &solve_trial,
+      const std::function<Eigen::VectorXd(VelocitySolverResult &)> &integrate_trial);
+
+  PositionIKResult solve_position_step_impl(
+      const Eigen::VectorXd &current_q, const Eigen::Matrix4d &target_pose,
+      const std::string &frame_task_name, const PositionStepOptions &options);
+  PositionIKResult solve_position_step_impl(
+      const Eigen::VectorXd &current_q, const std::vector<TaskTarget> &targets,
+      const PositionStepOptions &options);
   /// Immutable outer-command corridor, independent of movable diagnostic captures.
   /// Scalar configuration coordinates use the existing nv-to-nq mapping.
   struct PositionStepSeedCorridor {
@@ -1495,6 +1565,10 @@ private:
   bool pending_position_step_acceleration_limits_ = false;
   /// Guards against recursive MIN_ERROR step retry in solve_position_step.
   bool suppress_min_error_step_retry_ = false;
+  bool suppress_best_effort_posture_retry_ = false;
+  /// One bounded weighted retry after a finite MIN_ERROR command is rejected.
+  bool position_step_weighted_retry_active_ = false;
+  std::optional<int> position_step_weighted_retry_priority_;
   /// Guards against recursive preferred-lock candidate retry in solve_position_step.
   bool suppress_preferred_lock_step_retry_ = false;
   struct PositionStepTargetSignature {
@@ -1623,6 +1697,11 @@ private:
       const PositionStepOptions &options, double outer_dt,
       Eigen::VectorXd &q_candidate);
 
+  std::optional<PositionIKResult> attempt_best_effort_posture_position_step_retry(
+      const Eigen::VectorXd &entry_q, const PositionStepOptions &options,
+      double step_dt, int maximum_target_priority, const PositionIKResult &failed,
+      const std::function<PositionIKResult(const PositionStepOptions &)> &rerun_step);
+
   std::optional<PositionIKResult> attempt_min_error_position_step_retry(
       const Eigen::VectorXd &entry_q, const PositionStepOptions &options,
       double step_dt, bool have_vel_result,
@@ -1630,7 +1709,8 @@ private:
       const Eigen::VectorXd &q_after_primary,
       const std::function<bool(std::vector<std::pair<Task *, TaskSolveMode>> *)>
           &flip_primary_tasks,
-      const std::function<PositionIKResult()> &rerun_step);
+      const std::function<PositionIKResult()> &rerun_step,
+      bool rejected_execution = false);
 
   PositionIKResult solve_position_step_with_preferred_lock(
       const Eigen::VectorXd &current_q, const Eigen::Matrix4d &target_pose,
@@ -1868,6 +1948,7 @@ private:
     double position_tolerance = -1.0;
     double orientation_tolerance = -1.0;
     double step_dt = 0.0;
+    bool physical_velocity_budget = false;
   };
 
   struct TightFramePoseConstraintConfig {
@@ -1886,6 +1967,11 @@ private:
   };
 
   std::optional<LinearVelocityConstraintConfig> linear_velocity_constraints_;
+  std::optional<LinearVelocityConstraintConfig> linear_position_constraints_;
+  bool linear_position_execution_supported() const;
+  bool linear_position_step_acceptable(const Eigen::VectorXd &before,
+                                       const Eigen::VectorXd &after) const;
+
   /// One-shot protected-task viability request from solve_position_step. The
   /// concrete rows are built in solve_velocity after masks, contact projection,
   /// and the current kinematics are known.
@@ -1923,6 +2009,16 @@ private:
   bool non_worsening_collision_floor_enabled_ = false;  // opt-in (changes recovery semantics)
   double collision_structural_floor_ = 0.005;  // 5 mm penetration-prevention floor
   std::unordered_map<std::string, double> collision_pair_distance_floor_;
+  CollisionPairFloor collision_pair_floor_snapshot(
+      const std::string &geometry_a, const std::string &geometry_b) const;
+  std::unordered_map<std::string, double> collision_trajectory_floors_;
+  double collision_trajectory_floor_tolerance_ = 1e-9;
+  double trajectory_recovery_target(const std::string &pair_key,
+                                    double legacy_target) const;
+  bool collision_trajectory_catalog_matches() const;
+  bool collision_trajectory_state_acceptable(const Eigen::VectorXd &q);
+  bool check_collision_trajectory_step(const Eigen::VectorXd &seed,
+                                       PositionIKResult &result);
   // Frozen (locked/excluded) velocity DOFs used when the lazy-reuse cache was
   // built; lazy reuse is invalidated when the current frozen set differs, since
   // it changes which collision pairs are controllable / selectable.
@@ -2009,7 +2105,8 @@ private:
 
   std::optional<CollisionConstraintResult> compute_collision_constraint();
   std::optional<CollisionConstraintResult>
-  compute_collision_constraint(double row_dt, bool require_current_catalog = false);
+  compute_collision_constraint(double row_dt, bool require_current_catalog = false,
+                               bool velocity_command_timing = true);
   struct CollisionRecoveryDistances {
     double effective_min_distance = 0.0;
     double recovery_target = 0.0;
@@ -2160,6 +2257,13 @@ private:
 
 public:
   // ========== Position IK Methods ==========
+
+  /// Opt-in diagnostic snapshots; disabling also releases retained traces.
+  void enable_problem_tracing(bool enabled = true) {
+    problem_tracing_enabled_ = enabled;
+    last_problem_trace_ = {};
+  }
+  SolverProblemTrace get_last_problem_trace() const { return last_problem_trace_; }
 
   /**
    * @brief Basic position IK solver

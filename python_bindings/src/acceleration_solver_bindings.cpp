@@ -12,6 +12,7 @@
 
 #include <embodik/acceleration_solver.hpp>
 #include <embodik/kinematics_solver.hpp>
+#include <embodik/ik_baseline.hpp>
 #include <embodik/robot_model.hpp>
 #include <embodik/tasks.hpp>
 
@@ -229,6 +230,16 @@ void bind_acceleration_solver(nb::module_ &m) {
       DEF_VALUE_PROP(GeometricConstraintAccelerationPolicy,
                      upper_braking_accelerations);
 
+  nb::class_<AffineStateConstraint>(m, "AffineStateConstraint",
+      "Affine y=Cq+b state envelope for fixed-base additive scalar joints.")
+      .def(nb::init<>())
+      .def_rw("source_id", &AffineStateConstraint::source_id)
+      DEF_VALUE_PROP(AffineStateConstraint, coefficient_matrix)
+      DEF_VALUE_PROP(AffineStateConstraint, offset)
+      DEF_VALUE_PROP(AffineStateConstraint, lower_bounds)
+      DEF_VALUE_PROP(AffineStateConstraint, upper_bounds)
+      DEF_VALUE_PROP(AffineStateConstraint, policy);
+
   nb::class_<ComSupportPolygonAccelerationPolicy>(
       m, "ComSupportPolygonAccelerationPolicy")
       .def(nb::init<>())
@@ -362,6 +373,7 @@ void bind_acceleration_solver(nb::module_ &m) {
               "Opt in to bounded refinement of feasible partial SCALE "
               "commands, preserving earlier task images and hard bounds. "
               "An improved primary scale can change lower task errors.")
+      .def_rw("record_linear_problems", &AccelerationSolveOptions::record_linear_problems)
       .def_rw("prefer_direct_min_error_qp",
               &AccelerationSolveOptions::prefer_direct_min_error_qp,
               "Prefer a feasible-primal quadratic solve for an all-MIN_ERROR "
@@ -387,6 +399,7 @@ void bind_acceleration_solver(nb::module_ &m) {
             self.effort_constraints = std::move(value);
           })
       DEF_VALUE_PROP(AccelerationSolveOptions, affine_constraints)
+      DEF_VALUE_PROP(AccelerationSolveOptions, affine_state_constraints)
       DEF_VALUE_PROP(AccelerationSolveOptions, frozen_next_velocity_constraints)
       DEF_VALUE_PROP(AccelerationSolveOptions, task_acceleration_bounds)
       DEF_VALUE_PROP(AccelerationSolveOptions, centroidal_momentum_rate_objectives)
@@ -406,11 +419,17 @@ void bind_acceleration_solver(nb::module_ &m) {
       .def_rw("fixed_current_position_joint_indices",
               &AccelerationSolveOptions::fixed_current_position_joint_indices);
 
+  nb::enum_<CollisionCandidateValidation>(m, "CollisionCandidateValidation")
+      .value("FROZEN_ROWS", CollisionCandidateValidation::kFrozenRows)
+      .value("PHYSICAL_SAMPLES", CollisionCandidateValidation::kPhysicalSamples);
+
   nb::class_<VelocityCollisionLiftOptions>(
       m, "VelocityCollisionLiftOptions")
       .def(nb::init<>())
       .def_rw("validation_substeps",
               &VelocityCollisionLiftOptions::validation_substeps)
+      .def_rw("candidate_validation",
+              &VelocityCollisionLiftOptions::candidate_validation)
       .def_rw("max_refinement_iterations",
               &VelocityCollisionLiftOptions::max_refinement_iterations)
       .def_rw("refinement_trust_radius",
@@ -601,8 +620,50 @@ void bind_acceleration_solver(nb::module_ &m) {
       .def_ro("step_certified",
               &AccelerationAnalyticCollisionPairDiagnostics::step_certified);
 
+  nb::class_<LinearSolveDiagnostics>(m, "LinearSolveDiagnostics")
+      .def_ro("phase_one_status", &LinearSolveDiagnostics::phase_one_status)
+      .def_ro("phase_one_witness", &LinearSolveDiagnostics::phase_one_witness)
+      .def_ro("direct_min_error_attempted", &LinearSolveDiagnostics::direct_min_error_attempted)
+      .def_ro("direct_min_error_succeeded", &LinearSolveDiagnostics::direct_min_error_succeeded)
+      .def_ro("direct_min_error_message", &LinearSolveDiagnostics::direct_min_error_message)
+      .def_ro("termination_reason", &LinearSolveDiagnostics::termination_reason);
+
+  nb::class_<AccelerationLinearProblemTrace>(m, "AccelerationLinearProblemTrace")
+      .def_ro("q", &AccelerationLinearProblemTrace::q)
+      .def_ro("dq", &AccelerationLinearProblemTrace::dq)
+      .def_ro("dt", &AccelerationLinearProblemTrace::dt)
+      .def_ro("refinement_budget_remaining", &AccelerationLinearProblemTrace::refinement_budget_remaining)
+      .def_ro("objective_targets", &AccelerationLinearProblemTrace::objective_targets)
+      .def_ro("objective_biases", &AccelerationLinearProblemTrace::objective_biases)
+      .def_ro("objective_matrices", &AccelerationLinearProblemTrace::objective_matrices)
+      .def_ro("objective_configs", &AccelerationLinearProblemTrace::objective_configs)
+      .def_ro("constraint_matrix", &AccelerationLinearProblemTrace::constraint_matrix)
+      .def_ro("lower_bounds", &AccelerationLinearProblemTrace::lower_bounds)
+      .def_ro("upper_bounds", &AccelerationLinearProblemTrace::upper_bounds)
+      .def_ro("constraint_row_sources", &AccelerationLinearProblemTrace::constraint_row_sources)
+      .def_ro("solver_config", &AccelerationLinearProblemTrace::solver_config)
+      .def_ro("objective_equality_tolerance", &AccelerationLinearProblemTrace::objective_equality_tolerance)
+      .def_ro("constraint_rows_pre_normalized", &AccelerationLinearProblemTrace::constraint_rows_pre_normalized)
+      .def_ro("hard_constraints_prevalidated_feasible", &AccelerationLinearProblemTrace::hard_constraints_prevalidated_feasible)
+      .def_ro("allow_best_effort_lower_tasks", &AccelerationLinearProblemTrace::allow_best_effort_lower_tasks)
+      .def_ro("prefer_direct_min_error_qp", &AccelerationLinearProblemTrace::prefer_direct_min_error_qp)
+      .def_ro("allocation_applied", &AccelerationLinearProblemTrace::allocation_applied)
+      .def_ro("diagnostics", &AccelerationLinearProblemTrace::diagnostics)
+      .def_ro("backend_result", &AccelerationLinearProblemTrace::backend_result);
+
+  m.def("replay_acceleration_linear_problem", [](const AccelerationLinearProblemTrace &trace) {
+    return detail::SolveGeneralizedHierarchicalLinearSystemEigen(
+        trace.objective_targets, trace.objective_biases, trace.objective_matrices,
+        trace.constraint_matrix, trace.lower_bounds, trace.upper_bounds,
+        trace.solver_config, trace.objective_configs, nullptr,
+        trace.objective_equality_tolerance, trace.constraint_rows_pre_normalized,
+        trace.hard_constraints_prevalidated_feasible,
+        trace.allow_best_effort_lower_tasks, trace.prefer_direct_min_error_qp);
+  }, nb::arg("trace"), "Replay the recorded backend only; no state integration or geometric acceptance.");
+
   nb::class_<AccelerationSolverResult, SolverResult>(
       m, "AccelerationSolverResult")
+      .def_ro("linear_problems", &AccelerationSolverResult::linear_problems)
       .def_ro("preprocessing_time_ms",
               &AccelerationSolverResult::preprocessing_time_ms)
       .def_ro("backend_computation_time_ms",
@@ -840,12 +901,30 @@ void bind_acceleration_solver(nb::module_ &m) {
       .def("solve", &AccelerationSolver::solve, nb::arg("q"), nb::arg("dq"),
            nb::arg("dt"),
            nb::arg("options") = AccelerationSolveOptions{})
+      .def("validate_candidate", &AccelerationSolver::validate_candidate,
+           nb::arg("q"), nb::arg("dq"), nb::arg("dt"), nb::arg("ddq"),
+           nb::arg("options") = AccelerationSolveOptions{},
+           "Validate an unchanged physical ddq without command optimization. "
+           "Success reports feasibility and integrated state, not task achievement. "
+           "Nominal envelopes, allocation and nonzero elastic history are unsupported; "
+           "elastic history is unchanged. Geometric support may require feasibility searches.")
       .def("solve_with_velocity_collision",
            &AccelerationSolver::solve_with_velocity_collision,
            nb::arg("collision_solver"), nb::arg("q"), nb::arg("dq"),
            nb::arg("dt"),
            nb::arg("options") = AccelerationSolveOptions{},
-           nb::arg("lift_options") = VelocityCollisionLiftOptions{});
+           nb::arg("lift_options") = VelocityCollisionLiftOptions{})
+      .def("validate_candidate_with_velocity_collision",
+           &AccelerationSolver::validate_candidate_with_velocity_collision,
+           nb::arg("collision_solver"), nb::arg("q"), nb::arg("dq"),
+           nb::arg("dt"), nb::arg("ddq"),
+           nb::arg("options") = AccelerationSolveOptions{},
+           nb::arg("lift_options") = VelocityCollisionLiftOptions{},
+           "Validate an unchanged ddq with sampled checks and, by default, frozen "
+           "collision rows. PHYSICAL_SAMPLES omits only internal construction rows "
+           "for initially satisfied floors and zero repulsion deadband. "
+           "Collision refinement budget must be zero. "
+           "This does not certify continuous collision safety or complete stopping.");
 }
 
 #undef DEF_VALUE_PROP

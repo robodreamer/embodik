@@ -261,6 +261,8 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
         get_collision_min_distance() > 0.0 ? get_collision_min_distance() : 0.0;
     enable_stall_handler(nominal);
   }
+  if (problem_tracing_enabled_ && position_step_call_depth_ == 0)
+    last_problem_trace_ = {};
   const bool timing = timing_breakdown_enabled_;
   auto get_elapsed_ms = [](auto start) {
     return std::chrono::duration_cast<std::chrono::microseconds>(
@@ -289,6 +291,14 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
     }
   } clear_pending_locks{this};
   (void)clear_pending_locks;
+  if (has_collision_trajectory_floor_anchor() &&
+      (acceleration_limits_enabled_ || !collision_trajectory_catalog_matches())) {
+    result.status = SolverStatus::kInvalidInput;
+    result.status_message = "trajectory anchor requires a matching collision catalog and velocity-only execution";
+    result.joint_velocities = Eigen::VectorXd::Zero(robot_->nv());
+    result.solution.assign(robot_->nv(), 0.0);
+    return result;
+  }
   // Timing fields default to 0.0; only populate when timing is enabled.
   const Eigen::VectorXd q_eval =
       (current_q.size() > 0) ? current_q : robot_->get_current_configuration();
@@ -307,6 +317,13 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
     result.joint_velocities = Eigen::VectorXd::Zero(robot_->nv());
     result.limits_applied = apply_limits;
     last_solution_dq_norm_ = 0.0;
+    return result;
+  }
+  if (!linear_position_execution_supported()) {
+    result.status = SolverStatus::kInvalidInput;
+    result.status_message = "linear position constraints do not certify acceleration or contact execution";
+    result.joint_velocities = Eigen::VectorXd::Zero(robot_->nv());
+    result.solution.assign(static_cast<std::size_t>(robot_->nv()), 0.0);
     return result;
   }
   const Eigen::VectorXd *explicit_current_dq = active_explicit_current_dq();
@@ -759,9 +776,12 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
   bool collision_projection_applied = false;
   if (apply_limits && collision_constraint_result.has_value()) {
     const auto &coll = collision_constraint_result.value();
-    // Strict SCALE always projects at an active boundary. SCALE_ELASTIC keeps
-    // its normal elastic tradeoff unless contact recovery requires a positive
-    // separating velocity; projecting it earlier stalls useful tangent motion.
+    // Strict SCALE may project at an active boundary. Original-floor execution
+    // first tries to satisfy these rows in the task nullspace, preserving the
+    // Cartesian objective when the minimum-norm realization alone was blocked.
+    // The backend still enforces all joint and other physical rows.
+    // SCALE_ELASTIC keeps its normal tradeoff unless contact recovery requires
+    // positive separating velocity; earlier projection stalls tangent motion.
     const std::size_t collision_row_count = std::min(
         last_collision_debug_list_.size(),
         static_cast<std::size_t>(coll.lower_bounds.size()));
@@ -786,7 +806,10 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
         project_objectives_into_constraint_tangent_space(
             goals, jacobians, project_collision_tangent_objective,
             coll.jacobian, coll.lower_bounds, constraint_tolerance_,
-            {}, 0.0, false,
+            has_collision_trajectory_floor_anchor()
+                ? std::vector<bool>(coll.lower_bounds.size(), true)
+                : std::vector<bool>{},
+            0.0, false,
             preserve_for_weighted ? &constrained_weighted_goals : nullptr,
             preserve_for_weighted ? &constrained_weighted_jacobians : nullptr);
     constraint_projection_applied =
@@ -972,9 +995,7 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
 
   std::optional<ConstraintBlock> position_step_priority_constraint_result =
       std::nullopt;
-  if (apply_limits && acceleration_limits_enabled_ &&
-      acceleration_limits_.size() == robot_->nv() &&
-      !pending_position_step_priority_constraints_.empty()) {
+  if (apply_limits && !pending_position_step_priority_constraints_.empty()) {
     struct PriorityViabilityRow {
       Eigen::RowVectorXd jacobian;
       double lower_bound;
@@ -984,7 +1005,8 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
 
     const auto append_priority_block =
         [&](const Eigen::VectorXd &error, const Eigen::MatrixXd &jacobian,
-            int offset, double tolerance, double step_dt) {
+            int offset, double tolerance, double step_dt,
+            bool physical_velocity_budget) {
           if (!std::isfinite(tolerance) || tolerance <= 0.0 ||
               !std::isfinite(step_dt) || step_dt <= 0.0 ||
               offset < 0 || offset + 3 > error.size() ||
@@ -1012,6 +1034,17 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
             return;
           }
 
+          if (physical_velocity_budget &&
+              (!acceleration_limits_enabled_ ||
+               acceleration_limits_.size() != robot_->nv())) {
+            // A tangent of the individual norm budget, using physical columns.
+            // Over-budget seeds may recover without first demanding an
+            // instantaneous return to the tolerance. Final integration is
+            // independently checked against this task's original target.
+            const double slack = std::max(tolerance, error_norm) - error_norm;
+            rows.push_back({std::move(row), -slack / step_dt});
+            return;
+          }
           double acceleration_support = 0.0;
           for (int velocity_index = 0; velocity_index < row.size();
                ++velocity_index) {
@@ -1029,8 +1062,9 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
             return;
           }
 
-          const double viable_tolerance =
-              std::max(0.0, tolerance - constraint_tolerance_);
+          const double viable_tolerance = physical_velocity_budget
+              ? std::max(tolerance, error_norm)
+              : std::max(0.0, tolerance - constraint_tolerance_);
           const double slack = viable_tolerance - error_norm;
           double lower_bound = 0.0;
           if (slack > 0.0) {
@@ -1047,16 +1081,20 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
         continue;
       }
       const Eigen::VectorXd error = spec.task->getError();
-      const Eigen::MatrixXd jacobian = spec.task->getJacobian();
+      Eigen::MatrixXd jacobian = spec.task->getJacobian();
+      if (spec.physical_velocity_budget) {
+        if (const auto *frame = dynamic_cast<const FrameTask *>(spec.task.get()))
+          jacobian = frame->buildPhysicalJacobian();
+      }
       if (jacobian.cols() != robot_->nv() || error.size() != jacobian.rows()) {
         continue;
       }
       const TaskType task_type = spec.task->getType();
       if (error.size() >= 6) {
         append_priority_block(error, jacobian, 0, spec.position_tolerance,
-                              spec.step_dt);
+                              spec.step_dt, spec.physical_velocity_budget);
         append_priority_block(error, jacobian, 3, spec.orientation_tolerance,
-                              spec.step_dt);
+                              spec.step_dt, spec.physical_velocity_budget);
       } else if (error.size() >= 3) {
         const bool orientation_only =
             task_type == TaskType::FRAME_ORIENTATION;
@@ -1064,7 +1102,7 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
             error, jacobian, 0,
             orientation_only ? spec.orientation_tolerance
                              : spec.position_tolerance,
-            spec.step_dt);
+            spec.step_dt, spec.physical_velocity_budget);
       }
     }
 
@@ -1408,8 +1446,18 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
       Eigen::VectorXd::Ones(num_constraints);
 
   int constraint_idx = 0;
+  std::vector<std::string> constraint_row_families;
+  if (problem_tracing_enabled_) {
+    constraint_row_families.resize(num_constraints);
+  }
+  const auto label_rows = [&](int first, int count, const char *family) {
+    if (problem_tracing_enabled_) {
+      std::fill_n(constraint_row_families.begin() + first, count, family);
+    }
+  };
 
   // Joint velocity constraints
+  label_rows(constraint_idx, robot_->nv(), "joint_velocity");
   C.block(constraint_idx, 0, robot_->nv(), robot_->nv()) =
       Eigen::MatrixXd::Identity(robot_->nv(), robot_->nv());
 
@@ -1515,6 +1563,8 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
   // Position-based velocity constraints (sparse: only joints near their limits)
   if (apply_limits && use_position_limits_) {
     // sparse_pos_limits was pre-computed above; fill only those rows.
+    label_rows(constraint_idx, static_cast<int>(sparse_pos_limits.size()),
+               "joint_position");
     for (int k = 0; k < static_cast<int>(sparse_pos_limits.size()); ++k) {
       const auto &e = sparse_pos_limits[k];
       C(constraint_idx + k, e.nv_idx) = 1.0;
@@ -1691,6 +1741,8 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
 
   if (use_contact_projection &&
       joint_limit_non_worsening_result.has_value()) {
+    label_rows(constraint_idx, joint_limit_non_worsening_result->jacobian.rows(),
+               "joint_non_worsening");
     constraint_idx = append_constraint_block(
         C, c_lower, c_upper, constraint_idx, robot_->nv(),
         joint_limit_non_worsening_result->jacobian,
@@ -1701,6 +1753,8 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
   if (acceleration_position_integration_box && use_contact_projection) {
     // The backend variable is projected before publication. Bound P_c*v,
     // rather than assuming a box on the unprojected variable bounds its image.
+    label_rows(constraint_idx, static_cast<int>(true_integration_indices.size()),
+               "position_integration");
     for (int vi : true_integration_indices) {
       C.row(constraint_idx) = contact_P_c.row(vi);
       c_lower[constraint_idx] = true_integration_lower[vi];
@@ -1710,6 +1764,8 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
   }
 
   if (collision_constraint_result.has_value()) {
+    label_rows(constraint_idx, collision_constraint_result->jacobian.rows(),
+               "collision");
     constraint_idx = append_constraint_block(
         C, c_lower, c_upper, constraint_idx, robot_->nv(),
         collision_constraint_result->jacobian,
@@ -1718,12 +1774,15 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
   }
 
   if (com_constraint_result.has_value()) {
+    label_rows(constraint_idx, com_constraint_result->jacobian.rows(), "com");
     constraint_idx = append_constraint_block(
         C, c_lower, c_upper, constraint_idx, robot_->nv(),
         com_constraint_result->jacobian, com_constraint_result->lower_bounds,
         com_constraint_result->upper_bounds);
   }
   if (centroidal_momentum_bounds_result.has_value()) {
+    label_rows(constraint_idx, centroidal_momentum_bounds_result->jacobian.rows(),
+               "centroidal_momentum");
     constraint_idx = append_constraint_block(
         C, c_lower, c_upper, constraint_idx, robot_->nv(),
         centroidal_momentum_bounds_result->jacobian,
@@ -1731,6 +1790,8 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
         centroidal_momentum_bounds_result->upper_bounds);
   }
   if (capture_point_constraint_result.has_value()) {
+    label_rows(constraint_idx, capture_point_constraint_result->jacobian.rows(),
+               "capture_point");
     constraint_idx = append_constraint_block(
         C, c_lower, c_upper, constraint_idx, robot_->nv(),
         capture_point_constraint_result->jacobian,
@@ -1738,6 +1799,8 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
         capture_point_constraint_result->upper_bounds);
   }
   if (velocity_zmp_constraint_result.has_value()) {
+    label_rows(constraint_idx, velocity_zmp_constraint_result->jacobian.rows(),
+               "velocity_zmp");
     constraint_idx = append_constraint_block(
         C, c_lower, c_upper, constraint_idx, robot_->nv(),
         velocity_zmp_constraint_result->jacobian,
@@ -1746,6 +1809,8 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
   }
 
   if (rel_pose_constraint_result.has_value()) {
+    label_rows(constraint_idx, rel_pose_constraint_result->jacobian.rows(),
+               "relative_pose");
     constraint_idx = append_constraint_block(
         C, c_lower, c_upper, constraint_idx, robot_->nv(),
         rel_pose_constraint_result->jacobian,
@@ -1754,6 +1819,8 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
   }
 
   if (step_torso_constraint_result.has_value()) {
+    label_rows(constraint_idx, step_torso_constraint_result->jacobian.rows(),
+               "torso_pose");
     constraint_idx = append_constraint_block(
         C, c_lower, c_upper, constraint_idx, robot_->nv(),
         step_torso_constraint_result->jacobian,
@@ -1761,6 +1828,8 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
         step_torso_constraint_result->upper_bounds);
   }
   if (position_step_priority_constraint_result.has_value()) {
+    label_rows(constraint_idx, position_step_priority_constraint_result->jacobian.rows(),
+               "priority_budget");
     constraint_idx = append_constraint_block(
         C, c_lower, c_upper, constraint_idx, robot_->nv(),
         position_step_priority_constraint_result->jacobian,
@@ -1770,6 +1839,7 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
   if (linear_constraint_result.has_value()) {
     const auto &lc = linear_constraint_result.value();
     int rows = static_cast<int>(lc.jacobian.rows());
+    label_rows(constraint_idx, rows, "linear");
     C.block(constraint_idx, 0, rows, robot_->nv()) = lc.jacobian;
     c_lower.segment(constraint_idx, rows) = lc.lower_bounds;
     c_upper.segment(constraint_idx, rows) = lc.upper_bounds;
@@ -1778,6 +1848,7 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
   if (tight_pose_constraint_result.has_value()) {
     const auto &tpc = tight_pose_constraint_result.value();
     int rows = static_cast<int>(tpc.jacobian.rows());
+    label_rows(constraint_idx, rows, "tight_pose");
     C.block(constraint_idx, 0, rows, robot_->nv()) = tpc.jacobian;
     c_lower.segment(constraint_idx, rows) = tpc.lower_bounds;
     c_upper.segment(constraint_idx, rows) = tpc.upper_bounds;
@@ -1787,6 +1858,7 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
   if (tight_point_constraint_result.has_value()) {
     const auto &tpc = tight_point_constraint_result.value();
     int rows = static_cast<int>(tpc.jacobian.rows());
+    label_rows(constraint_idx, rows, "tight_point");
     C.block(constraint_idx, 0, rows, robot_->nv()) = tpc.jacobian;
     c_lower.segment(constraint_idx, rows) = tpc.lower_bounds;
     c_upper.segment(constraint_idx, rows) = tpc.upper_bounds;
@@ -2138,6 +2210,14 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
         w *= orientation_weight_scale;
       }
       advisor_weights.push_back(w);
+      if (position_step_weighted_retry_priority_.has_value() &&
+          objective_configs[i].priority != *position_step_weighted_retry_priority_) {
+        // The outer finite-pose guard protects already satisfied priorities.
+        // Do not keep pulling them (or posture preferences) to an exact image
+        // inside this explicitly authorized, transactional recovery trial.
+        advisor_weights.back() = 0.0;
+        advisor_row_weights[i].setZero();
+      }
     }
 
     WeightedAdvisoryResult out = compute_constrained_weighted_advisory(
@@ -2292,6 +2372,38 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
       detail::HierarchicalLinearSolverExecutionOptions{
           detail::HierarchicalLinearSolverPolicy::kLegacyVelocity, 0.0, false,
           &protected_stationary_primary, position_step_call_depth_ == 0});
+  std::optional<std::size_t> problem_trace_index;
+  if (problem_tracing_enabled_) {
+    VelocityProblemTrace trace;
+    trace.seed_q = q_eval;
+    trace.validation_dt = pending_step_validation_dt_.value_or(dt_);
+    trace.constraint_matrix = *solve_C;
+    trace.constraint_row_families = std::move(constraint_row_families);
+    trace.lower_bounds = c_lower;
+    trace.upper_bounds = c_upper;
+    trace.maximum_softening_factors = has_soft_rows
+        ? max_softening_factors : Eigen::VectorXd();
+    trace.objective_goals = goals;
+    trace.objective_jacobians = *solve_jacobians;
+    trace.objective_configs = objective_configs;
+    trace.solver_config = config;
+    trace.backend_column_scale = metric_active
+        ? joint_metric_col_scale_ : Eigen::VectorXd::Ones(robot_->nv());
+    trace.stationary_primary = protected_stationary_primary;
+    trace.validate_primary_range = position_step_call_depth_ == 0;
+    for (const auto &task : tasks_) {
+      if (task && task->isActive()) {
+        trace.active_task_names.push_back(task->getName());
+        trace.active_task_priorities.push_back(task->getPriority());
+      }
+    }
+    trace.backend_solution = Eigen::Map<const Eigen::VectorXd>(
+        backend_result.solution.data(), backend_result.solution.size());
+    trace.backend_status = backend_result.status;
+    trace.backend_status_message = backend_result.status_message;
+    problem_trace_index = last_problem_trace_.velocity_problems.size();
+    last_problem_trace_.velocity_problems.push_back(std::move(trace));
+  }
   if (metric_active &&
       static_cast<int>(backend_result.solution.size()) == robot_->nv()) {
     for (int j = 0; j < robot_->nv(); ++j)
@@ -2485,8 +2597,20 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
             current_rel_violation + kViolationImproveTolerance) {
           return false;
         }
+        // A bounded finite-zone trial needs its unaccepted linear proposal
+        // to reach the outer collision-curvature and pose-budget corrections.
+        // The public position-step wrapper still freshly checks every anchored
+        // floor before publishing; standalone velocity calls keep this guard.
+        const bool defer_anchored_trial_floor =
+            position_step_weighted_retry_priority_.has_value() &&
+            position_step_call_depth_ > 0 && has_collision_trajectory_floor_anchor() &&
+            !acceleration_limits_enabled_ && !robot_->is_floating_base() &&
+            robot_->nq() == robot_->nv() && !has_contact_frames() &&
+            !has_active_velocity_centroidal_hard_constraints() &&
+            std::all_of(robot_->model().joints.begin() + 1, robot_->model().joints.end(),
+                        [](const auto &joint) { return joint.nq() == 1 && joint.nv() == 1; });
         if (collision_constraint_.has_value() &&
-            collision_constraint_->enabled) {
+            collision_constraint_->enabled && !defer_anchored_trial_floor) {
           if (!collision_recovery_margins_acceptable(
                   current_collision_margins, candidate_collision_margins,
                   0.0)) {
@@ -2917,6 +3041,38 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
       return blocks;
     };
     const auto initial_blocks = pose_blocks();
+    // Explicit individual budgets apply to executable recovery candidates too.
+    // Otherwise a second, hidden strict guard can shrink a valid ray even when
+    // its finite endpoint stays within the caller's permitted pose zone.
+    std::vector<double> recovery_block_budgets(initial_blocks.size(), -1.0);
+    std::vector<bool> recovery_task_has_budget(recovery_tasks.size(), false);
+    std::size_t recovery_block_offset = 0;
+    for (std::size_t task_index = 0; task_index < recovery_tasks.size(); ++task_index) {
+      const auto &task = recovery_tasks[task_index];
+      const auto spec = std::find_if(
+          pending_position_step_priority_constraints_.begin(),
+          pending_position_step_priority_constraints_.end(),
+          [&](const auto &candidate) {
+            return candidate.physical_velocity_budget && candidate.task.get() == task.get();
+          });
+      const int blocks = task->getError().size() >= 6 ? 2 : 1;
+      if (blocks == 2 && spec != pending_position_step_priority_constraints_.end()) {
+        for (int block = 0; block < 2; ++block) {
+          const double budget = block == 0 ? spec->position_tolerance : spec->orientation_tolerance;
+          if (std::isfinite(budget) && budget > 0.0) {
+            recovery_block_budgets[recovery_block_offset + block] = budget;
+            recovery_task_has_budget[task_index] = true;
+          }
+        }
+      }
+      recovery_block_offset += blocks;
+    }
+    const auto block_reduction = [&](std::size_t index, double before, double after) {
+      const double budget = recovery_block_budgets[index];
+      return budget > 0.0
+          ? std::max(0.0, before - budget) - std::max(0.0, after - budget)
+          : before - after;
+    };
     if (legacy_recovery_requested && position_step_physical_recovery_anchor_blocks_.size() !=
         initial_blocks.size()) {
       position_step_physical_recovery_anchor_blocks_ = initial_blocks;
@@ -2950,7 +3106,7 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
         robot_->update_kinematics(endpoint);
         const auto incumbent_blocks = pose_blocks();
         for (std::size_t index = 0; index < initial_blocks.size(); ++index) {
-          incumbent_reduction += initial_blocks[index] - incumbent_blocks[index];
+          incumbent_reduction += block_reduction(index, initial_blocks[index], incumbent_blocks[index]);
         }
         robot_->update_kinematics(q_eval);
         pose_blocks();
@@ -3134,16 +3290,21 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
            ++index) {
         const double tolerance = 64.0 * std::numeric_limits<double>::epsilon() *
             std::max({1.0, initial_blocks[index], proposed_blocks[index]});
-        improving = proposed_blocks[index] <=
-                    recovery_anchor_blocks[index] +
-                        tolerance;
-        reduction += initial_blocks[index] - proposed_blocks[index];
+        const double budget = recovery_block_budgets[index];
+        const double block_limit = budget > 0.0
+            ? std::max(initial_blocks[index], budget + 1e-9)
+            : recovery_anchor_blocks[index];
+        improving = proposed_blocks[index] <= block_limit + tolerance;
+        reduction += block_reduction(index, initial_blocks[index], proposed_blocks[index]);
       }
       for (std::size_t index = 0; index < initial_merits.size() && improving;
            ++index) {
         const double tolerance = 64.0 * std::numeric_limits<double>::epsilon() *
             std::max({1.0, initial_merits[index], proposed_merits[index]});
-        improving = proposed_merits[index] <= initial_merits[index] + tolerance;
+        // Individual block limits above replace the aggregate norm only for
+        // explicitly budgeted tasks. Unbudgeted task acceptance is unchanged.
+        improving = recovery_task_has_budget[index] ||
+                    proposed_merits[index] <= initial_merits[index] + tolerance;
       }
       const double required_reduction = generalized_candidate && !bounded_ray_preference
           ? std::max(1e-8, incumbent_reduction + 1e-8) : 1e-8;
@@ -3326,7 +3487,8 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
   }
   const bool can_try_weighted_fallback =
       runtime_config_.weighted_fallback_enabled &&
-      classified_velocity.status != SolverStatus::kSuccess &&
+      (classified_velocity.status != SolverStatus::kSuccess ||
+       position_step_weighted_retry_active_) &&
       classified_velocity.status != SolverStatus::kNonFiniteInput &&
       !goals.empty();
   if (can_try_weighted_fallback && !advisory.available) {
@@ -3346,8 +3508,10 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
           accepted_candidate.data() + accepted_candidate.size());
       backend_result.status = SolverStatus::kSuccess;
       backend_result.status_message =
-          "constrained weighted fallback accepted after prioritized solver: " +
-          classified_velocity.status_message;
+          position_step_weighted_retry_active_
+              ? "constrained weighted fallback after finite position-step rejection"
+              : "constrained weighted fallback accepted after prioritized solver: " +
+                    classified_velocity.status_message;
       backend_result.final_error = advisory.per_objective_error.empty()
                                        ? 0.0
                                        : advisory.per_objective_error.front();
@@ -3490,8 +3654,9 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
   }
 
   // C is still physical here: the metric solve uses a separate C*D copy.
-  // Capture only for a stalled/failing position step. Direct escape does not
-  // certify softened rows, contact projection, or dynamic braking/history.
+  // Capture stalled/failing steps and finite-zone retry proposals before
+  // temporary correction rows are added. Direct escape does not certify
+  // softened rows, contact projection, or dynamic braking/history.
   if (position_step_hard_constraints_ != nullptr && !has_soft_rows &&
       contact_frames_.empty() && !acceleration_limits_enabled_ &&
       !has_active_velocity_centroidal_hard_constraints() &&
@@ -3499,7 +3664,8 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
       std::isfinite(*pending_step_validation_dt_) &&
       *pending_step_validation_dt_ > 0.0 &&
       (result.status != SolverStatus::kSuccess ||
-       result.joint_velocities.norm() < stall_config_.dq_stall_eps)) {
+       result.joint_velocities.norm() < stall_config_.dq_stall_eps ||
+       position_step_weighted_retry_priority_.has_value())) {
     auto &hard = *position_step_hard_constraints_;
     hard.q = current_q;
     hard.dt = *pending_step_validation_dt_;
@@ -3511,6 +3677,12 @@ KinematicsSolver::solve_velocity(const Eigen::VectorXd &current_q,
   stall_handler_update(result);
   elastic_band_update(result);
   update_auto_task_layout_feedback(result);
+  if (problem_trace_index) {
+    auto &trace = last_problem_trace_.velocity_problems[*problem_trace_index];
+    trace.returned_velocity = result.joint_velocities;
+    trace.returned_status = result.status;
+    trace.returned_status_message = result.status_message;
+  }
 
   return result;
 }

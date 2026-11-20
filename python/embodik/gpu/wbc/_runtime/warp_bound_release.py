@@ -81,6 +81,7 @@ def _make_kernel(
         refine_moving = bool(False)
         roundoff_restart = bool(False)
         original_scale = wp.float64(0.0)
+        numeric_checkpoint = bool(False)
         if wp.static(refine_partial_scale):
             if not original_invalid and original_task_norm > wp.float64(1e-20):
                 goal_norm = wp.float64(0.0)
@@ -296,7 +297,16 @@ def _make_kernel(
                         if ratio < distance:
                             distance = ratio
                             blocker = bound
-                if blocker < 0 or count >= width:
+                if blocker < 0:
+                    # A tiny projected direction may have no row slope above
+                    # the blocker threshold. Only optimization phase progress
+                    # can survive; Phase I must still establish feasibility.
+                    if phase == 1:
+                        numeric_checkpoint = True
+                    else:
+                        valid = False
+                    break
+                if count >= width:
                     valid = False
                     break
                 point += distance * direction
@@ -338,6 +348,9 @@ def _make_kernel(
                 valid = False
         if repair_moving and alpha < wp.float64(1.0) - wp.float64(1e-10):
             valid = False
+        acceptance_tolerance = wp.float64(1e-8)
+        if numeric_checkpoint:
+            acceptance_tolerance = wp.float64(1e-10)
         target_norm = wp.float64(0.0)
         residual_norm = wp.float64(0.0)
         for row in range(rows):
@@ -351,15 +364,15 @@ def _make_kernel(
                 residual += jacobian[batch, row, col] * point[col]
             residual_norm += residual * residual
             target_norm += task_goal[row] * task_goal[row]
-        if wp.sqrt(residual_norm) > wp.float64(1e-8) * wp.max(
+        if wp.sqrt(residual_norm) > acceptance_tolerance * wp.max(
             wp.float64(1.0), wp.sqrt(target_norm)
         ):
             valid = False
         for col in range(columns):
             if (
                 not wp.isfinite(point[col])
-                or point[col] < lower[batch, col] - wp.float64(1e-8)
-                or point[col] > upper[batch, col] + wp.float64(1e-8)
+                or point[col] < lower[batch, col] - acceptance_tolerance
+                or point[col] > upper[batch, col] + acceptance_tolerance
             ):
                 valid = False
         if roundoff_restart:

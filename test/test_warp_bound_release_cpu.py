@@ -358,3 +358,21 @@ def test_compensated_seed_with_redundant_tasks_and_locked_columns(seed, dimensio
     assert np.all(output >= lower - 1e-8)
     assert np.all(output <= upper + 1e-8)
     assert output[-1] == pytest.approx(0.0, abs=1e-10)
+
+
+@pytest.mark.parametrize("coupling", [6e-11, 7e-11, 9e-11])
+def test_numeric_blocker_exhaustion_retains_verified_scale_checkpoint(coupling):
+    matrix = np.array(
+        [
+            [0.0, 0.0, 0.0, 0.01, 0.0],
+            [-coupling, -coupling, -coupling, -1.0, 1.0],
+        ]
+    )
+    target = np.array([0.01, 0.0])
+    lower, upper = np.r_[-np.ones(4), -10.0], np.r_[np.ones(4), 0.4]
+    output, recovered = _solve(matrix, target, lower, upper, np.zeros(5))
+    assert recovered
+    scale = output[3]
+    assert 0.4 - 1e-9 <= scale <= 0.4 + 3 * coupling + 1e-9
+    np.testing.assert_allclose(matrix @ output, scale * target, atol=1e-10, rtol=0)
+    assert np.all(output >= lower - 1e-10) and np.all(output <= upper + 1e-10)

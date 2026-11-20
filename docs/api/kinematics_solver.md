@@ -156,6 +156,27 @@ The floor is **off by default**. Getter/setter pairs:
 `get_non_worsening_collision_floor_enabled()` and
 `get_collision_structural_floor()`.
 
+`initialize_collision_recovery_floors(q_start)` optionally initializes the
+existing floor map to `min(startup signed distance, active pair minimum)` for
+every allowed, runtime-active pair. Call it after configuring collision avoidance
+and enabling non-worsening recovery, before any solve seeds the map. It rejects
+an existing floor map, trajectory anchors, pending pair overrides, malformed
+configurations and invalid/incomplete distance evidence. Initialization is
+atomic on failure and preserves robot configuration/velocity, nominal margins
+and acceleration settings. This is a CPU interface; default initialization
+behavior remains unchanged until explicitly called.
+
+Signed negative startup floors are retained as declared. Applications requiring
+nonpenetration must reject a penetrating startup configuration themselves;
+retaining its signed floor does not establish collision-free clearance.
+
+The initialized map remains subject to existing explicit policy/catalog edits;
+freeze that context when retaining a startup contract. Native normalized-row
+and physical floating-point tolerances remain unchanged. The API supplies no
+continuous collision certificate or fixed nanometre acceptance guarantee.
+See [Startup recovery floors](../collision_constraints.md#non-worsening-recovery-floor)
+for the distinction from structural-floor initialization.
+
 ## Collision tuning default
 
 Fresh `KinematicsSolver` instances default to `CollisionTuningMode.BALANCED`
@@ -185,7 +206,10 @@ batch parallelization notes, and measured Speed vs Precise timings.
   primary solve once with MIN_ERROR before accepting freeze
 - `continuity_command_revision` — optional caller-owned source-command identity; keep a
   non-negative value stable across derived-frame re-expression and increment it when the source
-  command changes (`-1` keeps automatic pose-based detection)
+  command changes (`-1` keeps automatic pose-based detection). Both identity modes use
+  the same progress requirement for stationary commands. Automatic low-progress holds
+  remain reversible; explicit source identity retains its latching behavior. See
+  [stationary-command continuity](../solver_robustness.md#stationary-target-continuity).
 
 See `docs/examples/collision_aware_ik.md` for collision-floor, adaptive dt, elastic band, and
 fallback interaction with `configure_collision_constraint()`.

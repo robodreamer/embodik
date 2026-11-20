@@ -29,6 +29,12 @@ void bind_kinematics_solver(nb::module_ &m) {
           const Eigen::VectorXd &, const std::vector<TaskTarget> &,
           const PositionStepOptions &)>(&KinematicsSolver::solve_position_step);
 
+  nb::class_<CollisionPairFloor>(m, "CollisionPairFloor")
+      .def_ro("geometry_a", &CollisionPairFloor::geometry_a)
+      .def_ro("geometry_b", &CollisionPairFloor::geometry_b)
+      .def_ro("minimum_distance", &CollisionPairFloor::minimum_distance)
+      .def_ro("persistent_floor_m", &CollisionPairFloor::persistent_floor_m);
+
   nb::class_<CollisionPairDistance>(m, "CollisionPairDistance")
       .def_ro("geometry_a", &CollisionPairDistance::geometry_a)
       .def_ro("geometry_b", &CollisionPairDistance::geometry_b)
@@ -168,6 +174,17 @@ void bind_kinematics_solver(nb::module_ &m) {
            &KinematicsSolver::clear_all_target_velocities,
            "Clear direct target velocities on all registered tasks.")
 
+      .def("set_collision_trajectory_floor_anchor", &KinematicsSolver::set_collision_trajectory_floor_anchor,
+           nb::arg("q"), nb::arg("tolerance") = 1e-9,
+           "Anchor original named-pair floors until explicitly cleared; velocity-only position stepping")
+      .def("clear_collision_trajectory_floor_anchor", &KinematicsSolver::clear_collision_trajectory_floor_anchor)
+      .def("has_collision_trajectory_floor_anchor", &KinematicsSolver::has_collision_trajectory_floor_anchor)
+      .def("get_collision_trajectory_floor_tolerance", &KinematicsSolver::get_collision_trajectory_floor_tolerance)
+      .def("enable_problem_tracing", &KinematicsSolver::enable_problem_tracing,
+           nb::arg("enabled") = true,
+           "Enable diagnostic snapshots of nominal backend calls and priority checks; off by default")
+      .def("get_last_problem_trace", &KinematicsSolver::get_last_problem_trace,
+           "Return an owned snapshot for the latest velocity or position-step request")
       .def("get_task", &KinematicsSolver::get_task, nb::arg("name"),
            "Get a task by name")
 
@@ -567,8 +584,9 @@ void bind_kinematics_solver(nb::module_ &m) {
       // ---- Tunable collision boundary parameters (for sweep / autoresearch) ----
       .def("set_collision_repulsion_deadband",
            &KinematicsSolver::set_collision_repulsion_deadband, nb::arg("metres"),
-           "Width (m) of the no-braking zone above min_distance. Defaults to 0, "
-           "which keeps the velocity bound continuous at the boundary.")
+           "Width (m) of the explicit no-approach band above the effective "
+           "collision target. Default 0; the construction reserve still limits "
+           "approach near the boundary. Violated clearances retain recovery.")
       .def("get_collision_repulsion_deadband",
            &KinematicsSolver::get_collision_repulsion_deadband)
       .def("set_collision_recovery_scale",
@@ -584,6 +602,17 @@ void bind_kinematics_solver(nb::module_ &m) {
            "Off by default on a new solver; the bimanual teleop app opts in.")
       .def("get_non_worsening_collision_floor_enabled",
            &KinematicsSolver::get_non_worsening_collision_floor_enabled)
+      .def("initialize_collision_recovery_floors",
+           &KinematicsSolver::initialize_collision_recovery_floors,
+           nb::arg("q_start"),
+           "Initialize unseeded recovery floors to min(startup signed distance, "
+           "active pair minimum) for every allowed runtime-active pair. Requires "
+           "enabled collision avoidance and non-worsening recovery, no existing "
+           "floors, trajectory anchor or pending overrides. Preserves q/dq and "
+           "nominal margins; failures leave floors unchanged. Call before the "
+           "first solve and freeze policy/catalog when retaining this context. "
+           "Native floating-point tolerances remain unchanged; this is not a "
+           "continuous collision certificate.")
       .def("set_collision_structural_floor",
            &KinematicsSolver::set_collision_structural_floor, nb::arg("metres"),
            "Minimum clearance (m) maintained for structurally-close pairs when the "
@@ -763,6 +792,14 @@ void bind_kinematics_solver(nb::module_ &m) {
       .def("clear_com_constraint", &KinematicsSolver::clear_com_constraint,
            "Disable CoM support-polygon constraint.")
 
+      .def("set_linear_position_constraints",
+           &KinematicsSolver::set_linear_position_constraints, nb::arg("C"),
+           nb::arg("lower_bounds"), nb::arg("upper_bounds"),
+           "Set lower <= C @ q <= upper for fixed-base additive scalar joints. "
+           "Rebuilt at every inner state and integration horizon. Outside seeds "
+           "may recover without worsening any violated row. No acceleration or contacts.")
+      .def("clear_linear_position_constraints", &KinematicsSolver::clear_linear_position_constraints)
+      .def("get_linear_position_constraint_rows", &KinematicsSolver::get_linear_position_constraint_rows)
       .def("set_linear_velocity_constraints",
            &KinematicsSolver::set_linear_velocity_constraints, nb::arg("C"),
            nb::arg("lower_bounds"), nb::arg("upper_bounds"),
@@ -875,6 +912,11 @@ void bind_kinematics_solver(nb::module_ &m) {
            "Return post-step pair checks certified by cached rigid-body "
            "motion bounds in the latest outer position step.")
 
+      .def("get_collision_pair_floors", &KinematicsSolver::get_collision_pair_floors,
+           "Live clearance metadata for every allowed active pair, in the same "
+           "order as evaluate_collision_pair_distances. No FK, distance queries, "
+           "floor initialization or state mutation. Returns None without enabled "
+           "policy, geometry, or active pairs. Does not validate collision safety.")
       .def("evaluate_collision_pair_distances",
            &KinematicsSolver::evaluate_collision_pair_distances, nb::arg("q"),
            "Fresh exact distances and configured clearances for every allowed "

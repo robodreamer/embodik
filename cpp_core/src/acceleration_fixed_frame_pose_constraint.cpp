@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cmath>
 #include <exception>
+#include <stdexcept>
 #include <pinocchio/multibody/data.hpp>
 #include <pinocchio/algorithm/kinematics-derivatives.hpp>
 #include <pinocchio/algorithm/frames-derivatives.hpp>
@@ -574,7 +575,9 @@ FixedFramePoseConstraintResult linearize_fixed_frame_pose_violations(
     const Eigen::VectorXd &q, const Eigen::VectorXd &dq,
     const Eigen::VectorXd &acceleration, double dt,
     const ScalarGeometricViolation &trigger,
-    AffineAccelerationConstraint *refinement) {
+    AffineAccelerationConstraint *refinement,
+    FixedFramePoseTrustRows *owned_trust_rows) {
+  if (owned_trust_rows) *owned_trust_rows = {};
   if (!(dt > 0.0) || !std::isfinite(dt)) {
     return failure(SolverStatus::kInvalidInput,
                    "frame pose batch refinement time is invalid");
@@ -582,6 +585,7 @@ FixedFramePoseConstraintResult linearize_fixed_frame_pose_violations(
   auto original = linearize_fixed_frame_pose_violation(
       prepared, robot, q, dq, acceleration, trigger, refinement);
   if (!original.satisfied()) return original;
+  if (owned_trust_rows) *owned_trust_rows = {1, robot.nv()};
   std::vector<AffineAccelerationConstraint> extra_rows;
   try {
     pinocchio::SE3 reference;
@@ -641,7 +645,54 @@ FixedFramePoseConstraintResult linearize_fixed_frame_pose_violations(
   refinement->coefficient_matrix.bottomRows(robot.nv()).setIdentity();
   refinement->lower_bounds.tail(robot.nv()) = original_row.lower_bounds.tail(robot.nv());
   refinement->upper_bounds.tail(robot.nv()) = original_row.upper_bounds.tail(robot.nv());
+  if (owned_trust_rows) *owned_trust_rows = {count, robot.nv()};
   return original;
+}
+
+void remove_fixed_frame_pose_trust_rows(
+    AffineAccelerationConstraint *refinement,
+    const FixedFramePoseTrustRows &owned_rows) {
+  if (!refinement || owned_rows.first < 0 || owned_rows.count < 0 ||
+      owned_rows.first + owned_rows.count >
+          refinement->coefficient_matrix.rows()) {
+    throw std::logic_error("invalid owned frame-refinement trust rows");
+  }
+  const Eigen::Index original_rows = refinement->coefficient_matrix.rows();
+  for (const auto *values : {&refinement->affine_bias,
+                             &refinement->lower_bounds,
+                             &refinement->upper_bounds}) {
+    if (values->size() != 0 && values->size() != original_rows)
+      throw std::logic_error("inconsistent frame-refinement row vector");
+  }
+  for (const auto *active : {&refinement->lower_bound_active,
+                             &refinement->upper_bound_active}) {
+    if (!active->empty() &&
+        static_cast<Eigen::Index>(active->size()) != original_rows)
+      throw std::logic_error("inconsistent frame-refinement active rows");
+  }
+  const Eigen::Index following =
+      original_rows - owned_rows.first - owned_rows.count;
+  if (following > 0) {
+    refinement->coefficient_matrix.middleRows(owned_rows.first, following) =
+        refinement->coefficient_matrix.bottomRows(following).eval();
+  }
+  refinement->coefficient_matrix.conservativeResize(
+      original_rows - owned_rows.count, Eigen::NoChange);
+  const auto remove_vector_rows = [&](Eigen::VectorXd *values) {
+    if (values->size() == 0) return;
+    if (following > 0)
+      values->segment(owned_rows.first, following) = values->tail(following).eval();
+    values->conservativeResize(original_rows - owned_rows.count);
+  };
+  remove_vector_rows(&refinement->affine_bias);
+  remove_vector_rows(&refinement->lower_bounds);
+  remove_vector_rows(&refinement->upper_bounds);
+  for (auto *active : {&refinement->lower_bound_active,
+                       &refinement->upper_bound_active}) {
+    if (active->empty()) continue;
+    active->erase(active->begin() + owned_rows.first,
+                  active->begin() + owned_rows.first + owned_rows.count);
+  }
 }
 
 } // namespace embodik::detail
